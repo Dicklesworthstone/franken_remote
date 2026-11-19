@@ -1,5 +1,310 @@
 # Changelog
 
+## 2026-11-18 — Mac hosts send 30 fps at 8 Mbit/s again
+
+- Both Mac installers (`install.sh` and `scripts/macos/install-host.sh`)
+  asked frd for 60 fps at 30 Mbit/s. Nothing adapts that bitrate to the
+  path, and video that outruns the viewer's link ends the session. On 11-18
+  the owner's laptop on hotel guest Wi-Fi measured 12 Mbit/s from mac-studio.
+  Its sessions reconnected every 20-40 s, ending with
+  `Media(Send(RecoveryLimitExceeded))`, `Renewal(Transport(Expired))` and
+  client deadline expiry.
+- Both installers now use frd's own caps, 30 fps and 8 Mbit/s. On a fast
+  link, pass `-- --fps 60 --bitrate 30000000` to install-host.sh.
+- mac-studio was reinstalled with these caps. Real bitrate adaptation, so
+  that one setting is both sharp at home and stable on hotel Wi-Fi, is not
+  built yet.
+
+## 2026-11-18 — the Windows viewer runs above normal priority and names each reconnect
+
+- On 11-18 another agent's three-job Rust build ran on the owner's 4-core
+  laptop over SSH (it is an `rch` build worker). The UI thread stalled for
+  up to 1.7 s, and the viewer reconnected about every 20 s
+  (host: `PeerClosed(Client(Failure))`, `RecoveryLimitExceeded`).
+  Putting that build at idle priority cut the drops from every ~20 s to
+  minutes apart.
+- The viewer now sets its process to above-normal priority at start. It
+  uses little CPU itself (decode is on the GPU), so builds or a browser can
+  no longer starve its input, renewal and clock deadlines.
+- Each reconnect line now names how the replaced session ended (end code
+  and detail). The completion document names only the window's last session.
+
+## 2026-11-18 — the session log is written while a window is open
+
+- The Windows app wrote each window's status lines to `sessions.log` only
+  when the window closed. Now that a window reconnects instead of closing,
+  that could be hours later. Lines are now appended as they arrive, each
+  stamped with seconds since the window opened. The window's header
+  (`=== session started at unix …: args`) comes first; its trailer
+  (`=== session ended at unix …, exit N`) and completion document come last.
+- The launcher drains the viewer's stderr on its own thread, so a full pipe
+  can never block the viewer.
+
+## 2026-11-18 — a Windows viewer never closes or loses control on its own
+
+- Only the user (or `--seconds`) ends a viewer window now. When a session
+  ends any other way, the window keeps its last picture and reconnects:
+  - a host or network failure, or a report the host sent;
+  - control lost mid-session, or an input push refused;
+  - a presentation glitch, or a refused or expired replacement.
+  Before, almost all of these closed the window. On 11-18 the owner's
+  mac-studio sessions ended every 20-35 s
+  (`LeaseRevoked { reason: SessionEnded }`, host `Renewal(Transport(Expired))`,
+  `ReferenceRecovery(Transport(Backpressure))`).
+- A reconnect waits 0.4 s after the old session finishes, doubling up to
+  5 s while no picture arrives, with no limit on how many. A hidden window
+  waits until it is shown. The 32-session limit per window is gone.
+- Control comes back by itself. A `--control` session now keeps asking for
+  control: on every internal reconnect attempt, when the app returns to the
+  front, and in every replacement session. Before, an internal reconnect
+  retired the one control request and nothing asked again, so the picture
+  came back with the mouse and keyboard dead. Stop control is still
+  respected until the user asks for control again.
+- The shortcut hook (Windows key, Alt+Tab, Ctrl+Esc) runs on its own
+  high-priority thread. Before, it ran on the window's UI thread, which can
+  stall for hundreds of milliseconds drawing a large picture. Windows skips
+  a low-level hook that answers late, and since Windows 7 removes it
+  silently, so shortcuts could stop working mid-session. The thread also
+  registers the hook again every 2 s.
+- Viewer-side only; hosts need no rebuild.
+
+## 2026-11-18 — a host's mid-session picture recovery no longer ends the session
+
+- Since the first-view limit went to 6 s, every recovery a host admitted
+  failed at once, and the session ended. The viewer saw
+  `LeaseRevoked { reason: HostFailure }`, and the host logged
+  `ReferenceRecovery(Expired)`. On mac-studio every session ended about 3 s
+  in, at its first lost reference.
+- The cause: the host's recovery deadline is now its 6 s sender horizon, but
+  starting the replacement media channels still refused any deadline more
+  than 5 s away. That cap is now the same 6 s first-view limit.
+- A recovery test now runs with the shipped hosts' sender policy.
+- Host-side: hosts need a rebuild.
+
+## 2026-11-18 — a key queued during a preempted input turn no longer ends the session
+
+- A key or click the UI thread queued while the input dispatcher was between
+  reading its clock and taking the queue ended the session
+  (`Control(Capture(Clock))`): the event looked stamped in the future. On a
+  saturated CPU the dispatcher is often preempted there; on 11-18 two of the
+  owner's Windows sessions ended this way, after 4 s and 40 s. It was not a
+  clock-correlation fault: both stamps come from the viewer's own clock.
+- Such an event is now fresh. Every push still refuses a stamp from its own
+  future, and the event's 100 ms age limit still applies.
+- The fr-client clock tests that still expected the exchange to end at the
+  1 s bound now expect the previous fix's give-up behavior.
+- No bound changed. Viewer-side only; hosts need no rebuild.
+
+## 2026-11-18 — the host names why it refused an observation renewal
+
+- One installed host's log shows 14 shares ending with
+  `Renewal(Transport(Unauthorized))`, which can mean several things:
+  - the observation authority lapsed because a challenge's round trip
+    outlived its deadline (each answered challenge extends authority to its
+    issue time plus 3 s, with one challenge in flight at a time);
+  - the authority was revoked;
+  - a session permission check failed;
+  - the connection's own authority check failed.
+- frd now prints which, once per share: `frd: observation renewal refused:
+  <cause>`, beside the `frd: connection authority ended: <check>` line from
+  the previous entry. Behavior is unchanged. Once the hosts are rebuilt, this
+  decides whether the fix belongs in authority timing or elsewhere.
+
+## 2026-11-18 — one slow clock probe no longer ends the session
+
+- The viewer measures the host clock with a probe every second on the
+  control stream, which it shares with the video. A reply later than the
+  1 s exchange bound stopped the exchange and ended the whole session as
+  `ClockSynchronization`, although the last measurement stayed valid for
+  10 s. On a saturated link (the owner's 23 Mbit/s cellular path carrying up
+  to 30 Mbit/s of video) one queued reply is enough. On 11-18 the Windows
+  app's sessions to mac-studio ended after 10-40 s with
+  `ClockSynchronization` and `Capture(Clock)` among the causes, and the
+  host's log shows the viewer closing with a failure in 38 of its recorded
+  shares.
+- Now a probe past its bound is given up: its late reply is recognized and
+  ignored, the next probe measures again, and an unsent probe keeps its
+  sequence so the host still sees consecutive probes. The exchange still
+  ends with `Expired` when the host answers no probe for a whole
+  correlation lifetime (10 s by default), so a silent host still ends the
+  session. The host drops a reply it could not send within its 1 s lifetime
+  instead of ending the session.
+- Diagnostics: the typed cause of a clock failure (`frd: clock
+  synchronization ended: ...`) and of a failed host connection check
+  (`frd: connection authority ended: ...`, behind the 14 host-side
+  `Renewal(Transport(Unauthorized))` ends) are now printed, so the Windows
+  app's sessions.log and frd.log name them.
+
+## 2026-11-18 — a large first picture gets six seconds to start
+
+- A first view gets six seconds, up from two, from capturing its startup
+  IDR to the viewer's decoded-picture report.
+  - On 11-18 a full-screen 3240x1822 first picture from a Windows laptop on a
+    23 Mbit/s, 75 ms path took 1.9-2.0 s, so large first views failed
+    intermittently even after the recovery-window fix.
+  - The limits that bound that one picture move together:
+    - frd `decoder_startup::MAX_STARTUP_US`, the host's capture-anchored cap
+      and the largest decoder setup timeout;
+    - a new decoder `startup()` stage on the host (shared and controlled
+      publishers) and on the viewer; attachment stages keep 2 s;
+    - the first viewer's source budget (`shared_viewers::FIRST_VIEW_TIMEOUT`);
+      late joins keep `Policy::join_timeout`, 2 s;
+    - the host's sender recovery horizon (capture to QUIC hand-off of the
+      startup IDR, which is sent as a recovery picture), now 6 s through
+      `decoder_startup::host_send_policy()`. Mid-session recovery IDRs get
+      the same horizon. fr-media's own default stays 2 s; its validation now
+      allows up to 10 s (was 5 s);
+    - the unattended host startup deadline, from admission to first picture,
+      now 10 s (was 5 s). Approval sessions keep their 30 s budget.
+  - Unchanged: preparation, attachments, the source bootstrap (`BOOTSTRAP_US`)
+    and late joins stay at 2 s. So does the viewer's receive recovery budget,
+    2 s from decoder configuration to a complete IDR; on the 11-18 path the
+    IDR crossed in 0.7-0.9 s. Raising it pins many fr-media timing tests.
+  - The viewer's decoder stage takes effect when a client is rebuilt; the
+    host-side limits, which were the binding ones, take effect when the host
+    is reinstalled.
+
+## 2026-11-18 — Windows: one late key or click no longer ends the session
+
+- The viewer refuses input older than its 100 ms freshness budget (about
+  84 ms after the 16 ms tick margin). A stale key, click or scroll, an
+  unmapped key (media and vendor keys), a key the core refused, or a paced
+  key queue that timed out each called `input_failed`, which closed the
+  whole session.
+  - On 11-18 the owner's sessions from the Windows app kept ending after
+    tens of seconds; the host logged the viewer closing with a failure.
+  - Mouse motion in full screen did nothing: stale motion is dropped
+    silently, and a 3240-wide picture on the laptop's integrated GPU keeps
+    the UI thread busy long enough for most motion to go stale.
+- Now such an event is dropped and never sent late, and the session and its
+  control continue. A dropped press needs nothing, because the core already
+  ignores the release of a key or button it never pressed. A dropped
+  release releases every hold instead, so nothing stays pressed on the
+  host. Only a lost control grant (`ControlLost`) still ends control.
+- Diagnostics:
+  - Every forced close and input failure prints its source location
+    (`fr-windows: closing from ...`, `input_failed at ...`).
+  - At the end the viewer prints its longest message-pump turn and how many
+    stale mouse events it dropped.
+  - The app appends each session's arguments, status lines and completion
+    document to `%LOCALAPPDATA%\FrankenRemote\sessions.log` (about 1 MB
+    kept).
+  - A failed session's notice now includes the typed detail, e.g. "failed
+    after 32 s (Renewal(...))".
+- Not fixed yet: if the UI thread really is that slow in full screen, motion
+  still drops. The new numbers will show whether presentation needs to stop
+  blocking input.
+
+## 2026-11-18 — Windows: automatic control, full screen, shortcuts to the host
+
+- Control is automatic in a `--control` (View and control) session: every
+  replacement view requests it by itself as a fresh request in the new
+  session. That covers a resize, full screen on or off, a display change, an
+  automatic reconnect, and a return to a window whose control had stopped.
+  Before, each of these came back view-only until **Input → Request
+  control**. Only the user's own **Stop control** leaves a view without
+  control. The text clipboard follows the same choice, unless an earlier
+  clipboard owner ended abnormally.
+- `--fullscreen` (the app's new **Full screen at this screen's resolution**
+  option, on by default) opens a borderless window over the monitor before the
+  first picture size is stated, so the host is asked for the monitor's exact
+  pixel size and the picture is drawn 1:1. **Ctrl+Alt+Enter** toggles full
+  screen while viewing.
+- While a session controls the host and its window is in front, Windows
+  shortcuts go to the host: the Windows key (Command on a Mac), Alt+Tab,
+  Alt+Esc, Ctrl+Esc, Alt+Space, Alt+F4, F10. A low-level keyboard hook hands
+  them to the viewer's key path. This is on by default; `--no-shortcuts` and
+  the app's **Send Windows shortcuts** option keep them local. Ctrl+Alt+Enter,
+  Ctrl+Alt+Del and Win+L stay local.
+- The window title no longer flashes. The ready-view token and stale-view
+  suspensions can flip the control state several times a second, and the
+  title followed every flip. A new state now reaches the title and menu bar
+  only after it has held for 750 ms; the first state, an opening Input menu
+  and the end of a session still show at once.
+
+## 2026-11-18 — `fr app`: a desktop app with a machine picker on macOS and Linux
+
+- Windows had a Start-menu app (pick a machine, choose options, connect,
+  return to the list); macOS and Linux only had `fr connect --choose-host`,
+  whose window chose a machine but no options. `fr app` is the counterpart:
+  the native picker now also shows View only / View and control, Share
+  clipboard text and Ask which display to show, plus the previous attempt's
+  outcome above the list. Connect runs the viewer with those choices; closing
+  the viewer returns to the picker. Cancel or Escape quits. Choices are
+  remembered in the same document as the Windows app's (macOS:
+  `~/Library/Application Support/FrankenRemote/settings.json`; Linux:
+  `$XDG_CONFIG_HOME/frankenremote/settings.json`).
+- macOS shows radio buttons and check boxes under the list. The X11 picker
+  has a footer line toggled by F2, F3 and F4 or a click. Toggles only accept
+  fresh, focused input, like row navigation, and never confirm a row; a
+  toggle between a press and its release cancels that confirmation.
+- `fr app` runs two child commands of the same `fr`, so every connection
+  takes the existing path: `fr connect --choose-host --pick-only` reports
+  `host_selected` with the confirmed choices and opens no connection, then a
+  plain `fr connect NODE ...` re-resolves that identity and connects.
+  `--app-notice TEXT` (printable ASCII, at most 384 bytes) carries the
+  outcome into the next picker.
+- `fr app --install` adds `~/Applications/FrankenRemote.app` (macOS) or
+  `~/.local/share/applications/frankenremote.desktop` (Linux); `--uninstall`
+  removes only a launcher it wrote. `install.sh` installs the launcher with
+  the client and removes it on `--uninstall`.
+- On macOS a window from a process that `fr app` spawns directly may stay
+  behind the app the user is in (cooperative activation): on 11-18 a
+  returning picker opened hidden behind other windows. When the installed
+  launcher runs the same `fr`, `fr app` therefore starts each step through
+  Launch Services (`open -n -W -a FrankenRemote.app --args ...`), so macOS
+  brings it forward like any app the user opens. A picker that reopens only
+  because the last one expired unused (every two minutes; the app quits
+  after half an hour unused) starts with `open -g` and stays behind.
+- The macOS picker's rows showed only the node ID: the machine name, set
+  through the table cell's `textField` outlet, never appeared. It is now a
+  plain label, so each row shows the name above its ID.
+- Checked on 11-18:
+  - `cargo fmt`, `clippy --all-targets -D warnings` and tests for fr-native
+    on macOS 27.0.1 (mac-studio: 235 library, 355 `fr`) and on Linux (ts1:
+    470 library, 465 `fr`, and the 5 Xvfb picker tests, including the 2 new
+    choice tests).
+  - On mac-studio, `FrankenRemote.app` opened the picker in front. View
+    only, a keyboard row choice and Connect saved the choices and ran
+    `fr connect NODE --view-only`. That attempt failed (mac-mini-max, whose
+    host still waits for macOS permissions), and the picker came back in
+    front with the outcome and the remembered choices. Cancel quit.
+  - On ts1, an Xvfb screenshot showed the X11 picker with the notice and
+    the choice line.
+- Not tested yet:
+  - a successful session started from `fr app` (no host was reachable from
+    mac-studio);
+  - whether the viewer window comes to the front during a connection;
+  - the Linux desktop entry in a real desktop session.
+
+## 2026-11-18 — a large first view starts over a slower link
+
+- A viewer's first picture (the startup IDR) arrives as 1150-byte records on
+  the recovery stream, and the viewer set that stream's QUIC receive window
+  to the 8 KiB per-record allowance. That allowed one 8 KiB window per round
+  trip. On 11-17, a Windows laptop on a 75 ms, 23 Mbit/s cellular path asked a
+  5120x2880 Mac for 2890x1624: the ~230 KB IDR came in at about 110 KB/s,
+  missed the host's two-second startup deadline, and the host stopped the
+  share (the viewer showed `ended internal`). Only pictures of about
+  1600x900 or smaller worked.
+- The recovery lane now gets the full stream window, as the clipboard lane
+  already did. Record framing, negotiated record sizes, the aggregate
+  connection window and lifetimes are unchanged. On the same path the IDR now
+  arrives in 0.7-0.9 s, and full-size view and control sessions worked.
+  Startup still has only about 0.3 s of margin at that size.
+
+## 2026-11-18 — the Windows source install builds with TDM-GCC on PATH
+
+- `install.ps1` took the first `gcc.exe` on PATH. TDM-GCC ships no
+  `libgcc_eh.a`, which Rust's GNU target links, so the first build script
+  failed with `cannot find -lgcc_eh`. The installer now checks each GCC it
+  finds, skips the ones without that library, and puts the chosen one first
+  on PATH for the build.
+- rustup's stdout no longer leaks into the build step's return value, which
+  had failed the install with `Cannot find drive` after a successful build.
+- The pinned ISRG root PEMs are written only when they change, so a rerun no
+  longer rebuilds fr-mobile-ffi and fr-windows from scratch.
+
 ## 2026-11-08 — the host log names how a controlled viewer ended
 
 - When a controlled share's viewer ended on its own side, `frd` kept only a

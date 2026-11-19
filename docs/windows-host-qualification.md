@@ -87,10 +87,68 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 > clock steps back made by `Set-Date -Adjust` (3 to 45 ms each): with the fix
 > 2 of 2 sessions ran to the end; without it 2 of 2 ended at the first step. No elevated window, lock screen or second display was present.
 
+> **2026-11-14: text clipboard, priority under load, and control deaths that
+> were the viewer's.** All checks were on the machine above.
+>
+> **Text clipboard.** `frd run --control` shares the text clipboard with the
+> controlling viewer by default (d8535ccd). `--no-clipboard` turns it off, and
+> a view-only share never shares it. The clipboard is owned by a second
+> window, "Text clipboard sharing is on." with Turn off, stacked above the
+> Stop sharing window. Turn off stops sharing without ending control.
+>
+> Live with a macOS viewer (mac-mini-old) controlling this host, where the Mac
+> held text P and Windows held Q before the session: the controller's P was
+> kept, copies crossed in both directions, and nothing crossed after Turn off
+> (9 of 9 checks). Two fixes made that hold:
+> - Startup items that crossed no longer end the session (85168d22).
+> - Only the controller offers its pre-session text, so the two selections no
+>   longer swap (ad597f25; the unfixed host gave the Mac Q).
+>
+> **Priority under load.** frd and its media worker run AboveNormal
+> (8e44fd60). Host and load ran at Normal, with spinning threads as the load:
+> - 16 spinners (two per logical CPU): host starts went from 0/6 to 6/6.
+> - 8 spinners: sessions went from 0/2 to 2/2, at about 20 pictures/s
+>   (frame-interval p95 75 ms; about 40/s when idle).
+> - 16 spinners: sessions still fail in both arms (`Worker(Deadline)`).
+>
+> Task Scheduler starts tasks BelowNormal, so earlier task-launched
+> measurements on this machine ran below normal priority.
+>
+> **Control deaths that were the viewer's.** Control sessions from the Linux
+> viewer died within minutes, with whole-picture repairs on a clean link and
+> `RecoveryLimitExceeded`. The cause was the viewer's transport, not this
+> host: after a pass that blocked a route, it drained one datagram per turn
+> (fr-transport, a regression from 624b9dbb). Fixed in 2d56109d. Live A/B:
+> 3 of 3 unfixed sessions died; 3 of 3 fixed sessions completed.
+
 | OS Release | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Status |
 |---|---|---|---|---|---|---|
 | **Windows 11** (one Surface Laptop 3, Intel Iris Plus) | live, one display (hardware measurement) | not implemented | Intel Media Foundation HEVC, live (hardware measurement) | not implemented: frd runs in the interactive session | implemented (`--control`), not run against an elevated window | **view-only and control live; one machine; not qualified** |
 | **Windows 10 / Server 2022** | not tested | not implemented | not tested | not implemented | not tested | **not tested** |
+
+### Explicit host file sends
+
+A Windows host can send an initial batch of up to eight explicitly selected
+regular files to a controlling Linux or macOS viewer with a local `--receive`
+directory. `--once` and `--control` are both required:
+
+```powershell
+.\frd.exe run --encoder auto --once --control --send 'C:\Users\Alice\Documents\report.pdf' --json
+```
+
+Startup pins the source handles before desktop/network setup. The ordinary
+approval policy, live control grant and separately authenticated file attachment
+still govern transfer. Cloned host configurations share one consumable selection;
+reconnect cannot resend it. Windows source handles deny write/delete sharing,
+and directories, final reparse points and nonordinary device/network namespaces
+refuse. `--send-control` and Windows receive directories remain unavailable.
+See [native file downloads](../NATIVE_FILE_DOWNLOAD.md) for destination selection,
+source limitations, publication receipts and cleanup semantics.
+
+The `frd` integration target `host_policy_windows` covers Windows command parsing
+and actual source-handle selection, including the unsupported cases. Portable
+policy and host-selection tests cover the original one-use request. A live
+Windows-to-viewer file transfer has **not been run** for this change.
 
 ---
 
@@ -143,6 +201,100 @@ policy, including overlapping motion, clipping, hiding, forced-IDR redraw and
 replacement images. They pass with the pinned nightly and strict standalone
 Clippy. This establishes copy elimination and policy correctness in source;
 native D3D execution and any frame-rate improvement still require measurement.
+
+### Portrait and rotated displays
+
+The Windows host catalog now includes 90°, 180° and 270° displays. Pixel and
+logical sizes, origins and input coordinates remain upright; the catalog's
+rotation is metadata in clockwise quarter turns. A source image from Desktop
+Duplication is still unrotated: a 768×1024 portrait output supplies a 1024×768
+texture. The capture adapter validates that actual texture's dimensions,
+BGRA format, single mip, single array slice and single-sample layout before
+using it. Unknown rotations and geometry changes refuse the original owner.
+
+For a rotated output, one D3D11 video processor rotates the borrowed image
+directly into the existing owned BGRA desktop texture before `ReleaseFrame`.
+Source rectangles use acquired-image coordinates; destination rectangles use
+upright coordinates. The processor must advertise rotation and BGRA input and
+output in the same RGB color space, and a rate-conversion mode requiring no
+past or future frames. Automatic image enhancement is disabled. There is no
+additional full-display texture, temporal history or CPU rotation fallback.
+Unrotated capture keeps its existing direct copy path. The source desktop's
+axes and total pixels are bounded before allocation, including when the
+encoded picture is smaller than the display.
+
+The existing cursor compositor runs after the desktop is upright. Separate
+DXGI pointer positions already use the output's upright coordinates and are
+not rotated again. A pointer already embedded in the captured image travels
+with the image and receives no additional overlay. Native clients display the
+upright codec picture and map input through its physical bounds; they do not
+apply catalog rotation to it a second time.
+
+A rotation failure or failed `ReleaseFrame` invalidates retained source
+evidence. Recreating a duplication first invalidates the old image and cursor,
+then checks the complete selected display and exact original mode/rotation.
+A same-sized 180° flip, or a 90° to 270° change, cannot keep the old capture
+owner or refresh cached pixels. The existing geometry-change path closes that
+owner before a newly selected geometry can be used.
+
+**Evidence (2026-11-15, `fr-biky`):** nine portable tests of the production
+layout/resource and freshness policy passed with the pinned nightly, including
+strict standalone Clippy. The actual capture library passed Windows GNU
+`cargo check`; the library and media-worker binary passed strict Windows GNU
+Clippy with `windows-host-media`. An ignored native test uses the actual
+production D3D operation and reads back distinctly colored corners for 90°,
+180° and 270°; it passed strict typechecking against the real Windows and
+capture-library metadata, but has not been run. Physical portrait capture,
+cursor placement, negative-origin mixed-DPI input, rotation during sharing and
+any performance change remain **not tested** on Windows hardware.
+
+Native GPU check, on a Windows machine with a suitable video processor:
+
+```powershell
+cargo test -p fr-native --no-default-features --features windows-media --lib windows_capture::upright::tests::rotates_labeled_corners_on_hardware -- --ignored --nocapture
+```
+
+The geometry and direction follow Microsoft's
+[Desktop Duplication rotation and pointer contract](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api),
+[video processor rotation contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11videocontext-videoprocessorsetstreamrotation),
+and [Desktop Duplication sample](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/DXGIDesktopDuplication/cpp/DisplayManager.cpp).
+The distinction between upright duplication-mode dimensions and swapped
+acquired-image dimensions is also explicit in the
+[WebRTC DXGI implementation](https://webrtc.googlesource.com/src/+/7e0bd7aaaf52a6a4bd6c3f84c107071cd2827299/modules/desktop_capture/win/dxgi_output_duplicator.cc).
+
+### Encoder event and output bounds
+
+The Media Foundation event pump forwards at most 32 payload-free events through
+a nonblocking bounded inbox. A full inbox permanently fails that encoder;
+dropping an event cannot make the remaining sequence look healthy. Accumulated
+input credits have a separate 32-credit bound, so consuming events cannot hide
+unbounded native announcements. The capture owner closes after an encode error.
+
+Every event wait retains the encode request's original deadline. The inbox
+checks that deadline before and after receiving, including already queued
+events. The encoder also checks it before input submission, around output
+processing and renegotiation, and before copying a locked output buffer.
+Returning from a native call after expiry cannot start another output operation
+or turn a late unit into success. A hung foreign call still requires the
+existing media-process supervisor; these checks do not cancel a driver call.
+
+The selected protocol's access-unit byte limit reaches the encoder at open.
+Caller-owned output buffers are checked before allocation, including after a
+stream-type change. Transform-owned samples have their total length checked
+before contiguous-buffer conversion; locked lengths are checked against both
+the actual buffer capacity and the selected limit before reserving or copying
+bytes. This bounds application-owned output allocations, not the driver's
+private memory. A successful buffer lock always reaches unlock on validation,
+allocation or deadline failure. The encoder owns the event thread before
+fallible streaming-start messages, so failed startup retains shutdown custody.
+
+Nine portable tests exercise event ordering, overflow, producer shutdown,
+expired queued events, the original empty-wait deadline, native failure,
+accumulated credits and output sizes. The helper passed all nine tests and
+strict standalone Clippy with the pinned nightly before a final test-cleanup
+improvement; that improvement and the final native deadline placements could
+not be rerun after the execution environment disconnected. Windows compilation
+and native driver execution remain unverified for this change.
 
 ### Adaptive bitrate
 

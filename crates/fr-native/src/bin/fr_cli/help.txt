@@ -3,6 +3,7 @@ FrankenRemote development client
 fr help [TOPIC...]
 fr COMMAND --help
 
+fr app [--install | --uninstall]
 fr hosts [--json] [--socket /absolute/tailscaled.sock]
 fr peers [--json]
 fr hosts --probe --experimental-native [--probe-limit 1..64]
@@ -91,6 +92,21 @@ Esc/window close/Ctrl-C cancels. Names/IDs/route hints promise no access.
 Choice expires after 120 seconds; cleanup precedes connection/file selection.
 --choose-host excludes --saved/--hosts-file/--by-name and robot commands.
 --json emits host_selected before connecting; use its ID for disconnect.
+
+Desktop application:
+fr app opens the machine picker with View only / View and control, Share
+clipboard text and Ask which display to show (on Linux: F2, F3, F4 or a click
+on the bottom line), then connects with those choices. Closing the viewer
+returns to the picker with the outcome; Cancel/Escape in the picker quits.
+An unused picker reopens with a fresh machine list every two minutes; after
+half an hour unused, fr app quits.
+Choices are remembered in ~/Library/Application Support/FrankenRemote/
+settings.json (macOS) or $XDG_CONFIG_HOME/frankenremote/settings.json.
+fr app --install adds ~/Applications/FrankenRemote.app (macOS) or an
+applications-menu entry (Linux) that runs this fr with app; --uninstall
+removes only that launcher. The picker step is fr connect --choose-host
+--pick-only [--app-notice TEXT]: it reports host_selected with the confirmed
+choices and opens no connection.
 
 Control and reconnect:
 Choose one role. --control requests input once after a fresh frame; host:

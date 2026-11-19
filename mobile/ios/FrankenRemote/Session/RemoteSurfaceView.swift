@@ -25,16 +25,23 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     /// How far the keyboard (with its extra-keys bar) covers the view's
     /// bottom edge: the picture's content area stops above it.
     private var keyboardOverlap: CGFloat = 0
+    /// The exact frame whose live owner supplied the current input mapping.
+    private var presentationFrame: UInt64?
 
     weak var session: RemoteSession? {
         willSet {
-            if session !== newValue { releaseKeys() }
+            if session !== newValue {
+                releaseKeys()
+                modifiers.clear()
+                setSoftwareKeyboard(false)
+                extraKeys.show(modifiers)
+                interpreter.replaceSink(newValue)
+                presentationFrame = nil
+            }
         }
         didSet {
-            interpreter.sink = session
             renderer?.session = session
             renderer?.reset()
-            interpreter.reset()
         }
     }
     var hapticsEnabled = true
@@ -122,16 +129,11 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
         setNeedsLayout()
     }
 
-    /// Once per display refresh: session events, the picture size, timers.
+    /// Once per display refresh: events, retained-frame geometry, timers.
     private func refresh(_ time: CFTimeInterval) {
         guard let session else { return }
         session.pump()
-        if session.picture != .zero, session.picture != interpreter.mapper.picture {
-            var mapper = interpreter.mapper
-            mapper.setPicture(session.picture)
-            interpreter.mapper = mapper
-            renderer?.reset()
-        }
+        guard synchronizePresentation(at: time) else { return }
         let controlling = session.phase == .controlled
         if interpreter.controlling != controlling {
             interpreter.controlling = controlling
@@ -143,7 +145,7 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
         // while this device is not moving it (the host moved its cursor). The
         // cursor is drawn at the pointer while the finger drives it.
         let local = interpreter.localPointer(at: time)
-        if controlling, let cursor = renderer?.hostCursor {
+        if controlling, let cursor = renderer?.hostCursor, presentationIsCurrent() {
             if let pointer = interpreter.pointer {
                 if local == nil, hypot(pointer.x - cursor.x, pointer.y - cursor.y) > 1.5 {
                     interpreter.seedPointer(cursor)
@@ -152,9 +154,54 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
                 interpreter.seedPointer(cursor)
             }
         }
+        guard presentationIsCurrent() else { retirePresentation(); return }
         renderer?.localCursor = local
         if !typing.isEmpty { drainTyping() }
         handle(interpreter.tick(time: time))
+    }
+
+    /// A lossy VIDEO event never establishes an input transform. The copied
+    /// frame and its original owner must agree before gestures are serviced.
+    private func synchronizePresentation(at time: CFTimeInterval) -> Bool {
+        guard let session, let renderer, let next = renderer.prepareFrame() else {
+            retirePresentation()
+            return false
+        }
+        let previous = presentationFrame
+        let replaced = previous.map { session.display(forFrame: $0) == nil } ?? false
+        guard session.display(forFrame: next.frame) == next.display else {
+            retirePresentation()
+            return false
+        }
+        let changed = previous == nil || replaced
+            || interpreter.mapper.picture != next.picture || interpreter.mapper.display != next.display
+        if changed { retirePresentation(at: time) }
+        var mapper = interpreter.mapper
+        mapper.setPicture(next.picture, display: next.display, frame: next.frame)
+        interpreter.mapper = mapper
+        presentationFrame = next.frame
+        return mapper.isReady
+    }
+
+    private func presentationIsCurrent() -> Bool {
+        guard let session, let frame = presentationFrame else { return false }
+        return interpreter.mapper.frame == frame
+            && session.display(forFrame: frame) == interpreter.mapper.display
+    }
+
+    /// The original Rust owner releases held host state. Discard local work
+    /// without sending an old gesture or key release into a successor.
+    private func retirePresentation(at time: CFTimeInterval? = nil) {
+        let hadPresentation = presentationFrame != nil
+        interpreter.retirePresentation(at: time)
+        presentationFrame = nil
+        renderer?.localCursor = nil
+        if hadPresentation {
+            typing.clear()
+            heldKeys.removeAll()
+            modifiers.clear()
+            extraKeys.show(modifiers)
+        }
     }
 
     private func handle(_ effects: [TouchEffect]) {
@@ -166,29 +213,36 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     // MARK: Touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizePresentation(at: CACurrentMediaTime()) else { return }
         feedback.prepare()
         for touch in touches {
+            guard presentationIsCurrent() else { retirePresentation(); return }
             handle(interpreter.began(id(touch), at: touch.location(in: self), time: touch.timestamp))
         }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizePresentation(at: CACurrentMediaTime()) else { return }
         for touch in touches {
             // Coalesced samples keep fast strokes smooth on 120 Hz screens.
             let samples = event?.coalescedTouches(for: touch) ?? [touch]
             for sample in samples {
+                guard presentationIsCurrent() else { retirePresentation(); return }
                 handle(interpreter.moved(id(touch), to: sample.location(in: self), time: sample.timestamp))
             }
         }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizePresentation(at: CACurrentMediaTime()) else { return }
         for touch in touches {
+            guard presentationIsCurrent() else { retirePresentation(); return }
             handle(interpreter.ended(id(touch), at: touch.location(in: self), time: touch.timestamp))
         }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard presentationIsCurrent() else { retirePresentation(); return }
         for touch in touches {
             handle(interpreter.cancelled(id(touch), time: touch.timestamp))
         }

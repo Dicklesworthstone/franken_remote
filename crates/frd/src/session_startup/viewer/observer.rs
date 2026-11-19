@@ -121,6 +121,11 @@ impl Budget {
     fn stage(&self) -> Result<Duration, Error> {
         Ok(Duration::from_secs(2).min(self.remaining()?))
     }
+    /// The decoder startup stage (first picture): up to
+    /// [`decoder_startup::MAX_STARTUP`], longer than an attachment stage.
+    fn startup(&self) -> Result<Duration, Error> {
+        Ok(decoder_startup::MAX_STARTUP.min(self.remaining()?))
+    }
     fn live(&self) -> bool {
         self.remaining().is_ok()
     }
@@ -271,6 +276,11 @@ impl NativeObserver {
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), super::super::FileSendError>> + 'a {
         self.viewer.reap_files(cleanup, deadline)
+    }
+    /// Retire and nonblockingly collect original file owners, including after
+    /// the original bounded cleanup wait expired. No transfer is restarted.
+    pub fn collect_files(&mut self) -> Option<Result<(), super::super::FileSendError>> {
+        self.viewer.collect_files()
     }
     pub const fn display(&self) -> Display {
         self.display
@@ -1008,7 +1018,7 @@ async fn bootstrap<F: Future<Output = Result<Launch, ()>>>(
     receive_record(&mut session, budget, &mut config).await?;
     let (q, _) = session.io().map_err(Error::Session)?;
     let setup = selected
-        .decoder_setup(q, &media, budget.stage()?)
+        .decoder_setup(q, &media, budget.startup()?)
         .map_err(Error::Display)?;
     let receive = media
         .receiver_config(q, ReceivePolicy::default())

@@ -1,4 +1,4 @@
-use super::{Error, PathHint, Row, Shared, Status};
+use super::{Choices, Error, NO_CHOICES, PathHint, Row, Shared, Status};
 use std::{
     ffi::{CString, c_char, c_int, c_void},
     ptr::NonNull,
@@ -37,9 +37,16 @@ unsafe extern "C" {
         display: *const c_char,
         rows: *const NativeRow,
         count: u32,
+        choices: u32,
+        notice: *const c_char,
         window: *mut u32,
     ) -> *mut c_void;
-    fn fr_host_picker_step(handle: *mut c_void, ordinal: *mut u32, age_ms: *mut u32) -> c_int;
+    fn fr_host_picker_step(
+        handle: *mut c_void,
+        ordinal: *mut u32,
+        age_ms: *mut u32,
+        choices: *mut u32,
+    ) -> c_int;
     fn fr_host_picker_close(handle: *mut c_void);
 }
 
@@ -56,17 +63,27 @@ pub(super) fn run(
     shared: &Shared,
     display: &CString,
     rows: &[NativeRow],
+    choices: Option<Choices>,
+    notice: Option<&CString>,
 ) -> Result<Option<usize>, Error> {
     if !shared.live() {
         return Ok(None);
     }
     let mut window = 0;
     let count = u32::try_from(rows.len()).map_err(|_| Error::Capacity)?;
-    // SAFETY: bounded, immutable repr(C) rows and the NUL-terminated display
-    // outlive the handle on this worker; C only borrows them until close.
+    // SAFETY: bounded, immutable repr(C) rows, the NUL-terminated display and
+    // the optional NUL-terminated notice outlive the handle on this worker;
+    // C copies the notice and only borrows the rows until close.
     let native = Native(
         NonNull::new(unsafe {
-            fr_host_picker_open(display.as_ptr(), rows.as_ptr(), count, &raw mut window)
+            fr_host_picker_open(
+                display.as_ptr(),
+                rows.as_ptr(),
+                count,
+                choices.map_or(NO_CHOICES, Choices::bits),
+                notice.map_or(core::ptr::null(), |notice| notice.as_ptr()),
+                &raw mut window,
+            )
         })
         .ok_or(Error::NativeUnavailable)?,
     );
@@ -79,11 +96,17 @@ pub(super) fn run(
             return Ok(None);
         }
         let observed = Instant::now();
-        let (mut ordinal, mut age_ms) = (0, 0);
-        // SAFETY: this thread alone owns native; the two output pointers are
+        let (mut ordinal, mut age_ms, mut chosen) = (0, 0, NO_CHOICES);
+        // SAFETY: this thread alone owns native; the three output pointers are
         // valid for the call. C bounds its event batch before returning.
-        let event =
-            unsafe { fr_host_picker_step(native.0.as_ptr(), &raw mut ordinal, &raw mut age_ms) };
+        let event = unsafe {
+            fr_host_picker_step(
+                native.0.as_ptr(),
+                &raw mut ordinal,
+                &raw mut age_ms,
+                &raw mut chosen,
+            )
+        };
         if !shared.live() {
             return Ok(None);
         }
@@ -106,6 +129,17 @@ pub(super) fn run(
                     if ordinal >= rows.len() {
                         return Err(Error::NativeChanged);
                     }
+                    // A picker that offered choices returns valid ones with
+                    // its row; one that did not returns none.
+                    let confirmed = if chosen == NO_CHOICES {
+                        None
+                    } else {
+                        Some(Choices::from_bits(chosen).ok_or(Error::NativeChanged)?)
+                    };
+                    if confirmed.is_some() != choices.is_some() {
+                        return Err(Error::NativeChanged);
+                    }
+                    shared.state().choices = confirmed;
                     return Ok(Some(ordinal));
                 }
             }

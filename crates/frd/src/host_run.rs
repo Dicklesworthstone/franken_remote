@@ -719,7 +719,9 @@ fn request(
             // Local approval needs the session-agent process; this profile is
             // unattended by explicit operator choice (checked by the caller).
             require_approval: false,
-            startup_timeout: Duration::from_secs(5),
+            // Admission to first picture; leaves room for the 6 s first-view
+            // decoder startup (decoder_startup::MAX_STARTUP) after negotiation.
+            startup_timeout: Duration::from_secs(10),
             authority: AuthorityPolicy::plan_defaults(),
             transport: fr_transport::quic::Policy::default(),
         },

@@ -251,6 +251,27 @@ actual thread completion from that request. `finish` never blocks on an ongoing
 foreign call. A stuck OS call cannot be safely killed as a Rust thread; dropping
 the handle does not claim successful native cleanup or rollback.
 
+Native adapters with deferred teardown implement `NativeClipboard::poll_close`.
+The original worker fences and requests close once, then retains the native
+owner until polling reports its actual completion, including after a native
+operation fails or authority ends during setup. The application keeps its
+original reap deadline; expiry reports pending cleanup without restarting the
+worker or renewing that deadline. Synchronous adapters retain the default
+completion contract. A completed native cleanup failure is `NativeCleanup`,
+distinct from an ordinary closed lane or unavailable platform.
+
+The Windows clipboard retains both its privacy supervisor and the original
+indicator UI thread until they join. Native setup uses an acceptance handshake:
+a timed-out opening cannot leave a late window pumping without an owner. Its
+cleanup-aware factory preserves negative cleanup results through partial setup,
+including a failed supervisor spawn, rather than collapsing them into platform
+unavailability. The local `NativeOpenError` and
+`Configuration::new_with_guard_and_cleanup` API introduce no wire record or
+permission. Source regressions cover pending custody, one-shot close, native
+failure, panic, post-factory cancellation and setup-error classification; actual
+Windows UI execution remains a separate ignored desktop probe. These source
+tests do not by themselves establish a passed runtime or hardware result.
+
 Prepared transport admission checks the original route again after the final
 connection authorizer, which may request an optional lane's retirement. A retired
 stream retains its numeric tombstone to prevent reuse, but cannot acquire new

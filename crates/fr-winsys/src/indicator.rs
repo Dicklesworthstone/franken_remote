@@ -103,7 +103,24 @@ thread_local! {
 /// The open window. Dropping it closes the window without a stop.
 pub struct Indicator {
     window: isize,
-    thread: Option<JoinHandle<()>>,
+    thread: Option<JoinHandle<bool>>,
+    closing: bool,
+    result: Option<bool>,
+    retain: bool,
+}
+
+/// Local setup and native cleanup are separate outcomes. A failed-cleanup
+/// result is reported only after the original UI thread has joined.
+#[derive(Debug)]
+pub enum OpenError {
+    Setup(io::Error),
+    Cleanup,
+}
+
+impl From<io::Error> for OpenError {
+    fn from(error: io::Error) -> Self {
+        Self::Setup(error)
+    }
 }
 
 impl Indicator {
@@ -117,7 +134,30 @@ impl Indicator {
 
     /// Show a window of `kind`, as [`Indicator::open`] does.
     pub fn open_kind(kind: Kind, on_stop: impl Fn() + Send + 'static) -> io::Result<Self> {
+        Self::open_owned(kind, on_stop, false).map_err(|error| match error {
+            OpenError::Setup(error) => error,
+            OpenError::Cleanup => io::ErrorKind::Other.into(),
+        })
+    }
+
+    /// Open on a supervised foreign-call worker which must retain native
+    /// cleanup even after its caller's wait expires. A setup timeout or Drop
+    /// fences/closes the window and keeps that worker until its original UI
+    /// thread joins. Never call this from an authority or application UI thread.
+    pub fn open_kind_retained(
+        kind: Kind,
+        on_stop: impl Fn() + Send + 'static,
+    ) -> Result<Self, OpenError> {
+        Self::open_owned(kind, on_stop, true)
+    }
+
+    fn open_owned(
+        kind: Kind,
+        on_stop: impl Fn() + Send + 'static,
+        retain: bool,
+    ) -> Result<Self, OpenError> {
         let (opened, receive) = mpsc::channel();
+        let (accept, accepted) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("fr-indicator-ui".into())
             .spawn(move || {
@@ -125,24 +165,56 @@ impl Indicator {
                 KIND.with(|current| current.set(kind));
                 match create(kind) {
                     Ok(window) => {
-                        let _ = opened.send(Ok(window.0 as isize));
-                        pump();
+                        if opened.send(Ok(window.0 as isize)).is_ok() && accepted.recv().is_ok() {
+                            pump()
+                        } else {
+                            // SAFETY: the opening caller did not accept this
+                            // thread's window. Late creation cannot become an
+                            // orphan privacy surface after setup timed out.
+                            unsafe { DestroyWindow(window).is_ok() }
+                        }
                     }
                     Err(error) => {
                         let _ = opened.send(Err(error));
+                        // No admitted window. Thread exit retires any native
+                        // window that partial creation attached to this thread.
+                        true
                     }
                 }
             })?;
         match receive.recv_timeout(Duration::from_secs(3)) {
-            Ok(Ok(window)) => Ok(Self {
-                window,
-                thread: Some(thread),
-            }),
-            Ok(Err(error)) => {
-                let _ = thread.join();
-                Err(error)
+            Ok(Ok(window)) => {
+                if accept.send(()).is_err() {
+                    return Err(if thread.join().unwrap_or(false) {
+                        OpenError::Setup(io::ErrorKind::BrokenPipe.into())
+                    } else {
+                        OpenError::Cleanup
+                    });
+                }
+                Ok(Self {
+                    window,
+                    thread: Some(thread),
+                    closing: false,
+                    result: None,
+                    retain,
+                })
             }
-            Err(_) => Err(io::ErrorKind::TimedOut.into()),
+            Ok(Err(error)) => Err(if thread.join().unwrap_or(false) {
+                OpenError::Setup(error)
+            } else {
+                OpenError::Cleanup
+            }),
+            Err(_) => {
+                // Deny the exact pending open, including a success queued at
+                // the timeout boundary. Its UI thread destroys any late window.
+                drop(accept);
+                // This is the original supervised native worker, not its
+                // caller: keep custody across the caller's bounded reap.
+                if retain && !thread.join().unwrap_or(false) {
+                    return Err(OpenError::Cleanup);
+                }
+                Err(OpenError::Setup(io::ErrorKind::TimedOut.into()))
+            }
         }
     }
 
@@ -179,17 +251,57 @@ impl Indicator {
     }
 
     /// Close the window (no stop) and wait up to a second for its thread.
-    /// True: the UI thread has exited.
+    /// True: the UI thread has exited successfully. A retained worker owner
+    /// continues holding its thread after this wait; use `begin_close` and
+    /// `poll_close` for nonblocking, reportable completion instead.
     pub fn close(mut self) -> bool {
-        self.post_close();
-        let Some(thread) = self.thread.take() else {
-            return true;
-        };
+        self.begin_close();
         let until = Instant::now() + Duration::from_secs(1);
-        while !thread.is_finished() && Instant::now() < until {
+        loop {
+            if let Some(result) = self.poll_close() {
+                return result;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
             thread::sleep(Duration::from_millis(5));
         }
-        thread.is_finished() && thread.join().is_ok()
+    }
+
+    /// Request native closure exactly once, without waiting for it or running
+    /// the user's Stop callback. No retry or replacement lifetime is created.
+    pub fn begin_close(&mut self) {
+        if !std::mem::replace(&mut self.closing, true) {
+            self.post_close();
+        }
+    }
+
+    /// Finish cleanup on the supervised native worker, retaining the original
+    /// UI thread across any caller timeout. No authority/UI thread may wait
+    /// here. Unlike the compatibility `close` wait, this returns the actual
+    /// joined native outcome, never a timeout mistaken for that outcome.
+    pub fn finish_close(mut self) -> bool {
+        self.begin_close();
+        loop {
+            if let Some(result) = self.poll_close() {
+                return result;
+            }
+            thread::park_timeout(Duration::from_millis(5));
+        }
+    }
+
+    /// Nonblocking inspection of this same UI thread. Pending retains the
+    /// original handle; a completed failure is cached and cannot become success.
+    pub fn poll_close(&mut self) -> Option<bool> {
+        if let Some(result) = self.result {
+            return Some(result);
+        }
+        if !self.closing || !self.thread.as_ref()?.is_finished() {
+            return None;
+        }
+        let result = self.thread.take()?.join().unwrap_or(false);
+        self.result = Some(result);
+        Some(result)
     }
 
     fn post_close(&self) {
@@ -202,7 +314,12 @@ impl Indicator {
 impl Drop for Indicator {
     fn drop(&mut self) {
         if self.thread.is_some() {
-            self.post_close();
+            self.begin_close();
+            if self.retain {
+                while self.poll_close().is_none() {
+                    thread::park_timeout(Duration::from_millis(5));
+                }
+            }
         }
     }
 }
@@ -362,12 +479,16 @@ fn message_font(dpi: u32) -> Option<HFONT> {
     }
 }
 
-fn pump() {
+fn pump() -> bool {
     let mut message = MSG::default();
     // SAFETY: the standard loop over this thread's queue; it ends when the
     // window is destroyed (WM_QUIT) or the queue fails.
     unsafe {
-        while GetMessageW(&raw mut message, None, 0, 0).0 > 0 {
+        loop {
+            let result = GetMessageW(&raw mut message, None, 0, 0).0;
+            if result <= 0 {
+                return result == 0;
+            }
             let _ = TranslateMessage(&raw const message);
             DispatchMessageW(&raw const message);
         }
@@ -440,6 +561,33 @@ mod tests {
             GetWindowTextW(label, &mut text)
         };
         String::from_utf16_lossy(&text[..usize::try_from(length).unwrap()])
+    }
+
+    #[test]
+    #[ignore = "shows a window on the interactive desktop"]
+    fn retained_close_polls_the_original_ui_and_caches_its_result() {
+        let stops = Arc::new(AtomicUsize::new(0));
+        let counted = stops.clone();
+        let mut indicator = Indicator::open_kind_retained(Kind::Clipboard, move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        assert!(indicator.responsive(Duration::from_millis(250)));
+        assert_eq!(indicator.poll_close(), None);
+        indicator.begin_close();
+        indicator.begin_close();
+        let until = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(result) = indicator.poll_close() {
+                assert!(result);
+                break;
+            }
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(indicator.poll_close(), Some(true));
+        assert!(indicator.thread.is_none());
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
     }
 
     /// Needs the interactive desktop (run in the logged-on session): the

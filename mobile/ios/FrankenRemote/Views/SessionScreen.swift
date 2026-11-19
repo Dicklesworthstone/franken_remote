@@ -14,19 +14,30 @@ struct SessionScreen: View {
     @State private var zoomCommand: SessionSurface.ZoomCommand?
     @State private var hideTask: Task<Void, Never>?
     @State private var stats = SessionStats()
+    @State private var displayPicker: DisplaySelection?
+    @State private var displayPickerVisible = false
+    @State private var uploadPicker: FileUploadChoice?
+    @State private var uploadPickerVisible = false
+    @State private var uploadPickerToken: UInt64?
+    @State private var uploadPickerSession: RemoteSession?
 
     var body: some View {
         ZStack(alignment: .top) {
             SessionSurface(session: session, mode: settings.touchMode, settings: settings,
                            keyboard: $keyboard, zoom: $zoomCommand,
-                           visible: scenePhase == .active && !session.phase.isEnded)
+                           visible: scenePhase == .active && !session.phase.isEnded
+                               && session.phase != .closing && !model.switchingDisplay
+                               && displayPicker == nil && !displayPickerVisible
+                               && uploadPicker == nil && !uploadPickerVisible)
                 .ignoresSafeArea()
             if !session.phase.isViewing {
                 StatusCard(session: session, retry: retry, close: close)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if toolbarVisible || !session.phase.isViewing {
-                SessionToolbar(session: session, keyboard: $keyboard, zoom: $zoomCommand, close: close)
+                SessionToolbar(session: session, keyboard: $keyboard, zoom: $zoomCommand,
+                               close: close, changeDisplay: changeDisplay,
+                               chooseFile: chooseFile, releaseControl: releaseControl)
                     .transition(.move(edge: .top).combined(with: .opacity))
             } else {
                 Button {
@@ -57,6 +68,10 @@ struct SessionScreen: View {
                     .allowsHitTesting(false)
             }
         }
+        .overlay(alignment: .bottom) {
+            FileUploadBar(session: session)
+                .padding(.horizontal, 12).padding(.bottom, 12)
+        }
         .background(Color.black)
         .statusBarHidden(session.phase.isViewing && !toolbarVisible)
         .persistentSystemOverlays(session.phase.isViewing ? .hidden : .automatic)
@@ -71,6 +86,65 @@ struct SessionScreen: View {
             UIApplication.shared.isIdleTimerDisabled = phase.isViewing
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .onChange(of: session.displaySelection, initial: true) { _, selection in
+            displayPicker = selection
+        }
+        .sheet(item: $displayPicker) { selection in
+            let owner = session
+            DisplayPicker(host: owner.host.title, selection: selection,
+                          choose: { owner.selectDisplay(selection, index: $0) },
+                          cancel: { owner.cancelDisplay(selection) })
+                .onAppear { displayPickerVisible = true }
+                .onDisappear {
+                    owner.cancelDisplay(selection)
+                    displayPickerVisible = false
+                }
+        }
+        .sheet(item: $uploadPicker, onDismiss: {
+            // Selection callbacks run before the system sheet actually leaves.
+            // Keep the original picture hidden until this dismissal witness.
+            if let owner = uploadPickerSession, let token = uploadPickerToken,
+               owner.uploadChoice?.token == token,
+               owner.uploadChoice?.phase == .choosing {
+                owner.discardUploadSelection(token: token)
+            }
+            uploadPickerToken = nil
+            uploadPickerSession = nil
+            uploadPickerVisible = false
+        }) { choice in
+            if let owner = uploadPickerSession {
+                FileUploadPicker { url in
+                    if let url {
+                        owner.prepareUpload(url, choice: choice)
+                    } else {
+                        owner.discardUploadSelection(token: choice.token)
+                    }
+                    uploadPicker = nil
+                }
+                .onAppear { uploadPickerVisible = true }
+            }
+        }
+        .onChange(of: session.uploadChoice?.token) { _, token in
+            if token == nil { uploadPicker = nil }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                session.discardUploadSelection()
+                uploadPicker = nil
+            }
+        }
+        .task(id: session.handle) {
+            // Startup has no frame yet, and a presented picker can pause
+            // Metal's refreshes. Keep reading its original request/expiry.
+            while !Task.isCancelled {
+                // Native pickers can pause Metal callbacks. Continue bounded
+                // status polling through actual file cleanup after an end.
+                if !session.phase.isViewing || uploadPickerVisible || uploadPicker != nil {
+                    session.pump()
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
         .task(id: settings.showStats) {
             guard settings.showStats else { return }
             while !Task.isCancelled {
@@ -89,7 +163,8 @@ struct SessionScreen: View {
         hideTask?.cancel()
         hideTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
-            if !Task.isCancelled, session.phase.isViewing, !keyboard { toolbarVisible = false }
+            if !Task.isCancelled, session.phase.isViewing, !keyboard,
+               session.uploadChoice == nil, !uploadPickerVisible { toolbarVisible = false }
         }
     }
 
@@ -100,6 +175,30 @@ struct SessionScreen: View {
 
     private func close() {
         model.disconnect()
+    }
+
+    private func chooseFile() {
+        guard uploadPickerSession == nil, !uploadPickerVisible,
+              let choice = session.beginUploadSelection() else { return }
+        keyboard = false
+        session.setVisible(false)
+        uploadPickerToken = choice.token
+        uploadPickerSession = session
+        uploadPickerVisible = true
+        uploadPicker = choice
+        showToolbar()
+    }
+
+    private func releaseControl() {
+        model.releaseControl(session)
+        keyboard = false
+        zoomCommand = nil
+    }
+
+    private func changeDisplay() {
+        model.changeDisplay(session)
+        keyboard = false
+        zoomCommand = nil
     }
 }
 
@@ -113,43 +212,58 @@ private struct StatusCard: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            switch session.phase {
-            case .ended(let end):
-                Image(systemName: end == .closedByYou ? "checkmark.circle" : "exclamationmark.triangle")
-                    .font(.largeTitle)
-                    .foregroundStyle(end == .closedByYou ? Color.secondary : Color.orange)
-                Text(end.title).font(.headline)
-                if !end.message.isEmpty {
-                    Text(end.message).font(.subheadline).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                HStack {
-                    if end.canRetry {
-                        Button("Try again", action: retry).buttonStyle(.borderedProminent)
-                    }
-                    if end == .hostRefused, session.controlCapable {
-                        Button("View only") {
-                            model.connect(model.store.host(session.host.id) ?? session.host, control: false)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    Button("Close", action: close).buttonStyle(.bordered)
-                }
-                if !session.detail.isEmpty {
-                    DisclosureGroup("Details", isExpanded: $showDetail) {
-                        Text(session.detail).font(.caption.monospaced()).textSelection(.enabled)
-                    }
-                    .font(.caption)
-                    .frame(maxWidth: 320)
-                }
-            default:
+            if model.switchingDisplay {
                 ProgressView().controlSize(.large).tint(.white)
-                Text(progressTitle).font(.headline)
-                Text(session.host.name).font(.caption).foregroundStyle(.secondary)
-                if session.phase == .awaitingApproval {
-                    Text("Approve this connection on the host's screen.")
-                        .font(.subheadline).foregroundStyle(.secondary)
+                Text(model.releasingControl ? "Releasing control…" : "Changing display…").font(.headline)
+                Text(model.releasingControl
+                     ? "Closing the controlled session before opening fresh viewing."
+                     : "Closing the current session before opening the approved display list.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Cancel", action: close).buttonStyle(.bordered)
+            } else {
+                switch session.phase {
+                case .ended(let end):
+                    Image(systemName: end == .closedByYou ? "checkmark.circle" : "exclamationmark.triangle")
+                        .font(.largeTitle)
+                        .foregroundStyle(end == .closedByYou ? Color.secondary : Color.orange)
+                    Text(end.title).font(.headline)
+                    if !end.message.isEmpty {
+                        Text(end.message).font(.subheadline).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    HStack {
+                        if end.canRetry {
+                            Button("Try again", action: retry).buttonStyle(.borderedProminent)
+                        }
+                        if end == .hostRefused, session.controlCapable {
+                            Button("View only") {
+                                model.connect(model.store.host(session.host.id) ?? session.host, control: false)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        Button("Close", action: close).buttonStyle(.bordered)
+                    }
+                    if !session.detail.isEmpty {
+                        DisclosureGroup("Details", isExpanded: $showDetail) {
+                            Text(session.detail).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                        .font(.caption)
+                        .frame(maxWidth: 320)
+                    }
+                default:
+                    ProgressView().controlSize(.large).tint(.white)
+                    Text(progressTitle).font(.headline)
+                    Text(session.host.name).font(.caption).foregroundStyle(.secondary)
+                    if session.phase == .awaitingApproval {
+                        Text("Approve this connection on the host's screen.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }
                 }
+            }
+            if let error = model.displaySwitchError {
+                Text(error).font(.subheadline).foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
             }
         }
         .padding(24)

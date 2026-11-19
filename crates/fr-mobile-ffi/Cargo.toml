@@ -16,6 +16,9 @@ sha2 = { version = "=0.11.0", default-features = false }
 [dev-dependencies]
 base64 = { version = "=0.23.1", default-features = false, features = ["alloc"] }
 sha2 = { version = "=0.11.0", default-features = false }
+# The exact native file-consent/report policy runs on portable test hosts.
+fr-client.workspace = true
+fr-wire.workspace = true
 
 # The iOS app links the static library; tests and other Rust use the rlib.
 [lib]
@@ -51,13 +54,14 @@ windows = { version = "=0.62.2", features = [
 # on frd's viewer half so the session compiles for host tests; it stays off by
 # default so the workspace build's frd features are unchanged.
 frd = { workspace = true, optional = true }
+fr-files = { workspace = true, optional = true }
 fr-transport = { workspace = true, optional = true }
 # The directory fetch's result document for Swift (`fr_directory_fetch`).
 serde_json = { workspace = true, optional = true }
 
 [features]
 default = []
-session = ["dep:frd", "dep:fr-transport", "dep:serde_json"]
+session = ["dep:frd", "dep:fr-files", "dep:fr-transport", "dep:serde_json"]
 macos-session = ["session", "frd/macos-viewer"]
 # The session core for the Windows client (no C ABI there yet).
 windows-session = ["session", "frd/windows-viewer"]

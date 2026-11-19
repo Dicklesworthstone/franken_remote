@@ -12,6 +12,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreVideo/CoreVideo.h>
+#import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -22,6 +23,7 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include "apple_decode_output.h"
 
 enum {
     FR_MAC_OK = 0,
@@ -45,6 +47,7 @@ enum {
     FR_MAC_CLOSE = 8,
     FR_MAC_FOCUS_LOST = 9,
     FR_MAC_FOCUS_GAINED = 10,
+    FR_MAC_FOCUS_PAUSED = 11,
 };
 
 // Must match `RawEvent` in macos.rs.
@@ -426,7 +429,13 @@ enum {
     FR_MAC_TEXT_COMPOSER = 16,
     FR_MAC_FILE_SELECTION = 32,
     FR_MAC_AUDIO = 64,
-    FR_MAC_SHARE_ALL = 127,
+    FR_MAC_STOP_CONTROL = 128,
+    FR_MAC_SHARE_ALL = 255,
+};
+// Must match macos_switch::Action. One original action occupies the latch.
+enum {
+    FR_MAC_REOPEN_DISPLAY = 1,
+    FR_MAC_REOPEN_VIEWING = 2,
 };
 #define FR_MAC_SHARING_HEIGHT 44.0
 #define FR_MAC_TEXT_HEIGHT 76.0
@@ -438,6 +447,7 @@ enum {
 #define FR_MAC_REMOTE_INPUT_TAG INT64_C(0x46524350)
 #define FR_MAC_SHARING_CELL 230.0
 #define FR_MAC_CHANGE_WIDTH 136.0
+#define FR_MAC_STOP_CONTROL_WIDTH 136.0
 #define FR_MAC_CLIPBOARD_WIDTH 184.0
 #define FR_MAC_FILE_SELECTION_WIDTH 144.0
 #define FR_MAC_FILE_SELECTION_BYTES (32 * 1024)
@@ -498,6 +508,7 @@ static unsigned fr_sharing_cells(uint32_t flags) {
 static double fr_sharing_width(uint32_t flags) {
     double width = 16 + FR_MAC_SHARING_CELL * fr_sharing_cells(flags) +
                    ((flags & FR_MAC_CHANGE_DISPLAY) ? FR_MAC_CHANGE_WIDTH : 0) +
+                   ((flags & FR_MAC_STOP_CONTROL) ? FR_MAC_STOP_CONTROL_WIDTH : 0) +
                    ((flags & FR_MAC_CLIPBOARD) ? FR_MAC_CLIPBOARD_WIDTH : 0) +
                    ((flags & FR_MAC_FILE_SELECTION) ? FR_MAC_FILE_SELECTION_WIDTH : 0);
     if (flags & FR_MAC_TEXT_COMPOSER) width = fmax(width, FR_MAC_TEXT_MIN_WIDTH);
@@ -550,6 +561,19 @@ static BOOL fr_any_key(const BOOL *keys) {
 @interface FrSharingButton : NSButton
 @end
 
+// The clipboard's Off surface is independent of keyboard focus and remains
+// visible when another app covers the remote picture. It never becomes a
+// remote input window or changes the application's activation policy.
+@interface FrClipboardPanel : NSPanel
+@end
+
+@interface FrClipboardView : FrSharingView
+@property(nonatomic) BOOL drawn;
+@end
+
+@interface FrClipboardOffButton : FrSharingButton
+@end
+
 // AppKit owns real text editing, input methods and candidate placement here.
 // This view is local chrome, not a guessed remote document or caret.
 @interface FrTextComposer : NSTextView {
@@ -576,8 +600,12 @@ static BOOL fr_any_key(const BOOL *keys) {
     FrSharingView *sharing;
     NSTextField *uploadLabel, *uploadPacingLabel, *downloadLabel;
     NSTextField *clipboardLabel;
-    FrSharingButton *uploadCancel, *uploadPacing, *downloadCancel, *changeDisplay;
+    FrSharingButton *uploadCancel, *uploadPacing, *downloadCancel, *changeDisplay, *stopControl;
     FrSharingButton *clipboardOff;
+    FrClipboardPanel *clipboardPanel;
+    FrClipboardView *clipboardPanelView;
+    NSTextField *clipboardPanelLabel;
+    FrClipboardOffButton *clipboardPanelOff;
     NSTextField *audioLabel, *audioVolumeLabel;
     FrSharingButton *audioDown, *audioUp, *audioMute;
     uint32_t audioState, audioVolume;
@@ -603,8 +631,9 @@ static BOOL fr_any_key(const BOOL *keys) {
     double uploadPacingSince, uploadActionCaptured;
     BOOL uploadPacingPending;
     BOOL uploadCancelled, downloadCancelled, layoutInProgress;
-    BOOL displayChangeUsed;
-    double displayChangeAt;
+    BOOL reopenUsed;
+    double reopenAt;
+    uint32_t reopenAction;
     FrTextComposer *textEditor, *retiredTextEditor;
     NSScrollView *textScroll;
     NSTextField *textLabel;
@@ -654,8 +683,12 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)updateAudioControls;
 - (void)cancelDownload:(id)sender;
 - (void)changeDisplay:(id)sender;
+- (void)stopControl:(id)sender;
+- (void)chooseReopen:(uint32_t)action;
 - (void)stopClipboard:(BOOL)userOff;
 - (void)stopClipboardWithoutUI:(BOOL)userOff;
+- (BOOL)openClipboardSurface;
+- (BOOL)closeClipboardSurface;
 - (void)finishStoppedUI;
 - (void)disableClipboard:(id)sender;
 - (BOOL)fileSelectionAvailable;
@@ -679,6 +712,11 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)cancelText:(id)sender;
 - (BOOL)allowsTextReplacement:(NSRange)range string:(id)string;
 @end
+
+// One independent privacy surface per native viewer process. Retain its exact
+// owner until AppKit confirms close, even if final window cleanup encounters
+// an exception. An unconfirmed surface can never be replaced by another one.
+static FrWindowOwner *fr_clipboard_surface_owner;
 
 @implementation FrTextComposer
 - (BOOL)acceptsTextCallbacks {
@@ -938,6 +976,22 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)mouseUp:(NSEvent *)event { (void)event; }
 @end
 
+@implementation FrClipboardPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+@implementation FrClipboardView
+- (void)drawRect:(NSRect)dirty {
+    [super drawRect:dirty];
+    self.drawn = YES;
+}
+@end
+
+@implementation FrClipboardOffButton
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+@end
+
 static NSTextField *fr_sharing_label(FrSharingView *parent, NSString *text) {
     NSTextField *label = [NSTextField labelWithString:text];
     label.font = [NSFont systemFontOfSize:11];
@@ -958,6 +1012,23 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
     button.font = [NSFont systemFontOfSize:11];
     [parent addSubview:button];
     return button;
+}
+
+// Query exactly the retained panel, not a process-wide or guessed window.
+// A stalled WindowServer query cannot renew the Rust privacy watchdog.
+static BOOL fr_clipboard_surface_onscreen(NSWindow *panel) {
+    NSInteger number = panel.windowNumber;
+    if (number <= 0 || number > UINT32_MAX) return NO;
+    CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,
+                                                   (CGWindowID)number);
+    if (!windows) return NO;
+    BOOL shown = NO;
+    if (CFArrayGetCount(windows) == 1) {
+        NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows, 0);
+        shown = [info[(__bridge NSString *)kCGWindowIsOnscreen] boolValue];
+    }
+    CFRelease(windows);
+    return shown;
 }
 
 static BOOL fr_file_selection_bytes(NSPasteboard *pasteboard, uint8_t *bytes, size_t *length) {
@@ -1014,7 +1085,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     sample.full_screen = (window.styleMask & NSWindowStyleMaskFullScreen) ? 1 : 0;
     sample.eligible = sameSource && !owner->fullScreenMoving && !owner->nativeStopPending &&
         !owner->overflow &&
-        !owner->textActive && !owner->textPending && !owner->displayChangeAt &&
+        !owner->textActive && !owner->textPending && !owner->reopenAt &&
         // Native polling pauses at an undelivered sharing action. That is not
         // a complete final event turn: a queued close/focus/escape may follow.
         !owner->sharingActions &&
@@ -1029,6 +1100,94 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 - (void)dealloc {
     for (id observer in lifetimeObservers) [lifetimeCenter removeObserver:observer];
 }
+- (BOOL)openClipboardSurface {
+    if (fr_clipboard_surface_owner || clipboardPanel || clipboardStopped || nativeStopPending ||
+        atomic_load_explicit(&lifetime->unavailable, memory_order_acquire)) return NO;
+    NSScreen *screen = window.screen ?: NSScreen.mainScreen;
+    if (!screen) return NO;
+    NSRect visible = screen.visibleFrame;
+    NSSize size = NSMakeSize(360, 44);
+    if (NSWidth(visible) < size.width || NSHeight(visible) < size.height) return NO;
+    NSRect frame = NSMakeRect(floor(NSMidX(visible) - size.width / 2),
+                              floor(NSMaxY(visible) - size.height - 8),
+                              size.width, size.height);
+    FrClipboardPanel *panel = [[FrClipboardPanel alloc]
+        initWithContentRect:frame
+                  styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                    backing:NSBackingStoreBuffered defer:NO];
+    if (!panel) return NO;
+    // Retain partial construction for this owner's cleanup, including a
+    // native exception or a session-loss notification during the open.
+    clipboardPanel = panel;
+    fr_clipboard_surface_owner = self;
+    panel.title = @"FrankenRemote text clipboard";
+    panel.level = NSStatusWindowLevel;
+    panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorIgnoresCycle;
+    panel.hidesOnDeactivate = NO;
+    panel.floatingPanel = YES;
+    panel.becomesKeyOnlyIfNeeded = YES;
+    panel.releasedWhenClosed = NO;
+    panel.hasShadow = YES;
+    FrClipboardView *surface = [[FrClipboardView alloc]
+        initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
+    if (!surface) return NO;
+    clipboardPanelView = surface;
+    panel.contentView = surface;
+    clipboardPanelLabel = fr_sharing_label(surface, @"Text clipboard: Waiting");
+    clipboardPanelLabel.frame = NSMakeRect(12, 14, 242, 18);
+    FrClipboardOffButton *off = [[FrClipboardOffButton alloc]
+        initWithFrame:NSMakeRect(266, 8, 82, 28)];
+    if (!clipboardPanelLabel || !off) return NO;
+    clipboardPanelOff = off;
+    off.title = @"Turn Off";
+    off.bezelStyle = NSBezelStyleRounded;
+    off.controlSize = NSControlSizeSmall;
+    off.target = self;
+    off.action = @selector(disableClipboard:);
+    off.font = [NSFont systemFontOfSize:11];
+    off.accessibilityLabel = @"Turn off FrankenRemote text clipboard sharing";
+    off.toolTip = @"Stops this connection's text clipboard. Viewing and control continue.";
+    [surface addSubview:off];
+    [panel orderFrontRegardless];
+    [panel displayIfNeeded];
+    // No nested event pump. The viewer's bounded pump remains the sole native
+    // event translator. Rust checks actual visibility before native access.
+    return !clipboardStopped && !nativeStopPending &&
+           !atomic_load_explicit(&lifetime->unavailable, memory_order_acquire);
+}
+
+- (BOOL)closeClipboardSurface {
+    // Call only after the original privacy callback was fenced, or before its
+    // first adoption on a failed open. Keep all custody on a native exception;
+    // the occupied owner slot also survives final Window destruction.
+    if (![NSThread isMainThread]) return NO;
+    FrClipboardPanel *panel = clipboardPanel;
+    if (!panel) {
+        if (fr_clipboard_surface_owner == self) fr_clipboard_surface_owner = nil;
+        return YES;
+    }
+    @try {
+        clipboardPanelOff.target = nil;
+        clipboardPanelOff.action = NULL;
+        clipboardPanelOff.enabled = NO;
+        clipboardPanelLabel.stringValue = @"Text clipboard: Off";
+        [panel orderOut:nil];
+        [panel close];
+        if (panel.isVisible) return NO;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return NO;
+    }
+    clipboardPanel = nil;
+    clipboardPanelView = nil;
+    clipboardPanelLabel = nil;
+    clipboardPanelOff = nil;
+    if (fr_clipboard_surface_owner == self) fr_clipboard_surface_owner = nil;
+    return YES;
+}
+
 - (void)checkSessionUnavailable {
     if (atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) &&
         !sessionUnavailableReported) {
@@ -1045,6 +1204,13 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
                                          @selector(changeDisplay:));
         changeDisplay.accessibilityLabel = @"Choose another remote display";
         changeDisplay.enabled = NO; // Rust arms only an eligible original mode.
+    }
+    if (sharingFlags & FR_MAC_STOP_CONTROL) {
+        stopControl = fr_sharing_button(sharing, @"Stop control", self,
+                                       @selector(stopControl:));
+        stopControl.accessibilityLabel = @"Stop remote control and return to viewing";
+        stopControl.toolTip = @"Release control and reopen viewing. Press F8 to request control again. File and clipboard sharing end.";
+        stopControl.enabled = NO; // Only the original active grant can arm this.
     }
     if (sharingFlags & FR_MAC_CLIPBOARD) {
         clipboardLabel = fr_sharing_label(sharing, @"Clipboard: Waiting");
@@ -1118,6 +1284,10 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     unsigned cells = fr_sharing_cells(sharingFlags);
     double offset = changeDisplay ? FR_MAC_CHANGE_WIDTH : 0;
     if (changeDisplay) changeDisplay.frame = NSMakeRect(8, 8, FR_MAC_CHANGE_WIDTH - 8, 28);
+    if (stopControl) {
+        stopControl.frame = NSMakeRect(8 + offset, 8, FR_MAC_STOP_CONTROL_WIDTH - 8, 28);
+        offset += FR_MAC_STOP_CONTROL_WIDTH;
+    }
     if (clipboardOff) {
         clipboardLabel.frame = NSMakeRect(8 + offset, 14, 108, 17);
         clipboardOff.frame = NSMakeRect(8 + offset + 112, 8, 68, 28);
@@ -1188,7 +1358,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     double captured = event ? event.timestamp : 0;
     double now = NSProcessInfo.processInfo.systemUptime;
     if (!button || !button.enabled || !audioInitialized || nativeStopPending || overflow ||
-        displayChangeAt > 0 ||
+        reopenAt > 0 ||
         atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) ||
         !window.isKeyWindow || !window.isVisible || window.isMiniaturized ||
         !window.isOnActiveSpace || !(window.occlusionState & NSWindowOcclusionStateVisible) ||
@@ -1203,7 +1373,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         CGEventGetIntegerValueField(native, kCGEventSourceUserData) == FR_MAC_REMOTE_INPUT_TAG ||
         CGEventGetIntegerValueField(native, kCGEventSourceUnixProcessID) == getpid())
         return;
-    if (nativeStopPending || displayChangeAt > 0 || audioVolume != volume || audioMuted != muted ||
+    if (nativeStopPending || reopenAt > 0 || audioVolume != volume || audioMuted != muted ||
         atomic_load_explicit(&lifetime->unavailable, memory_order_acquire))
         return;
     if (button == audioDown) audioVolume = volume > 10 ? volume - 10 : 0;
@@ -1521,7 +1691,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     double now = NSProcessInfo.processInfo.systemUptime;
     if (sender != uploadPacing || !uploadPacing.enabled || uploadPacingPending ||
         uploadCancelled || !uploadContext || !uploadPacingState ||
-        nativeStopPending || overflow || fullScreenMoving || displayChangeAt > 0 ||
+        nativeStopPending || overflow || fullScreenMoving || reopenAt > 0 ||
         textActive || textPending ||
         atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) ||
         !window.isKeyWindow || !window.isVisible || window.isMiniaturized ||
@@ -1539,7 +1709,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         CGEventGetIntegerValueField(native, kCGEventSourceUnixProcessID) == getpid())
         return;
     // Native getters must not bridge a reentrant terminal callback or redraw.
-    if (nativeStopPending || uploadCancelled || uploadPacingPending || displayChangeAt > 0 ||
+    if (nativeStopPending || uploadCancelled || uploadPacingPending || reopenAt > 0 ||
         atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) ||
         uploadContext != context || uploadPacingState != state)
         return;
@@ -1563,13 +1733,32 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 }
 - (void)changeDisplay:(id)sender {
     (void)sender;
+    [self chooseReopen:FR_MAC_REOPEN_DISPLAY];
+}
+- (void)stopControl:(id)sender {
+    (void)sender;
+    [self chooseReopen:FR_MAC_REOPEN_VIEWING];
+}
+- (void)chooseReopen:(uint32_t)action {
+    FrSharingButton *button = action == FR_MAC_REOPEN_DISPLAY ? changeDisplay :
+        action == FR_MAC_REOPEN_VIEWING ? stopControl : nil;
+    // A repeated click cannot replace the already captured release gesture.
+    if (action == FR_MAC_REOPEN_VIEWING && reopenUsed && reopenAction == action) return;
     NSEvent *event = NSApp.currentEvent;
     double now = NSProcessInfo.processInfo.systemUptime;
-    if (!changeDisplay.enabled || displayChangeUsed || !window.isKeyWindow ||
+    if (!button.enabled || reopenUsed || nativeStopPending || !window.isKeyWindow ||
         !event || event.type != NSEventTypeLeftMouseDown || event.window != window ||
         !isfinite(event.timestamp) || event.timestamp <= 0 || now < event.timestamp ||
-        now - event.timestamp >= 0.250) return;
-    displayChangeUsed = YES;
+        now - event.timestamp >= 0.250) {
+        // Stopping grants nothing. An inadmissible click may not reopen, but
+        // must still fence this original input owner before any later event.
+        // take_reopen reports the native stop to Rust even without a watcher.
+        if (action == FR_MAC_REOPEN_VIEWING)
+            [self stopNativeInput:@"Text cancelled: remote control is stopping."];
+        return;
+    }
+    reopenUsed = YES;
+    reopenAction = action;
     [self retireUploadPacing];
     audioDirty = NO;
     audioRedraw = NO;
@@ -1580,9 +1769,11 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     textContext = 0;
     textUntil = 0;
     textEligible = NO;
-    [self retireText:@"Text cancelled: the selected display is changing."];
+    [self retireText:action == FR_MAC_REOPEN_DISPLAY
+        ? @"Text cancelled: the selected display is changing."
+        : @"Text cancelled: remote control is stopping."];
     [self stopClipboardWithoutUI:NO];
-    displayChangeAt = event.timestamp;
+    reopenAt = event.timestamp;
 }
 
 - (void)stopClipboardWithoutUI:(BOOL)userOff {
@@ -1596,13 +1787,15 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 - (void)finishStoppedUI {
     if (nativeStopPending) return;
     if (clipboardUIStopped) {
-        clipboardUIStopped = NO;
         clipboardOff.enabled = NO;
         clipboardLabel.stringValue = @"Clipboard: Off";
+        if ([self closeClipboardSurface]) clipboardUIStopped = NO;
     }
-    if (!nativeStopPending && displayChangeUsed) {
+    if (reopenUsed) {
         changeDisplay.enabled = NO;
-        changeDisplay.title = @"Changing Display";
+        stopControl.enabled = NO;
+        if (reopenAction == FR_MAC_REOPEN_DISPLAY) changeDisplay.title = @"Changing Display";
+        if (reopenAction == FR_MAC_REOPEN_VIEWING) stopControl.title = @"Stopping control";
     }
 }
 - (void)stopClipboard:(BOOL)userOff {
@@ -1610,8 +1803,9 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     [self finishStoppedUI];
 }
 - (void)disableClipboard:(id)sender {
-    (void)sender;
-    if (!clipboardOff.enabled) return;
+    if (clipboardStopped ||
+        !((sender == clipboardOff && clipboardOff.enabled) ||
+          (sender == clipboardPanelOff && clipboardPanelOff.enabled))) return;
     [self stopClipboard:YES];
 }
 
@@ -1730,7 +1924,29 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     // Space changes while AppKit animates it are not a user's focus change.
     // The settled sample still requires the key, visible, active-Space window.
     if (fullScreenFenced) return;
-    [self loseFocus];
+    [self pauseFocus];
+}
+// An app switch, another key window, a covering window or another Space: the
+// window is still on screen somewhere. Rust releases everything it holds on
+// the host and pauses the grant until this window is key and visible again.
+// Local text and its held keys are discarded (scalar only). The independent
+// clipboard Off panel and its original watchdog remain live; actual clipboard
+// payload still needs the original grant, view and bilateral readiness.
+- (void)pauseFocus {
+    if (nativeStopPending) return;
+    textContext = 0;
+    textUntil = 0;
+    textEligible = NO;
+    [self retireText:@"Text cancelled: the window lost focus."];
+    buttons = 0;  // the session releases everything it holds remotely
+    memset(physicalKeys, 0, sizeof(physicalKeys));
+    memset(localTextKeys, 0, sizeof(localTextKeys));
+    physicalModifiers = 0;
+    localTextModifiers = 0;
+    textQuarantine = NO;
+    FrMacEvent e = {0};
+    e.kind = FR_MAC_FOCUS_PAUSED;
+    [self push:e];
 }
 // The terminal focus-loss path: AppKit's resign-key notification and an
 // unavailable session both end held input here.
@@ -1758,7 +1974,9 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     [self layout];
 }
 - (void)windowWillMiniaturize:(NSNotification *)note {
-    [self windowDidResignKey:note];
+    (void)note;
+    if (fullScreenFenced) return;
+    [self loseFocus];
 }
 - (void)windowDidChangeOcclusionState:(NSNotification *)note {
     (void)note;
@@ -1766,9 +1984,13 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         [self fullScreenSettle];
         return;
     }
-    if (!window.isVisible || window.isMiniaturized || !window.isOnActiveSpace ||
-        !(window.occlusionState & NSWindowOcclusionStateVisible)) {
-        [self windowDidResignKey:note];
+    // A minimized or hidden window ends control. A covered window, or one on
+    // another Space, pauses it.
+    if (!window.isVisible || window.isMiniaturized) {
+        [self loseFocus];
+    } else if (!window.isOnActiveSpace ||
+               !(window.occlusionState & NSWindowOcclusionStateVisible)) {
+        [self pauseFocus];
     }
 }
 // Full screen moves the window to its own Space and resizes it over an
@@ -2170,7 +2392,7 @@ int fr_mac_window_sharing_update(void *handle,
             owner->uploadPacing.accessibilityLabel = resume
                 ? @"Resume this original file selection" : @"Pause this original file selection";
             owner->uploadPacing.enabled = upload_pacing && !owner->uploadCancelled &&
-                !owner->nativeStopPending && !owner->displayChangeAt;
+                !owner->nativeStopPending && !owner->reopenAt;
         }
         if (owner->downloadLabel) {
             owner->downloadLabel.stringValue =
@@ -2252,27 +2474,34 @@ int fr_mac_window_audio_state(void *handle, uint32_t *volume, int *muted, int *c
     return FR_MAC_OK;
 }
 
-int fr_mac_window_display_change_enabled(void *handle, int enabled) {
-    if (!handle || (enabled != 0 && enabled != 1)) return FR_MAC_INVALID;
+int fr_mac_window_reopen_enabled(void *handle, int display, int control) {
+    if (!handle || (display != 0 && display != 1) || (control != 0 && control != 1))
+        return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
-    if (!owner->changeDisplay) return FR_MAC_INVALID;
+    if (!owner->changeDisplay || (control && !owner->stopControl)) return FR_MAC_INVALID;
     if (owner->nativeStopPending) return FR_MAC_UNAVAILABLE;
-    if (enabled && owner->displayChangeUsed && owner->displayChangeAt == 0) {
-        owner->displayChangeUsed = NO;
+    if ((display || control) && owner->reopenUsed && owner->reopenAt == 0) {
+        owner->reopenUsed = NO;
+        owner->reopenAction = 0;
         owner->changeDisplay.title = @"Change Display";
+        owner->stopControl.title = @"Stop control";
     }
-    BOOL allowed = enabled && !owner->displayChangeUsed;
-    if (owner->changeDisplay.enabled != allowed) owner->changeDisplay.enabled = allowed;
+    BOOL allowDisplay = display && !owner->reopenUsed;
+    BOOL allowControl = control && !owner->reopenUsed;
+    if (owner->changeDisplay.enabled != allowDisplay) owner->changeDisplay.enabled = allowDisplay;
+    if (owner->stopControl.enabled != allowControl) owner->stopControl.enabled = allowControl;
     return owner->nativeStopPending ? FR_MAC_UNAVAILABLE : FR_MAC_OK;
 }
 
-int fr_mac_window_take_display_change(void *handle, double *captured) {
-    if (!handle || !captured) return FR_MAC_INVALID;
+int fr_mac_window_take_reopen(void *handle, uint32_t *action, double *captured) {
+    if (!handle || !action || !captured) return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
-    *captured = owner->displayChangeAt;
-    owner->displayChangeAt = 0;
+    if (owner->nativeStopPending) return FR_MAC_UNAVAILABLE;
+    *action = owner->reopenAt > 0 ? owner->reopenAction : 0;
+    *captured = owner->reopenAt;
+    owner->reopenAt = 0;
     return FR_MAC_OK;
 }
 
@@ -2310,8 +2539,8 @@ int fr_mac_window_text_update(void *handle, uint64_t context, uint64_t until, in
         return FR_MAC_UNAVAILABLE;
     }
     if (owner->nativeStopPending) return FR_MAC_UNAVAILABLE;
-    // A pending display handoff must wait for the original producer to park.
-    if (!owner->displayChangeAt) [owner cleanupRetiredText];
+    // An explicit handoff must wait for the original producer to park.
+    if (!owner->reopenAt) [owner cleanupRetiredText];
     if (owner->nativeStopPending) return FR_MAC_UNAVAILABLE;
     [owner updateTextControls];
     [owner checkSessionUnavailable];
@@ -2319,7 +2548,7 @@ int fr_mac_window_text_update(void *handle, uint64_t context, uint64_t until, in
 }
 
 // Explicit custody: fenced=1 means Rust has stopped the original input/media
-// owners (or no input owner exists); fenced=0 is a parked display handoff.
+// owners (or no input owner exists); fenced=0 is a parked explicit handoff.
 // Parked mode performs scalar retirement only and leaves the native editor
 // retained until a later fully-fenced cleanup. It never calls AppKit/IME.
 // Return 0 without a prior negative, +1 for a prior negative (a parked veto,
@@ -2435,6 +2664,19 @@ int fr_mac_window_clipboard_bind(void *handle, void *context, FrClipboardStop st
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
     if (!owner->clipboardOff || owner->clipboardContext) return FR_MAC_INVALID;
+    @try {
+        if (!owner->clipboardStopped && ![owner openClipboardSurface]) {
+            [owner closeClipboardSurface];
+            return FR_MAC_UNAVAILABLE;
+        }
+    } @catch (NSException *exception) {
+        (void)exception;
+        // The Rust callback is not adopted on failure. Its caller keeps the
+        // desktop and records an optional clipboard setup refusal.
+        @try { [owner closeClipboardSurface]; }
+        @catch (NSException *cleanup) { (void)cleanup; }
+        return FR_MAC_UNAVAILABLE;
+    }
     owner->clipboardContext = context;
     owner->clipboardStop = stop;
     owner->clipboardRelease = release;
@@ -2475,8 +2717,17 @@ int fr_mac_window_clipboard_update(void *handle, uint32_t state) {
     if (!owner->clipboardOff) return FR_MAC_INVALID;
     static NSString *const labels[] = {@"Clipboard: Waiting", @"Clipboard: On",
         @"Clipboard: Off", @"Clipboard: N/A", @"Clipboard: Ended"};
+    // A stopped native worker cannot leave a live-looking independent panel.
+    // Fence its original callback before any AppKit cleanup can block.
+    if (state >= 2) [owner stopClipboardWithoutUI:NO];
+    if (owner->nativeStopPending) return FR_MAC_UNAVAILABLE;
+    [owner finishStoppedUI];
+    if (owner->clipboardUIStopped) return FR_MAC_UNAVAILABLE;
     owner->clipboardLabel.stringValue = owner->clipboardStopped ? labels[2] : labels[state];
     owner->clipboardOff.enabled = !owner->clipboardStopped && state < 2;
+    owner->clipboardPanelLabel.stringValue = state == 1
+        ? @"Text clipboard sharing is on" : @"Text clipboard: Waiting";
+    owner->clipboardPanelOff.enabled = !owner->clipboardStopped && state < 2;
     return FR_MAC_OK;
 }
 
@@ -2484,13 +2735,31 @@ int fr_mac_window_clipboard_visible(void *handle, int *visible) {
     if (!handle || !visible) return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
-    NSWindow *w = owner->window;
-    *visible = owner->clipboardOff && !owner->clipboardStopped &&
-               !owner->sharing.hidden && !owner->clipboardOff.hidden &&
-               w.isKeyWindow && w.isVisible && !w.isMiniaturized && w.isOnActiveSpace &&
-               (w.occlusionState & NSWindowOcclusionStateVisible) &&
-               NSContainsRect(owner->sharing.visibleRect, owner->clipboardOff.frame) ? 1 : 0;
-    return FR_MAC_OK;
+    *visible = 0;
+    @try {
+        FrClipboardPanel *panel = owner->clipboardPanel;
+        FrClipboardView *surface = owner->clipboardPanelView;
+        FrClipboardOffButton *off = owner->clipboardPanelOff;
+        BOOL shown = panel && surface && off && surface.drawn &&
+            panel.isVisible && !panel.isMiniaturized && panel.isOnActiveSpace &&
+            (panel.occlusionState & NSWindowOcclusionStateVisible) &&
+            !surface.hidden && !off.hidden && off.enabled &&
+            surface.window == panel && off.window == panel &&
+            NSContainsRect(surface.visibleRect, surface.bounds) &&
+            NSContainsRect(surface.visibleRect, off.frame) &&
+            fr_clipboard_surface_onscreen(panel);
+        // Keyboard focus and picture occlusion belong to input/presentation,
+        // not this separate privacy surface. Hide/minimize, original stop and
+        // session loss remain terminal, including after a native query stalls.
+        *visible = shown && owner->clipboardContext && !owner->clipboardStopped &&
+            !owner->nativeStopPending && !NSApp.isHidden &&
+            owner->window.isVisible && !owner->window.isMiniaturized &&
+            !atomic_load_explicit(&owner->lifetime->unavailable, memory_order_acquire) ? 1 : 0;
+        return FR_MAC_OK;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return FR_MAC_UNAVAILABLE;
+    }
 }
 
 // Waits up to `timeout` seconds for the first event, then drains one bounded
@@ -2504,14 +2773,14 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     @autoreleasepool {
         NSDate *until = timeout > 0 ? [NSDate dateWithTimeIntervalSinceNow:timeout]
                                     : [NSDate distantPast];
-        // A display change, audio preference, file pacing or captured Send inspects the full bounded
+        // An explicit handoff, audio preference, file pacing or captured Send inspects the full bounded
         // batch so queued close, escape or focus loss can veto the action.
         // File-only cancel still reaches Rust immediately when neither is pending.
         while (!owner->nativeStopPending &&
                (!(owner->sharingActions & FR_MAC_CANCEL_ACTIONS) ||
                 (owner->sharingActions & FR_MAC_PACING_ACTIONS) ||
                 owner->audioDirty ||
-                owner->displayChangeAt > 0 || owner->textPending) &&
+                owner->reopenAt > 0 || owner->textPending) &&
                owner->count < FR_MAC_QUEUE && dequeued < FR_MAC_PUMP_EVENTS) {
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:until
@@ -2526,7 +2795,7 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
         }
         // Local actions must reach Rust before any further UI drawing.
         if (!owner->sharingActions && !owner->audioDirty && !owner->nativeStopPending &&
-            !owner->displayChangeAt && !owner->textPending &&
+            !owner->reopenAt && !owner->textPending &&
             owner->count < FR_MAC_QUEUE && dequeued < FR_MAC_PUMP_EVENTS)
             [NSApp updateWindows];
     }
@@ -2862,6 +3131,7 @@ void fr_mac_window_free(void *handle) {
         owner->uploadPacing = nil;
         owner->downloadCancel = nil;
         owner->changeDisplay = nil;
+        owner->stopControl = nil;
         owner->clipboardOff = nil;
         owner->audioLabel = nil;
         owner->audioVolumeLabel = nil;
@@ -2869,6 +3139,9 @@ void fr_mac_window_free(void *handle) {
         owner->audioUp = nil;
         owner->audioMute = nil;
         owner->sendCopiedFiles = nil;
+        // A failed independent panel close retains only its original privacy
+        // custody. Do not retain decoded screen pixels on that account.
+        owner->renderer = nil;
     }
 }
 
@@ -2879,33 +3152,24 @@ void fr_mac_window_free(void *handle) {
     FrRenderer *renderer;
     CMVideoFormatDescriptionRef format;
     VTDecompressionSessionRef session;
-    OSStatus status;
-    CVImageBufferRef image;
+    FrAppleDecodeOutput output;
 }
 @end
 
 @implementation FrDecoder
 - (void)dealloc {
+    fr_apple_output_close(&output);
     if (session) {
+        // Fence first; keep callback storage alive until native work drains
+        // and its session is invalidated. No output gate is held while waiting.
+        VTDecompressionSessionWaitForAsynchronousFrames(session);
         VTDecompressionSessionInvalidate(session);
         CFRelease(session);
     }
     if (format) CFRelease(format);
-    if (image) CVPixelBufferRelease(image);
+    fr_apple_output_destroy(&output);
 }
 @end
-
-static void fr_decoded(void *refcon, void *frame, OSStatus status, VTDecodeInfoFlags flags,
-                       CVImageBufferRef image, CMTime pts, CMTime duration) {
-    (void)frame;
-    (void)flags;
-    (void)pts;
-    (void)duration;
-    FrDecoder *d = (__bridge FrDecoder *)refcon;
-    d->status = status;
-    if (d->image) CVPixelBufferRelease(d->image);
-    d->image = status == noErr && image ? CVPixelBufferRetain(image) : NULL;
-}
 
 // Parameter sets arrive already admitted by Rust's HEVC guard.
 int fr_mac_decoder_new(void *renderer_handle, const uint8_t *vps, size_t vps_len,
@@ -2917,6 +3181,8 @@ int fr_mac_decoder_new(void *renderer_handle, const uint8_t *vps, size_t vps_len
     @autoreleasepool {
         FrDecoder *d = [FrDecoder new];
         d->renderer = (__bridge FrRenderer *)renderer_handle;
+        if (!fr_apple_output_init(&d->output, width, height, full_range != 0))
+            return FR_MAC_ALLOCATION;
         const uint8_t *sets[3] = {vps, sps, pps};
         const size_t sizes[3] = {vps_len, sps_len, pps_len};
         if (CMVideoFormatDescriptionCreateFromHEVCParameterSets(kCFAllocatorDefault, 3, sets, sizes, 4,
@@ -2934,7 +3200,7 @@ int fr_mac_decoder_new(void *renderer_handle, const uint8_t *vps, size_t vps_len
         NSDictionary *spec = @{
             (id)kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder : @YES,
         };
-        VTDecompressionOutputCallbackRecord callback = {fr_decoded, (__bridge void *)d};
+        VTDecompressionOutputCallbackRecord callback = {fr_apple_output_callback, &d->output};
         if (VTDecompressionSessionCreate(kCFAllocatorDefault, d->format, (__bridge CFDictionaryRef)spec,
                                          (__bridge CFDictionaryRef)attributes, &callback,
                                          &d->session) != noErr)
@@ -2984,10 +3250,11 @@ int fr_mac_decoder_hardware(void *handle) {
 
 // Decodes one length-prefixed access unit synchronously and, when `present`
 // is set, draws it. A decode-only unit still advances the reference chain.
-int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t pts,
+int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t token,
                           int present) {
     if (!handle || !bytes || !len) return FR_MAC_INVALID;
     FrDecoder *d = (__bridge FrDecoder *)handle;
+    if (!fr_apple_output_begin(&d->output, token)) return FR_MAC_CODEC;
     int result = FR_MAC_OK;
     @autoreleasepool {
         CMBlockBufferRef block = NULL;
@@ -2999,29 +3266,26 @@ int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_
             if (block) CFRelease(block);
             return FR_MAC_ALLOCATION;
         }
-        CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(pts, 1000000), kCMTimeInvalid};
+        // Original frame identity; capture time remains separate Rust metadata.
+        CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(token, 1), kCMTimeInvalid};
         const size_t sizes[1] = {len};
         if (CMSampleBufferCreateReady(kCFAllocatorDefault, block, d->format, 1, 1, &timing, 1, sizes,
                                       &sample) != noErr) {
             CFRelease(block);
             return FR_MAC_ALLOCATION;
         }
-        d->status = noErr;
-        if (d->image) {
-            CVPixelBufferRelease(d->image);
-            d->image = NULL;
-        }
         VTDecodeInfoFlags info = 0;
-        OSStatus status = VTDecompressionSessionDecodeFrame(d->session, sample, 0, NULL, &info);
+        OSStatus status = VTDecompressionSessionDecodeFrame(d->session, sample, 0, &d->output, &info);
         CFRelease(sample);
         CFRelease(block);
+        CVPixelBufferRef decoded = NULL;
+        enum FrAppleOutputError output_result =
+            fr_apple_output_take(&d->output, status, info, &decoded);
         if (status == kVTInvalidSessionErr) return FR_MAC_SESSION_LOST;
-        if (status != noErr || d->status != noErr || !d->image ||
-            (info & kVTDecodeInfo_FrameDropped))
-            return FR_MAC_CODEC;
-        if (present) result = [d->renderer present:d->image];
-        CVPixelBufferRelease(d->image);
-        d->image = NULL;
+        if (output_result == FR_APPLE_OUTPUT_GEOMETRY) return FR_MAC_GEOMETRY;
+        if (output_result != FR_APPLE_OUTPUT_OK) return FR_MAC_CODEC;
+        if (present) result = [d->renderer present:decoded];
+        CVPixelBufferRelease(decoded);
     }
     return result;
 }

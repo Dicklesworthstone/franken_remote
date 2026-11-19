@@ -165,6 +165,84 @@ fn a_followed_host_pointer_is_drawn_once_as_the_local_pointer_with_the_remote_sh
 }
 
 #[test]
+fn a_recovered_binding_reissues_current_pixels_when_a_shape_number_is_reused() {
+    let mut remote = remote();
+    let mut platform = Platform {
+        pointer: Some(LocalPointer::Inside),
+        ..Platform::default()
+    };
+    let mut history = PointerHistory::default();
+    history.submitted(200, 150, 5);
+    at(&mut remote, 5, 200, 150, true, 1);
+    run(&mut remote, true, Some(&mut platform), Some(&history));
+    platform.ack();
+    run(&mut remote, true, Some(&mut platform), Some(&history));
+    // Decoder recovery changes the binding even if display geometry and the
+    // host's shape number are reused. This is refresh's production reset path.
+    remote.reset(DisplayGeometryGeneration::INITIAL);
+    let rgba = [0_u8, 0xff, 0xff, 0xff].repeat(16 * 16);
+    remote
+        .tracker
+        .store_shape(&CursorShape {
+            shape_id: 5,
+            width: 16,
+            height: 16,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            scale_1000: 1000,
+            flags: SHAPE_FLAG_VISIBLE,
+            rgba: &rgba,
+        })
+        .unwrap();
+    at(&mut remote, 5, 200, 150, true, 1);
+    assert_eq!(
+        run(&mut remote, true, Some(&mut platform), Some(&history)),
+        NONE,
+    );
+    assert_eq!(platform.requests.len(), 2);
+    assert_eq!(platform.requests[1].1.as_ref().unwrap().2, rgba);
+    // The old acknowledgement cannot settle the current request or cause a
+    // third request while its original native application is pending.
+    assert_eq!(platform.applied, 1);
+    run(&mut remote, true, Some(&mut platform), Some(&history));
+    assert_eq!(platform.requests.len(), 2);
+    platform.ack();
+    run(&mut remote, true, Some(&mut platform), Some(&history));
+    assert_eq!(platform.requests.len(), 2);
+}
+
+#[test]
+fn a_recovered_binding_restores_default_through_the_surviving_native_owner() {
+    let mut remote = remote();
+    let mut platform = Platform {
+        pointer: Some(LocalPointer::Inside),
+        ..Platform::default()
+    };
+    let mut history = PointerHistory::default();
+    history.submitted(200, 150, 5);
+    at(&mut remote, 5, 200, 150, true, 1);
+    run(&mut remote, true, Some(&mut platform), Some(&history));
+    platform.ack();
+    run(&mut remote, true, Some(&mut platform), Some(&history));
+    remote.reset(DisplayGeometryGeneration::INITIAL);
+    platform.busy = true;
+    assert_eq!(
+        run(&mut remote, true, Some(&mut platform), Some(&history)),
+        NONE,
+    );
+    assert_eq!(platform.requests.len(), 1);
+    assert_eq!(remote.rendered.window(), Some(WindowCursor::Shape(5)));
+    platform.busy = false;
+    run(&mut remote, true, Some(&mut platform), Some(&history));
+    assert_eq!(platform.last(), "Default");
+    assert_eq!(remote.rendered.window(), Some(WindowCursor::Shape(5)));
+    platform.ack();
+    run(&mut remote, true, Some(&mut platform), Some(&history));
+    assert_eq!(remote.rendered.window(), Some(WindowCursor::Default));
+    assert_eq!(platform.requests.len(), 2);
+}
+
+#[test]
 fn a_host_moved_pointer_blanks_the_local_pointer_before_the_overlay_appears() {
     let mut remote = remote();
     let mut platform = Platform {

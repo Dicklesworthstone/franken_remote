@@ -80,8 +80,8 @@ pub struct RunOptions {
     pub microphone: bool,
     /// Exact `PipeWire` socket; absent resolves below the local runtime directory.
     pub microphone_server: Option<PathBuf>,
-    /// `--files DIR`: the controller's drop directory (needs `input_agent`;
-    /// the caller validates it by type before any I/O).
+    /// `--files DIR`: the controller's drop directory (needs `input_agent`,
+    /// or `control` on Windows; validated before desktop/network startup).
     pub files: Option<PathBuf>,
     /// Explicit host source files or portable directory roots for one control lease.
     pub send: Vec<PathBuf>,
@@ -375,7 +375,7 @@ impl RunOptions {
     #[cfg(any(windows, test))]
     #[must_use]
     pub fn windows_refusal(&self, _approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 8] = [
+        let refusals: [(bool, &str, &str); 7] = [
             (
                 self.software_explicit,
                 "software_encoder_unavailable",
@@ -395,11 +395,6 @@ impl RunOptions {
                 self.input_agent.is_some(),
                 "input_agent_unavailable",
                 "a Windows host injects input itself; use --control instead of --input-agent",
-            ),
-            (
-                self.files.is_some(),
-                "files_unavailable",
-                "--files has no Windows backend yet",
             ),
             (
                 self.audio || self.audio_server.is_some() || self.audio_sink.is_some(),

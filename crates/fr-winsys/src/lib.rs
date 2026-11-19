@@ -11,6 +11,8 @@ mod approval_policy;
 pub mod certs;
 #[cfg(windows)]
 pub mod clipboard;
+#[cfg(any(windows, test))]
+mod file_selection_policy;
 #[cfg(windows)]
 pub mod fs;
 #[cfg(windows)]

@@ -114,6 +114,12 @@ pub(super) fn deactivate() {
     }
 }
 
+/// An app switch discards the draft only: the viewer's own handler pauses
+/// control (`control::active`), which a resize or hide still ends instead.
+pub(super) fn deactivate_app() {
+    dismiss();
+}
+
 /// Parent closure fences the original owner even if its window is borrowed.
 pub(super) fn close_owner() {
     if let Some(state) = active() {
@@ -468,7 +474,9 @@ extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_ACTIVATEAPP if wparam.0 == 0 => {
-            deactivate();
+            // The viewer window receives the same app switch and pauses
+            // control there; this editor only loses its draft.
+            deactivate_app();
             with_viewer(Viewer::text_deactivated);
             LRESULT(0)
         }

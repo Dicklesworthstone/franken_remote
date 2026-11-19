@@ -103,6 +103,11 @@ fn ok(value: c_int) -> Result<(), StopReason> {
         Ok(())
     }
 }
+// D-Bus type codes are ASCII bytes; `c_char` is i8 on x86_64 but u8 on
+// aarch64 Linux, so convert by bytes rather than by sign.
+fn type_code(code: u8) -> c_char {
+    c_char::from_ne_bytes([code])
+}
 fn read(value: c_int) -> Result<(), StopReason> {
     if value <= 0 {
         Err(StopReason::Malformed)
@@ -148,8 +153,7 @@ impl Cursor {
     }
     fn enter(&self, ty: u8, contents: &CStr) -> Result<bool, StopReason> {
         // SAFETY: live message (type invariant); NUL-terminated contents string.
-        let n =
-            unsafe { sd_bus_message_enter_container(self.0, ty.cast_signed(), contents.as_ptr()) };
+        let n = unsafe { sd_bus_message_enter_container(self.0, type_code(ty), contents.as_ptr()) };
         if n < 0 {
             Err(StopReason::Malformed)
         } else {
@@ -164,7 +168,7 @@ impl Cursor {
         let mut p: *const c_char = ptr::null();
         // SAFETY: live message (type invariant); for the string-like types used
         // here ('s', 'o') sd-bus writes one `const char *` into p's storage.
-        read(unsafe { sd_bus_message_read_basic(self.0, ty.cast_signed(), (&raw mut p).cast()) })?;
+        read(unsafe { sd_bus_message_read_basic(self.0, type_code(ty), (&raw mut p).cast()) })?;
         // SAFETY: p is null or points into the still-live message; `string`
         // bounds the scan and copies before the message can be released.
         unsafe { string(p) }
@@ -172,25 +176,19 @@ impl Cursor {
     fn number(&self) -> Result<u32, StopReason> {
         let mut n = 0_u32;
         // SAFETY: live message (type invariant); 'u' writes one uint32_t into n.
-        read(unsafe {
-            sd_bus_message_read_basic(self.0, b'u'.cast_signed(), (&raw mut n).cast())
-        })?;
+        read(unsafe { sd_bus_message_read_basic(self.0, type_code(b'u'), (&raw mut n).cast()) })?;
         Ok(n)
     }
     fn timestamp(&self) -> Result<u64, StopReason> {
         let mut n = 0_u64;
         // SAFETY: live message (type invariant); 't' writes one uint64_t into n.
-        read(unsafe {
-            sd_bus_message_read_basic(self.0, b't'.cast_signed(), (&raw mut n).cast())
-        })?;
+        read(unsafe { sd_bus_message_read_basic(self.0, type_code(b't'), (&raw mut n).cast()) })?;
         Ok(n)
     }
     fn boolean(&self) -> Result<bool, StopReason> {
         let mut n = 0_i32;
         // SAFETY: live message (type invariant); 'b' writes one C int into n.
-        read(unsafe {
-            sd_bus_message_read_basic(self.0, b'b'.cast_signed(), (&raw mut n).cast())
-        })?;
+        read(unsafe { sd_bus_message_read_basic(self.0, type_code(b'b'), (&raw mut n).cast()) })?;
         match n {
             0 => Ok(false),
             1 => Ok(true),
@@ -439,9 +437,8 @@ impl Signals {
             loop {
                 let mut p: *const c_char = ptr::null();
                 // SAFETY: live callback message; 's' writes one `const char *`.
-                let n = unsafe {
-                    sd_bus_message_read_basic(raw, b's'.cast_signed(), (&raw mut p).cast())
-                };
+                let n =
+                    unsafe { sd_bus_message_read_basic(raw, type_code(b's'), (&raw mut p).cast()) };
                 if n == 0 {
                     break;
                 }
@@ -665,7 +662,7 @@ impl Connection {
                     c"org.freedesktop.login1.Manager".as_ptr(),
                     property.as_ptr(),
                     ptr::null_mut(),
-                    b'b'.cast_signed(),
+                    type_code(b'b'),
                     (&raw mut preparing).cast(),
                 )
             })?;

@@ -119,9 +119,15 @@ The `macos-desktop` feature builds a native viewer from system frameworks only.
 VideoToolbox decodes the host's HEVC stream into IOSurface-backed buffers, and
 Metal draws them, with the client-rendered remote cursor, into a
 `CAMetalLayer` in an AppKit window. AppKit keyboard, pointer and wheel events
-enter the same `frd` input path as the Linux viewer. As on Linux, losing focus,
-hiding the window or a change of picture size stops local input and ends
-control; closing the window ends the session. **Ctrl+Alt+Shift+Escape** also
+enter the same `frd` input path as the Linux viewer. Switching to another app,
+another window taking focus, covering the viewer or moving it to another Space
+pauses control. The viewer releases every key and button it holds on the
+host, and sends nothing while away. Viewing continues, and input resumes once
+the window is key and visible again. Nothing held is restored. The pause
+discards an unsent text draft and stops the clipboard (`control_pauses` in
+the completion counts pauses). Minimizing or hiding the window, a locked or
+switched-away user session, or a change of picture size stops local input and
+ends control; closing the window ends the session. **Ctrl+Alt+Shift+Escape** also
 stops the original session locally before any other input from that native
 batch can be forwarded.
 
@@ -236,8 +242,9 @@ The initial `--control` request is consumed once for the whole invocation.
 Automatic reconnects obtain fresh viewing only; after the recovered window is
 visible, focused and fresh, press and release **F8** to request new control.
 Held, repeated, modified or stale keys cannot request a grant. No queued
-gesture, input action or grant crosses an attempt. Focus/visibility loss and
-known host revocation remain terminal. Completion distinguishes request counts
+gesture, input action or grant crosses an attempt. Minimizing or hiding the
+window and known host revocation remain terminal; an app switch or a covered
+window pauses control within the attempt (see above). Completion distinguishes request counts
 and viewing reconnects, confirmed local cleanup, and the host's independently
 reported cleanup/effect stages. A close click cannot hide a native cleanup
 failure or an adverse host report.
@@ -440,13 +447,44 @@ input mapping and control consent are never carried into the replacement.
 The new viewer starts without control; release and press F8 to request it.
 Previously selected files are not offered again.
 
+The controlling viewer also has **Stop control**. It releases the current
+control session through the same orderly close, then reopens viewing only after
+the original local owners have finished cleanup. The new attempt repeats
+identity, admission, any host approval, and display selection from a fresh
+catalog. An invocation using the native display picker asks again; other
+configured display choices are evaluated against the new catalog. No old
+display alias or input mapping is reused. Press and release **F8** in the fresh,
+focused viewer to request another grant.
+
+Stop control ends the original clipboard sharing, file selections and pending
+text composition. Completed file publications and input effects retain their
+original reports; cleanup does not undo them. A replacement cannot replay those
+choices. The button is available only for a currently controlled viewer, with
+the same independent cleanup owner used by Change Display. Viewing and a
+pending control request cannot consume an old Stop control click. If the local
+click expires before it can begin the orderly close, the original control is
+still stopped, but no replacement view is authorized.
+
 Explicit changes share the connector's existing attempt/owner bounds. Closing
 the window, the emergency escape, an input/native failure or failed cleanup
 takes precedence over a pending change. Completion retains each original
-display-change close and lease report even if a later choice is cancelled or
-a reconnect fails; unknown host cleanup remains unknown. The Change Display
-button is unavailable while a control request is pending. Its reserved toolbar
-area cannot produce remote pointer coordinates.
+display-change or control-release close and lease report even if a later choice
+is cancelled or a reconnect fails; unknown host cleanup remains unknown. Both
+buttons are unavailable while a control request is pending. Their reserved
+toolbar areas cannot produce remote pointer coordinates. Stop control has its
+own 136-point slot in the existing sharing row, reserved before the window's
+input viewport is established.
+
+**Stop control verification (2026-11-15, fr-ivyh):** the exact portable
+action policy passes all 10 tests and the exact native-window sizing policy
+passes all 13 tests on the repository-pinned nightly. Both pass standalone
+Clippy with all/pedantic warnings denied. These checks cover current-grant and
+event-time gates, later state/terminal vetoes, single consumption, the original
+close-start deadline, and every combination of reserved sharing controls.
+The actual session completion regressions also cover cleanup/refusal gates,
+preserved original close evidence, and consumed control consent; they require
+the macOS integration build. AppKit execution and a live host control-release
+round trip have not been tested in this Linux environment.
 
 **Verification (2026-11-09):** six display-switch, nine control-consent and five
 sizing tests pass with the pinned compiler and strict standalone Clippy. Four
@@ -720,16 +758,34 @@ fr connect NODE_ID --control --experimental-native --display only --json
 fr connect NODE_ID --control --experimental-native --display only --no-clipboard
 ```
 
-The viewer reserves a visible **Clipboard / Turn Off** control. Turn Off fences
-the original clipboard immediately. Once its attachment is established, that
-lane can retire while input, viewing and independent file transfers continue.
-Cancellation during incomplete attachment can still require closing the original
-connection. Hiding or closing the viewer, losing focus, changing
-displays or ending the original control also stops clipboard admission. The
-native worker requires both the original grant and a responsive local privacy
-control. A viewing reconnect or later F8 control request does not re-enable
-the initial clipboard choice. Start a new explicitly controlled connection to
-select sharing again.
+The viewer reserves a **Clipboard / Turn Off** toolbar control and an independent,
+nonactivating **Text clipboard / Turn Off** panel. The panel remains visible when
+you switch to another application or Space; it does not take keyboard focus.
+Switching applications releases held remote keys and buttons and pauses input.
+The original clipboard lane can keep sharing copies made in the other app
+while its separate privacy panel and the original grant remain valid.
+
+Covering the remote picture can still suspend clipboard payloads under the
+existing view-freshness policy. Fresh presentation and authenticated proof of
+the same lease are required to resume; the panel grants no input, observation
+or publication authority by itself. The pause never renews an existing item's
+deadline, and an expired or revoked owner cannot be revived.
+
+Either **Turn Off** fences the original clipboard immediately. Once its
+attachment is established, that lane can retire while input, viewing and
+independent file transfers continue. Cancellation during incomplete attachment
+can still require closing the original connection. Hiding or minimizing the
+viewer, closing it, changing displays or ending the original control also stops
+clipboard admission. A missing, hidden or unresponsive Off panel fails closed;
+the original 250 ms watchdog is serviced on paused-input turns as well as
+ordinary turns. If the separate panel cannot be created, the optional clipboard
+reports a native setup refusal and the desktop remains usable. Failed native
+panel cleanup retains that original surface and refuses another clipboard
+panel; an exception is not treated as successful cleanup.
+
+A viewing reconnect or later F8 control request does not re-enable the initial
+clipboard choice. Start a new explicitly controlled connection to select sharing
+again.
 
 No text is read before the original grant, bilateral readiness and local privacy
 checks. The adapter observes pasteboard revision metadata and reads only a new
@@ -763,9 +819,12 @@ later viewing attempt fails:
 | `clipboard_absence`, `clipboard_ended` | Typed setup absence or the reason an active lane retired. |
 | `clipboard_cleanup` | `not_started`, `unknown`, `pending`, `finished` or `failed`, from the original worker. |
 
-The new native backend and toolbar require macOS SDK/runtime qualification.
-Portable policy checks, source review and authored native tests are separate
-evidence; they do not establish a live Mac clipboard or tailnet result.
+The native backend, toolbar and independent panel require macOS SDK/runtime
+qualification. The app-switch change adds deterministic regressions for
+continued original-surface heartbeats and terminal loss of privacy visibility.
+Those new tests and the new AppKit path were not compiled or executed in the
+implementation session after its executor became unavailable. Source review
+does not establish a live Mac clipboard or tailnet result.
 
 ## Check local capture, encoding and input readiness
 

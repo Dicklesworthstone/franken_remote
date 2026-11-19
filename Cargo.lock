@@ -588,6 +588,7 @@ dependencies = [
  "fr-client",
  "fr-core",
  "fr-transport",
+ "fr-winsys",
  "fr-wire",
  "getrandom 0.4.3",
  "rustix",
@@ -621,6 +622,7 @@ dependencies = [
  "base64",
  "fr-client",
  "fr-core",
+ "fr-files",
  "fr-media",
  "fr-tailnet",
  "fr-transport",
@@ -676,6 +678,7 @@ dependencies = [
 name = "fr-windows"
 version = "0.1.0"
 dependencies = [
+ "fr-client",
  "fr-core",
  "fr-media",
  "fr-mobile-ffi",

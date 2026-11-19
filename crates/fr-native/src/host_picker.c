@@ -13,8 +13,16 @@
 #include <time.h>
 
 struct fr_host_row { char name[255], stable_id[129]; uint32_t path; };
+/* Keys before KEY_REQUIRED must exist in the keymap. F2-F4 toggle the
+ * optional connection choices and may be absent (then only clicks do). */
 enum { KEY_ESCAPE, KEY_ENTER, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
-       KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_HOME, KEY_END, KEY_COUNT };
+       KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_HOME, KEY_END, KEY_REQUIRED,
+       KEY_F2 = KEY_REQUIRED, KEY_F3, KEY_F4, KEY_COUNT };
+/* Optional host-picker connection choices (`fr app`): local preferences for
+ * the next command line, never authority. Must match host_picker.rs. */
+#define CHOICE_NONE UINT32_MAX
+#define CHOICE_ALL 7u
+#define NOTICE_MAX 384
 struct fr_host_picker {
     xcb_connection_t *c;
     xcb_window_t window;
@@ -23,11 +31,18 @@ struct fr_host_picker {
     xcb_gcontext_t gc;
     const struct fr_host_row *rows;
     uint32_t count, selected, first, page_rows;
-    uint16_t width, height, columns, line, ascent, header, row_height;
+    uint16_t width, height, columns, line, ascent, header, row_height, char_width;
     uint8_t keycodes[KEY_COUNT], held[32], xkb;
     uint8_t mapped, focused, ready, dirty, pressed, pending, candidate, rearm;
     uint32_t press_at, press_row, baseline, sequence, barrier_kind, candidate_age;
     uint64_t barrier_mono, candidate_mono, revision;
+    /* Choices: the current bits, and each toggle's column span on the
+     * footer's choice line (drawn at choice_y), for clicks. */
+    uint8_t has_choices;
+    uint32_t choices;
+    int choice_y;
+    uint16_t choice_from[3], choice_to[3];
+    char notice[NOTICE_MAX + 1];
 };
 
 static int checked(struct fr_host_picker *h, xcb_void_cookie_t cookie) {
@@ -74,7 +89,7 @@ static void *xkb_reply(struct fr_host_picker *h, uint32_t sequence) {
 static int keyboard(struct fr_host_picker *h) {
     static const uint32_t symbols[KEY_COUNT] = {
         0xff1b, 0xff0d, 0xff52, 0xff54, 0xff51, 0xff53,
-        0xff55, 0xff56, 0xff50, 0xff57
+        0xff55, 0xff56, 0xff50, 0xff57, 0xffbf, 0xffc0, 0xffc1
     };
     const xcb_query_extension_reply_t *extension = xcb_get_extension_data(h->c, &xkb_extension);
     if (!extension || !extension->present) return 0;
@@ -114,7 +129,7 @@ static int keyboard(struct fr_host_picker *h) {
         }
     }
     free(map); free(error);
-    for (unsigned key = 0; key < KEY_COUNT; ++key) if (!h->keycodes[key]) return 0;
+    for (unsigned key = 0; key < KEY_REQUIRED; ++key) if (!h->keycodes[key]) return 0;
     return 1;
 }
 
@@ -186,11 +201,52 @@ static void colors(struct fr_host_picker *h, uint32_t foreground, uint32_t backg
     uint32_t values[] = { foreground, background };
     xcb_change_gc(h->c, h->gc, XCB_GC_FOREGROUND | XCB_GC_BACKGROUND, values);
 }
+/* Clipboard sharing follows a control grant: view-only shows it as "-" and
+ * ignores its toggle, keeping the remembered value for the next control. */
+static void toggle(struct fr_host_picker *h, uint32_t bit) {
+    if (!h->has_choices || (bit == 2u && !(h->choices & 1u))) return;
+    h->choices ^= bit; h->dirty = 1;
+}
+static int choice_at(const struct fr_host_picker *h, int16_t x, int16_t y, uint32_t *bit) {
+    if (!h->has_choices || !h->char_width || x < 12 || y < h->choice_y ||
+        y >= h->choice_y + (int)h->line) return 0;
+    unsigned column = ((unsigned)x - 12) / h->char_width;
+    for (unsigned i = 0; i < 3; ++i) {
+        if (column >= h->choice_from[i] && column < h->choice_to[i]) { *bit = 1u << i; return 1; }
+    }
+    return 0;
+}
+static void draw_choices(struct fr_host_picker *h, int y) {
+    static const char *const full[3] = { "View and control", "Share clipboard", "Ask which display" };
+    static const char *const brief[3] = { "Control", "Clipboard", "Display" };
+    int wide = h->columns >= 75;
+    char line[128];
+    size_t at = 0;
+    for (unsigned i = 0; i < 3 && at < sizeof(line); ++i) {
+        char mark = i == 1 && !(h->choices & 1u) ? '-' : (h->choices >> i) & 1u ? 'x' : ' ';
+        if (i) at += (size_t)snprintf(line + at, sizeof(line) - at, wide ? "   " : " ");
+        if (at >= sizeof(line)) break;
+        h->choice_from[i] = (uint16_t)at;
+        at += (size_t)snprintf(line + at, sizeof(line) - at, wide ? "F%u [%c] %s" : "F%u[%c]%s",
+                               i + 2, mark, wide ? full[i] : brief[i]);
+        h->choice_to[i] = (uint16_t)(at < sizeof(line) ? at : sizeof(line) - 1);
+    }
+    h->choice_y = y;
+    text(h, line, y);
+}
 static int draw(struct fr_host_picker *h) {
     colors(h, 0x171717, 0xf5f5f5);
     xcb_clear_area(h->c, 0, h->window, 0, 0, h->width, h->height);
     int y = text(h, "Choose a machine", 8);
-    text(h, "Identity is checked again before connecting.", y);
+    y = text(h, "Identity is checked again before connecting.", y);
+    if (h->notice[0]) {
+        /* The previous session's outcome, on at most the two spare header lines. */
+        char shown[2 * 240 + 1];
+        snprintf(shown, sizeof(shown), "%.*s", (int)(2u * h->columns), h->notice);
+        colors(h, 0x8a4b00, 0xf5f5f5);
+        text(h, shown, y);
+        colors(h, 0x171717, 0xf5f5f5);
+    }
     for (uint32_t slot = 0; slot < h->page_rows && h->first + slot < h->count; ++slot) {
         uint32_t index = h->first + slot;
         uint32_t background = index == h->selected ? 0x164875 : 0xf5f5f5;
@@ -218,7 +274,12 @@ static int draw(struct fr_host_picker *h) {
     y = (int)h->height - 4 * h->line - 8;
     y = text(h, page, y);
     y = text(h, "Arrows: move  Page Up/Down: page  Home/End", y);
-    text(h, "Enter or click: choose  Esc: cancel", y);
+    /* Every footer line fits one row (at least 40 columns) so the choice line
+     * stays inside the reserved footer. */
+    y = text(h, !h->has_choices ? "Enter or click: choose  Esc: cancel" :
+                h->columns >= 62 ? "Enter or click: connect  Esc: cancel  F2-F4 or click: options" :
+                "Enter/click: connect  Esc: cancel", y);
+    if (h->has_choices) draw_choices(h, y);
     /* Local accessibility/geometry metadata. It is not read for selection. */
     uint32_t layout[] = { h->width, h->height, h->header, h->row_height,
         h->first, h->page_rows, h->selected, h->count };
@@ -233,9 +294,19 @@ void fr_host_picker_close(struct fr_host_picker *h) {
     free(h);
 }
 struct fr_host_picker *fr_host_picker_open(const char *display,
-        const struct fr_host_row *rows, uint32_t count, uint32_t *window) {
+        const struct fr_host_row *rows, uint32_t count, uint32_t choices,
+        const char *notice, uint32_t *window) {
     if (!display || !rows || !count || count > 1024 || !window) return NULL;
     *window = XCB_NONE;
+    if (choices != CHOICE_NONE && (choices & ~CHOICE_ALL)) return NULL;
+    size_t notice_len = 0;
+    if (notice) {
+        while (notice_len <= NOTICE_MAX && notice[notice_len]) {
+            if ((unsigned char)notice[notice_len] < 32 || (unsigned char)notice[notice_len] > 126) return NULL;
+            ++notice_len;
+        }
+        if (notice_len > NOTICE_MAX) return NULL;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         if (!rows[i].name[0] || !memchr(rows[i].name, 0, sizeof(rows[i].name)) ||
             !rows[i].stable_id[0] || !memchr(rows[i].stable_id, 0, sizeof(rows[i].stable_id)) || rows[i].path > 2)
@@ -244,6 +315,9 @@ struct fr_host_picker *fr_host_picker_open(const char *display,
     struct fr_host_picker *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     h->rows = rows; h->count = count;
+    h->has_choices = choices != CHOICE_NONE;
+    h->choices = h->has_choices ? choices : 0;
+    if (notice_len) memcpy(h->notice, notice, notice_len);
     int screen = 0;
     h->c = xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
@@ -266,6 +340,7 @@ struct fr_host_picker *fr_host_picker_open(const char *display,
         if (h->columns > 240) h->columns = 240;
         h->ascent = (uint16_t)font->font_ascent;
         h->line = (uint16_t)(font->font_ascent + font->font_descent + 3);
+        h->char_width = (uint16_t)font->max_bounds.character_width;
     }
     free(font); free(error); if (!valid || h->columns < 40) goto fail;
     h->header = (uint16_t)(4 * h->line + 12);
@@ -386,7 +461,8 @@ static int event(struct fr_host_picker *h, xcb_generic_event_t *event) {
         if (down && !was_down && !before_held && since && since < (1u << 31)) {
             if (slot == KEY_ENTER) {
                 h->pressed = 1; h->press_at = key->time; h->press_row = h->selected;
-            } else if (slot < KEY_COUNT) navigate(h, slot);
+            } else if (slot >= KEY_F2 && slot <= KEY_F4) toggle(h, 1u << (slot - KEY_F2));
+            else if (slot < KEY_REQUIRED) navigate(h, slot);
         }
         return 0;
     }
@@ -403,11 +479,14 @@ static int event(struct fr_host_picker *h, xcb_generic_event_t *event) {
         invalidate(h);
         if (!h->ready) return !down && h->focused ? (barrier(h, 1) ? 0 : -1) : 0;
         uint32_t since = button->time - h->baseline;
+        uint32_t bit = 0;
         if (down && !held(h) && since && since < (1u << 31)) {
             if (button->detail == 1 && inside) {
                 h->selected = h->press_row = row; h->press_at = button->time;
                 h->pressed = 2; h->dirty = 1;
-            } else if (button->detail == 4 || button->detail == 5)
+            } else if (button->detail == 1 && choice_at(h, button->event_x, button->event_y, &bit))
+                toggle(h, bit);
+            else if (button->detail == 4 || button->detail == 5)
                 navigate(h, button->detail == 4 ? KEY_PAGE_UP : KEY_PAGE_DOWN);
         }
         return 0;
@@ -423,8 +502,10 @@ static int event(struct fr_host_picker *h, xcb_generic_event_t *event) {
 
 /* One bounded batch, including events queued by final focus/key/button
  * queries. A later event can invalidate an earlier candidate in this batch. */
-int fr_host_picker_step(struct fr_host_picker *h, uint32_t *ordinal, uint32_t *age_ms) {
-    if (!h || !ordinal || !age_ms || xcb_connection_has_error(h->c)) return -1;
+int fr_host_picker_step(struct fr_host_picker *h, uint32_t *ordinal, uint32_t *age_ms,
+                        uint32_t *choices) {
+    if (!h || !ordinal || !age_ms || !choices || xcb_connection_has_error(h->c)) return -1;
+    *choices = CHOICE_NONE;
     unsigned budget = 128;
     uint64_t verified_revision = 0;
     int verified = 0;
@@ -451,7 +532,11 @@ int fr_host_picker_step(struct fr_host_picker *h, uint32_t *ordinal, uint32_t *a
         uint64_t age = (uint64_t)h->candidate_age + elapsed + 1;
         h->candidate = 0;
         if (age < 250) {
-            *ordinal = h->press_row; *age_ms = (uint32_t)age; return 2;
+            *ordinal = h->press_row; *age_ms = (uint32_t)age;
+            /* The choices shown at confirmation; a toggle after the press
+             * already invalidated that candidate. */
+            if (h->has_choices) *choices = h->choices;
+            return 2;
         }
     }
     if (h->dirty && h->mapped && !draw(h)) return -1;

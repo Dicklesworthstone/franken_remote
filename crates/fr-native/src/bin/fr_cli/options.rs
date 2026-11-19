@@ -168,7 +168,22 @@ pub struct Connection {
     /// This requires control and may accompany an explicit `--send` selection;
     /// neither direction is implicit.
     pub receive: Option<ReceiveOptions>,
+    /// `--pick-only` (with `--choose-host`, for `fr app`): show the picker
+    /// with connection choices, report the chosen host and choices, and open
+    /// no connection.
+    pub pick: Option<PickOnly>,
 }
+/// The desktop application's picker request. Its choices are only initial
+/// preferences for the window; the report carries what the user confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickOnly {
+    /// The remembered clipboard preference, kept even while view-only.
+    pub clipboard: bool,
+    /// `--app-notice TEXT`: the previous session's outcome, shown above the list.
+    pub notice: Option<String>,
+}
+/// The longest `--app-notice`, in printable ASCII bytes (the pickers' label bound).
+pub const MAX_APP_NOTICE: usize = 384;
 #[cfg(any(feature = "linux-desktop", test))]
 impl Connection {
     pub fn uploads(&self) -> bool {
@@ -797,6 +812,7 @@ fn parse_command(
     let mut receive = None;
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
+    let (mut pick_only, mut app_notice) = (false, None);
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
@@ -885,8 +901,24 @@ fn parse_command(
             "--receive-conflict" if connect => {
                 receive_keep_both = Some(receive::keep_both(next_arg(args, &mut index)?)?);
             }
+            "--pick-only" if connect && choose_host => pick_only = true,
+            "--app-notice" if connect && choose_host => {
+                let text = next_arg(args, &mut index)?;
+                if text.is_empty()
+                    || text.len() > MAX_APP_NOTICE
+                    || !text
+                        .bytes()
+                        .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+                {
+                    return Err(usage());
+                }
+                app_notice = Some(text.to_owned());
+            }
             _ => return Err(usage()),
         }
+    }
+    if app_notice.is_some() && !pick_only {
+        return Err(usage());
     }
     let receive = ReceiveOptions::new(
         receive,
@@ -913,7 +945,9 @@ fn parse_command(
                 2,
             ));
         }
-        if clipboard == Some(true) && !control {
+        // A picker request only states the window's initial preferences: a
+        // remembered clipboard choice may accompany view-only there.
+        if clipboard == Some(true) && !control && !pick_only {
             return Err(Failure::new(
                 "clipboard_requires_control",
                 "The clipboard follows a control lease; pass --control with --clipboard. A view-only session never exposes either clipboard.",
@@ -1055,6 +1089,10 @@ fn parse_command(
                     file_commands,
                 },
                 receive,
+                pick: pick_only.then(|| PickOnly {
+                    clipboard: clipboard.unwrap_or(true),
+                    notice: app_notice,
+                }),
             })
         }
     } else {
@@ -1071,6 +1109,57 @@ mod tests {
     use super::*;
     fn options(s: &str) -> Result<Options, Failure> {
         parse(&s.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+    }
+    #[test]
+    fn picker_requests_are_choose_host_only_and_keep_the_clipboard_preference() {
+        let base = "connect --choose-host --experimental-native --display only";
+        let Command::Connect(c) = options(&format!("{base} --view-only --clipboard --pick-only"))
+            .unwrap()
+            .command
+        else {
+            panic!("expected a connection");
+        };
+        assert!(c.choose_host && !c.control && !c.clipboard);
+        assert_eq!(
+            c.pick,
+            Some(PickOnly {
+                clipboard: true,
+                notice: None,
+            })
+        );
+        let mut args: Vec<String> = format!("{base} --control --pick-only --app-notice")
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        args.push("mac: The host did not answer.".to_owned());
+        let Command::Connect(c) = parse(&args).unwrap().command else {
+            panic!("expected a connection");
+        };
+        let pick = c.pick.unwrap();
+        assert!(pick.clipboard);
+        assert_eq!(
+            pick.notice.as_deref(),
+            Some("mac: The host did not answer.")
+        );
+        // A plain connection never has a picker request.
+        let Command::Connect(plain) = options(&format!("{base} --control")).unwrap().command else {
+            panic!("expected a connection");
+        };
+        assert!(plain.pick.is_none());
+        for invalid in [
+            // A notice without a picker request, or either without --choose-host.
+            format!("{base} --control --app-notice text"),
+            "connect n-host --control --experimental-native --display only --pick-only".to_owned(),
+            // View-only still cannot request the clipboard outside a picker request.
+            format!("{base} --view-only --clipboard"),
+        ] {
+            assert!(options(&invalid).is_err(), "{invalid}");
+        }
+        let mut long = args.clone();
+        *long.last_mut().unwrap() = "x".repeat(MAX_APP_NOTICE + 1);
+        assert!(parse(&long).is_err());
+        *long.last_mut().unwrap() = "tab\there".to_owned();
+        assert!(parse(&long).is_err());
     }
     #[test]
     fn refuses_implicit_control_or_unqualified_transport_before_any_io() {

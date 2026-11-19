@@ -10,10 +10,14 @@
  * Threading: any thread may call any function, concurrently. No function
  * blocks on the network. A freed or invented handle is refused, never used.
  *
- * Coordinates: input positions are ENCODED PICTURE pixels (the size in
- * FR_EVENT_VIDEO / FrFrameInfo), after the app undid its own zoom, pan,
- * letterbox, rotation and safe-area placement. A point outside the picture
- * is refused (FR_OUTSIDE), never moved onto an edge.
+ * Coordinates: input positions use an ENCODED PICTURE-sized area
+ * (FrFrameInfo), after the app undid its own zoom, pan, rotation and safe-area
+ * placement. Fit the ORIGINAL DISPLAY aspect into that area with integer
+ * dimensions and centered offsets; draw and target its image rectangle.
+ * Its letterbox bars are refused (FR_OUTSIDE), never moved onto an edge.
+ * fr_session_frame_display supplies the original dimensions for a live
+ * frame owner. Cursor positions, shape sizes and hotspots use ORIGINAL
+ * DISPLAY pixels and must be scaled through the same image rectangle.
  *
  * Privacy: nothing here logs pixels, keys, text, names or addresses.
  */
@@ -43,7 +47,13 @@ extern "C" {
                                  input: nothing accepted. Physical keys may
                                  wait; completed text must be discarded,
                                  never queued or retried automatically. */
-#define FR_STALE (-8)         /* the handle names no live session */
+#define FR_STALE (-8)         /* the session or original request is no longer live */
+
+/* Display policy for fr_session_start_with_display (FrConfig is unchanged). */
+#define FR_DISPLAY_PRIMARY 0  /* desktop origin, else first approved display */
+#define FR_DISPLAY_CHOOSE 1   /* one display: open; several: ask the user */
+#define FR_MAX_DISPLAYS 8
+#define FR_UPLOAD_STATUS_MAX_BYTES 16384
 
 /* Event kinds. */
 #define FR_EVENT_STATE 1      /* value: FR_STATE_* */
@@ -131,7 +141,7 @@ typedef struct FrStats {
 
 typedef struct FrCursor {
     uint64_t generation;
-    int32_t x;               /* picture pixels */
+    int32_t x;               /* original selected display pixels */
     int32_t y;
     uint16_t width;
     uint16_t height;
@@ -141,9 +151,88 @@ typedef struct FrCursor {
     uint32_t reserved;
 } FrCursor;
 
+/* A single approved catalog in one connection attempt. The token is local,
+ * nonzero and never reused, even by a later session with identical rows.
+ * Host-owned display aliases and geometry generations stay inside Rust. */
+typedef struct FrDisplayRequest {
+    uint64_t token;
+    uint32_t count;           /* 1..FR_MAX_DISPLAYS */
+    uint32_t reserved;
+} FrDisplayRequest;
+
+typedef struct FrDisplayInfo {
+    uint32_t pixel_width;    /* post-rotation desktop pixels */
+    uint32_t pixel_height;
+    uint32_t logical_width;
+    uint32_t logical_height;
+    int32_t x;               /* desktop-space origin; may be negative */
+    int32_t y;
+    uint32_t scale_numerator;
+    uint32_t scale_denominator;
+    uint32_t rotation;       /* clockwise quarter turns, 0..3 */
+    uint32_t reserved;
+} FrDisplayInfo;
+
 bool fr_host_name_valid(const char *_Nullable name);
 
 int32_t fr_session_start(const FrConfig *_Nullable config, FrHandle *_Nullable out);
+int32_t fr_session_start_with_display(const FrConfig *_Nullable config,
+                                      uint32_t mode, FrHandle *_Nullable out);
+/* Optional, empty upload negotiation on a control-capable session. No file
+ * is selected or sent, and no control is requested by this call. Existing
+ * start entry points and FrConfig retain their original ABI/behavior. */
+int32_t fr_session_start_with_upload(const FrConfig *_Nullable config,
+                                    uint32_t mode, FrHandle *_Nullable out);
+
+/* Choose while observing, before the native picker covers the view. Tokens
+ * belong to one connection attempt, expire after 120 s and are never reused.
+ * Observe real visibility throughout the picker. No file contents are read
+ * without a later fresh Send gesture and the host's current control grant. */
+int32_t fr_session_begin_upload_selection(FrHandle session, uint64_t *_Nullable out);
+/* Synchronous filesystem work: call only on a bounded background worker.
+ * path is an absolute UTF-8 local regular-file path (at most 4096 bytes).
+ * Keep the selected URL's security-scoped permission through preparation.
+ * On successful Send keep it until upload_sources_released returns true. */
+int32_t fr_session_prepare_upload(FrHandle session, uint64_t token,
+                                  const char *_Nullable path);
+/* Discard only this token. An outstanding prepare call must still return
+ * before its native permission is released or another worker is launched. */
+int32_t fr_session_discard_upload_selection(FrHandle session, uint64_t token);
+/* Explicit once-only Send on a current controlled view. Every attempted Send
+ * consumes the selection, including FR_BUSY/refusal; never retry it. */
+int32_t fr_session_send_upload(FrHandle session, uint64_t token);
+/* File-only commands for the exact displayed original batch (1..9). */
+int32_t fr_session_cancel_upload(FrHandle session, uint32_t batch);
+int32_t fr_session_pause_upload(FrHandle session, uint32_t batch, bool paused);
+/* Positive source collection, even after an original cleanup failure.
+ * A terminal event alone is insufficient. Retain this exact handle and the
+ * native scopes until true, then free; free itself does not join workers.
+ * False for a stale handle. A later collection never repairs a failure. */
+bool fr_session_upload_sources_released(FrHandle session);
+/* Bounded version-1 JSON: selection, current transfer, at most nine receipts,
+ * ready and sources_released. No paths, names or file contents. Queued bytes
+ * are not host publication. Returns required bytes EXCLUDING NUL, like
+ * copy_pin; use FR_UPLOAD_STATUS_MAX_BYTES bytes including termination.
+ * 0 means stale/unavailable, never successful transfer. */
+size_t fr_session_copy_upload_status(FrHandle session, char *_Nullable buffer, size_t capacity);
+
+/* Poll before the first frame, while startup/approval expiry still runs.
+ * false leaves out untouched. Copy every row with this same token; if any
+ * copy fails, discard the entire snapshot. Never replay a choice against
+ * a new token. Selection succeeds once and grants no input authority. */
+bool fr_session_display_request(FrHandle session, FrDisplayRequest *_Nullable out);
+bool fr_session_display_info(FrHandle session, uint64_t token, uint32_t index,
+                             FrDisplayInfo *_Nullable out);
+int32_t fr_session_select_display(FrHandle session, uint64_t token, uint32_t index);
+/* Cancel/dismiss closes only the original still-pending startup. A stale
+ * token cannot close a replacement attempt or an already accepted choice. */
+int32_t fr_session_cancel_display(FrHandle session, uint64_t token);
+/* After asking to close: FR_PENDING while running, FR_OK only when the
+ * original service AND cleanup succeeded, FR_CLOSED otherwise; FR_STALE
+ * for an unknown handle. An end event alone is insufficient. Retain the old
+ * handle until FR_OK before opening a replacement observing session, with
+ * a fresh catalog and no carried-over control request or input. */
+int32_t fr_session_reopen_status(FrHandle session);
 bool fr_session_poll_event(FrHandle session, FrEvent *_Nullable event);
 size_t fr_session_copy_pin(FrHandle session, char *_Nullable buffer, size_t capacity);
 size_t fr_session_copy_detail(FrHandle session, char *_Nullable buffer, size_t capacity);
@@ -153,6 +242,13 @@ CVPixelBufferRef _Nullable fr_session_copy_frame(FrHandle session,
                                                  uint64_t after_sequence,
                                                  FrFrameInfo *_Nullable info)
     CF_RETURNS_RETAINED;
+/* Original approved display for the live owner of FrFrameInfo.frame.
+ * Recheck before repainting a retained frame. False for stale, retired or
+ * closed owners, unknown handles or NULL outputs; refusal writes neither.
+ * VIDEO events are lossy notifications, not presentation geometry authority.
+ * This does not grant visibility or input authority; FrFrameInfo ABI is unchanged. */
+bool fr_session_frame_display(FrHandle session, uint64_t frame,
+                                uint32_t *_Nullable width, uint32_t *_Nullable height);
 void fr_session_frame_drawn(FrHandle session, uint64_t frame);
 void fr_session_set_visible(FrHandle session, bool visible);
 
@@ -184,6 +280,14 @@ int32_t fr_session_text(FrHandle session, const char *_Nullable utf8);
 int32_t fr_session_release_all(FrHandle session);
 
 bool fr_session_cursor(FrHandle session, FrCursor *_Nullable out);
+/* Metadata for one retained picture: pass its FrFrameInfo.frame and sequence.
+ * Position, shape and hotspot use original selected display pixels. Refuses
+ * stale attempts and pictures at/below the latest decoder reset's sequence.
+ * false leaves out untouched; discard any cached cursor overlay on refusal.
+ * After copying RGBA separately, re-read this metadata and require the same
+ * generation before rendering the copied shape. */
+bool fr_session_frame_cursor(FrHandle session, uint64_t frame, uint64_t sequence,
+                             FrCursor *_Nullable out);
 size_t fr_session_copy_cursor_rgba(FrHandle session, uint8_t *_Nullable buffer,
                                    size_t capacity);
 bool fr_session_stats(FrHandle session, FrStats *_Nullable out);

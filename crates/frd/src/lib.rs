@@ -115,9 +115,10 @@ pub mod session_monitor;
 // A Windows host's remote control: frd's own SendInput sink (tested everywhere).
 #[cfg(any(all(host_stack, windows), test))]
 pub mod windows_input;
-// A Windows host's controller clipboard: frd's own Win32 owner and its Turn
-// off window (the owner's rules are tested everywhere).
-#[cfg(any(all(host_stack, windows), test))]
+// A Windows host's or controlling viewer's clipboard: the same Win32 owner
+// and independent Turn off window. The owner's rules are tested wherever the
+// native stack builds (always on Linux); its errors are clipboard_quic's.
+#[cfg(all(native_stack, any(windows, test)))]
 pub mod windows_clipboard;
 // One persistent SIGINT/SIGTERM wait for `frd run` and the ingress helper.
 #[cfg(host_stack)]

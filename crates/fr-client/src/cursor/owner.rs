@@ -239,6 +239,10 @@ pub struct Rendered {
     /// `None`: no platform owner is managed.
     window: Option<WindowCursor>,
     requested: Option<(WindowCursor, u64)>,
+    /// The current view must issue a fresh image even when its shape ID is
+    /// identical to the retired view's. Previous native state remains known
+    /// until a replacement is actually acknowledged.
+    window_stale: bool,
 }
 impl Default for Rendered {
     fn default() -> Self {
@@ -252,6 +256,7 @@ impl Rendered {
             overlay: Overlay::Hidden,
             window: None,
             requested: None,
+            window_stale: false,
         }
     }
     pub const fn overlay(&self) -> Overlay {
@@ -274,11 +279,13 @@ impl Rendered {
         }
         if let Some(wanted) = target.window {
             let latest = self.requested.map(|(w, _)| w).or(self.window);
-            if latest != Some(wanted) {
+            if self.window_stale || latest != Some(wanted) {
                 return Step::Window(wanted);
             }
-            if self.window != Some(wanted) {
-                // Requested, not yet applied: wait before any overlay.
+            if self.requested.is_some() || self.window != Some(wanted) {
+                // Even if the last acknowledged image equals wanted, an
+                // intervening request may already have changed the native
+                // pointer. Wait for this replacement's own acknowledgement.
                 return Step::Idle;
             }
         }
@@ -298,20 +305,31 @@ impl Rendered {
             self.overlay = Overlay::Unknown;
         }
     }
+    /// A new view invalidates the old image's meaning, not the native effects
+    /// already acknowledged or in flight. Force a fresh request; do not assume
+    /// that a surviving platform owner has restored its default pointer.
+    pub fn window_unknown(&mut self) {
+        if self.window.is_some() || self.requested.is_some() {
+            self.window_stale = true;
+        }
+    }
     /// A platform owner was attached; the window still shows its own pointer.
     pub fn window_attached(&mut self) {
         if self.window.is_none() {
             self.window = Some(WindowCursor::Default);
             self.requested = None;
+            self.window_stale = false;
         }
     }
     /// The platform owner failed or stopped: it is no longer managed.
     pub fn window_detached(&mut self) {
         self.window = None;
         self.requested = None;
+        self.window_stale = false;
     }
     pub fn window_requested(&mut self, cursor: WindowCursor, generation: u64) {
         self.requested = Some((cursor, generation));
+        self.window_stale = false;
     }
     /// The platform applied every request up to `generation`.
     pub fn window_applied(&mut self, generation: u64) {

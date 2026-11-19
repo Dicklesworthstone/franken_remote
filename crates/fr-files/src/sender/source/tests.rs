@@ -273,3 +273,67 @@ fn changes_to_empty_leaves_after_manifest_are_refused_before_completion() {
         });
     }
 }
+
+#[test]
+fn an_upload_snapshot_descriptor_survives_unlink_before_its_source_starts() {
+    fixture(|path, cx| {
+        let name = "selected-snapshot.txt";
+        let pathname = path.join(name);
+        let payload = b"snapshot bytes retained by the original descriptor";
+        fs::write(&pathname, payload).unwrap();
+        let file = File::open(&pathname).unwrap();
+        // Apple upload coordination removes its snapshot pathname when the
+        // accessor returns. A descriptor pinned inside that accessor remains
+        // the original source; Send starts its worker only after coordination.
+        fs::remove_file(&pathname).unwrap();
+        assert!(!pathname.exists());
+        assert_eq!(file.metadata().unwrap().nlink(), 0);
+        let mut source = Source::spawn(
+            cx.clone(),
+            file,
+            name.into(),
+            Policy::default(),
+            cx.timer_driver().unwrap().now().as_nanos() / 1000 + 2_000_000,
+        )
+        .unwrap();
+
+        let manifest = prepared(&mut source);
+        assert_eq!(manifest.root_name, name);
+        assert!(!manifest.is_directory);
+        assert_eq!(manifest.total_bytes, payload.len() as u64);
+        assert_eq!(manifest.entries.len(), 1);
+        let entry = &manifest.entries[0];
+        assert_eq!(entry.index, 0);
+        assert_eq!(entry.rel_path, name);
+        assert_eq!(entry.size, payload.len() as u64);
+        let mut received = Vec::new();
+        loop {
+            source.request(5).unwrap();
+            match event(&mut source).unwrap() {
+                Event::Chunk {
+                    index,
+                    offset,
+                    bytes,
+                } => {
+                    assert_eq!(index, 0);
+                    assert_eq!(offset, received.len() as u64);
+                    assert!(!bytes.is_empty() && bytes.len() <= 5);
+                    received.extend_from_slice(&bytes);
+                }
+                Event::End => break,
+                Event::Prepared(_) => panic!("the original source prepared twice"),
+            }
+        }
+        assert_eq!(received, payload);
+        reap(&mut source);
+        assert!(source.finished());
+        assert!(
+            source.reap().is_none(),
+            "the source was collected exactly once"
+        );
+        assert!(
+            !pathname.exists(),
+            "reading the descriptor never recreates its path"
+        );
+    });
+}

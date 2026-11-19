@@ -158,6 +158,22 @@ enum Peer {
     Closed,
 }
 impl Peer {
+    async fn reconcile_acknowledgements(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Control(viewer) => viewer
+                .reconcile_acknowledgements()
+                .await
+                .map_err(Error::Control),
+            Self::Acquiring {
+                session, request, ..
+            } => request.reconcile_acknowledgements(session).await,
+            Self::Observe { session, .. } | Self::Viewing { session, .. } => session
+                .reconcile_acknowledgements(|| true)
+                .await
+                .map_err(Error::Session),
+            Self::Closed => Err(Error::Closed),
+        }
+    }
     fn prepare_decode(&mut self, receiver: &ReceivePipeline) -> Result<bool, Error> {
         match self {
             Self::Acquiring {
@@ -718,6 +734,24 @@ impl StreamingViewer {
             result
         }
     }
+    /// Fence before a nonblocking collection of the original disk owners.
+    /// Useful after a bounded reap expired: only already-finished workers are
+    /// joined, with their original receipts retained. This grants no authority
+    /// or new deadline, and cannot turn the earlier timeout into success.
+    pub fn collect_files(&mut self) -> Option<Result<(), fr_files::sender::Error>> {
+        self.close();
+        let Some(viewer) = self.peer.controlled() else {
+            if let Some(lane) = &mut self.files {
+                lane.without_control();
+            }
+            return Some(Ok(()));
+        };
+        let result = viewer.try_finish_file_cleanup();
+        if let Some(lane) = &self.files {
+            lane.observe(viewer);
+        }
+        result
+    }
     pub fn worker_id(&self) -> Option<u32> {
         self.presenter.worker_id()
     }
@@ -883,8 +917,12 @@ impl StreamingViewer {
             );
         }
         let cx = &self.control.cx.clone();
+        // Initial view preparation also queries the clock owner, whose
+        // synchronous maintenance must see any ACK already in this socket.
+        self.peer.reconcile_acknowledgements().await?;
         acquisition::notify(&mut self.peer, &self.receiver, &mut self.control, None, ui)?;
         loop {
+            self.peer.reconcile_acknowledgements().await?;
             // Tick before selecting native work. A lost reference may expire
             // during silence, with no packet or decoder completion to wake it.
             let recovering = recovery::service(
@@ -1123,6 +1161,7 @@ async fn network(
     result: &mut impl FnMut(ResultEvent),
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> Result<(), Error> {
+    peer.reconcile_acknowledgements().await?;
     if let Some(app) = clipboard
         && let Some(viewer) = peer.controlled()
     {

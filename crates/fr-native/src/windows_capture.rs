@@ -13,7 +13,8 @@
 //! since the last encoded one, and the pointer where it was drawn. Access
 //! loss invalidates retained pixels until a replacement duplication supplies
 //! a new image; denied or unserviced capture never becomes a fresh timestamp.
-//! Rotated displays are refused for now.
+//! Rotated outputs are made upright on the GPU before cursor composition;
+//! capture, catalog and input retain the same physical desktop coordinates.
 mod convert;
 mod cursor;
 mod cursor_region;
@@ -22,6 +23,8 @@ mod encoder;
 mod freshness;
 mod parent;
 mod plan;
+mod rotation;
+mod upright;
 
 use crate::{NativeError, capture_rate::Rate};
 use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
@@ -99,7 +102,7 @@ pub struct CaptureStatistics {
 /// thread's wall clock. GPU work is charged to the call that waited for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StageTimes {
-    /// Desktop Duplication: acquire, copy, release.
+    /// Desktop Duplication: acquire, copy or GPU rotation, release.
     pub poll: u32,
     /// Bounded cursor rectangle restoration and composition.
     pub compose: u32,
@@ -215,7 +218,7 @@ impl WinCapture {
         }
         let admission =
             HevcGuard::new(config, limits, 4).map_err(|_| NativeError::InvalidConfiguration)?;
-        let source = duplication::Duplicator::open(display)?;
+        let source = duplication::Duplicator::open(display, fps, &limits)?;
         let picture = (g.crop_width(), g.crop_height());
         let coded = (g.coded_width(), g.coded_height());
         let converter = convert::Converter::open(
@@ -226,8 +229,14 @@ impl WinCapture {
             coded,
             fps,
         )?;
-        let encoder =
-            encoder::Encoder::open(source.device(), display.adapter, coded, fps, bitrate)?;
+        let encoder = encoder::Encoder::open(
+            source.device(),
+            display.adapter,
+            coded,
+            fps,
+            bitrate,
+            limits.max_encoded_access_unit_bytes(),
+        )?;
         Ok(Self {
             source,
             converter,

@@ -213,6 +213,59 @@ critical connection credit, per-stream FIFO order and delivery deadlines are
 unchanged. A staged record's original delivery deadline still covers its
 acknowledgement.
 
+### Acknowledgement evidence after a local scheduling pause
+
+The host or viewer task may resume after a retained record's delivery deadline
+even though the peer has already acknowledged it. Judging the send before
+reading that queued acknowledgement mistakes the local scheduling pause for
+an unresponsive peer. `QuicRecords::reconcile_acknowledgements` gives this case
+one bounded observation before the ordinary retained-send deadline check.
+`drive` includes it within its existing 250 ms turn bound. Host, viewer,
+controlled-viewer and recovery service loops also invoke it before their first
+synchronous maintenance, send or receive operation.
+
+When no retained-send deadline is due, reconciliation does no I/O, invokes no
+authorization callback and mutates nothing. It is not an authority check and
+cannot replace `tick`, `send` or `receive`. Those synchronous operations retain
+their original semantics: they enforce deadlines without reading the socket.
+Normal maintenance therefore keeps its existing ordering and scheduling cost.
+
+An overdue send is eligible only when its complete record has entered the native
+stream and no expired unsent or partially staged record remains. Unsettled native
+I/O also refuses this path. For eligible work, the pinned Asupersync
+`acknowledge_io_once` receives at most one batch of 32 UDP packets with a positive
+1 ms receive wait and a 10 ms absolute operation bound. It sends no application
+payload, retransmission or PTO probe. It may acknowledge incoming packets, but
+it dispatches no application record. No loop waits for another acknowledgement.
+
+Cancellation, immutable connection/operation guards, the caller's permission,
+clock monotonicity and attachment lifetime remain checked before and during the
+read. Optional receive expiry and explicit local or peer retirement still win.
+Only local retained-send judgement waits for this read. After successful I/O,
+actual authenticated `acknowledged_send_offset` evidence releases fully
+acknowledged records; every remaining send is judged against its original
+deadline. A silent peer still closes the connection or retires its completed
+optional pair under the existing rules. A cancelled, failed or dropped native
+operation remains terminal.
+
+This changes the order of observing delivery evidence, not a record's deadline.
+It cannot establish the exact time an ACK arrived at the socket: an ACK observed
+by this bounded read may discharge already-sent custody after the local deadline.
+It cannot make expired outgoing bytes eligible for transmission, restore an
+input lease, extend a ticket, make an old view fresh, or replay a transfer.
+Usefulness and authority remain checked where the content is used.
+A new scheduling pause between reconciliation and a later synchronous check
+can still expire that check's retained work. This is not a promise that arbitrary
+host stalls, expired authority or an interrupted native operation can resume.
+
+Regression cases in `crates/fr-transport/tests/native_quic.rs` and its
+`native_quic/reconciliation.rs` module use real UDP/TLS and cover a queued ACK
+after a sender pause, silence, unsent expiry, no application flush, unchanged
+synchronous expiry, cancellation and original authority gates. The clipboard
+attachment case verifies that the same evidence preserves an established
+optional pair. These transport fixtures and the host/viewer loop regressions
+are separate from loaded two-machine or hardware qualification.
+
 Evidence for the per-record release (2026-11-12). The source is namespace
 `tc netem` rows of `real_impairment::controlled_session_under_namespace_delay_and_loss`
 (in-process `frd` host, shipped `fr` client). Arm A was 77100ab0 on the same
@@ -241,8 +294,9 @@ and missing it closed the connection. A 250 ms record on a 120 ms RTT path
 waits one round trip for the previous epoch and another for its own flight and
 ACK. Any loss recovery comes on top of that. In namespace runs at 60 ms one-way
 delay, control and view-only sessions ended with `transport_deadline_expired`
-while both peers were healthy. An admitted reliable record must now be staged
-and acknowledged by max(send-by, admission + `delivery_allowance_us`):
+while both peers were healthy. An admitted reliable record's staging and retained
+acknowledgement deadline is max(send-by, admission + `delivery_allowance_us`),
+with the bounded observation-order exception above for already-staged bytes:
 
 - The allowance is seven RFC 9002 probe timeouts, 7 x (smoothed RTT +
   max(4 x RTT variation, 1 ms) + 25 ms maximum ACK delay): the span of three

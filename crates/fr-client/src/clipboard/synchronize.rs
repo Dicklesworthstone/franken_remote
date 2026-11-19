@@ -46,6 +46,10 @@ impl<N: NativeClipboard> ControllerSynchronizer<N> {
     pub fn close(&mut self) {
         self.native.close();
     }
+    /// Keep this original owner until native teardown has actually completed.
+    pub fn poll_close(&mut self) -> Option<Result<(), N::Error>> {
+        self.native.poll_close()
+    }
     pub fn is_closed(&self) -> bool {
         self.native.is_closed()
     }

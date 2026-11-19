@@ -84,6 +84,50 @@ fn programmatic_download_options_keep_the_same_scope_and_conflict_checks() {
 }
 
 #[test]
+fn in_process_control_allows_only_an_explicit_bounded_one_share_selection() {
+    // Exercise the Windows executor choice through the production validator
+    // on every test platform. Native parsing and handles have their separate
+    // Windows integration target; no file or policy store is opened here.
+    let source = std::env::temp_dir().join("selected-host-file.txt");
+    let mut options = RunOptions {
+        once: true,
+        control: true,
+        send: vec![source.clone()],
+        ..RunOptions::default()
+    };
+    assert!(options.input_agent.is_none());
+    assert!(options.validate_file_send().is_ok());
+    for approval in [super::Approval::None, super::Approval::Local] {
+        assert_eq!(options.windows_refusal(approval), None);
+    }
+    options.once = false;
+    assert!(options.validate_file_send().is_err());
+    options.once = true;
+    options.control = false;
+    assert!(options.validate_file_send().is_err());
+    options.control = true;
+    options.send = vec![source; crate::native_files::MAX_SENDS];
+    assert!(options.validate_file_send().is_ok());
+    options
+        .send
+        .push(std::env::temp_dir().join("one-too-many.txt"));
+    assert!(options.validate_file_send().is_err());
+    for path in [
+        PathBuf::from("relative.txt"),
+        std::env::temp_dir()
+            .join("parent")
+            .join("..")
+            .join("file.txt"),
+    ] {
+        options.send = vec![path];
+        assert!(options.validate_file_send().is_err());
+    }
+    options.send.clear();
+    options.send_control = Some("desk".into());
+    assert!(options.validate_file_send().is_err());
+}
+
+#[test]
 fn host_can_select_a_source_and_drop_directory_for_one_controlled_share() {
     let options = parse(&[
         "--once",

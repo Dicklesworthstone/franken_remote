@@ -8,6 +8,94 @@ use asupersync::{
 use fr_files::sender::batch::Selection;
 use std::fs::File;
 
+#[test]
+fn original_native_choice_is_rechecked_after_the_real_intake_lock_wait() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let rt = RuntimeBuilder::current_thread().build().unwrap();
+    let intake = SendIntake::new(
+        rt.request_cx_with_budget(Budget::INFINITE),
+        Policy::default(),
+    );
+    intake.set_ready(true);
+    let current = AtomicBool::new(true);
+    let checks = AtomicUsize::new(0);
+    let outcome = std::thread::scope(|scope| {
+        let state = intake.lock();
+        let (sampled, waiting) = std::sync::mpsc::sync_channel(1);
+        let intake = &intake;
+        let current = &current;
+        let checks = &checks;
+        let worker = scope.spawn(move || {
+            let mut first = true;
+            intake.submit_checked_with_clock(
+                request(),
+                || {
+                    if std::mem::take(&mut first) {
+                        sampled.send(()).unwrap();
+                        Ok(100)
+                    } else {
+                        Ok(110)
+                    }
+                },
+                || {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    current.load(Ordering::SeqCst)
+                },
+            )
+        });
+        let sample = waiting.recv_timeout(Duration::from_secs(5));
+        let before_unlock = checks.load(Ordering::SeqCst);
+        current.store(false, Ordering::SeqCst);
+        // Release before assertions/unwinding so no blocked thread is stranded.
+        drop(state);
+        sample.unwrap();
+        assert_eq!(before_unlock, 0);
+        worker.join().unwrap()
+    });
+    assert!(matches!(outcome, Err(Error::Expired)));
+    assert_eq!(checks.load(Ordering::SeqCst), 1);
+    assert!(intake.ready(), "refused choice cannot consume the slot");
+    assert!(intake.take().is_none(), "expired native choice was queued");
+    let control = intake
+        .submit_checked_with_clock(request(), || Ok(111), || true)
+        .unwrap();
+    assert!(!control.cancel_requested());
+    assert!(intake.take().is_some());
+}
+
+#[test]
+fn final_choice_checks_spend_the_original_transfer_deadline_and_cancellation() {
+    use std::cell::Cell;
+    let rt = RuntimeBuilder::current_thread().build().unwrap();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let intake = SendIntake::new(cx.clone(), Policy::default());
+    intake.set_ready(true);
+    let now = Cell::new(100);
+    let mut selected = request();
+    selected.lifetime = Duration::from_micros(10);
+    let result = intake.submit_checked_with_clock(
+        selected,
+        || Ok(now.get()),
+        || {
+            now.set(110); // a contended original source/context check used the budget
+            true
+        },
+    );
+    assert!(matches!(result, Err(Error::Expired)));
+    assert!(intake.ready());
+    assert!(intake.take().is_none());
+    let result = intake.submit_checked_with_clock(
+        request(),
+        || Ok(111),
+        || {
+            cx.cancel_fast(CancelKind::User);
+            true
+        },
+    );
+    assert!(matches!(result, Err(Error::Closed)));
+    assert!(intake.take().is_none());
+}
+
 fn request() -> SendRequest {
     let mut selection = Selection::new();
     selection

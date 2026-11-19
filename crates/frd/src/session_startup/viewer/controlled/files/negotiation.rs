@@ -233,6 +233,26 @@ impl Pending {
         Ok(())
     }
     pub(super) fn start(
+        self,
+        q: &mut QuicRecords,
+        input: &mut PresentedInput,
+    ) -> Result<Attached, Error> {
+        let control = match &self.destination {
+            Destination::Receive(_, control) => Some(control.clone()),
+            Destination::Send(_) => None,
+        };
+        let result = self.start_inner(q, input);
+        if let (Some(control), Err(error)) = (control, &result) {
+            // Every fallible receive-construction step precedes the disk
+            // worker's successful spawn. Once that succeeds, start_inner only
+            // installs the returned owner. A setup refusal therefore proves
+            // no disk owner needs joining, even though Pending was consumed.
+            control.end(crate::native_files::Absence::SetupFailed(*error));
+            control.cleaned(Ok(()));
+        }
+        result
+    }
+    fn start_inner(
         mut self,
         q: &mut QuicRecords,
         input: &mut PresentedInput,

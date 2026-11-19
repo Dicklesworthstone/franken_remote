@@ -1,18 +1,16 @@
 //! The handle-relative file-system calls this crate makes.
 //!
-//! Unix: rustix itself, and std's Unix metadata. Windows has no
-//! handle-relative implementation yet: every directory call below refuses
-//! with `NOTSUP`, so a drop directory never opens there and a directory
-//! source is refused, while the transfer protocol, sessions and single-file
-//! sources compile and run. Delete the Windows half once Windows file custody
-//! (relative opens under a pinned directory handle) is implemented.
+//! Unix: rustix itself, and std's Unix metadata. Windows regular-file receive
+//! uses the safe retained-handle custody in fr-winsys directly. The general
+//! directory operations below remain unsupported there: tree receive and
+//! directory selection are refused, and directory durability is never invented.
 #[cfg(unix)]
 pub(crate) use rustix::{fd, fs, io, process};
 #[cfg(unix)]
 pub(crate) use std::os::unix::fs::MetadataExt;
 
 #[cfg(windows)]
-pub(crate) use windows::{MetadataExt, fd, fs, io, process};
+pub(crate) use windows::{MetadataExt, fd, fs, io};
 
 // Items mirror rustix; some are named only by Linux-only paths.
 #[cfg(windows)]
@@ -40,27 +38,28 @@ mod windows {
     }
 
     pub(crate) mod io {
-        /// The few POSIX error numbers this crate names, compared by value.
+        use std::io::ErrorKind;
+
+        /// Sanitized filesystem failures shared with the Unix adapter.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub(crate) struct Errno(i32);
+        pub(crate) struct Errno(ErrorKind);
         impl Errno {
-            pub(crate) const NOENT: Self = Self(2);
-            pub(crate) const BADF: Self = Self(9);
-            pub(crate) const EXIST: Self = Self(17);
-            pub(crate) const ISDIR: Self = Self(21);
-            pub(crate) const INVAL: Self = Self(22);
-            pub(crate) const NOTSUP: Self = Self(95);
+            pub(crate) const NOENT: Self = Self(ErrorKind::NotFound);
+            pub(crate) const BADF: Self = Self(ErrorKind::Other);
+            pub(crate) const EXIST: Self = Self(ErrorKind::AlreadyExists);
+            pub(crate) const ISDIR: Self = Self(ErrorKind::IsADirectory);
+            pub(crate) const INVAL: Self = Self(ErrorKind::InvalidInput);
+            pub(crate) const NOTSUP: Self = Self(ErrorKind::Unsupported);
             pub(crate) const OPNOTSUPP: Self = Self::NOTSUP;
+        }
+        impl From<std::io::Error> for Errno {
+            fn from(value: std::io::Error) -> Self {
+                Self(value.kind())
+            }
         }
         impl From<Errno> for std::io::Error {
             fn from(value: Errno) -> Self {
-                let kind = match value {
-                    Errno::NOENT => std::io::ErrorKind::NotFound,
-                    Errno::EXIST => std::io::ErrorKind::AlreadyExists,
-                    Errno::INVAL => std::io::ErrorKind::InvalidInput,
-                    _ => std::io::ErrorKind::Unsupported,
-                };
-                kind.into()
+                value.0.into()
             }
         }
         pub(crate) type Result<T> = core::result::Result<T, Errno>;

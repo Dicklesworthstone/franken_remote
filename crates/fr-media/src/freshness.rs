@@ -147,6 +147,7 @@ pub struct ViewEvidence {
 struct Candidate {
     descriptor: FrameDescriptor,
     display_until_us: u64,
+    source: (u64, SourceObservation),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -213,6 +214,10 @@ pub struct ViewTracker {
     // Unknown health updates cannot erase the last known source timestamp.
     // One exact descriptor is retained, never an unbounded observation history.
     known_observation: Option<(FrameDescriptor, u64)>,
+    // A newer progress record can displace an Unknown report before decoding.
+    // Keep a bounded negative-history floor; only exact retained evidence can
+    // qualify a frame at or below it. Hiding does not erase source history.
+    unknown_source_through: Option<u64>,
     progress: Option<Progress>,
     serial: u64,
     closed: bool,
@@ -246,6 +251,7 @@ impl ViewTracker {
             visible_source: None,
             unqualified: None,
             known_observation: None,
+            unknown_source_through: None,
             progress: None,
             serial: 0,
             closed: false,
@@ -433,6 +439,16 @@ impl ViewTracker {
         }
         if known {
             self.known_observation = Some((p.descriptor, p.observed_micros));
+        } else {
+            self.unknown_source_through = Some(
+                self.unknown_source_through
+                    .map_or(p.descriptor.frame, |frame| frame.max(p.descriptor.frame)),
+            );
+        }
+        if let Some(candidate) = self.pending.as_mut()
+            && candidate.descriptor == p.descriptor
+        {
+            candidate.source = (p.observed_micros, p.observation);
         }
         self.progress = Some(p);
         self.bump()?;
@@ -465,15 +481,32 @@ impl ViewTracker {
             return self.fail(Error::InvalidProgress);
         }
         self.last_decoded = Some(descriptor.frame);
+        // Reference-only decoding does not supersede the renderer's original
+        // pending submission or restart that picture's display deadline.
         if submitted {
+            let fallback = if self
+                .unknown_source_through
+                .is_some_and(|frame| descriptor.frame <= frame)
+            {
+                SourceObservation::Unknown
+            } else {
+                SourceObservation::Captured
+            };
+            let source = self
+                .progress
+                .filter(|progress| progress.descriptor == descriptor)
+                .map_or((descriptor.capture_micros, fallback), |progress| {
+                    (progress.observed_micros, progress.observation)
+                });
             self.visible = None;
             self.visible_source = None;
             self.unqualified = None;
+            self.pending = Some(Candidate {
+                descriptor,
+                display_until_us,
+                source,
+            });
         }
-        self.pending = submitted.then_some(Candidate {
-            descriptor,
-            display_until_us,
-        });
         Ok(())
     }
     /// A current, qualified platform visibility callback, NOT a decode callback.
@@ -511,17 +544,7 @@ impl ViewTracker {
             return Err(Error::QueueExpired);
         }
         self.visible = Some(candidate.descriptor);
-        self.visible_source = Some(
-            self.progress
-                .filter(|p| p.descriptor == candidate.descriptor)
-                .map_or(
-                    (
-                        candidate.descriptor.capture_micros,
-                        SourceObservation::Captured,
-                    ),
-                    |p| (p.observed_micros, p.observation),
-                ),
-        );
+        self.visible_source = Some(candidate.source);
         self.bump()?;
         self.evidence(now_us)
     }
@@ -596,6 +619,7 @@ impl ViewTracker {
         self.hide();
         self.progress = None;
         self.known_observation = None;
+        self.unknown_source_through = None;
         self.closed = true;
     }
     pub const fn is_closed(&self) -> bool {

@@ -295,14 +295,15 @@ impl ClockSync {
         }
         self.last_now = now;
         match &mut self.side {
-            Side::Host {
-                pending: Some(pending),
-                ..
-            } if now >= pending.until => return Err(Error::Expired),
+            // A reply that could not be sent within its lifetime would measure
+            // nothing usable. Drop it: the viewer gives that probe up and sends
+            // the next one, which this side still accepts in sequence.
+            Side::Host { pending, .. } => {
+                pending.take_if(|reply| now >= reply.until);
+            }
             Side::Viewer { exchange, .. } => {
                 exchange.tick(ClientInstant(now)).map_err(Error::Client)?;
             }
-            Side::Host { .. } => {}
         }
         Ok(now)
     }
@@ -449,12 +450,12 @@ impl ClockSync {
                     interval,
                 },
                 Message::Reply { .. },
-            ) => {
-                exchange
-                    .accept(bytes, ClientInstant(now))
-                    .map_err(Error::Client)?;
-                *next_request = now.checked_add(*interval).ok_or(Error::Clock)?;
-            }
+            ) => match exchange.accept(bytes, ClientInstant(now)) {
+                Ok(_) => *next_request = now.checked_add(*interval).ok_or(Error::Clock)?,
+                // The reply of a probe given up after its bound: consumed, no sample.
+                Err(fr_client::clock::Error::LateReply) => {}
+                Err(error) => return Err(Error::Client(error)),
+            },
             _ => return Err(Error::WrongRole),
         }
         Ok(Disposition::Consumed)

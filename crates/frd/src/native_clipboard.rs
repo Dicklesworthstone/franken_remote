@@ -2,7 +2,7 @@
 //! publisher/observer; its service starts negotiation only after control exists.
 //! Factories run on the clipboard thread, never inside UI or QUIC callbacks.
 use crate::{
-    clipboard_quic::{Error, NativeAccess, WorkerSeed, WorkerTask},
+    clipboard_quic::{Error, NativeAccess, NativeOpenError, WorkerSeed, WorkerTask},
     session_startup::{ControlledHost, ControlledViewer},
     worker::Deadline,
 };
@@ -83,6 +83,28 @@ impl Configuration {
         F: FnOnce(Control, NativeAccess) -> Result<N, PlatformError> + Send + 'static,
         I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
     {
+        Self::new_with_guard_and_cleanup(
+            consent,
+            timeout,
+            move |control, access| factory(control, access).map_err(NativeOpenError::Native),
+            new_id,
+        )
+    }
+
+    /// As `new_with_guard`, preserving a native factory's distinct cleanup
+    /// failure after partial setup. Returning an error still requires custody
+    /// of every original resource until its native work has actually ended.
+    pub fn new_with_guard_and_cleanup<N, F, I>(
+        consent: bool,
+        timeout: Duration,
+        factory: F,
+        new_id: I,
+    ) -> Result<Self, Error>
+    where
+        N: NativeClipboard + 'static,
+        F: FnOnce(Control, NativeAccess) -> Result<N, NativeOpenError> + Send + 'static,
+        I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
+    {
         if timeout.is_zero() || timeout > Duration::from_secs(2) || timeout.as_micros() == 0 {
             return Err(Error::Limit);
         }
@@ -91,13 +113,13 @@ impl Configuration {
             consent,
             launch: Some(Box::new(move |seed, control, before| {
                 let access = seed.native_access();
-                seed.spawn(
+                seed.spawn_with_cleanup(
                     move || {
                         if let Some(before) = before {
-                            before(control.clone())?;
+                            before(control.clone()).map_err(NativeOpenError::Native)?;
                         }
                         if !control.status().enabled {
-                            return Err(PlatformError::Unavailable);
+                            return Err(NativeOpenError::Native(PlatformError::Unavailable));
                         }
                         factory(control, access)
                     },

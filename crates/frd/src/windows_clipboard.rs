@@ -1,5 +1,7 @@
-//! A Windows host's text clipboard for the controller (`frd run --control`).
-//! frd owns it itself, on the clipboard worker thread, through
+//! The Windows text clipboard on either end of a controlled session: a host's
+//! for its controller (`frd run --control`), or a controlling viewer's own
+//! (fr-windows `--control`, through fr-mobile-ffi's session). frd owns it
+//! itself, on the clipboard worker thread, through
 //! `fr_winsys::clipboard`: Win32's clipboard loads no library frd must keep
 //! out of process, so there is no helper child. The rules are the macOS
 //! owner's (`fr_native::macos_clipboard`): change metadata (the window
@@ -17,6 +19,7 @@
 //! sharing for this connection (the original `native_clipboard::Control`);
 //! every native call also requires an answer within the last 300 ms. The
 //! window is the clipboard owner a write names.
+use crate::clipboard_quic::NativeOpenError;
 use fr_core::{
     clipboard::{ClipboardSink, PlatformError, Publication, Stamp},
     limits::ProtocolLimits,
@@ -50,6 +53,8 @@ pub enum Failure {
     /// The caller's check, run while open, refused.
     Refused,
     Unavailable,
+    /// The native privacy owner exited without successful cleanup.
+    Cleanup,
 }
 
 /// What the owner asks of the clipboard; `System` is the real one.
@@ -75,8 +80,14 @@ pub trait Native {
         expected: u32,
         allowed: &dyn Fn() -> bool,
     ) -> Result<u32, (Failure, bool)>;
-    /// Close the privacy window. Never clears the clipboard.
+    /// Request closure of the privacy window once. Never clears the clipboard.
     fn close(&mut self);
+    /// Nonblocking inspection of the original privacy owner's cleanup. Pending
+    /// work must retain its thread/resources; only synchronous adapters use the
+    /// default. Completion (including an error) must remain observable.
+    fn poll_close(&mut self) -> Option<Result<(), Failure>> {
+        Some(Ok(()))
+    }
 }
 
 type Gate = dyn Fn(Option<HostInstant>) -> bool + Send + Sync;
@@ -170,6 +181,7 @@ pub enum Error {
     Limit,
     Allocation,
     Invalid,
+    Cleanup,
 }
 
 impl Error {
@@ -189,6 +201,7 @@ impl Error {
             Failure::Limit => Self::Limit,
             Failure::Invalid => Self::Invalid,
             Failure::Refused => Self::Access,
+            Failure::Cleanup => Self::Cleanup,
             Failure::Busy | Failure::Unavailable => Self::Platform(PlatformError::Unavailable),
         }
     }
@@ -256,13 +269,23 @@ impl<N: Native> Clipboard<N> {
     /// `NativeAccess::check`; it must not block or call back into this owner.
     /// `None` is observation; a write supplies its item's `Some(until)`.
     pub fn open(
-        native: N,
+        mut native: N,
         limits: &ProtocolLimits,
         gate: impl Fn(Option<HostInstant>) -> bool + Send + Sync + 'static,
-    ) -> Result<Self, PlatformError> {
+    ) -> Result<Self, NativeOpenError> {
         let limit = limits.max_clipboard_item_bytes() as usize;
         if limit == 0 {
-            return Err(PlatformError::Unsupported);
+            native.close();
+            loop {
+                if let Some(result) = native.poll_close() {
+                    return Err(if result.is_ok() {
+                        NativeOpenError::Native(PlatformError::Unsupported)
+                    } else {
+                        NativeOpenError::Cleanup
+                    });
+                }
+                std::thread::park_timeout(Duration::from_millis(5));
+            }
         }
         Ok(Self {
             native,
@@ -521,6 +544,13 @@ impl<N: Native> NativeClipboard for Clipboard<N> {
             self.native.close();
         }
     }
+
+    fn poll_close(&mut self) -> Option<Result<(), Self::Error>> {
+        self.close();
+        self.native
+            .poll_close()
+            .map(|result| result.map_err(Error::native))
+    }
 }
 
 impl<N: Native> Drop for Clipboard<N> {
@@ -529,25 +559,71 @@ impl<N: Native> Drop for Clipboard<N> {
     }
 }
 
+/// Original native supervisor custody, independent of the caller's reap wait.
+/// Its result is retained; dropping an unfinished owner on the clipboard thread
+/// waits for that same worker, never detaches it or creates a replacement.
+#[cfg(any(windows, test))]
+struct CleanupThread {
+    worker: Option<std::thread::JoinHandle<bool>>,
+    result: Option<Result<(), Failure>>,
+}
+
+#[cfg(any(windows, test))]
+impl CleanupThread {
+    fn new(worker: std::thread::JoinHandle<bool>) -> Self {
+        Self {
+            worker: Some(worker),
+            result: None,
+        }
+    }
+
+    fn poll(&mut self) -> Option<Result<(), Failure>> {
+        if let Some(result) = self.result {
+            return Some(result);
+        }
+        if !self.worker.as_ref()?.is_finished() {
+            return None;
+        }
+        let result = match self.worker.take()?.join() {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => Err(Failure::Cleanup),
+        };
+        self.result = Some(result);
+        Some(result)
+    }
+}
+
+#[cfg(any(windows, test))]
+impl Drop for CleanupThread {
+    fn drop(&mut self) {
+        while self.poll().is_none() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    }
+}
+
 #[cfg(windows)]
 pub use system::{System, WindowsClipboard, factory};
 
 #[cfg(windows)]
 mod system {
-    use super::{Clipboard, Failure, Native};
-    use crate::{clipboard_quic::NativeAccess, native_clipboard::Control};
+    use super::{CleanupThread, Clipboard, Failure, Native};
+    use crate::{
+        clipboard_quic::{NativeAccess, NativeOpenError},
+        native_clipboard::Control,
+    };
     use fr_core::{clipboard::PlatformError, limits::ProtocolLimits};
     use fr_winsys::{
         clipboard as win32,
-        indicator::{Indicator, Kind},
+        indicator::{Indicator, Kind, OpenError},
     };
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex, PoisonError,
             atomic::{AtomicBool, AtomicU64, Ordering},
             mpsc::{self, RecvTimeoutError},
         },
-        thread::{self, JoinHandle},
+        thread,
         time::{Duration, Instant},
     };
 
@@ -559,7 +635,6 @@ mod system {
     /// Another program holding the clipboard open (a clipboard manager
     /// reading a change) delays a read or write at most this long.
     const OPEN_WAIT: Duration = Duration::from_millis(200);
-    const CLOSE_BUDGET: Duration = Duration::from_millis(1500);
 
     pub type WindowsClipboard = Clipboard<System>;
 
@@ -596,39 +671,66 @@ mod system {
         shared: Arc<Shared>,
         window: isize,
         stop: Option<mpsc::Sender<()>>,
-        worker: Option<JoinHandle<bool>>,
+        cleanup: CleanupThread,
     }
 
     impl System {
-        fn open(control: Control) -> Result<Self, PlatformError> {
+        fn open(control: &Control) -> Result<Self, NativeOpenError> {
             let shared = Arc::new(Shared {
                 origin: Instant::now(),
                 answered: AtomicU64::new(0),
                 off: AtomicBool::new(false),
             });
             let (turned_off, original) = (shared.clone(), control.clone());
-            let indicator = Indicator::open_kind(Kind::Clipboard, move || {
+            let indicator = Indicator::open_kind_retained(Kind::Clipboard, move || {
                 turned_off.off.store(true, Ordering::Release);
                 original.stop();
             })
-            .map_err(|_| PlatformError::Unavailable)?;
+            .map_err(|error| match error {
+                OpenError::Setup(_) => NativeOpenError::Native(PlatformError::Unavailable),
+                OpenError::Cleanup => NativeOpenError::Cleanup,
+            })?;
             if !indicator.responsive(CHECK_BUDGET) {
-                let _ = indicator.close();
-                return Err(PlatformError::Unavailable);
+                shared.off.store(true, Ordering::Release);
+                control.stop();
+                return Err(if indicator.finish_close() {
+                    NativeOpenError::Native(PlatformError::Unavailable)
+                } else {
+                    NativeOpenError::Cleanup
+                });
             }
             shared.answer();
             let window = indicator.window();
             let (stop, stopped) = mpsc::channel();
             let watched = shared.clone();
+            // A failed spawn drops its closure. Keep the original indicator in
+            // this one-use cell so its cleanup result is still collectable.
+            let owner = Arc::new(Mutex::new(Some(indicator)));
+            let taken = owner.clone();
+            let supervising = control.clone();
             let worker = thread::Builder::new()
                 .name("fr-clipboard-privacy".into())
-                .spawn(move || supervise(indicator, &watched, &control, &stopped))
-                .map_err(|_| PlatformError::Unavailable)?;
+                .spawn(move || {
+                    let indicator = taken.lock().unwrap_or_else(PoisonError::into_inner).take();
+                    indicator.is_some_and(|indicator| {
+                        supervise(indicator, &watched, &supervising, &stopped)
+                    })
+                });
+            let Ok(worker) = worker else {
+                shared.off.store(true, Ordering::Release);
+                control.stop();
+                let indicator = owner.lock().unwrap_or_else(PoisonError::into_inner).take();
+                return Err(if indicator.is_some_and(Indicator::finish_close) {
+                    NativeOpenError::Native(PlatformError::Unavailable)
+                } else {
+                    NativeOpenError::Cleanup
+                });
+            };
             Ok(Self {
                 shared,
                 window,
                 stop: Some(stop),
-                worker: Some(worker),
+                cleanup: CleanupThread::new(worker),
             })
         }
     }
@@ -636,7 +738,7 @@ mod system {
     /// Check the window every 50 ms until the owner closes it; a check it
     /// does not answer within 250 ms stops clipboard sharing.
     fn supervise(
-        indicator: Indicator,
+        mut indicator: Indicator,
         shared: &Shared,
         control: &Control,
         stopped: &mpsc::Receiver<()>,
@@ -650,7 +752,15 @@ mod system {
             }
             shared.answer();
         }
-        indicator.close()
+        shared.off.store(true, Ordering::Release);
+        control.stop();
+        indicator.begin_close();
+        loop {
+            if let Some(result) = indicator.poll_close() {
+                return result;
+            }
+            thread::park_timeout(CHECK_INTERVAL);
+        }
     }
 
     const fn failure(error: win32::Error) -> Failure {
@@ -698,15 +808,10 @@ mod system {
         fn close(&mut self) {
             self.shared.off.store(true, Ordering::Release);
             drop(self.stop.take());
-            if let Some(worker) = self.worker.take() {
-                let until = Instant::now() + CLOSE_BUDGET;
-                while !worker.is_finished() && Instant::now() < until {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                if worker.is_finished() {
-                    let _ = worker.join();
-                }
-            }
+        }
+
+        fn poll_close(&mut self) -> Option<Result<(), Failure>> {
+            self.cleanup.poll()
         }
     }
 
@@ -719,10 +824,10 @@ mod system {
     /// The clipboard worker's native factory: the window first, then an owner
     /// gated on it and on the original worker's authority.
     pub fn factory()
-    -> impl FnOnce(Control, NativeAccess) -> Result<WindowsClipboard, PlatformError> + Send + 'static
+    -> impl FnOnce(Control, NativeAccess) -> Result<WindowsClipboard, NativeOpenError> + Send + 'static
     {
         move |control, access| {
-            let native = System::open(control)?;
+            let native = System::open(&control)?;
             let shared = native.shared.clone();
             Clipboard::open(native, &ProtocolLimits::ABSOLUTE, move |until| {
                 shared.live() && access.check(until)

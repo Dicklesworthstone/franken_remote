@@ -18,8 +18,40 @@ mod native;
 mod tests;
 
 pub const MAX_ROWS: usize = 1024;
+/// The longest notice line shown above the list, in printable ASCII bytes.
+pub const MAX_NOTICE: usize = 384;
 const MAP_LIMIT: Duration = Duration::from_secs(2);
 const CHOICE_LIMIT: Duration = Duration::from_secs(120);
+/// Native "no choice line" marker; must match `CHOICE_NONE` in the C file.
+const NO_CHOICES: u32 = u32::MAX;
+
+/// Local connection preferences shown with the host list (`fr app`). They
+/// only shape the next command line; the connector still requests control
+/// and clipboard sharing itself, under the host's own approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools, reason = "three independent toggles")]
+pub struct Choices {
+    pub control: bool,
+    pub clipboard: bool,
+    pub choose_display: bool,
+}
+impl Choices {
+    fn bits(self) -> u32 {
+        u32::from(self.control)
+            | (u32::from(self.clipboard) << 1)
+            | (u32::from(self.choose_display) << 2)
+    }
+    const fn from_bits(bits: u32) -> Option<Self> {
+        if bits & !7 != 0 {
+            return None;
+        }
+        Some(Self {
+            control: bits & 1 != 0,
+            clipboard: bits & 2 != 0,
+            choose_display: bits & 4 != 0,
+        })
+    }
+}
 
 /// A discovery hint, not evidence about the next connection's actual route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +104,7 @@ pub enum Error {
     InvalidRow,
     DuplicateIdentity,
     InvalidDisplay,
+    InvalidNotice,
     WorkerUnavailable,
     WorkerPanicked,
     NativeUnavailable,
@@ -105,6 +138,8 @@ struct State {
     mapped: bool,
     window: Option<u32>,
     choice: Option<usize>,
+    /// The choices confirmed together with `choice`, when the window had them.
+    choices: Option<Choices>,
     joined: bool,
 }
 
@@ -217,7 +252,31 @@ pub struct HostPicker {
 
 impl HostPicker {
     pub fn start(display: &str, rows: &[Row]) -> Result<Self, Error> {
+        Self::start_with(display, rows, None, None)
+    }
+
+    /// The desktop application's picker: the host list plus connection
+    /// `choices`, and optionally a notice (the previous session's outcome).
+    pub fn start_with(
+        display: &str,
+        rows: &[Row],
+        choices: Option<Choices>,
+        notice: Option<&str>,
+    ) -> Result<Self, Error> {
         validate(display, rows)?;
+        let notice = notice
+            .map(|text| {
+                if text.is_empty()
+                    || text.len() > MAX_NOTICE
+                    || !text
+                        .bytes()
+                        .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+                {
+                    return Err(Error::InvalidNotice);
+                }
+                CString::new(text).map_err(|_| Error::InvalidNotice)
+            })
+            .transpose()?;
         let display = CString::new(display).map_err(|_| Error::InvalidDisplay)?;
         let rows = native::rows(rows);
         let shared = Arc::new(Shared {
@@ -227,16 +286,28 @@ impl HostPicker {
                 mapped: false,
                 window: None,
                 choice: None,
+                choices: None,
                 joined: false,
             }),
         });
         let native_shared = Arc::clone(&shared);
         supervise(Arc::clone(&shared), move || {
-            native::run(&native_shared, &display, &rows)
+            native::run(&native_shared, &display, &rows, choices, notice.as_ref())
         })?;
         Ok(Self {
             control: Control(shared),
         })
+    }
+
+    /// The choices confirmed with the ordinal [`Self::poll`] returned; `None`
+    /// before that, or when this window offered no choices.
+    pub fn choices(&self) -> Option<Choices> {
+        let state = self.control.0.state();
+        if state.status == Status::Consumed {
+            state.choices
+        } else {
+            None
+        }
     }
 
     pub fn control(&self) -> Control {

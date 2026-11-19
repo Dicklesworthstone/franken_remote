@@ -1,5 +1,523 @@
 # Implementation status
 
+## iOS scaled-picture input and cursor ownership (2026-11-16 UTC)
+
+The active iOS app now maps the original approved display into the encoded
+picture's input area, then applies its local zoom and pan. Metal samples the
+whole picture into that same integer image rectangle; direct touches refuse
+its bars and trackpad movement stays inside it. Cursor position, shape size
+and hotspot are converted from original display pixels before drawing or
+seeding the trackpad pointer.
+
+The app obtains geometry from the retained frame's original live attempt,
+using additive C accessors rather than relying on lossy VIDEO notifications.
+Existing C frame/cursor layouts remain unchanged. Identical-size reconnects
+retire the earlier mapping and queued input. The scoped cursor accessor also
+requires a picture published after its decoder reset, so a newer cursor
+cannot appear on an older retained image within the same attempt. A post-copy
+generation check refuses mixed cursor metadata and bitmap revisions.
+
+Rust/C regressions exercise original-owner lookup, output preservation on
+refusal, same-size reconnects, cursor publication floors and retirement;
+Swift regressions cover scaled and odd geometry, image bars, touch/trackpad
+bounds and original-display cursor conversion. Independent source review is
+distinct from execution: the local executor was unavailable for these
+changes, and no new Apple SDK build, XCTest run or live device session is
+claimed. The dedicated iOS client workflow added alongside the concurrent
+upload integration now targets the actual `macos-session` and shipping Xcode
+Simulator suites; completed results for the reconciled revision remain required.
+See [iOS geometry and validation](docs/ios-client.md#scaled-picture-touch-and-cursor-geometry).
+The scaling umbrella `fr-foub` remains in progress.
+
+## iOS explicit file uploads (2026-11-16 UTC)
+
+The shipping app now offers an explicit upload-copy picker while observing,
+then requires a separate Control grant and Send once action. It uses the
+existing ATP upload owner and host drop directory. One non-reused local token
+binds preparation to the original connection attempt for at most 120 seconds.
+Send consumes that choice once and rechecks its original input source,
+visible current view, live session and 250 ms gesture deadline. A refused
+choice cannot be retried or rebound to a replacement session.
+
+Document-provider preparation creates a disclosed local upload copy, up to
+256 MiB, on one background worker. Ordinary coordinated access protects
+regular-file preflight; Apple's forUploading coordination makes a snapshot
+whose descriptor is pinned before its accessor returns. The OS may unlink
+that snapshot before the later native sender starts; the descriptor remains
+the source, without pathname reopening or weaker identity checks. No
+coordinator stays active while waiting for user input or transferring data.
+Folders, packages, links, unknown metadata, changed names and changed sizes
+are refused. Provider materialization and the local copy can happen before
+Send; no file contents go to the remote host before that explicit action.
+The cap does not promise a limit on provider hydration traffic.
+
+The C ABI adds optional empty upload negotiation, original selection and
+preparation, explicit Send, exact-batch Pause/Resume/Cancel and bounded JSON
+status without changing FrConfig. Queued progress, actual host publication,
+uncertain durability and original cleanup remain distinct. An unused or
+declined optional lane cannot invent an upload or a receipt. Paths, filenames
+and contents stay out of diagnostics.
+
+A separate positive source-release witness follows actual original worker
+collection, including after failed bounded cleanup. Terminal reporting alone
+cannot release the Swift owner's security-scoped permission. Pending provider
+work remains bounded after Discard, and Discard restores ordinary Control
+without permitting another preparation worker. Picker dismissal addresses
+only its original session. Give back control waits for successful original
+cleanup and reopens the same pinned host for viewing, without carrying files
+or automatic control intent.
+
+Validation: all 12 exact committed selection-owner tests passed with the
+repository-pinned rustc and -D warnings. Strict all/pedantic Clippy passed for
+that real private module. Pinned workspace formatting and diff checks passed
+on the reconciled source, including the added real-source regression for an
+unlinked descriptor. The full portable Cargo test build was attempted but
+rustc received SIGKILL while compiling pinned Asupersync, before project tests
+ran. The subsequent lower-memory integrated check remains pending. Fourteen
+Swift regressions and integrated Apple session/C ABI/Xcode tests remain
+unexecuted; Apple jobs are queued. Live iPhone/iPad provider and host-publication
+qualification is not claimed. Tracks `fr-ios-file-upload`, still in progress.
+See [upload flow and provider contracts](docs/ios-client.md#send-a-selected-file-to-the-host).
+
+## Original-display mapping for scaled native pictures (2026-11-16 UTC)
+
+The Linux desktop now chooses its original-display mapped renderer whenever a
+local picture box is stated, including native-size windows. A smaller canonical
+picture retained by a shared publisher can therefore be sampled into the
+original target without a native-size decoder mismatch. Odd display axes use
+one even target for rendering and snapshot checks while retaining the complete
+original input bounds. The even no-box legacy path remains exact-size.
+
+The Windows viewer now derives video placement, cursor placement and pointer
+translation from the approved original display. HEVC crop dimensions determine
+texture sampling only. Its pointer mapping accounts for the shared input
+owner's integer rectangle inside the encoded picture, including canonical
+rounding such as a 1582-by-888 crop for a 5120-by-2880 display. Edge clicks and
+drag releases remain inside that original input rectangle.
+
+Approved display dimensions are retained under the original frame owner's
+publication gate. A bounded event queue losing a VIDEO notification cannot
+remove or replace that geometry. Configuration cannot redefine it within an
+attempt. Identical dimensions on a replacement attempt still require a fresh
+native mapping timestamp, and the viewer rechecks ownership after presentation.
+
+Two Linux regression tests, eight portable Windows geometry tests and two
+shared-session metadata tests were added; the existing selection and
+configuration tests were updated. They cover shared smaller pictures, original
+negative origins, sampling, odd dimensions, edge/letterbox input, late metadata,
+notification overflow and stale reconnect/resize events. Independent source and
+arithmetic reviews passed. These new tests have not yet executed locally: the
+executor disconnected during unchanged baseline dependency compilation.
+Hosted verification on the new revisions remains required; no native Windows,
+real X11 scaled-host, live tailnet or performance result is claimed.
+
+Baseline hosted compiler failures also revealed incorrect inclusion of the
+native session tests by the portable download owner and a file-offer test passing
+an Offer where a Selection was required. Those source defects and unchanged-test
+lint failures were corrected without suppressing tests or relaxing gates.
+See [fitted Linux presentation](FITTED_PRESENTATION.md) and
+[Windows client geometry](docs/windows-client.md#scaled-pictures-keep-the-original-display-coordinates).
+Tracks `fr-foub` and `fr-foub.1`, which remain open for broader qualification.
+
+## Windows download cleanup and completion (2026-11-16 UTC)
+
+`fr-windows view --control --receive DIR` now connects an explicitly selected
+local destination to the existing ATP receive owner. It can receive regular
+files selected by a Linux, macOS or Windows host and combine them with its
+original upload on a positively negotiated duplex session. The Windows
+directory is pinned and validated before connecting; per-file and cumulative
+session limits and reject/keep-both conflict policy use the existing safe
+receiver. There is no new transfer protocol or native filesystem implementation.
+The reused Windows rename record now also reserves the complete native structure
+plus the filename bytes, with short and maximum-length publication cases added
+to the existing native regression.
+
+The Receive files menu exposes staged progress, publication counts, durability
+uncertainty and file-only cancellation. Completion JSON retains bounded original
+receipts and actual disk cleanup without filenames, paths or contents. A
+committed Windows rename with unconfirmed directory durability remains distinct
+from an unknown publication effect. Reconnects and replacement views cannot
+inherit receive consent or replay transfers, and original cleanup failures
+prevent replacement. A failed session-thread spawn releases newly bound choices.
+The original selection API and receipt JSON fields remain compatible with the
+concurrent Windows download integration; stable reason/publication codes and
+an explicit success result are additive. Overall command success now also
+requires the original receive lane's successful publication and cleanup evidence.
+
+The underlying receive path also preserves its first cleanup failure through
+later collection, while keeping late real publication evidence. Setup refusal
+before a disk worker starts now ends the original receive status and confirms
+no-worker cleanup instead of leaving an indefinite negotiating/pending report.
+
+The final reconciled Windows package passed 120 portable tests, including the
+receive flags, quota and consent refusals, and strict all-target Clippy.
+Pinned formatting, documentation links and whitespace checks pass. Added
+shared-owner, capability-intersection and real TLS/UDP receive regressions are
+present, but runtime execution was blocked before changed code compiled: rustc
+was killed while compiling unchanged pinned Asupersync with one build job and
+debug information disabled. Windows all-target cross checks were likewise
+killed in unchanged `windows 0.62.2`, including a retry with single-threaded
+compiler settings. Native directory/UI/transfer qualification remains pending;
+no live Windows result is claimed by the portable checks.
+See [Windows client usage](docs/windows-client.md#receive-files-selected-by-the-host).
+Tracks `fr-p2-file-transfer-m7o`, which remains open for broader acceptance.
+
+## Windows hosts can opt in to regular-file receiving (2026-11-15 UTC)
+
+`frd run --encoder mediafoundation --control --files C:\Users\me\FrankenRemoteDrop` now reaches the
+existing controlled Files lane on Windows. The selected directory must already
+exist and pass the native actual-handle owner/DACL and no-reparse checks.
+Windows option validation no longer rejects this supported combination; file
+receiving still requires the original control attachment and a separate local
+file permission. Missing or unsafe roots refuse before host startup with
+Windows-appropriate diagnostics.
+
+Three additional Windows regressions cover real root admission and limits,
+unsafe DACLs, junctions and path namespaces, and CLI refusal ordering. Existing
+Windows option tests now expect the supported configuration. These regressions
+and real Windows transfers remain **unexecuted** after executor loss; source/API
+review is not native qualification. NATIVE_FILE_RECEIVE.md records the opt-in,
+regular-file-only scope, conflict policy and committed-but-unconfirmed directory
+durability. Tree transfer, synchronization and reconnect replay remain
+unavailable. Tracks `fr-p2-file-transfer-m7o`.
+
+## Windows regular-file receive custody (2026-11-15 UTC)
+
+The existing ATP disk worker can now receive regular files into a Windows
+destination selected by its actual directory handle. Selection walks ordinary
+local-drive path components individually and refuses reparse points and unsafe
+owner/DACLs. The retained root denies delete sharing. Exclusive staging creates
+a protected private DACL immediately; cancellation deletes through the original
+file handle and closes it before releasing the transfer's reservation.
+
+Before each final original-authority check, publication prepares its bounded
+native rename record. The next operation renames the retained staging handle
+into the retained root without replacement. Keep-both conflict retries perform
+a fresh check. Existing integrity, file sync, separate file permission, transfer
+deadlines and cleanup accounting remain in force. Windows tree profiles refuse
+before worker admission or reservation.
+
+A successful rename is committed with `DurabilityUnknown`: directory crash
+durability is not established, and the destination is never rolled back or
+automatically replayed on that account. This increment supplies storage and ATP
+custody; the host CLI opt-in follows separately.
+
+Sixteen new portable-component, native-boundary, filesystem and ATP regressions
+are present. Independent source and pinned Windows API reviews found no remaining
+blocker. The changed feature has **not compiled or executed** after executor
+loss. The earlier 16 passing portable fr-winsys tests and successful pinned
+Windows all-target check cover baseline `0ed1fb` only. Native filesystem and
+original-connection transfer qualification remain outstanding. Tracks
+`fr-p2-file-transfer-m7o`, which remains open.
+
+## Late decoder configuration cannot revive retired presentation (2026-11-15 UTC)
+
+Native decoder construction and its hardware query now finish before metadata
+is committed under the original frame owner's publication gate. Replacement,
+retirement and close refuse a delayed result: it cannot change a successor's
+picture metadata or append VIDEO after terminal ENDED. Native image replacement
+and clearing detach old images under the gate, then release native resources
+after unlocking. No foreign constructor, hardware query or final image release
+is added to the publication critical section.
+
+Four further regressions exercise the retained-image configuration gap in both
+range directions, publication serialization, stale attempts, close and late
+terminal results. These tests use the actual FrameSlot and Shared paths; native
+picture cases use real HEVC. Source review and pinned formatting passed before
+executor loss. Runtime regression execution, complete workspace tests and
+Windows/Apple integration remain blocked. Recovered files have not had a
+post-recovery formatter/build run. The Linux workspace check was
+interrupted during shared memory pressure; the Windows preflight lacked
+MinGW, and the execution environment subsequently disconnected. No timeout,
+dependency pin or qualification gate was relaxed. `fr-4cqh` remains open.
+
+## Retained native pictures keep their own color range (2026-11-15 UTC)
+
+Repainting a retained picture now reads the color range from that native image.
+Acknowledging a newer decoder configuration cannot recolor the preceding
+picture while the renderer awaits the new decoder's first frame. Windows and
+the Apple C ABI use the same rule; callers no longer supply mutable current
+configuration as metadata for old pixels.
+
+A native regression decodes real limited/full/limited-range HEVC pictures and
+checks the metadata returned with each retained image. The fixture's full-range
+SPS was produced from the existing stream with FFmpeg's metadata filter.
+Pinned source formatting, whitespace checks and independent source review
+passed before executor loss. The native regression and complete Windows/Apple
+integration remain unexecuted here. Portable baseline results (113 Windows
+policy, 10 decoder-contract and six root-bundle tests, one ignored) are
+separate evidence and do not qualify this change. Tracks `fr-4cqh`.
+
+## Windows app switch pauses control instead of ending it (2026-11-15 UTC)
+
+Switching from a controlling Windows viewer to another application now
+pauses control. At the switch the viewer releases every key and mouse button
+it pressed on the host. While another application is in front nothing is
+forwarded, including pointer motion over the still-visible window. Viewing,
+the grant and its renewal, and the text clipboard lane continue. Input
+resumes once the pump sees the viewer in the foreground again, and only new
+native events are sent: a release of something pressed elsewhere sends
+nothing, and nothing is replayed. `Shared::set_active` closes the input gate
+under the grant lock, releases held keys and then buttons at the host's last
+pointer point, and retires unsent control choices. It returns `false` only
+when a release is refused. The shell then ends control through the existing
+focus-close path described below (or a hide), so a paused grant never keeps
+input held on the host. Minimize, resize/mapping changes and external
+file-picker focus loss still end control.
+
+**Live** (oldsurface viewer `--control --seconds 75` against an X11 host on
+ts2; xev on the host records the injected input; a console window takes the
+foreground for 10 s). The pause build passed every check in 2 of 2 runs:
+
+- The held key and button were released at the switch.
+- Nothing reached the host while the viewer was in the background.
+- After return, later key presses arrived, and the stale releases sent nothing.
+- Text copied on Windows in the background application reached ts2, and text
+  copied on ts2 after return reached Windows.
+- Each session ran to `--seconds` with 0 reopens, at 27-28 drawn pictures/s.
+
+The same script ran once on main without this change (3a6dd777 plus its
+build fix). Held input was released at the switch. The original session then
+ended `ok` / `Cancelled` instead of `CONTROL_STOPPED` / `Hidden`. The
+focus-close proof was therefore absent, and the viewer exited 2 s after the
+switch with `original_cleanup_unconfirmed`. Nothing after the switch reached
+the host, and no clipboard text crossed. That is one run: it shows the failure
+exists but gives no rate.
+
+**Passed:** formatting, CI's Windows cross Clippy command, the fr-mobile-ffi
+`macos-session` library tests (151) and Clippy, and macOS workspace Clippy.
+**Not verified:** the refused-release fallback, live (it needs a busy input
+queue at the switch). The macOS viewer still ends control on focus loss
+(`fr-native` `halt`).
+
+## Windows focus loss keeps a path back to fresh viewing (2026-11-15 UTC)
+
+Switching away from an active controlling Windows viewer now fences its
+original input immediately and keeps the native window. The original control,
+clipboard and upload owners end through their existing terminal exchange.
+Only successful original service and cleanup permit a disconnected dormant
+window to await a fresh foreground event. Returning starts a new observing
+connection through normal admission; **Input → Request control** is required
+for a new grant. Pending input, clipboard content and file selections never
+replay into the replacement.
+
+The focus callback uses an exact-attempt witness and a lock-free input fence,
+so a busy producer mutex cannot delay the fence and a stale callback cannot
+close a newer attempt. Stop intent is recorded before cleanup can publish its
+result. The public ending remains `CONTROL_STOPPED / Hidden`; separate positive
+evidence, not that label alone, authorizes replacement. The retained GPU image
+is cleared on focus loss and again after foreground return, with original
+lifetime/foreground checks after native work and no invented presentation
+evidence.
+
+The original ten-second cleanup bound, invocation deadline, replacement cap
+and cooldown remain. A fresh foreground request has its own bounded opening
+phase; repeated callbacks cannot extend it or repair late/failed cleanup.
+Minimize/restore, resize/mapping changes and external focus loss from a file
+picker retain their existing terminal behavior.
+
+**Passed:** all 106 portable Windows-client tests, strict all-target package
+Clippy, pinned workspace formatting and an actual-source Windows GNU compile
+and strict Clippy check of the renderer and geometry boundary. Independent
+review checked the original-owner locking, input submission fences and native
+reentry checks. **Blocked:** full shared session/frd/native-viewer compilation
+and the new shared completion, no-grant and lock-contention integration
+regressions, because unchanged pinned Asupersync compilation was SIGKILLed
+before project code. No live Windows, GPU or tailnet result is claimed.
+`fr-o26d` remains in progress pending those gates. See
+[Windows usage](docs/windows-client.md).
+
+## Late sender turns reconcile queued QUIC acknowledgements (2026-11-15 UTC)
+
+A host or viewer whose own task wakes after a retained reliable record's
+delivery deadline now has one bounded ACK-only receive turn before judging
+that custody. Actual acknowledged stream offsets release retained records;
+the unchanged expiry check judges everything left. The helper sends no
+application data, retransmissions or probes and dispatches no input. It reads
+at most one native receive batch, with a 1 ms receive wait inside a 10 ms
+absolute turn bound. This is an observation-order correction, not evidence
+that an ACK reached the kernel before its original deadline.
+
+The normal host, admission-refresh and viewer loops call that turn before
+synchronous service can judge retained-send expiry. Original cancellation,
+connection/operation lifetimes, authorization, input and presentation gates,
+receive deadlines and explicit attachment retirement still win. Expired
+unsent or partially staged records and unsettled native output cannot use the
+exception. Synchronous `tick` retains its original fail-closed contract; there
+is no general delivery allowance extension or fresh input ticket.
+
+Eleven real UDP/TLS transport regressions and five host/viewer integration
+regressions cover successful reconciliation, missing ACKs, unsent tails,
+queued payload, optional clipboard retirement, cancellation, authorization
+and original lifetime precedence. **Passed:** pinned workspace formatting and
+diff checks; independent source review of the native ACK-only path and its
+host/viewer integration. **Blocked:** these runtime regressions and complete
+workspace compilation. The unchanged pinned Asupersync compiler was killed
+with SIGKILL before first-party code in normal, single-job reduced-memory,
+Cranelift and metadata-only attempts. No test assertion has been claimed as
+passing from those runs. The original scheduling-stall reproducer is retained
+as a real network regression, but no live load-induced end has been attributed
+to this cause. `fr-load-ends-cuqi` remains in progress, including its five full
+suites at load above 100. See [QUIC records](QUIC_RECORDS.md).
+
+## Connected Windows file selection and control-to-view handoff (2026-11-14 UTC)
+
+A controlling Windows viewer now offers **File transfer → Pick and send one
+file…** without requiring a preselected `--send` argument. One native dialog
+worker keeps the presentation thread responsive, then pins the selected regular
+file through the existing Windows handle-custody boundary. The original upload
+intake admits at most nine explicit single-file batches and retains each batch's
+progress, host publication receipt and cleanup result. File-only Pause, Resume
+and Cancel refer to the batch displayed by their original popup. Reconnect,
+resize, display change and a new control grant never replay these selections.
+
+Native choices retain their original dialog and accepted-gesture deadlines
+through destruction, source preparation, joining and lock waits. Final admission
+checks the exact original input source/view context and original sender lifetime.
+A failed native cleanup remains failed after later collection. The final JSON
+contains bounded receipt history and chooser cleanup, without file paths or
+contents. No Windows receiving, directory sending, drag-and-drop or reconnect
+resumption is added.
+
+The original picker is registered before its worker can create a native
+window, so activation of that exact UI thread does not cancel its own choice.
+The actual common-dialog parent observes external focus loss and fences only
+the captured grant, even if the Shared owner has moved to another attempt.
+The viewer's deferred activation is scoped to its native lifetime and attempt;
+final file admission checks the original viewer's actual foreground window.
+Subclass removal and native destruction are required cleanup evidence, and
+worker-thread identity is retired before the thread can exit or be reused.
+
+**Input → Stop control and keep viewing** now fences the original native input
+and closes its controlled connection before opening a fresh observing session.
+The underlying source is retained through its terminal exchange; emergency
+source loss still cancels. Replacement requires positive original service and
+cleanup, retains the existing cooldown/replacement/invocation bounds, and starts
+without replaying control, clipboard or files. Closing the window disconnects.
+
+**Passed:** all 96 portable Windows-client tests and strict all-target Clippy;
+ten new chooser-policy regressions; actual picker/menu/policy sources in a
+narrow Windows GNU strict-Clippy check against Windows 0.62.2. That native
+compile fixture substitutes the external Shared/Upload API and does not
+establish full session integration. Thirteen upload-owner tests, two final
+intake-admission tests, two original UDP/TLS close regressions and one stale
+file-choice source-fence regression are present
+but unexecuted locally: the unchanged pinned Asupersync compilation was killed
+before reaching project code, including an isolated one-job reduced-memory
+attempt. Complete workspace/runtime and real Windows chooser, transfer and
+control-release qualification remain pending. See [Windows usage](docs/windows-client.md).
+
+## Windows choices retain their original gesture and connection (2026-11-14 UTC)
+
+The machine chooser retains its accepted native message timestamp through
+queued callbacks and window destruction. Final consumption rechecks that same
+event age as well as the original discovery/chooser deadline. A stalled cleanup
+cannot turn an expired click into a later connection.
+
+Change Display now binds its local popup to the exact internal connection
+attempt, not only the shared session object and native mapping lifetime. An
+internal reconnect can reuse that object; an older popup can no longer close
+or replace the newer attempt. Current-attempt drawn evidence is required, and
+native refresh and deferred processing recheck the original identities. The
+existing cleanup proof, replacement bounds and fresh approved catalog remain.
+
+These are narrow follow-ups to the concurrently delivered machine chooser and
+runtime switching, preserving their implementations. Both the machine picker
+and upload menu use the error constructor exposed by the actual pinned Windows
+bindings. The earlier three native SendMessageW signature corrections are also
+retained.
+
+**Passed:** all 85 portable `fr-windows` tests and strict all-target Clippy;
+pinned workspace formatting; actual final machine-picker source with real
+fr-client/fr-core and Windows 0.62.2 in all-target Windows GNU cross-Clippy.
+New regressions cover a reused shared owner with a different attempt and the
+exclusive native gesture-age boundary after cleanup. Full native-session
+integration and live Windows UI/transfer behavior remain separate qualification.
+
+
+## Explicit Windows file uploads (2026-11-14 UTC)
+
+`fr-windows view [HOST] --control --send FILE` now connects one explicitly
+selected regular file to the original controlled ATP upload. The native File
+transfer menu shows state, queued bytes, actual publication receipt and cleanup,
+and cancels only that upload. An already published or uncertain effect is
+never rewritten as cancellation. Host refusal details such as Conflict,
+Permission and Integrity remain visible without paths or file contents.
+
+The shared session consumes the selected handle once, offers optional Files
+alongside existing text/clipboard, and starts source work only after the
+original control grant and attachment. A refused or configured selection is
+never replayed on reconnect. Viewing replacements omit the upload while
+retaining its original menu and receipts. Shutdown uses the original cleanup
+deadline and retains stopped disk owners through eventual nonblocking collection;
+a missed deadline stays failed after a later join. The C ABI configures no upload.
+
+The final JSON includes a content-free upload result. With `--send`, success
+requires a durable host publication receipt and completed original source
+cleanup as well as a successful desktop result; queued bytes cannot satisfy it.
+This slice targets the existing Linux/macOS file receivers. Windows receive
+directories, directory sending, downloads and drag-and-drop are not added.
+
+**Passed:** all 83 portable Windows-client tests and strict all-target Clippy
+after preserving the concurrently landed picker cleanup; pinned workspace
+formatting; all 16 portable
+`fr-winsys` tests and strict Clippy; isolated actual Windows file-boundary
+all-target cross-Clippy, including compilation of its native regression tests.
+Eight upload owner/receipt regressions and bilateral Files/text/clipboard
+negotiation tests are added in the shared session. They require the full native
+session graph and remain unrun locally because the pinned Asupersync graph
+exceeds this execution environment's resources. Hosted full Windows integration
+and a live Windows-to-host transfer remain separate, pending qualification.
+See [Windows upload usage](docs/windows-client.md#send-one-file-to-the-host).
+
+
+## Windows selected-file handle custody (2026-11-14 UTC)
+
+Windows native file selection now retains the actual read-only disk handle and
+its volume/file identity. The sender duplicates that same handle rather than
+reopening a pathname or comparing the compatibility layer's placeholder Unix
+inode values. Denying write/delete sharing keeps conflicting writers and
+renames out while the original handle or a duplicate remains open. Leaf
+reparse points, directories, non-disk objects, special device namespaces,
+alternate streams and explicitly mapped network drives are refused. Ancestor
+junction resolution remains an OS path operation; the drive-letter check is
+not proof of physical-local storage.
+
+This is the source-custody prerequisite for an explicit Windows upload, not a
+claim of Windows receive support. All 16 portable `fr-winsys` tests and strict
+all-target Clippy passed on the pinned nightly, including four new production
+path-policy regressions. Native handle-sharing, rename and reparse tests are
+present but still need a Windows runtime. Existing Unix selection is unchanged.
+
+
+## Native Windows machine choice and in-view display changes (2026-11-14 UTC)
+
+`fr-windows` and `fr-windows view` without a destination now open a native
+machine picker from one bounded installed-Tailscale catalog. The chosen stable
+ID and canonical certificate name remain paired through fresh installed-daemon
+validation; cancellation starts no remote session. Explicit destinations and
+connection options keep their existing behavior. The shared selected-target
+API rejects removed identities, renamed nodes and same-name replacements.
+
+The viewer now offers **Input → Change display…**. It fences the original input
+and clipboard, requires positive original service/cleanup completion, and then
+opens a fresh approved display catalog to the same machine. Replacement starts
+viewing without replaying control or clipboard. Old picture admission stops
+during retirement; the original replacement deadline remains enforced after
+clipboard locking and native window preparation. Later resize replacements
+retain the fresh-choice policy. Failed cleanup remains terminal and visible.
+
+Three command regressions, four shared identity-selection regressions and nine
+portable display-replacement regressions were added; existing invalid-metadata
+and address tests also cover the new shared entry point. Independent source
+review found and fixed the post-native-read gesture-age and replacement-deadline
+cases. The exact shared connection files passed pinned formatting before the
+execution environment became unavailable. The new Windows/UI/compiler and test
+verdicts are pending in the existing CI lanes; no real Windows multi-monitor,
+IME, clipboard, GPU or tailnet qualification is claimed for these changes.
+See [Windows client usage](docs/windows-client.md). Both scoped feature beads
+remain open for the missing verification.
+
 ## Windows adaptive bitrate through the live capture worker (2026-11-14 UTC)
 
 The original Media Foundation capture worker now implements `CaptureAtRate`

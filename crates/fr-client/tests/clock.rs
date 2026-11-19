@@ -105,7 +105,7 @@ fn unsent_early_replayed_foreign_and_unsolicited_replies_never_establish_correla
     );
 }
 #[test]
-fn deadlines_are_exclusive_and_expiry_does_not_create_a_new_probe() {
+fn a_probe_past_its_exclusive_bound_is_given_up_and_a_silent_lifetime_ends_the_exchange() {
     for queued in [false, true] {
         let mut c = client();
         c.begin(ClientInstant(100)).unwrap();
@@ -113,10 +113,26 @@ fn deadlines_are_exclusive_and_expiry_does_not_create_a_new_probe() {
             c.queued(ClientInstant(200)).unwrap();
         }
         assert_eq!(c.begin(ClientInstant(300)), Err(Error::Busy));
-        assert_eq!(c.tick(ClientInstant(1100)), Err(Error::Expired));
-        assert_eq!(c.begin(ClientInstant(1101)), Err(Error::Stopped));
+        assert_eq!(c.tick(ClientInstant(1099)), Ok(()));
+        assert!(c.in_flight());
+        // Given up at its exclusive bound, without ending the exchange.
+        assert_eq!(c.tick(ClientInstant(1100)), Ok(()));
+        assert!(!c.in_flight());
+        c.begin(ClientInstant(1101)).unwrap();
+        if queued {
+            c.queued(ClientInstant(1102)).unwrap();
+            // The given-up probe's reply still arrives, and is ignored.
+            assert_eq!(
+                c.accept(&reply(1, 0), ClientInstant(1103)).unwrap_err(),
+                Error::LateReply
+            );
+            assert!(c.in_flight());
+        }
+        // No reply accepted for a whole correlation lifetime ends it.
+        assert_eq!(c.tick(ClientInstant(10_000)), Err(Error::Expired));
+        assert_eq!(c.begin(ClientInstant(10_001)), Err(Error::Stopped));
         assert_eq!(
-            c.accept(&reply(1, 0), ClientInstant(1102)).unwrap_err(),
+            c.accept(&reply(1, 0), ClientInstant(10_002)).unwrap_err(),
             Error::Stopped
         );
     }
@@ -138,7 +154,9 @@ fn refresh_keeps_old_validity_and_requires_new_sequence() {
     c.queued(ClientInstant(140)).unwrap();
     let second = c.accept(&reply(2, 250), ClientInstant(160)).unwrap();
     assert_eq!(second.received_at_us(), 160);
-    assert!(c.correlation(ClientInstant(10160)).unwrap().is_none());
+    assert_eq!(c.correlation(ClientInstant(10_159)), Ok(Some(second)));
+    // Its validity ends with the exchange: no reply was accepted since.
+    assert_eq!(c.correlation(ClientInstant(10_160)), Err(Error::Expired));
 }
 #[test]
 fn host_regression_local_regression_and_overflow_are_terminal() {
@@ -155,8 +173,23 @@ fn host_regression_local_regression_and_overflow_are_terminal() {
         c.accept(&reply(2, 999), ClientInstant(5)).unwrap_err(),
         Error::HostClockRegression
     );
-    let mut c = client();
-    assert_eq!(c.begin(ClientInstant(u64::MAX)), Err(Error::ClockOverflow));
+    // Overflow, met within a lifetime of the exchange's start (a silent
+    // lifetime would end it as Expired first).
+    let mut c = ClockExchange::new(
+        binding(),
+        ProtocolLimits::ABSOLUTE,
+        ClockPolicy {
+            max_exchange_us: 1000,
+            valid_for_us: 10_000,
+            drift_ppm: 0,
+        },
+        ClientInstant(u64::MAX - 10_000),
+    )
+    .unwrap();
+    assert_eq!(
+        c.begin(ClientInstant(u64::MAX - 500)),
+        Err(Error::ClockOverflow)
+    );
 }
 #[test]
 fn stop_never_preserves_a_pending_probe_or_a_usable_result() {

@@ -11,7 +11,7 @@
 use crate::{
     directory,
     session::{Config, InputResult, Session, connection::Target},
-    video::FrameInfo,
+    video::{Cursor, FrameInfo},
 };
 use core::ffi::{c_char, c_void};
 use fr_tailnet::{HostName, HostPin};
@@ -22,6 +22,21 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
+};
+
+mod display;
+mod upload;
+pub use display::{
+    FR_DISPLAY_CHOOSE, FR_DISPLAY_PRIMARY, FR_MAX_DISPLAYS, FrDisplayInfo, FrDisplayRequest,
+    fr_session_cancel_display, fr_session_display_info, fr_session_display_request,
+    fr_session_reopen_status, fr_session_select_display,
+};
+
+pub use upload::{
+    FR_UPLOAD_STATUS_MAX_BYTES, fr_session_begin_upload_selection, fr_session_cancel_upload,
+    fr_session_copy_upload_status, fr_session_discard_upload_selection, fr_session_pause_upload,
+    fr_session_prepare_upload, fr_session_send_upload, fr_session_start_with_upload,
+    fr_session_upload_sources_released,
 };
 
 pub const FR_OK: i32 = 0;
@@ -171,7 +186,9 @@ const fn code(result: InputResult) -> i32 {
     match result {
         InputResult::Sent => FR_OK,
         InputResult::Pending => FR_PENDING,
-        InputResult::NotControlled => FR_NOT_CONTROLLED,
+        // Only `Shared::set_active`, which the C ABI does not expose, closes
+        // the Inactive gate; sharing this code keeps the published set fixed.
+        InputResult::NotControlled | InputResult::Inactive => FR_NOT_CONTROLLED,
         InputResult::Outside => FR_OUTSIDE,
         InputResult::Unsupported => FR_UNSUPPORTED,
         InputResult::Invalid => FR_INVALID,
@@ -228,10 +245,47 @@ pub unsafe extern "C" fn fr_host_name_valid(name: *const c_char) -> bool {
 /// NULL or NUL-terminated.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrHandle) -> i32 {
+    // SAFETY: forwarded contract; preserve the original ABI's display policy.
+    unsafe { start(config, crate::session::DisplayChoice::Primary, false, out) }
+}
+
+/// Start with the given display policy, without changing `FrConfig`'s ABI.
+/// `FR_DISPLAY_CHOOSE` opens a sole approved display or waits for an explicit
+/// choice from a larger catalog. No selection bypasses host approval.
+///
+/// # Safety
+/// `config` and `out` are NULL or valid; the strings `config` points to are
+/// NULL or NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_session_start_with_display(
+    config: *const FrConfig,
+    mode: u32,
+    out: *mut FrHandle,
+) -> i32 {
+    let choice = match mode {
+        FR_DISPLAY_PRIMARY => crate::session::DisplayChoice::Primary,
+        FR_DISPLAY_CHOOSE => crate::session::DisplayChoice::ChooseIfMultiple,
+        _ => return FR_INVALID,
+    };
+    // SAFETY: forwarded contract.
+    unsafe { start(config, choice, false, out) }
+}
+
+/// # Safety
+/// The configuration, strings and output obey `fr_session_start`'s contract.
+unsafe fn start(
+    config: *const FrConfig,
+    display: crate::session::DisplayChoice,
+    upload: bool,
+    out: *mut FrHandle,
+) -> i32 {
     // SAFETY: NULL or valid per contract.
     let (Some(config), false) = (unsafe { config.as_ref() }, out.is_null()) else {
         return FR_INVALID;
     };
+    if upload && !config.control {
+        return FR_INVALID;
+    }
     // SAFETY: forwarded contract.
     let Some((host, pin)) = (unsafe { destination(config) }) else {
         return FR_INVALID;
@@ -255,8 +309,11 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         target,
         port: config.port,
         control: config.control,
+        clipboard: false,
+        upload: upload.then(crate::session::Upload::interactive),
+        download: None,
         picture,
-        display: crate::session::DisplayChoice::Primary,
+        display,
     }) else {
         return FR_BUSY;
     };
@@ -463,10 +520,7 @@ pub unsafe extern "C" fn fr_session_copy_frame(
         return core::ptr::null_mut();
     };
     let shared = s.shared();
-    let Some((image, frame)) = shared
-        .frames
-        .take_newer(after_sequence, shared.full_range())
-    else {
+    let Some((image, frame)) = shared.frames.take_newer(after_sequence) else {
         return core::ptr::null_mut();
     };
     if !info.is_null() {
@@ -474,6 +528,39 @@ pub unsafe extern "C" fn fr_session_copy_frame(
         unsafe { info.write(frame.into()) };
     }
     image
+}
+
+/// Original approved display dimensions for this retained frame's live
+/// attempt. Unlike VIDEO notifications, this lookup survives event overflow
+/// and cannot pair an old picture with a replacement connection's geometry.
+/// Returns false without writing either output for unknown, retired, closed
+/// or mismatched owners. This supplies geometry, not input authority.
+///
+/// # Safety
+/// Each output is NULL or writable for one `u32`; both must be non-null for
+/// success. Call again before repainting a retained frame after a reconnect.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_session_frame_display(
+    handle: FrHandle,
+    frame: u64,
+    width: *mut u32,
+    height: *mut u32,
+) -> bool {
+    if width.is_null() || height.is_null() {
+        return false;
+    }
+    let Some(session) = lookup(handle) else {
+        return false;
+    };
+    let Some((display_width, display_height)) = session.shared().display_for_frame(frame) else {
+        return false;
+    };
+    // SAFETY: both outputs are non-null and writable per the caller's contract.
+    unsafe {
+        width.write(display_width);
+        height.write(display_height);
+    }
+    true
 }
 
 /// Report that the picture with frame id `frame` was drawn into a drawable
@@ -592,7 +679,7 @@ pub unsafe extern "C" fn fr_session_begin_typing(handle: FrHandle, out: *mut u64
 }
 
 /// Type one physical stroke under the original callback. `index` starts at
-/// zero and advances only after FR_OK/FR_PENDING. FR_BUSY queued no transition:
+/// zero and advances only after `FR_OK`/`FR_PENDING`. `FR_BUSY` queued no transition:
 /// retry the same index, usage and modifiers with this same token only. Other
 /// refusals end this callback. The eight modifier bits name HID 0xE0..=0xE7.
 #[unsafe(no_mangle)]
@@ -620,7 +707,7 @@ pub extern "C" fn fr_session_end_typing(handle: FrHandle, token: u64) {
 }
 
 /// Whether the original current grant includes committed text. Readiness is
-/// still checked by fr_session_text; false is not permission to guess Unicode.
+/// still checked by `fr_session_text`; false is not permission to guess Unicode.
 #[unsafe(no_mangle)]
 pub extern "C" fn fr_session_supports_text(handle: FrHandle) -> bool {
     lookup(handle).is_some_and(|session| session.shared().supports_text())
@@ -649,6 +736,20 @@ pub extern "C" fn fr_session_release_all(handle: FrHandle) -> i32 {
     input(handle, |s| s.shared().release_all())
 }
 
+fn cursor_info(cursor: &Cursor) -> FrCursor {
+    FrCursor {
+        generation: cursor.generation,
+        x: cursor.x,
+        y: cursor.y,
+        width: cursor.width,
+        height: cursor.height,
+        hotspot_x: cursor.hotspot_x,
+        hotspot_y: cursor.hotspot_y,
+        visible: u32::from(cursor.visible),
+        reserved: 0,
+    }
+}
+
 /// The remote cursor's state (for hosts that send it apart from the
 /// picture). Returns false before any cursor is known.
 ///
@@ -665,18 +766,40 @@ pub unsafe extern "C" fn fr_session_cursor(handle: FrHandle, out: *mut FrCursor)
     if out.is_null() || cursor.generation == 0 {
         return false;
     }
-    let value = FrCursor {
-        generation: cursor.generation,
-        x: cursor.x,
-        y: cursor.y,
-        width: cursor.width,
-        height: cursor.height,
-        hotspot_x: cursor.hotspot_x,
-        hotspot_y: cursor.hotspot_y,
-        visible: u32::from(cursor.visible),
-        reserved: 0,
-    };
+    let value = cursor_info(&cursor);
     // SAFETY: non-null and writable per contract.
+    unsafe { out.write(value) };
+    true
+}
+
+/// Cursor metadata for the retained picture's original display and attempt.
+/// Supply both identifiers from that picture's `FrFrameInfo`. A decoder reset
+/// refuses pictures at or below its publication floor. On refusal, `out` is
+/// unchanged and the app must discard its cached cursor overlay.
+///
+/// # Safety
+/// `out` is NULL or writable for one `FrCursor`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_session_frame_cursor(
+    handle: FrHandle,
+    frame: u64,
+    sequence: u64,
+    out: *mut FrCursor,
+) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    let Some(session) = lookup(handle) else {
+        return false;
+    };
+    let Some(value) = session
+        .shared()
+        .with_cursor_for_frame(frame, sequence, cursor_info)
+    else {
+        return false;
+    };
+    // SAFETY: non-null and writable per contract. The bounded metadata copy
+    // finished and released both authority locks before touching this output.
     unsafe { out.write(value) };
     true
 }

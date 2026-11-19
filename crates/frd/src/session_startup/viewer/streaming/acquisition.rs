@@ -311,6 +311,16 @@ impl PendingControl {
             Err(error) => input_error(fr_client::input::Error::Wire(error)),
         }
     }
+    pub(super) async fn reconcile_acknowledgements(
+        &self,
+        session: &mut ViewerSession,
+    ) -> Result<(), Error> {
+        self.current()?;
+        session
+            .reconcile_acknowledgements(|| self.current().is_ok())
+            .await
+            .map_err(Error::Session)
+    }
     pub(super) async fn drive(
         &mut self,
         session: &mut ViewerSession,
@@ -318,6 +328,7 @@ impl PendingControl {
         wait: Duration,
         mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
+        self.reconcile_acknowledgements(session).await?;
         let sample = self.service(session)?;
         let inbound = Route::Stream(session.routes.inbound);
         let (_, feedback, _) = self

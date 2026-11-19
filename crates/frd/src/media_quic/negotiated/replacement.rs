@@ -107,7 +107,11 @@ impl NegotiatedMedia {
             return Err(Error::Transport(quic::Error::Backpressure));
         }
         let now = current(cx)?;
-        if now >= until || until - now > 5_000_000 {
+        // The host's recovery deadline comes from its sender's recovery
+        // horizon, `decoder_startup::host_send_policy()`, which is the 6 s
+        // first-view limit. A fixed 5 s cap here refused every mid-session
+        // recovery the host admitted as `Expired`.
+        if now >= until || until - now > crate::media::decoder_startup::MAX_STARTUP_US {
             return Err(Error::Expired);
         }
         if let Some(tickets) = &tickets {

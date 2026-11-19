@@ -89,10 +89,35 @@ impl SendIntake {
     pub fn submit(&self, request: SendRequest) -> Result<SendControl, Error> {
         self.submit_with_clock(request, || self.now())
     }
+
+    /// Recheck an original local choice immediately before admission, after
+    /// waiting for the intake lock. The callback may only check local choice
+    /// state in a reviewed lock order; bounded native scalar clock/foreground
+    /// reads may not pump messages. No native UI/file I/O or callbacks into
+    /// this intake. The original transfer clock is resampled after it returns.
+    /// Refusal consumes the request without replacing the original pending
+    /// selection, granting authority, or renewing any transfer deadline.
+    pub fn submit_if(
+        &self,
+        request: SendRequest,
+        check: impl FnMut() -> bool,
+    ) -> Result<SendControl, Error> {
+        self.submit_checked_with_clock(request, || self.now(), check)
+    }
+
     fn submit_with_clock(
         &self,
         request: SendRequest,
+        clock: impl FnMut() -> Result<u64, Error>,
+    ) -> Result<SendControl, Error> {
+        self.submit_checked_with_clock(request, clock, || true)
+    }
+
+    fn submit_checked_with_clock(
+        &self,
+        request: SendRequest,
         mut clock: impl FnMut() -> Result<u64, Error>,
+        mut check: impl FnMut() -> bool,
     ) -> Result<SendControl, Error> {
         let p = request.policy;
         let original = self.0.policy;
@@ -113,11 +138,17 @@ impl SendIntake {
         if state.closed || self.0.cx.is_cancel_requested() {
             return Err(Error::Closed);
         }
+        if !check() {
+            return Err(Error::Expired);
+        }
         // Another owner may advance `last` while this submission waits for the
         // mutex. Order a fresh sample under the SAME lock instead of treating
         // the earlier submission timestamp as a clock regression. Waiting can
         // spend the original lifetime, never restart it at this later sample.
         let now = clock()?;
+        if self.0.cx.is_cancel_requested() {
+            return Err(Error::Closed);
+        }
         if now < submitted || now < state.last {
             return Err(Error::Clock);
         }

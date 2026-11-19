@@ -639,6 +639,7 @@ fn build_macos_audio() {
 /// presentation. System frameworks only; nothing is downloaded or bundled.
 fn build_macos_viewer() {
     println!("cargo:rerun-if-changed=src/macos_viewer.m");
+    println!("cargo:rerun-if-changed=src/apple_decode_output.h");
     println!("cargo:rerun-if-changed=src/macos_picker.m");
     println!("cargo:rerun-if-changed=src/macos_file_picker.m");
     if env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_none()
@@ -700,6 +701,7 @@ fn build_macos_viewer() {
         "CoreMedia",
         "CoreVideo",
         "Foundation",
+        "IOSurface",
         "Metal",
         "QuartzCore",
         "VideoToolbox",

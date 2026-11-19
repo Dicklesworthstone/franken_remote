@@ -1,7 +1,7 @@
 //! Bounded command-line options shared by Windows and portable regression tests.
 #![forbid(unsafe_code)]
 
-use std::net::IpAddr;
+use std::{net::IpAddr, path::PathBuf};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
@@ -36,34 +36,173 @@ impl DisplayChoice {
     }
 }
 
+/// Which local HEVC decode path a viewing command may use.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Decoder {
+    /// GPU (DXVA) decode when the system decoder accepts this PC's device,
+    /// otherwise the decoder's CPU path with GPU presentation.
+    #[default]
+    Automatic,
+    /// Refuse the session unless the GPU decodes.
+    Hardware,
+    /// CPU decode, GPU presentation (for comparison or a faulty driver).
+    Software,
+}
+
+impl Decoder {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Automatic),
+            "hardware" => Some(Self::Hardware),
+            "software" => Some(Self::Software),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiveConflict {
+    #[default]
+    Reject,
+    KeepBoth,
+}
+
+/// Explicit local destination consent. Native validation pins the directory
+/// before connecting; these options cannot select a path on the host.
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ReceiveOptions {
+    pub directory: PathBuf,
+    pub max_file_bytes: Option<u64>,
+    pub max_session_bytes: Option<u64>,
+    pub conflict: ReceiveConflict,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line flags"
+)]
 pub(crate) struct Options {
     pub port: u16,
     /// Optional complete authenticated address-set constraint, not a DNS override.
     pub addresses: Vec<IpAddr>,
     pub family: Family,
     pub control: bool,
+    /// With `--control`, share text with a host that also enables clipboard.
+    /// Defaults on; `--no-clipboard` disables it for this command.
+    pub clipboard: bool,
     pub seconds: Option<u64>,
     pub display: DisplayChoice,
+    /// One explicit regular file; consumed once by the original control grant.
+    pub send: Option<PathBuf>,
+    /// Receive host-selected files only under this command's original grant.
+    pub receive: Option<ReceiveOptions>,
+    /// Local decode path (`--decoder auto|hardware|software`).
+    pub decoder: Decoder,
+    /// `--fullscreen`: a borderless window over the whole monitor, so the
+    /// host is asked for exactly this screen's pixel size (no local scaling).
+    pub fullscreen: bool,
+    /// While controlling, send Windows shortcuts (Win, Alt+Tab, Ctrl+Esc...)
+    /// to the host. Defaults on; `--no-shortcuts` keeps them local.
+    pub shortcuts: bool,
+}
+
+/// A missing viewing destination requests one local native machine choice.
+/// Directory queries retain their explicit destination and never open a UI.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ConnectionCommand<'a> {
+    pub view: bool,
+    pub selection: Option<&'a str>,
+    pub options: Options,
+}
+
+impl<'a> ConnectionCommand<'a> {
+    pub(crate) fn parse(args: &'a [String], default_port: u16) -> Option<Self> {
+        let (view, rest) = match args {
+            [] => (true, args),
+            [command, rest @ ..] if command == "view" => (true, rest),
+            [command, rest @ ..] if command == "directory" => (false, rest),
+            _ => return None,
+        };
+        let (selection, rest) = match rest {
+            [selection, rest @ ..] if !selection.is_empty() && !selection.starts_with('-') => {
+                (Some(selection.as_str()), rest)
+            }
+            _ if view => (None, rest),
+            _ => return None,
+        };
+        Some(Self {
+            view,
+            selection,
+            options: Options::parse(rest, view, default_port)?,
+        })
+    }
 }
 
 impl Options {
+    #[allow(clippy::too_many_lines, reason = "one bounded command parser")]
     pub(crate) fn parse(mut rest: &[String], view: bool, default_port: u16) -> Option<Self> {
         let mut options = Self {
             port: default_port,
             addresses: Vec::new(),
             family: Family::Automatic,
             control: false,
+            clipboard: true,
             seconds: None,
             display: DisplayChoice::Primary,
+            send: None,
+            receive: None,
+            decoder: Decoder::Automatic,
+            fullscreen: false,
+            shortcuts: true,
         };
         let mut port_set = false;
+        let mut decoder_set = false;
         let mut display_set = false;
+        let mut receive_directory = None;
+        let mut receive_max_file_bytes = None;
+        let mut receive_max_session_bytes = None;
+        let mut receive_conflict = None;
         loop {
             match rest {
-                [] => return Some(options),
+                [] => {
+                    if let Some(directory) = receive_directory {
+                        if receive_max_file_bytes
+                            .zip(receive_max_session_bytes)
+                            .is_some_and(|(file, session)| session < file)
+                        {
+                            return None;
+                        }
+                        options.receive = Some(ReceiveOptions {
+                            directory,
+                            max_file_bytes: receive_max_file_bytes,
+                            max_session_bytes: receive_max_session_bytes,
+                            conflict: receive_conflict.unwrap_or_default(),
+                        });
+                    } else if receive_max_file_bytes.is_some()
+                        || receive_max_session_bytes.is_some()
+                        || receive_conflict.is_some()
+                    {
+                        return None;
+                    }
+                    return ((options.send.is_none() && options.receive.is_none())
+                        || options.control)
+                        .then_some(options);
+                }
                 [flag, tail @ ..] if view && flag == "--control" && !options.control => {
                     options.control = true;
+                    rest = tail;
+                }
+                [flag, tail @ ..] if view && flag == "--no-clipboard" && options.clipboard => {
+                    options.clipboard = false;
+                    rest = tail;
+                }
+                [flag, tail @ ..] if view && flag == "--fullscreen" && !options.fullscreen => {
+                    options.fullscreen = true;
+                    rest = tail;
+                }
+                [flag, tail @ ..] if view && flag == "--no-shortcuts" && options.shortcuts => {
+                    options.shortcuts = false;
                     rest = tail;
                 }
                 [flag, tail @ ..]
@@ -102,6 +241,31 @@ impl Options {
                             options.display = DisplayChoice::parse(value)?;
                             display_set = true;
                         }
+                        "--decoder" if view && !decoder_set => {
+                            options.decoder = Decoder::parse(value)?;
+                            decoder_set = true;
+                        }
+                        "--send" if view && options.send.is_none() && !value.is_empty() => {
+                            options.send = Some(PathBuf::from(value));
+                        }
+                        "--receive" if view && receive_directory.is_none() && !value.is_empty() => {
+                            receive_directory = Some(PathBuf::from(value));
+                        }
+                        "--receive-max-file-bytes" if view && receive_max_file_bytes.is_none() => {
+                            receive_max_file_bytes = Some(byte_limit(value)?);
+                        }
+                        "--receive-max-session-bytes"
+                            if view && receive_max_session_bytes.is_none() =>
+                        {
+                            receive_max_session_bytes = Some(byte_limit(value)?);
+                        }
+                        "--receive-conflict" if view && receive_conflict.is_none() => {
+                            receive_conflict = Some(match value.as_str() {
+                                "reject" => ReceiveConflict::Reject,
+                                "keep-both" => ReceiveConflict::KeepBoth,
+                                _ => return None,
+                            });
+                        }
                         _ => return None,
                     }
                     rest = tail;
@@ -110,6 +274,13 @@ impl Options {
             }
         }
     }
+}
+
+fn byte_limit(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok().filter(|limit| *limit != 0)
 }
 
 #[cfg(test)]
@@ -128,6 +299,83 @@ mod tests {
     }
 
     #[test]
+    fn a_native_machine_choice_preserves_explicit_connection_options() {
+        for args in [vec![], vec!["view"]] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            let command = ConnectionCommand::parse(&args, 8443).unwrap();
+            assert!(command.view);
+            assert_eq!(command.selection, None);
+            assert!(!command.options.control);
+        }
+        let args = [
+            "view",
+            "--control",
+            "--no-clipboard",
+            "--ipv6",
+            "--display",
+            "choose",
+        ]
+        .map(str::to_owned);
+        let command = ConnectionCommand::parse(&args, 8443).unwrap();
+        assert_eq!(command.selection, None);
+        assert!(command.options.control);
+        assert!(!command.options.clipboard);
+        assert_eq!(command.options.family, Family::Ipv6);
+        assert_eq!(command.options.display, DisplayChoice::Choose);
+    }
+
+    #[test]
+    fn the_decoder_preference_is_explicit_unique_and_viewing_only() {
+        assert_eq!(parse(&[], true).unwrap().decoder, Decoder::Automatic);
+        for (value, decoder) in [
+            ("auto", Decoder::Automatic),
+            ("hardware", Decoder::Hardware),
+            ("software", Decoder::Software),
+        ] {
+            assert_eq!(parse(&["--decoder", value], true).unwrap().decoder, decoder);
+        }
+        for args in [
+            vec!["--decoder", "gpu"],
+            vec!["--decoder", ""],
+            vec!["--decoder"],
+            vec!["--decoder", "auto", "--decoder", "software"],
+        ] {
+            assert_eq!(parse(&args, true), None, "{args:?}");
+        }
+        assert_eq!(parse(&["--decoder", "software"], false), None);
+    }
+
+    #[test]
+    fn explicit_destinations_keep_the_existing_view_and_directory_paths() {
+        for (verb, view) in [("view", true), ("directory", false)] {
+            let args = [verb, "host.tail.ts.net", "--port", "9443", "--ipv4"].map(str::to_owned);
+            let command = ConnectionCommand::parse(&args, 8443).unwrap();
+            assert_eq!(command.view, view);
+            assert_eq!(command.selection, Some("host.tail.ts.net"));
+            assert_eq!(command.options.port, 9443);
+            assert_eq!(command.options.family, Family::Ipv4);
+        }
+    }
+
+    #[test]
+    fn malformed_commands_do_not_silently_open_the_machine_picker() {
+        for args in [
+            vec!["directory"],
+            vec!["directory", "--ipv6"],
+            vec!["view", ""],
+            vec!["view", "--unknown"],
+            vec!["view", "--port"],
+            vec!["view", "one.tail.ts.net", "two.tail.ts.net"],
+            vec!["hosts", "--control"],
+            vec!["--control"],
+            vec!["unknown"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(ConnectionCommand::parse(&args, 8443).is_none(), "{args:?}");
+        }
+    }
+
+    #[test]
     fn discovery_backed_connection_defaults_to_both_authenticated_families() {
         assert_eq!(
             parse(&[], true),
@@ -136,11 +384,214 @@ mod tests {
                 addresses: Vec::new(),
                 family: Family::Automatic,
                 control: false,
+                clipboard: true,
                 seconds: None,
                 display: DisplayChoice::Primary,
+                decoder: Decoder::Automatic,
+                send: None,
+                receive: None,
+                fullscreen: false,
+                shortcuts: true,
             })
         );
         assert_eq!(parse(&[], false), parse(&[], true));
+    }
+
+    #[test]
+    fn fullscreen_is_opt_in_and_shortcuts_default_on() {
+        let plain = parse(&["--control"], true).unwrap();
+        assert!(!plain.fullscreen && plain.shortcuts);
+        let chosen = parse(&["--control", "--fullscreen", "--no-shortcuts"], true).unwrap();
+        assert!(chosen.fullscreen && !chosen.shortcuts);
+        for args in [
+            vec!["--fullscreen", "--fullscreen"],
+            vec!["--no-shortcuts", "--no-shortcuts"],
+        ] {
+            assert!(parse(&args, true).is_none(), "{args:?}");
+        }
+        // Window choices exist only for viewing, not for directory queries.
+        assert!(parse(&["--fullscreen"], false).is_none());
+        assert!(parse(&["--no-shortcuts"], false).is_none());
+    }
+
+    #[test]
+    fn clipboard_defaults_on_for_control_and_explicit_off_is_order_independent() {
+        assert!(parse(&["--control"], true).unwrap().clipboard);
+        for args in [
+            ["--control", "--no-clipboard"],
+            ["--no-clipboard", "--control"],
+        ] {
+            let options = parse(&args, true).unwrap();
+            assert!(options.control);
+            assert!(!options.clipboard);
+        }
+        assert!(!parse(&["--no-clipboard"], true).unwrap().clipboard);
+        assert!(parse(&["--no-clipboard", "--no-clipboard"], true).is_none());
+        assert!(parse(&["--no-clipboard"], false).is_none());
+    }
+
+    #[test]
+    fn a_single_explicit_file_requires_control_in_either_option_order() {
+        for args in [
+            vec!["--control", "--send", "C:\\Users\\me\\draft.txt"],
+            vec!["--send", "C:\\Users\\me\\draft.txt", "--control"],
+        ] {
+            let options = parse(&args, true).unwrap();
+            assert!(options.control);
+            assert_eq!(
+                options.send,
+                Some(PathBuf::from("C:\\Users\\me\\draft.txt"))
+            );
+        }
+        let unicode = "C:\\Users\\me\\Résumé final.txt";
+        assert_eq!(
+            parse(&["--control", "--send", unicode], true).unwrap().send,
+            Some(PathBuf::from(unicode))
+        );
+        for args in [
+            vec!["--send", "file.txt"],
+            vec!["--control", "--send"],
+            vec!["--control", "--send", ""],
+            vec!["--control", "--send", "a", "--send", "b"],
+        ] {
+            assert!(parse(&args, true).is_none());
+        }
+        assert!(parse(&["--send", "file.txt"], false).is_none());
+    }
+
+    #[test]
+    fn receiving_is_explicit_local_consent_and_composes_with_uploads() {
+        let directory = "C:\\Users\\me\\Documents\\Reçus";
+        for args in [
+            vec!["--control", "--receive", directory],
+            vec!["--receive", directory, "--control"],
+        ] {
+            let options = parse(&args, true).unwrap();
+            assert!(options.control);
+            assert!(options.send.is_none());
+            assert_eq!(
+                options.receive,
+                Some(ReceiveOptions {
+                    directory: PathBuf::from(directory),
+                    max_file_bytes: None,
+                    max_session_bytes: None,
+                    conflict: ReceiveConflict::Reject,
+                })
+            );
+        }
+        let args = [
+            "view",
+            "--receive-conflict",
+            "keep-both",
+            "--receive-max-session-bytes",
+            "300",
+            "--receive",
+            directory,
+            "--control",
+            "--send",
+            "C:\\Users\\me\\draft.txt",
+            "--receive-max-file-bytes",
+            "100",
+            "--no-clipboard",
+        ]
+        .map(str::to_owned);
+        let command = ConnectionCommand::parse(&args, 8443).unwrap();
+        assert_eq!(command.selection, None);
+        assert!(!command.options.clipboard);
+        assert!(command.options.send.is_some());
+        assert_eq!(
+            command.options.receive,
+            Some(ReceiveOptions {
+                directory: PathBuf::from(directory),
+                max_file_bytes: Some(100),
+                max_session_bytes: Some(300),
+                conflict: ReceiveConflict::KeepBoth,
+            })
+        );
+    }
+
+    #[test]
+    fn receive_settings_cannot_enable_authority_or_silently_change_conflict_policy() {
+        for args in [
+            vec!["--receive", "C:\\Drop"],
+            vec!["--control", "--receive"],
+            vec!["--control", "--receive", ""],
+            vec!["--control", "--receive", "C:\\One", "--receive", "C:\\Two"],
+            vec!["--control", "--receive-max-file-bytes", "1"],
+            vec!["--control", "--receive-max-session-bytes", "1"],
+            vec!["--control", "--receive-conflict", "keep-both"],
+            vec![
+                "--control",
+                "--receive",
+                "C:\\Drop",
+                "--receive-conflict",
+                "overwrite",
+            ],
+            vec![
+                "--control",
+                "--receive",
+                "C:\\Drop",
+                "--receive-conflict",
+                "reject",
+                "--receive-conflict",
+                "keep-both",
+            ],
+            vec![
+                "--control",
+                "--receive",
+                "C:\\Drop",
+                "--receive-max-file-bytes",
+                "2",
+                "--receive-max-session-bytes",
+                "1",
+            ],
+        ] {
+            assert!(parse(&args, true).is_none(), "{args:?}");
+        }
+        for flag in [
+            "--receive",
+            "--receive-max-file-bytes",
+            "--receive-max-session-bytes",
+            "--receive-conflict",
+        ] {
+            assert!(parse(&[flag, "1"], false).is_none());
+        }
+    }
+
+    #[test]
+    fn receive_byte_limits_reject_zero_overflow_and_duplicate_budgets() {
+        for flag in ["--receive-max-file-bytes", "--receive-max-session-bytes"] {
+            for value in ["0", "-1", "+1", "1MiB", " 1", "", "18446744073709551616"] {
+                assert!(
+                    parse(&["--control", "--receive", "C:\\Drop", flag, value], true).is_none()
+                );
+            }
+            assert!(
+                parse(
+                    &["--control", "--receive", "C:\\Drop", flag, "1", flag, "2"],
+                    true
+                )
+                .is_none()
+            );
+            let options = parse(
+                &[
+                    "--control",
+                    "--receive",
+                    "C:\\Drop",
+                    flag,
+                    "18446744073709551615",
+                ],
+                true,
+            )
+            .unwrap();
+            let receive = options.receive.unwrap();
+            let limit = if flag == "--receive-max-file-bytes" {
+                receive.max_file_bytes
+            } else {
+                receive.max_session_bytes
+            };
+            assert_eq!(limit, Some(u64::MAX));
+        }
     }
 
     #[test]

@@ -32,6 +32,8 @@ fn every_header_constant_matches_the_rust_value() {
         expected.push((name.to_owned(), value.into()));
     }
     for (name, value) in [
+        ("FR_DISPLAY_PRIMARY", FR_DISPLAY_PRIMARY),
+        ("FR_DISPLAY_CHOOSE", FR_DISPLAY_CHOOSE),
         ("FR_EVENT_STATE", kind::STATE),
         ("FR_EVENT_PIN", kind::PIN),
         ("FR_EVENT_VIDEO", kind::VIDEO),
@@ -62,6 +64,14 @@ fn every_header_constant_matches_the_rust_value() {
     ] {
         expected.push((name.to_owned(), value.into()));
     }
+    expected.push((
+        "FR_MAX_DISPLAYS".into(),
+        i64::try_from(FR_MAX_DISPLAYS).unwrap(),
+    ));
+    expected.push((
+        "FR_UPLOAD_STATUS_MAX_BYTES".into(),
+        i64::try_from(FR_UPLOAD_STATUS_MAX_BYTES).unwrap(),
+    ));
     let mut found = defines();
     found.sort();
     expected.sort();
@@ -91,6 +101,190 @@ fn struct_layouts_match_the_headers_static_assertions() {
     assert_eq!(offset_of!(FrConfig, pin), 16);
     assert_eq!(offset_of!(FrConfig, picture_width), 24);
     assert_eq!(offset_of!(FrConfig, picture_height), 28);
+    assert_eq!(size_of::<FrDisplayRequest>(), 16);
+    assert_eq!(offset_of!(FrDisplayRequest, count), 8);
+    assert_eq!(size_of::<FrDisplayInfo>(), 40);
+    assert_eq!(offset_of!(FrDisplayInfo, x), 16);
+    assert_eq!(offset_of!(FrDisplayInfo, scale_numerator), 24);
+    assert_eq!(offset_of!(FrDisplayInfo, rotation), 32);
+}
+
+#[test]
+fn display_bridge_rejects_bad_handles_and_modes_without_changing_outputs() {
+    let mut request = FrDisplayRequest {
+        token: 91,
+        count: 3,
+        reserved: 7,
+    };
+    let original = request;
+    let mut info = FrDisplayInfo {
+        x: -1920,
+        rotation: 2,
+        ..FrDisplayInfo::default()
+    };
+    let original_info = info;
+    let host = CString::new("mac.tailtest.ts.net").unwrap();
+    let config = config(&host, 18443, None);
+    let mut handle = 91;
+    // SAFETY: outputs are valid or NULL; the config and its string are valid.
+    unsafe {
+        assert!(!fr_session_display_request(0, &raw mut request));
+        assert!(!fr_session_display_request(0, core::ptr::null_mut()));
+        assert!(!fr_session_display_info(0, 91, 0, &raw mut info));
+        assert!(!fr_session_display_info(
+            0,
+            91,
+            u32::MAX,
+            core::ptr::null_mut()
+        ));
+        assert_eq!(
+            fr_session_start_with_display(&raw const config, u32::MAX, &raw mut handle),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_session_start_with_display(core::ptr::null(), FR_DISPLAY_CHOOSE, &raw mut handle),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_session_start_with_display(
+                &raw const config,
+                FR_DISPLAY_CHOOSE,
+                core::ptr::null_mut()
+            ),
+            FR_INVALID
+        );
+    }
+    assert_eq!(request, original);
+    assert_eq!(info, original_info);
+    assert_eq!(handle, 91);
+    assert_eq!(fr_session_select_display(0, 91, 0), FR_STALE);
+    assert_eq!(fr_session_cancel_display(0, 91), FR_STALE);
+    assert_eq!(fr_session_reopen_status(0), FR_STALE);
+}
+
+#[test]
+fn upload_bridge_refuses_stale_choices_and_invalid_start_without_changing_outputs() {
+    let host = CString::new("mac.tailtest.ts.net").unwrap();
+    let mut config = config(&host, 18443, None);
+    config.control = false;
+    let mut handle = 91;
+    let mut token = 92;
+    let mut buffer = [0x55 as c_char; 4];
+    // SAFETY: inputs and outputs are live or explicitly NULL. No valid session
+    // or file path is supplied, so none of these calls starts a source.
+    unsafe {
+        assert_eq!(
+            fr_session_start_with_upload(&raw const config, FR_DISPLAY_CHOOSE, &raw mut handle),
+            FR_INVALID,
+        );
+        assert_eq!(
+            fr_session_start_with_upload(&raw const config, u32::MAX, &raw mut handle),
+            FR_INVALID,
+        );
+        assert_eq!(
+            fr_session_start_with_upload(core::ptr::null(), FR_DISPLAY_CHOOSE, &raw mut handle),
+            FR_INVALID,
+        );
+        assert_eq!(
+            fr_session_begin_upload_selection(0, &raw mut token),
+            FR_STALE
+        );
+        assert_eq!(
+            fr_session_begin_upload_selection(0, core::ptr::null_mut()),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_session_prepare_upload(0, 92, core::ptr::null()),
+            FR_STALE
+        );
+        assert_eq!(
+            fr_session_copy_upload_status(0, buffer.as_mut_ptr(), buffer.len()),
+            0
+        );
+        assert_eq!(
+            fr_session_copy_upload_status(0, core::ptr::null_mut(), 0),
+            0
+        );
+    }
+    assert_eq!((handle, token), (91, 92));
+    assert_eq!(buffer[0], 0);
+    assert_eq!(buffer[1], 0x55 as c_char);
+    assert_eq!(fr_session_discard_upload_selection(0, 92), FR_STALE);
+    assert_eq!(fr_session_send_upload(0, 92), FR_STALE);
+    assert_eq!(fr_session_cancel_upload(0, 1), FR_STALE);
+    assert_eq!(fr_session_pause_upload(0, 1, true), FR_STALE);
+    assert_eq!(fr_session_cancel_upload(0, 0), FR_INVALID);
+    assert_eq!(fr_session_pause_upload(0, 10, false), FR_INVALID);
+    assert!(!fr_session_upload_sources_released(0));
+}
+
+#[test]
+fn frame_display_refuses_unknown_owners_and_null_outputs_without_writing() {
+    let mut width = 91;
+    let mut height = 37;
+    // SAFETY: outputs are writable or NULL; all handles are deliberately invalid.
+    unsafe {
+        for handle in [0, 1, u64::MAX] {
+            assert!(!fr_session_frame_display(
+                handle,
+                1,
+                &raw mut width,
+                &raw mut height
+            ));
+        }
+        assert!(!fr_session_frame_display(
+            0,
+            1,
+            core::ptr::null_mut(),
+            &raw mut height
+        ));
+        assert!(!fr_session_frame_display(
+            0,
+            1,
+            &raw mut width,
+            core::ptr::null_mut()
+        ));
+    }
+    assert_eq!((width, height), (91, 37));
+}
+
+#[test]
+fn frame_cursor_refuses_unknown_owners_and_null_outputs_without_writing() {
+    let _: unsafe extern "C" fn(FrHandle, u64, u64, *mut FrCursor) -> bool =
+        fr_session_frame_cursor;
+    let sentinel = FrCursor {
+        generation: 91,
+        x: -3,
+        y: 37,
+        width: 11,
+        height: 13,
+        hotspot_x: 2,
+        hotspot_y: 7,
+        visible: 1,
+        reserved: 19,
+    };
+    let mut out = sentinel;
+    // SAFETY: output is writable or NULL; all handles are deliberately invalid.
+    unsafe {
+        for handle in [0, 1, u64::MAX] {
+            for (frame, sequence) in [(0, 0), (1, 1), (u64::MAX, u64::MAX)] {
+                assert!(!fr_session_frame_cursor(
+                    handle,
+                    frame,
+                    sequence,
+                    &raw mut out
+                ));
+                assert_eq!(out, sentinel);
+            }
+            assert!(!fr_session_frame_cursor(
+                handle,
+                1,
+                1,
+                core::ptr::null_mut()
+            ));
+        }
+    }
+    assert_eq!(out, sentinel);
 }
 
 #[test]

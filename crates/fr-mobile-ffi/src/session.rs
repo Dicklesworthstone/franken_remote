@@ -12,15 +12,24 @@
 //! input failures end control (frd's contract for a producer); so do closing,
 //! backgrounding and an invisible view. Ending control ends the session (`CONTROL_STOPPED` when
 //! this device stopped it); viewing again is a new session.
+mod clipboard;
 mod completion;
 pub mod connection;
 mod control_policy;
 mod control_request;
 mod display;
+mod download;
+mod file_offer;
+mod files;
+mod focus_close;
 mod key_capture;
+mod local_cursor_adapter;
 mod text;
 mod typing;
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+mod upload;
 
+pub use clipboard::Report as ClipboardReport;
 #[cfg(test)]
 use completion::classify;
 pub use completion::end;
@@ -32,11 +41,20 @@ pub use display::{
     Choice as DisplayChoice, Error as DisplayError, MAX_CHOICES as MAX_DISPLAY_CHOICES,
     Request as DisplayRequest,
 };
+pub use download::{Download, Receipt as DownloadReceipt, Report as DownloadReport};
+pub use files::{MAX_UPLOADS, PreparedUpload, Report as UploadReport, Upload};
+pub use frd::native_files::{
+    ConflictPolicy as DownloadConflictPolicy, DirectoryRefusal as DownloadRefusal,
+    Limits as DownloadLimits,
+};
 pub use text::{CapturedText, TextDraft};
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+pub(crate) use upload::Error as UploadError;
 
 use crate::{
     events::{self, Event, Events, kind, state},
     input::{self, LineScroller},
+    local_cursor,
     video::{Cursor, Decoder, FrameSlot},
 };
 use asupersync::{
@@ -50,7 +68,7 @@ use fr_core::input::{DesktopPoint, InputBounds, KeyTransition, ScrollUnit};
 use fr_core::input_submission::Capability;
 use fr_media::{
     access_unit::EncodedAccessUnit,
-    freshness::ClockPolicy,
+    freshness::{ClockPolicy, Error as FreshnessError},
     hevc::DecoderRecord,
     worker::{
         Configuration as WorkerConfiguration, Error as WorkerError, overlay::Update as CursorUpdate,
@@ -64,8 +82,8 @@ use frd::{
         reconnect::{self, Application, CallbackError, Failure, Status},
     },
     session_startup::{
-        ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
-        Presentation, Viewer,
+        ControlledViewer, ControlledViewerError, InteractiveViewerState, NativeObserver,
+        ObserverError, ObserverPolicy, Presentation, StreamingViewerError, Viewer, ViewerControl,
         viewer_events::{
             ClientInstant, Event as InputEvent, Layout, LocalPoint, Located, NativeCapture,
             PositionedAction, Source,
@@ -102,6 +120,9 @@ pub enum InputResult {
     /// Nothing was accepted because input is busy or the text context is not
     /// ready. Physical keys may be paced; completed text must be discarded.
     Busy,
+    /// The app is in the background ([`Shared::set_active`]): nothing was
+    /// sent or queued, and control continues. Drop the event; never retry it.
+    Inactive,
 }
 
 /// A native event's original input source, picture mapping and exclusive send
@@ -138,6 +159,16 @@ pub struct CapturedKey {
     pressed: bool,
     capture: CapturedInput,
 }
+
+/// One file chooser's original input source and uninterrupted visible view.
+/// Contains no file path, ticket, or authority and is never refreshed in place.
+#[derive(Clone)]
+pub struct FileChoiceContext {
+    input: frd::session_startup::viewer_events::InputContext,
+    /// Exact original grant identity, retained even after that grant is gone.
+    /// A native callback may stop this token, never a replacement source.
+    stop: Arc<AtomicBool>,
+}
 impl CapturedKey {
     /// Charge native queue time without changing the original source or stamp.
     pub fn with_queue_age(mut self, age: Duration) -> Option<Self> {
@@ -151,6 +182,15 @@ pub struct Config {
     pub target: connection::Target,
     pub port: u16,
     pub control: bool,
+    /// Optional native clipboard for a controlling Windows client. Observation
+    /// and other platforms never configure or advertise this Windows adapter.
+    pub clipboard: bool,
+    /// One explicit, already selected local file. Clones retain its original
+    /// one-use owner; replacement sessions must omit it rather than replay it.
+    pub upload: Option<Arc<Upload>>,
+    /// An explicitly selected, pinned local destination for this original
+    /// controlled session. Replacements must omit it rather than replay consent.
+    pub download: Option<Arc<Download>>,
     /// The largest picture this device shows 1:1 (`scaled-picture`); `None`
     /// keeps the host's native pixels.
     pub picture: Option<(u32, u32)>,
@@ -162,18 +202,23 @@ pub struct Config {
 struct Capture {
     stop: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
+    cursor: Option<Arc<local_cursor::Owner>>,
 }
 impl NativeCapture for Capture {
     fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Some(cursor) = &self.cursor {
+            cursor.stop();
+        }
     }
     fn try_reap(&mut self) -> bool {
         self.released.load(Ordering::SeqCst)
+            && self.cursor.as_ref().is_none_or(|cursor| cursor.completed())
     }
 }
 impl Drop for Capture {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.stop();
     }
 }
 
@@ -187,6 +232,9 @@ struct Granted {
     released: Arc<AtomicBool>,
     keys: [bool; 256],
     buttons: [bool; 5],
+    /// Where the host last saw the pointer: an app switch releases held
+    /// buttons here, as no later native point exists.
+    last: Option<Located>,
     scroll: LineScroller,
     /// Last checked send bound for this exact text context. The native Send
     /// gesture freezes it; later renewals cannot extend a queued commit.
@@ -202,9 +250,27 @@ struct Granted {
 }
 impl Drop for Granted {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
         self.source.stop();
         self.released.store(true, Ordering::SeqCst);
     }
+}
+
+/// Published together with one granted producer. Its short publication lock
+/// never performs native work and never waits for the granted/source lock.
+/// The independent control fence stops queued dispatch while that lock is busy.
+struct FocusOwner {
+    original: focus_close::Original,
+    control: ViewerControl,
+}
+
+/// Original approved display coordinates, retained with their frame owner.
+/// Encoded pictures may be smaller; decoder configuration cannot change this
+/// scope within an attempt.
+#[derive(Clone, Copy)]
+struct PresentationDisplay {
+    attempt: u64,
+    size: (u32, u32),
 }
 
 /// Everything the app's threads and the session thread share.
@@ -212,14 +278,32 @@ pub struct Shared {
     pub events: Events,
     pub frames: FrameSlot,
     pub cursor: Mutex<Cursor>,
+    local_cursor: Option<local_cursor::Hub>,
     granted: Mutex<Option<Granted>>,
+    focus_owner: Mutex<Option<FocusOwner>>,
+    clipboard: clipboard::Clipboard,
+    upload: Option<Arc<Upload>>,
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    upload_selection: Mutex<crate::upload_selection::Selections<PreparedUpload>>,
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    upload_preparing: AtomicBool,
+    /// Positive collection of original source owners, distinct from the
+    /// terminal result published before a failed bounded cleanup completes.
+    upload_sources_released: AtomicBool,
+    download: Option<Arc<Download>>,
     close: AtomicBool,
     want_control: AtomicBool,
+    /// Keep control: ask for it again whenever this session can (each new
+    /// attempt after an internal reconnect, the app returning to the front).
+    auto_control: AtomicBool,
     control_capable: bool,
     control_requests: Mutex<control_request::Requests>,
     control_retirement: control_request::Retirement,
     requesting_control: AtomicBool,
     visible: AtomicBool,
+    /// The app is in the foreground. Only [`Shared::set_active`] clears it;
+    /// shells that never call it (iOS) stay active.
+    active: AtomicBool,
     /// How many times the view went from visible to hidden: a control
     /// request made before a hide never completes after it.
     hides: AtomicU64,
@@ -230,7 +314,13 @@ pub struct Shared {
     /// The original service and bounded cleanup succeeded for a local close.
     /// Published before `finished`; never inferred from the UI's end code.
     orderly_closed: AtomicBool,
+    /// An active native controller requested an orderly close specifically
+    /// because its original window lost focus. Hidden remains its end reason.
+    focus_close_requested: AtomicBool,
+    /// Positive original service/cleanup proof for that focus-close request.
+    focus_closed: AtomicBool,
     picture: Mutex<(u32, u32)>,
+    display: Mutex<Option<PresentationDisplay>>,
     full_range: AtomicBool,
     hardware: AtomicI32,
     pin: Mutex<Option<String>>,
@@ -241,29 +331,196 @@ pub struct Shared {
     first_view_micros: AtomicU64,
 }
 impl Shared {
+    /// The optional native UI exchange. Its owner belongs to one exact grant,
+    /// and reports only cursor effects, never input or visible-frame evidence.
+    pub fn local_cursor(&self) -> Option<&local_cursor::Hub> {
+        self.local_cursor.as_ref()
+    }
+
+    /// Original approved display dimensions for this live frame owner.
+    /// A lossy VIDEO notification is not a geometry authority. The frame gate
+    /// prevents an earlier attempt's dimensions from describing a new picture.
+    pub fn display_for(&self, attempt: u64) -> Option<(u32, u32)> {
+        self.frames
+            .with_current(attempt, || {
+                if self.close.load(Ordering::SeqCst) || self.finished() {
+                    return None;
+                }
+                self.display
+                    .lock()
+                    .ok()?
+                    .filter(|display| display.attempt == attempt)
+                    .map(|display| display.size)
+            })
+            .ok()
+            .flatten()
+    }
+
+    /// Original display dimensions for a retained app-visible frame id.
+    /// Attempt generations never repeat. A reconnect between either snapshot
+    /// below and the guarded lookup therefore refuses instead of supplying
+    /// the replacement display's coordinates for an older picture.
+    pub fn display_for_frame(&self, frame: u64) -> Option<(u32, u32)> {
+        let attempt = self.frames.app_id(0);
+        if frame == 0 || frame != self.frames.app_id(frame) {
+            return None;
+        }
+        self.display_for(attempt)
+    }
+
+    /// Copy only bounded cursor metadata for the original retained picture.
+    /// The callback runs under the frame and cursor gates: it must not allocate,
+    /// call native code or acquire any other session lock.
+    #[cfg(any(target_os = "ios", target_os = "macos", test))]
+    pub(crate) fn with_cursor_for_frame<T>(
+        &self,
+        frame: u64,
+        sequence: u64,
+        bounded_copy: impl FnOnce(&Cursor) -> T,
+    ) -> Option<T> {
+        let attempt = self.frames.app_id(0);
+        self.frames
+            .with_current(attempt, || {
+                if self.close.load(Ordering::SeqCst)
+                    || self.finished()
+                    || frame == 0
+                    || frame != self.frames.app_id(frame)
+                    || sequence == 0
+                    || sequence > self.frames.sequence()
+                {
+                    return None;
+                }
+                let display = {
+                    let display = self.display.lock().ok()?;
+                    display.filter(|display| display.attempt == attempt)?.size
+                };
+                let cursor = self.cursor.lock().ok()?;
+                if cursor.attempt != attempt
+                    || cursor.generation == 0
+                    || (cursor.source_width, cursor.source_height) != display
+                    || sequence <= cursor.frame_after
+                {
+                    return None;
+                }
+                Some(bounded_copy(&cursor))
+            })
+            .ok()
+            .flatten()
+    }
+
+    fn clear_presentation(&self) {
+        self.frames.clear();
+        if let Ok(mut cursor) = self.cursor.lock() {
+            let _ = cursor.reset(0, self.frames.sequence());
+            cursor.visible = false;
+            cursor.rgba.clear();
+        }
+    }
+
+    /// Commit a native decoder's bounded metadata after it returns, while its
+    /// original frame owner is still live. Native creation, probing and drops
+    /// stay outside the frame gate. Retirement acquires that gate before
+    /// publishing ENDED, so no delayed completion can append another VIDEO.
+    fn publish_configuration(
+        &self,
+        attempt: u64,
+        display: (u32, u32),
+        picture: (u32, u32),
+        full_range: bool,
+        hardware: Option<bool>,
+    ) -> Result<(), WorkerError> {
+        self.frames
+            .with_current(attempt, || {
+                if self.close.load(Ordering::SeqCst) || self.finished() {
+                    return Err(WorkerError::WrongEpoch);
+                }
+                let mut original = self
+                    .display
+                    .lock()
+                    .map_err(|_| WorkerError::NativeFailure)?;
+                if !fr_wire::display::picture::is_picture(display, picture)
+                    || original
+                        .is_some_and(|value| value.attempt == attempt && value.size != display)
+                {
+                    return Err(WorkerError::GeometryChanged);
+                }
+                let previous = self
+                    .picture
+                    .lock()
+                    .map(|mut p| std::mem::replace(&mut *p, picture))
+                    .map_err(|_| WorkerError::NativeFailure)?;
+                *original = Some(PresentationDisplay {
+                    attempt,
+                    size: display,
+                });
+                drop(original);
+                // A changed picture invalidates the original control layout.
+                // No native call runs here; the independent authority owner
+                // performs release/cleanup after the granted source is stopped.
+                if previous != (0, 0) && previous != picture {
+                    self.stop_control(Some(LocalStop::PictureChanged));
+                }
+                self.hardware
+                    .store(hardware.map_or(-1, i32::from), Ordering::Relaxed);
+                self.full_range.store(full_range, Ordering::Relaxed);
+                self.events.push(Event {
+                    kind: kind::VIDEO,
+                    picture_width: picture.0,
+                    picture_height: picture.1,
+                    ..Event::default()
+                });
+                Ok(())
+            })
+            .map_err(worker_error)?
+    }
+
     #[cfg(test)]
     fn new() -> Self {
         Self::with_control(true)
     }
+    #[cfg(test)]
     fn with_control(control_capable: bool) -> Self {
+        Self::with_auxiliary(control_capable, false, None, None)
+    }
+    fn with_auxiliary(
+        control_capable: bool,
+        clipboard: bool,
+        upload: Option<Arc<Upload>>,
+        download: Option<Arc<Download>>,
+    ) -> Self {
         Self {
             events: Events::default(),
             frames: FrameSlot::default(),
             cursor: Mutex::default(),
+            local_cursor: None,
             granted: Mutex::default(),
+            focus_owner: Mutex::default(),
+            clipboard: clipboard::Clipboard::new(control_capable && clipboard && cfg!(windows)),
+            upload_sources_released: AtomicBool::new(upload.is_none()),
+            upload,
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            upload_selection: Mutex::default(),
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            upload_preparing: AtomicBool::new(false),
+            download,
             close: AtomicBool::new(false),
             want_control: AtomicBool::new(false),
+            auto_control: AtomicBool::new(false),
             control_capable,
             control_requests: Mutex::default(),
             control_retirement: control_request::Retirement::default(),
             requesting_control: AtomicBool::new(false),
             visible: AtomicBool::new(false),
+            active: AtomicBool::new(true),
             hides: AtomicU64::new(0),
             local_stop: AtomicU32::new(0),
             serving: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             orderly_closed: AtomicBool::new(false),
+            focus_close_requested: AtomicBool::new(false),
+            focus_closed: AtomicBool::new(false),
             picture: Mutex::new((0, 0)),
+            display: Mutex::default(),
             full_range: AtomicBool::new(false),
             hardware: AtomicI32::new(-1),
             pin: Mutex::default(),
@@ -278,9 +535,89 @@ impl Shared {
     /// is cancelled by the supervisor. Idempotent.
     pub fn close(&self) {
         self.close.store(true, Ordering::SeqCst);
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
+        self.clear_upload_selection();
+        // Fence new native input immediately, but retain the original source
+        // and its receipts until the existing close exchange and cleanup run.
+        // Source::stop cancels in-flight service; using it here would turn an
+        // explicit orderly close into an unconfirmed emergency cancellation.
+        {
+            let granted = self
+                .granted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(granted) = granted.as_ref() {
+                granted.stop.store(true, Ordering::SeqCst);
+                granted.source.fence_for_close();
+            }
+        }
+        self.clipboard.stop();
+        if let Some(upload) = &self.upload {
+            upload.retire();
+        }
+        if let Some(download) = &self.download {
+            download.retire();
+        }
         self.retire_control_request();
         self.retire_display();
-        self.stop_control(None);
+    }
+    /// Fence this exact active controller on native focus loss while retaining
+    /// its source through the original orderly close and held-input cleanup.
+    /// This never resumes control. A native shell may wait for `focus_closed`
+    /// and a new local foreground choice before opening a fresh viewing owner.
+    /// A stale callback, a failed input source or an earlier close cannot create
+    /// that proof. `attempt` is the drawn frame's original `app_id(0)` scope.
+    pub fn close_for_focus_loss(&self, attempt: u64) -> bool {
+        {
+            let Ok(owner) = self.focus_owner.lock() else {
+                return false;
+            };
+            let Some(owner) = owner.as_ref() else {
+                return false;
+            };
+            if self.finished()
+                || !self.serving.load(Ordering::SeqCst)
+                || !self.visible.load(Ordering::SeqCst)
+                || !owner
+                    .original
+                    .claim(attempt, self.frames.app_id(0), &self.close)
+            {
+                return false;
+            }
+            // Close is claimed for this published original without waiting on
+            // native/file admission. A competing callback cannot drop the
+            // retained source when it notices this permanent input fence.
+            owner.control.fence_for_close();
+            if self
+                .local_stop
+                .compare_exchange(
+                    0,
+                    LocalStop::Hidden as u32,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_err()
+            {
+                return false;
+            }
+            // Cleanup retires this witness under the same short lock before
+            // any later attempt may begin. Publish the request here, so fast
+            // original cleanup cannot race the callback out of its real proof.
+            self.focus_close_requested.store(true, Ordering::SeqCst);
+            self.events.state(state::CONTROL_ENDED, 0);
+        }
+        // The close fence precedes every auxiliary/native cleanup. Hiding a
+        // closing owner retains its already-fenced input source, never revives it.
+        self.set_visible(false);
+        self.clipboard.stop();
+        if let Some(upload) = &self.upload {
+            upload.retire();
+        }
+        if let Some(download) = &self.download {
+            download.retire();
+        }
+        self.retire_display();
+        true
     }
     /// A new native picker request, published only after host approval. The
     /// original startup budget and transport continue while the UI decides.
@@ -322,6 +659,9 @@ impl Shared {
         selection.cancel(request)?;
         self.close.store(true, Ordering::SeqCst);
         drop(selection);
+        self.clipboard.stop();
+        self.cancel_upload();
+        self.cancel_download();
         self.stop_control(None);
         Ok(())
     }
@@ -358,18 +698,83 @@ impl Shared {
     pub fn orderly_closed(&self) -> bool {
         self.finished() && self.end_code() == end::OK && self.orderly_closed.load(Ordering::SeqCst)
     }
-    /// The view is on screen in an active app (not backgrounded, covered or
-    /// detached). Frames count as seen only while this holds; losing it
-    /// ends control at once, and a pending control request with it.
+    /// A focus-close whose original service AND cleanup succeeded. The public
+    /// result stays `CONTROL_STOPPED` / `Hidden`; merely seeing that result or
+    /// waiting longer cannot establish this separate proof.
+    pub fn focus_closed(&self) -> bool {
+        self.finished()
+            && self.end_code() == end::CONTROL_STOPPED
+            && self.focus_closed.load(Ordering::SeqCst)
+    }
+    /// The view is on screen (not backgrounded, covered or detached; a
+    /// desktop app switch alone is [`Shared::set_active`]). Frames count as
+    /// seen only while this holds; losing it ends control at once, and a
+    /// pending control request with it.
     pub fn set_visible(&self, visible: bool) {
         let was = self.visible.swap(visible, Ordering::SeqCst);
         if !visible {
+            self.clipboard.hide(was);
             if was {
+                self.cancel_upload();
+                self.cancel_download();
                 self.hides.fetch_add(1, Ordering::SeqCst);
             }
             self.retire_control_request();
-            self.stop_control(Some(LocalStop::Hidden));
+            // Close already fences native input and retains the source until
+            // its original service settles. A repeated native hide must not
+            // turn that orderly drain into an emergency source cancellation.
+            if !self.close.load(Ordering::SeqCst) {
+                self.stop_control(Some(LocalStop::Hidden));
+            }
         }
+    }
+    /// The app left (`false`) or regained (`true`) the foreground while its
+    /// view stays on screen: a desktop app switch, not a minimize or hide.
+    /// Leaving first releases every key and button this grant sent a press
+    /// for, then admits nothing (motion over the inactive window included)
+    /// until the app is active again. The grant, its lease renewal, the
+    /// clipboard lane and viewing all continue, so an app switch does not end
+    /// the session (plan Phase 1 exit gate). Unsent control choices retire.
+    /// Returning admits only new native events: a release of a key or button
+    /// pressed in another app sends nothing, and nothing is replayed.
+    ///
+    /// `false` only when leaving and a release was refused: control is not
+    /// paused with input held, and the shell must end it (an orderly
+    /// [`Shared::close_for_focus_loss`], else a hide). A failed source has
+    /// already dropped its grant, exactly as any push that loses control.
+    #[must_use]
+    pub fn set_active(&self, active: bool) -> bool {
+        if active {
+            self.active.store(true, Ordering::SeqCst);
+            return true;
+        }
+        self.retire_control_request();
+        let mut slot = self
+            .granted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Closed under the grant lock: no event admitted after this point
+        // can precede the releases below.
+        self.active.store(false, Ordering::SeqCst);
+        // A closing owner keeps its fenced source for that close's own
+        // cleanup and submits nothing more (see `with_granted`).
+        if self.close.load(Ordering::SeqCst) {
+            return true;
+        }
+        let released = match slot.as_mut() {
+            Some(granted) if !granted.stop.load(Ordering::SeqCst) => release_held(granted),
+            _ => InputResult::Sent,
+        };
+        if released == InputResult::ControlLost {
+            drop(slot.take());
+            self.note_local_stop(LocalStop::InputRefused);
+            self.events.state(state::CONTROL_ENDED, 0);
+        }
+        released == InputResult::Sent
+    }
+    /// The app is in the foreground (see [`Shared::set_active`]).
+    pub fn active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
     }
     /// The legacy native/FFI choice can wait for this attempt's first view.
     /// Hiding, attempt retirement and reconnect discard it; they never carry
@@ -379,6 +784,16 @@ impl Shared {
             return;
         };
         self.request_control_at(original);
+    }
+    /// Keep control for this session's whole life: control is requested
+    /// again each time it can be (a new attempt after an internal reconnect,
+    /// the app back in front), not only once. A shell sets this for a viewer
+    /// the user opened with control; Stop control is a new session without it.
+    pub fn set_auto_control(&self, on: bool) {
+        self.auto_control.store(on, Ordering::SeqCst);
+    }
+    pub fn auto_control(&self) -> bool {
+        self.auto_control.load(Ordering::SeqCst)
     }
     fn request_control_at(&self, original: u64) {
         let Ok(_requests) = self.control_requests.lock() else {
@@ -479,6 +894,7 @@ impl Shared {
             ready
                 && self.control_capable
                 && self.visible.load(Ordering::SeqCst)
+                && self.active.load(Ordering::SeqCst)
                 && !self.close.load(Ordering::SeqCst)
                 && self.local_stop.load(Ordering::SeqCst) == 0
                 && !self.finished(),
@@ -488,6 +904,7 @@ impl Shared {
     fn take_control_request(&self) -> Result<bool, ()> {
         let mut requests = self.control_requests.lock().map_err(|_| ())?;
         if !self.visible.load(Ordering::SeqCst)
+            || !self.active.load(Ordering::SeqCst)
             || self.close.load(Ordering::SeqCst)
             || self.local_stop.load(Ordering::SeqCst) != 0
         {
@@ -529,17 +946,171 @@ impl Shared {
         self.end.load(Ordering::SeqCst)
     }
     pub fn controlled(&self) -> bool {
-        self.granted.lock().is_ok_and(|g| g.is_some())
+        !self.close.load(Ordering::SeqCst)
+            && self
+                .granted
+                .lock()
+                .is_ok_and(|g| !self.close.load(Ordering::SeqCst) && g.is_some())
+    }
+    /// Original optional clipboard evidence. This contains no clipboard text,
+    /// local revision, item identifier or input authority.
+    pub fn clipboard_report(&self) -> ClipboardReport {
+        self.clipboard.report()
+    }
+    /// Original upload evidence, including its final host receipt after the
+    /// view closes. Contains no file path, basename, or contents.
+    pub fn upload_report(&self) -> Option<UploadReport> {
+        self.upload.as_ref().map(|upload| upload.report())
+    }
+    /// Cancel only the selected upload; the original desktop remains alive.
+    pub fn cancel_upload(&self) -> bool {
+        self.upload.as_ref().is_some_and(|upload| upload.cancel())
+    }
+    /// Original download publication and cleanup evidence, containing no path
+    /// or file contents. Closing the view cannot erase a committed result.
+    pub fn download_report(&self) -> Option<DownloadReport> {
+        self.download.as_ref().map(|download| download.report())
+    }
+    /// Stop only this original destination. No new destination or later session
+    /// may inherit the local receive permission.
+    pub fn cancel_download(&self) -> bool {
+        self.download
+            .as_ref()
+            .is_some_and(|download| download.cancel())
+    }
+    fn files_cleaned(&self, result: Result<(), frd::session_startup::FileSendError>) {
+        if let Some(upload) = &self.upload {
+            upload.cleaned(result);
+        }
+        if let Some(download) = &self.download {
+            download.cleaned(result);
+        }
+    }
+    /// Bind native file selection before opening the OS chooser. A compositor
+    /// gap is unavailable; it never authorizes carrying a choice into a later
+    /// source, view generation or suspension/recovery cycle.
+    pub fn begin_file_choice(&self) -> Result<FileChoiceContext, InputResult> {
+        let mut captured = None;
+        let result = self.with_granted(|granted| {
+            let Ok(Some(context)) = granted.source.input_context() else {
+                return InputResult::Busy;
+            };
+            if !granted
+                .source
+                .input_context_ready(&context)
+                .unwrap_or(false)
+            {
+                return InputResult::Busy;
+            }
+            captured = Some(FileChoiceContext {
+                input: context,
+                stop: Arc::clone(&granted.stop),
+            });
+            InputResult::Sent
+        });
+        if result == InputResult::Sent {
+            captured.ok_or(InputResult::Busy)
+        } else {
+            Err(result)
+        }
+    }
+    /// Recheck the exact original choice. A temporary compositor candidate
+    /// gap is `Ok(false)`; source/view discontinuity is an error. Neither a
+    /// refusal nor a later ready check refreshes this original context.
+    pub fn file_choice_ready(&self, context: &FileChoiceContext) -> Result<bool, InputResult> {
+        let mut ready = None;
+        let result = self.with_granted(|granted| {
+            if !Arc::ptr_eq(&context.stop, &granted.stop) {
+                return InputResult::Invalid;
+            }
+            match granted.source.input_context_ready(&context.input) {
+                Ok(current) => {
+                    ready = Some(current);
+                    InputResult::Sent
+                }
+                Err(_) => InputResult::Invalid,
+            }
+        });
+        if result == InputResult::Sent {
+            ready.ok_or(InputResult::Invalid)
+        } else {
+            Err(result)
+        }
+    }
+    /// A native chooser lost focus outside its original viewer. Stop only its
+    /// captured grant, including while waiting for the source lock. A retired
+    /// chooser cannot hide a later attempt, cancel its request, or drop a new
+    /// grant on the same Shared. This never restores visibility or control.
+    ///
+    /// True means this call removed the matching original grant. False can
+    /// also mean another callback already observed its stop and removed it.
+    pub fn hide_file_choice(&self, context: &FileChoiceContext) -> bool {
+        self.hide_file_source(&context.stop)
+    }
+
+    fn hide_file_source(&self, original: &Arc<AtomicBool>) -> bool {
+        original.store(true, Ordering::SeqCst);
+        let (was_visible, dropped) = {
+            let mut slot = self
+                .granted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(granted) = slot.as_ref() else {
+                return false;
+            };
+            if !Arc::ptr_eq(original, &granted.stop) {
+                return false;
+            }
+            let was_visible = self.visible.swap(false, Ordering::SeqCst);
+            if was_visible {
+                self.hides.fetch_add(1, Ordering::SeqCst);
+            }
+            // Publish the original reason before cancellation can wake its
+            // serving/cleanup owner. Never borrow upload/clipboard while the
+            // granted lock is held: final file admission takes them first.
+            self.note_local_stop(LocalStop::Hidden);
+            granted.source.stop();
+            (was_visible, slot.take())
+        };
+        self.clipboard.hide(was_visible);
+        self.clipboard.retire();
+        if let Some(upload) = &self.upload {
+            upload.retire();
+        }
+        if let Some(download) = &self.download {
+            download.retire();
+        }
+        self.retire_control_request();
+        self.events.state(state::CONTROL_ENDED, 0);
+        drop(dropped);
+        true
     }
     /// Fence the granted source now (focus loss, backgrounding, close).
     /// `reason`: this device stopped a live grant (not a close it asked
     /// for, and not the attempt's own cleanup).
     fn stop_control(&self, reason: Option<LocalStop>) {
-        let dropped = match self.granted.lock() {
-            Ok(mut granted) => granted.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
+        let dropped = {
+            let mut granted = self
+                .granted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Retire the published witness before cleanup can finish and a new
+            // attempt can begin. Attach uses the same granted -> focus order;
+            // focus callbacks never acquire the granted lock.
+            self.focus_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            granted.take()
         };
         if dropped.is_some() {
+            self.clipboard.retire();
+            if let Some(upload) = &self.upload {
+                upload.retire();
+            }
+            if let Some(download) = &self.download {
+                download.retire();
+            }
             if let Some(reason) = reason {
                 self.note_local_stop(reason);
             }
@@ -554,9 +1125,17 @@ impl Shared {
     }
 
     fn with_granted(&self, act: impl FnOnce(&mut Granted) -> InputResult) -> InputResult {
+        if self.close.load(Ordering::SeqCst) {
+            return InputResult::ControlLost;
+        }
         let Ok(mut slot) = self.granted.lock() else {
             return InputResult::ControlLost;
         };
+        // A callback may have waited behind the close fence. It must neither
+        // submit input nor drop the retained source and cancel its close I/O.
+        if self.close.load(Ordering::SeqCst) {
+            return InputResult::ControlLost;
+        }
         let Some(granted) = slot.as_mut() else {
             return InputResult::NotControlled;
         };
@@ -564,6 +1143,10 @@ impl Shared {
             drop(slot.take());
             self.events.state(state::CONTROL_ENDED, 0);
             return InputResult::ControlLost;
+        }
+        // Read under the grant lock that `set_active` closes the gate under.
+        if !self.active.load(Ordering::SeqCst) {
+            return InputResult::Inactive;
         }
         let result = act(granted);
         if result == InputResult::ControlLost {
@@ -595,7 +1178,11 @@ impl Shared {
                 return InputResult::Outside;
             };
             g.scroll.reset();
-            push_captured(g, InputEvent::Pointer(location), captured.as_ref())
+            let result = push_captured(g, InputEvent::Pointer(location.clone()), captured.as_ref());
+            if result == InputResult::Sent {
+                g.last = Some(location);
+            }
+            result
         })
     }
     /// A button transition at encoded picture pixel `(x, y)`. A press of a
@@ -641,12 +1228,13 @@ impl Shared {
                 return InputResult::Pending;
             }
             let event = InputEvent::Positioned {
-                location,
+                location: location.clone(),
                 action: PositionedAction::Button { button, pressed },
             };
             let result = push_captured(g, event, captured.as_ref());
             if result == InputResult::Sent {
                 g.buttons[slot] = pressed;
+                g.last = Some(location);
             }
             result
         })
@@ -881,30 +1469,71 @@ impl Shared {
     pub fn release_all(&self) -> InputResult {
         self.with_granted(|g| {
             g.scroll.reset();
-            for slot in 0..256_usize {
-                if g.keys[slot] {
-                    let Ok(usage) = u16::try_from(slot) else {
-                        continue;
-                    };
-                    let Some((_, key)) = input::key(usage) else {
-                        continue;
-                    };
-                    let result = push(
-                        g,
-                        InputEvent::Key {
-                            key,
-                            transition: KeyTransition::Release,
-                        },
-                    );
-                    if result != InputResult::Sent {
-                        return result;
-                    }
-                    g.keys[slot] = false;
-                }
-            }
-            InputResult::Sent
+            release_keys(g)
         })
     }
+}
+
+fn release_keys(g: &mut Granted) -> InputResult {
+    for slot in 0..256_usize {
+        if g.keys[slot] {
+            let Ok(usage) = u16::try_from(slot) else {
+                continue;
+            };
+            let Some((_, key)) = input::key(usage) else {
+                continue;
+            };
+            let result = push(
+                g,
+                InputEvent::Key {
+                    key,
+                    transition: KeyTransition::Release,
+                },
+            );
+            if result != InputResult::Sent {
+                return result;
+            }
+            g.keys[slot] = false;
+        }
+    }
+    InputResult::Sent
+}
+
+/// Every key, then every button (at the host's last pointer point) this
+/// grant sent a press for. Returns the first refusal; a held button without
+/// a known point cannot be released here, so it refuses too.
+fn release_held(g: &mut Granted) -> InputResult {
+    g.scroll.reset();
+    let keys = release_keys(g);
+    if keys != InputResult::Sent {
+        return keys;
+    }
+    for index in 0..5_u32 {
+        let Some((slot, button)) = input::button(index) else {
+            continue;
+        };
+        if !g.buttons[slot] {
+            continue;
+        }
+        let Some(location) = g.last.clone() else {
+            return InputResult::ControlLost;
+        };
+        let result = push(
+            g,
+            InputEvent::Positioned {
+                location,
+                action: PositionedAction::Button {
+                    button,
+                    pressed: false,
+                },
+            },
+        );
+        if result != InputResult::Sent {
+            return result;
+        }
+        g.buttons[slot] = false;
+    }
+    InputResult::Sent
 }
 
 fn capture_input(g: &Granted) -> Option<CapturedInput> {
@@ -977,7 +1606,53 @@ pub struct Session {
 }
 impl Session {
     pub fn start(config: Config) -> std::io::Result<Self> {
-        let shared = Arc::new(Shared::with_control(config.control));
+        Self::start_inner(config, false)
+    }
+    /// Start with a native UI owner for frd's admitted local cursor requests.
+    /// The caller must service this session's exchange and complete its native
+    /// cleanup before destroying the UI. The C ABI keeps its existing path.
+    pub fn start_with_local_cursor(config: Config) -> std::io::Result<Self> {
+        Self::start_inner(config, true)
+    }
+    fn start_inner(config: Config, native_cursor: bool) -> std::io::Result<Self> {
+        if !config.control && (config.upload.is_some() || config.download.is_some()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "file transfer requires control",
+            ));
+        }
+        if let Some(upload) = &config.upload
+            && !upload.bind()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "file selection already belongs to its original session",
+            ));
+        }
+        if let Some(download) = &config.download
+            && !download.bind()
+        {
+            // Only this newly bound upload belongs to the failed start. The
+            // already-bound download may serve another original session and
+            // must never be cancelled by a rejected clone of its configuration.
+            if let Some(upload) = &config.upload {
+                upload.finish();
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "receive destination already belongs to its original session",
+            ));
+        }
+        let mut shared = Shared::with_auxiliary(
+            config.control,
+            config.clipboard,
+            config.upload.clone(),
+            config.download.clone(),
+        );
+        if native_cursor && config.control {
+            shared.local_cursor = Some(local_cursor::Hub::default());
+        }
+        let shared = Arc::new(shared);
         let worker = shared.clone();
         let control = config.control;
         // Detached: the thread owns its share of the state and ends on its
@@ -991,10 +1666,26 @@ impl Session {
                 let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run(&worker, config);
                 }));
-                if ran.is_err() && !worker.finished() {
-                    worker.frames.clear();
+                if ran.is_ok() {
+                    // Normal early refusal never created a source; a serving
+                    // run returns only after retaining all auxiliary cleanup.
+                    worker.upload_sources_released.store(true, Ordering::SeqCst);
+                } else if !worker.finished() {
+                    worker.clear_presentation();
                     finish(&worker, end::INTERNAL, Some("Panic".into()));
+                    // A panic is not proof that a native source was collected.
                 }
+            })
+            .inspect_err(|_| {
+                // No native session thread or disk owner exists. Spend and
+                // release only the selections just bound by this failed start;
+                // retained UI handles observe a terminal original outcome.
+                finish(
+                    &shared,
+                    end::INTERNAL,
+                    Some("SessionThreadUnavailable".into()),
+                );
+                shared.upload_sources_released.store(true, Ordering::SeqCst);
             })?;
         Ok(Self { shared, control })
     }
@@ -1021,6 +1712,15 @@ impl Drop for Session {
 }
 
 fn finish(shared: &Shared, code: u32, detail: Option<String>) {
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    shared.clear_upload_selection();
+    shared.clipboard.stop();
+    if let Some(upload) = &shared.upload {
+        upload.finish();
+    }
+    if let Some(download) = &shared.download {
+        download.finish();
+    }
     shared.retire_control_request();
     shared.retire_display();
     shared.stop_control(None);
@@ -1086,7 +1786,12 @@ fn run(shared: &Arc<Shared>, config: Config) {
         max_attempts: 3,
         ..reconnect::Policy::default()
     };
-    let Ok(offer) = control_policy::offer(control) else {
+    let Ok(offer) = control_policy::offer_with_download(
+        control,
+        shared.clipboard.report().requested,
+        shared.upload.is_some(),
+        shared.download.is_some(),
+    ) else {
         return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
     };
     let operation = async {
@@ -1143,10 +1848,23 @@ fn run(shared: &Arc<Shared>, config: Config) {
     let terminal = app.terminal_failure();
     let orderly =
         completion::orderly_closed(result, app.service_succeeded, closed, stopped, terminal);
+    let focus_closed = shared.focus_close_requested.load(Ordering::SeqCst)
+        && completion::focus_closed(result, app.service_succeeded, closed, stopped, terminal);
     let (code, detail) = ending(result, closed, stopped, terminal);
-    shared.frames.clear();
+    shared.clear_presentation();
     shared.orderly_closed.store(orderly, Ordering::SeqCst);
+    shared.focus_closed.store(focus_closed, Ordering::SeqCst);
     finish(shared, code, detail);
+    // A failed bounded cleanup has already ended this command unsuccessfully.
+    // Keep the original observer on its original session thread until its
+    // clipboard/file workers actually return; dropping pending handles would
+    // detach native teardown. This never restores success or permits another attempt.
+    runtime.block_on(app.retain_auxiliary());
+    // A security-scoped permission must outlive a timed-out source worker too.
+    // Publish collection only after its retained owner returns and all original
+    // observer descriptors have been dropped. This never repairs the outcome.
+    drop(app);
+    shared.upload_sources_released.store(true, Ordering::SeqCst);
 }
 
 fn publish_pin(shared: &Shared, watch: Option<&PinWatch>) {
@@ -1210,6 +1928,11 @@ async fn supervise<T>(
 /// The in-process presenter frd's worker drives on its blocking pool.
 struct Presenter {
     shared: Arc<Shared>,
+    /// Immutable connection generation; a delayed callback cannot target a
+    /// newer attempt that happens to reuse this Shared object.
+    attempt: u64,
+    /// Original selected display pixels, before any host encoding resize.
+    display: (u32, u32),
     decoder: Option<Decoder>,
 }
 fn worker_error(error: crate::video::Error) -> WorkerError {
@@ -1228,8 +1951,34 @@ impl LocalPresenter for Presenter {
         configuration: &WorkerConfiguration,
         record: &DecoderRecord,
     ) -> Result<(), WorkerError> {
-        if record.generation() != configuration.generation {
+        if record.generation() != configuration.generation
+            || self.attempt != self.shared.frames.app_id(0)
+        {
             return Err(WorkerError::WrongEpoch);
+        }
+        {
+            let mut cursor = self
+                .shared
+                .cursor
+                .lock()
+                .map_err(|_| WorkerError::NativeFailure)?;
+            if cursor.attempt != self.attempt || self.attempt != self.shared.frames.app_id(0) {
+                return Err(WorkerError::WrongEpoch);
+            }
+            // Configure and overlay run serially on the same local worker.
+            // A fresh binding makes the core re-send its shape; the new
+            // cursor can appear only on a later picture of this decoder.
+            let frame_after = self.shared.frames.sequence();
+            cursor
+                .reset(self.attempt, frame_after)
+                .map_err(worker_error)?;
+            cursor.source_width = self.display.0;
+            cursor.source_height = self.display.1;
+            if let Some(local) = &self.shared.local_cursor {
+                local
+                    .configure(self.attempt, frame_after)
+                    .map_err(|_| WorkerError::NativeFailure)?;
+            }
         }
         let decoder = Decoder::new(
             configuration.codec()?,
@@ -1237,30 +1986,19 @@ impl LocalPresenter for Presenter {
             record.bytes(),
         )
         .map_err(worker_error)?;
-        let picture = decoder.picture();
-        self.shared
-            .hardware
-            .store(decoder.hardware().map_or(-1, i32::from), Ordering::Relaxed);
-        self.shared
-            .full_range
-            .store(decoder.full_range(), Ordering::Relaxed);
-        // A changed picture size invalidates any attached layout: control
-        // ends (frd also refuses the old layout).
-        let previous = self
-            .shared
-            .picture
-            .lock()
-            .map(|mut p| std::mem::replace(&mut *p, picture))
-            .unwrap_or_default();
-        if previous != (0, 0) && previous != picture {
-            self.shared.stop_control(Some(LocalStop::PictureChanged));
-        }
-        self.shared.events.push(Event {
-            kind: kind::VIDEO,
-            picture_width: picture.0,
-            picture_height: picture.1,
-            ..Event::default()
-        });
+        // The native constructor and hardware query may return after the
+        // asynchronous owner has timed out. Recheck under the publication
+        // gate only AFTER both foreign calls, before exposing their result.
+        let hardware = decoder.hardware();
+        self.shared.publish_configuration(
+            self.attempt,
+            self.display,
+            decoder.picture(),
+            decoder.full_range(),
+            hardware,
+        )?;
+        // Replacing the decoder may enter native destruction. Its publication
+        // guard has already ended, including on the error path above.
         self.decoder = Some(decoder);
         Ok(())
     }
@@ -1271,17 +2009,26 @@ impl LocalPresenter for Presenter {
         let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         self.shared.frames.record_decode(micros);
         if let Some(image) = image {
-            self.shared.frames.publish(image, unit.frame().as_raw());
+            self.shared
+                .frames
+                .publish_for(self.attempt, image, unit.frame().as_raw())
+                .map_err(worker_error)?;
         }
         Ok(())
     }
     fn overlay(&mut self, update: &CursorUpdate<'_>) -> Result<(), WorkerError> {
-        self.shared
+        if self.attempt != self.shared.frames.app_id(0) {
+            return Err(WorkerError::WrongEpoch);
+        }
+        let mut cursor = self
+            .shared
             .cursor
             .lock()
-            .map_err(|_| WorkerError::NativeFailure)?
-            .apply(update)
-            .map_err(worker_error)
+            .map_err(|_| WorkerError::NativeFailure)?;
+        if self.attempt != self.shared.frames.app_id(0) {
+            return Err(WorkerError::WrongEpoch);
+        }
+        cursor.apply_for(self.attempt, update).map_err(worker_error)
     }
 }
 
@@ -1297,8 +2044,7 @@ impl LocalPresenter for Presenter {
 /// ([`FrameSlot::app_id`]), so an earlier attempt's drawing never counts.
 fn shown(shared: &Shared, pending: &mut Option<u64>, frame: Option<Presentation>) -> Option<u64> {
     if let Some(frame) = frame {
-        *pending =
-            (frame.stage == PresentationStage::SubmittedToCompositor).then(|| frame.frame.as_raw());
+        *pending = submitted(frame);
     }
     let id = (*pending)?;
     if !shared.visible.load(Ordering::SeqCst) || shared.frames.drawn() < shared.frames.app_id(id) {
@@ -1306,6 +2052,41 @@ fn shown(shared: &Shared, pending: &mut Option<u64>, frame: Option<Presentation>
     }
     *pending = None;
     Some(id)
+}
+
+/// frd's id for a picture it submitted for display. A decode-only picture is
+/// never shown.
+fn submitted(frame: Presentation) -> Option<u64> {
+    (frame.stage == PresentationStage::SubmittedToCompositor).then(|| frame.frame.as_raw())
+}
+
+/// Record the answer to a visibility report for `frame`, which [`shown`] has
+/// just taken out of `pending`.
+///
+/// - The view exists only once the session clock is correlated. A picture
+///   drawn while the session opened therefore meets `ClockNotReady` on the
+///   first turns, so that refusal puts it back to report on a later turn.
+/// - `QueueExpired` means the picture arrived on screen after its display
+///   budget. frd still holds it as the visible picture, unqualified, until the
+///   host verifies the source again, and its evidence gates input until then.
+///   It counts as shown, so the view keeps checking that evidence; otherwise
+///   a late opening picture on a static host would never offer control.
+/// - Any other refusal waits for a newer picture, as in the Linux viewer.
+fn witness<T>(
+    result: &Result<T, StreamingViewerError>,
+    frame: u64,
+    pending: &mut Option<u64>,
+    last_shown: &mut Option<u64>,
+) {
+    match result {
+        Ok(_) | Err(StreamingViewerError::Freshness(FreshnessError::QueueExpired)) => {
+            *last_shown = Some(frame);
+        }
+        Err(StreamingViewerError::Control(ControlledViewerError::ClockNotReady)) => {
+            *pending = Some(frame);
+        }
+        Err(_) => {}
+    }
 }
 
 /// What attaching the granted source did.
@@ -1346,10 +2127,12 @@ fn attach(
     viewer.confirm_viewport(&layout).map_err(|_| ())?;
     let stop = Arc::new(AtomicBool::new(false));
     let released = Arc::new(AtomicBool::new(false));
-    let capture = Capture {
+    let mut capture = Capture {
         stop: stop.clone(),
         released: released.clone(),
+        cursor: None,
     };
+    let mut local_cursor = None;
     let mut outcome = Attach::Fenced;
     viewer
         .capture_input_owned(&layout.clone(), |source| {
@@ -1357,6 +2140,33 @@ fn attach(
                 return Err(());
             };
             let opened = source.clock().map_err(|_| ())?;
+            if let Some(hub) = &shared.local_cursor {
+                match hub.bind(
+                    shared.frames.app_id(0),
+                    (display.pixel_width, display.pixel_height),
+                    Arc::clone(&stop),
+                ) {
+                    Ok(owner) => {
+                        capture.cursor = Some(Arc::clone(&owner));
+                        local_cursor = Some(local_cursor_adapter::Handle {
+                            owner,
+                            control: source.control(),
+                        });
+                    }
+                    // No owner was published. A contended optional cursor
+                    // exchange keeps the existing native-default path; it
+                    // cannot abort the original input capture or grant.
+                    Err(local_cursor::Error::Busy) => {}
+                    Err(_) => return Err(()),
+                }
+            }
+            let focus_owner = FocusOwner {
+                original: focus_close::Original {
+                    attempt: shared.frames.app_id(0),
+                    stop: Arc::clone(&stop),
+                },
+                control: source.control(),
+            };
             let granted = Granted {
                 source,
                 opened,
@@ -1366,10 +2176,14 @@ fn attach(
                 released,
                 keys: [false; 256],
                 buttons: [false; 5],
+                last: None,
                 scroll: LineScroller::default(),
                 text_window: None,
                 key_window: None,
                 typing: input::typing::Batches::default(),
+            };
+            let Ok(mut focus) = shared.focus_owner.lock() else {
+                return Err(());
             };
             // Re-checked under the lock `set_visible` and `close` fence
             // through: one that ran after the check above found nothing to
@@ -1380,6 +2194,7 @@ fn attach(
                 && shared.hides.load(Ordering::SeqCst) == hides
             {
                 *slot = Some(granted);
+                *focus = Some(focus_owner);
                 outcome = Attach::Installed;
             } else {
                 drop(granted);
@@ -1387,11 +2202,19 @@ fn attach(
             Ok(capture)
         })
         .map_err(|_| ())?;
+    if let Some(cursor) = local_cursor {
+        // An attachment refusal stops this original optional owner; input
+        // still follows the one capture attachment and its cleanup deadline.
+        let _ = viewer.attach_local_cursor(Box::new(cursor));
+    }
     Ok(outcome)
 }
 
 /// frd's per-attempt application: open the presenter after approval and
 /// display selection, serve until closed, and clean up every native owner.
+// Independent per-attempt facts (role, start, service result, pending files),
+// not one state machine.
+#[allow(clippy::struct_excessive_bools)]
 struct Mobile {
     shared: Arc<Shared>,
     control: bool,
@@ -1404,6 +2227,8 @@ struct Mobile {
     native_started: Rc<Cell<bool>>,
     service_succeeded: bool,
     terminal: Option<ObserverError>,
+    clipboard_cleanup: Option<Deadline>,
+    files_pending: bool,
 }
 impl Mobile {
     fn new(
@@ -1426,12 +2251,70 @@ impl Mobile {
             native_started: Rc::default(),
             service_succeeded: false,
             terminal: None,
+            clipboard_cleanup: None,
+            files_pending: false,
+        }
+    }
+
+    async fn retain_auxiliary(&mut self) {
+        let Some(deadline) = self.clipboard_cleanup else {
+            return;
+        };
+        let Some(observer) = self.observer.as_mut() else {
+            return;
+        };
+        while self.shared.clipboard.pending() || self.files_pending {
+            // Reaping first observes completion, even after this exact original
+            // deadline expired. We never renew the clipboard's cleanup budget.
+            let _ = observer.reap_clipboard(&self.close_cx, deadline).await;
+            if self.files_pending
+                && let Some(result) = observer.collect_files()
+            {
+                self.files_pending = false;
+                self.shared.files_cleaned(result);
+            }
+            for _ in 0..2 {
+                let _ = observer.collect_clipboard();
+                self.shared.clipboard.collect();
+            }
+            if self.shared.clipboard.pending() || self.files_pending {
+                if let Some(timer) = self.close_cx.timer_driver() {
+                    sleep(timer.now(), Duration::from_millis(25)).await;
+                } else {
+                    // Even a failed runtime clock cannot justify detaching
+                    // pending native teardown. Only this retired owner waits.
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
         }
     }
 }
 
 impl Application for Mobile {
     type Output = ();
+    fn offer(
+        &mut self,
+        _attempt: u8,
+        original: &fr_wire::negotiation::Offer,
+    ) -> Result<fr_wire::negotiation::Offer, CallbackError> {
+        let offered = self
+            .shared
+            .clipboard
+            .offer(original)
+            .map_err(|()| CallbackError)?;
+        files::offer(
+            &offered,
+            self.shared
+                .upload
+                .as_ref()
+                .is_some_and(|upload| upload.available()),
+            self.shared
+                .download
+                .as_ref()
+                .is_some_and(|download| download.available()),
+        )
+        .map_err(|()| CallbackError)
+    }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
         if self.started || self.native_started.get() || self.observer.is_some() {
@@ -1440,7 +2323,22 @@ impl Application for Mobile {
         self.started = true;
         self.service_succeeded = false;
         self.shared.begin_display()?;
-        self.shared.frames.begin_attempt();
+        self.shared
+            .frames
+            .begin_attempt()
+            .map_err(|_| ObserverError::InvalidConfiguration)?;
+        let presentation_attempt = self.shared.frames.app_id(0);
+        self.shared
+            .cursor
+            .lock()
+            .map_err(|_| ObserverError::InvalidConfiguration)?
+            .reset(presentation_attempt, self.shared.frames.sequence())
+            .map_err(|_| ObserverError::InvalidConfiguration)?;
+        if let Some(local) = &self.shared.local_cursor {
+            local
+                .begin_attempt(presentation_attempt)
+                .map_err(|_| ObserverError::InvalidConfiguration)?;
+        }
         publish_pin(&self.shared, self.watch.as_ref());
         let attempt_number = u32::from(attempt);
         let epoch = self
@@ -1465,6 +2363,8 @@ impl Application for Mobile {
                 Launch::in_process(
                     Box::new(Presenter {
                         shared,
+                        attempt: presentation_attempt,
+                        display: (display.pixel_width, display.pixel_height),
                         decoder: None,
                     }),
                     epoch,
@@ -1483,7 +2383,19 @@ impl Application for Mobile {
         );
         let opened = opening.await?;
         let display = opened.display();
+        let initial = opened.initial_presentation();
         let observer = self.observer.insert(opened);
+        self.shared
+            .clipboard
+            .configure(observer, &self.close_cx, || {
+                !self.shared.close.load(Ordering::SeqCst)
+            });
+        if let Some(upload) = &self.shared.upload {
+            upload.configure(observer);
+        }
+        if let Some(download) = &self.shared.download {
+            download.configure(observer);
+        }
         self.shared.serving.store(true, Ordering::SeqCst);
         let shared = self.shared.clone();
         let mut viewing = false;
@@ -1500,7 +2412,11 @@ impl Application for Mobile {
                 shared.events.state(state::VIEWING, attempt_number);
             }
         };
-        let mut pending = None;
+        // frd decodes and submits the opening picture before serving, and its
+        // callbacks carry only later pictures. On a static host the opening
+        // picture is the only one, so it starts pending: without it the view
+        // would never be announced or offer control.
+        let mut pending = submitted(initial);
         let outcome = if self.control {
             let mut mapped = false;
             let mut last_shown = None;
@@ -1509,6 +2425,9 @@ impl Application for Mobile {
             let mut hides_at_request = 0;
             let mut announced_control = false;
             let ui = move |state: InteractiveViewerState<'_>, frame: Option<Presentation>| {
+                // Free the bounded content-free receipt slot on every turn,
+                // including while viewing, requesting, stopping or hidden.
+                shared.clipboard.collect();
                 if shared.close.load(Ordering::SeqCst) {
                     shared.events.state(state::CLOSING, attempt_number);
                     return Ok(ControlFlow::Break(fr_wire::closure::Reason::Requested));
@@ -1527,10 +2446,16 @@ impl Application for Mobile {
                                 .map_err(|_| ())?;
                             mapped = true;
                         }
-                        if fresh.is_some() && view.visible(frame).is_ok() {
-                            last_shown = Some(frame);
+                        if fresh.is_some() {
+                            witness(&view.visible(frame), frame, &mut pending, &mut last_shown);
                         }
                         announce_view(&shared);
+                        // A session that keeps control asks again on every
+                        // attempt (an internal reconnect retired the old
+                        // request) and whenever the app returns to the front.
+                        if !requested && shared.auto_control() {
+                            shared.request_control();
+                        }
                         let ready = !requested
                             && shared.visible.load(Ordering::SeqCst)
                             && view.evidence().is_ok();
@@ -1633,13 +2558,23 @@ impl Application for Mobile {
         cx: &Cx,
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>> {
-        // Fence at call time: no input outlives the attempt.
+        // Fence at call time: no input or local file choice outlives the attempt.
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
+        self.shared.clear_upload_selection();
         self.shared.retire_control_request();
         self.shared
             .requesting_control
             .store(false, Ordering::SeqCst);
         self.shared.retire_display();
         self.shared.stop_control(None);
+        self.shared.clipboard.retire();
+        if let Some(upload) = &self.shared.upload {
+            upload.retire();
+        }
+        if let Some(download) = &self.shared.download {
+            download.retire();
+        }
+        self.clipboard_cleanup = Some(deadline);
         self.shared.serving.store(false, Ordering::SeqCst);
         async move {
             let result = match self.observer.as_mut() {
@@ -1649,7 +2584,29 @@ impl Application for Mobile {
                     let media = observer.reap_media(cx, deadline).await;
                     let input = observer.reap_input_capture(cx, deadline).await;
                     let files = observer.reap_files(cx, deadline).await;
-                    media.is_ok() && input.is_ok() && files.is_ok()
+                    if let Err(error) = files {
+                        // Retain the original bounded cleanup failure even if
+                        // the source finishes immediately afterward. A later
+                        // join is collection, not a repaired transfer result.
+                        self.shared.files_cleaned(Err(error));
+                    }
+                    // Reap may time out before polling a just-finished source.
+                    // Collect without a renewed wait budget, retaining the
+                    // original timeout as failure even if joining now succeeds.
+                    let collected_files = observer.collect_files();
+                    self.files_pending = collected_files.is_none();
+                    if let Some(result) = collected_files {
+                        self.shared.files_cleaned(result);
+                    }
+                    let clipboard = observer.reap_clipboard(cx, deadline).await;
+                    for _ in 0..2 {
+                        let _ = observer.collect_clipboard();
+                        self.shared.clipboard.collect();
+                    }
+                    media.is_ok()
+                        && input.is_ok()
+                        && files.is_ok()
+                        && clipboard::cleanup_finished(clipboard)
                 }
                 // Approval and display selection precede the deferred native
                 // factory; once it started, losing it proves no cleanup.

@@ -199,10 +199,12 @@ impl Queue {
         Ok(())
     }
 }
-/// A single native event producer. Drop, focus loss, hiding, resize, suspend and
-/// native failure must stop it. The authority fence is lock-free and wakes
-/// cancellation of an in-flight network operation. Best-effort queue cleanup
-/// never waits for a lock; no subsequent focus gain can resume control.
+/// A single native event producer. Drop, hiding, resize, suspend and native
+/// failure must stop it. Focus loss must either stop it or release every press
+/// it sent and push nothing until focus returns (a paused app switch, as in
+/// fr-mobile-ffi's `Shared::set_active`). The authority fence is lock-free and
+/// wakes cancellation of an in-flight network operation. Best-effort queue
+/// cleanup never waits for a lock; no focus gain can resume a stopped source.
 /// Capture timestamps must use `clock`, not wall time or the host's clock.
 /// A retained stopped producer cannot keep the closed viewer's payloads alive.
 pub struct Source {
@@ -249,15 +251,27 @@ impl Source {
     }
 
     pub fn clock(&self) -> Result<ClientInstant, Error> {
-        if self.control.is_stopped() {
+        if self.control.is_stopped() || self.control.input_fenced() {
             return Err(Error::Closed);
         }
         now(&self.control.cx)
             .map(ClientInstant)
             .map_err(|_| Error::Clock)
     }
+    /// Permanently refuse new/queued input while the original owner prepares
+    /// its existing orderly close. This is not suspension or replacement
+    /// authority: the source must remain owned until that close and cleanup.
+    /// Already admitted actions keep their original receipts and effect status.
+    /// Unlike emergency `stop`, this does not cancel a native I/O turn midway.
+    pub fn fence_for_close(&self) {
+        self.control.fence_for_close();
+        self.clear_queued();
+    }
     pub fn stop(&self) {
         self.control.stop();
+        self.clear_queued();
+    }
+    fn clear_queued(&self) {
         if let Some(queue) = self.queue.upgrade() {
             match queue.try_lock() {
                 Ok(mut queue) => queue.events.clear(),
@@ -304,7 +318,7 @@ impl Source {
         self.clock()?;
         let shared = self.queue.upgrade().ok_or(Error::Closed)?;
         let queue = shared.lock().map_err(|_| Error::Unavailable)?;
-        if self.control.is_stopped() {
+        if self.control.is_stopped() || self.control.input_fenced() {
             return Err(Error::Closed);
         }
         Ok((!queue.context.suspended).then(|| TextContext {
@@ -333,7 +347,7 @@ impl Source {
         }
         let shared = self.queue.upgrade().ok_or(Error::Closed)?;
         let queue = shared.lock().map_err(|_| Error::Unavailable)?;
-        if self.control.is_stopped() {
+        if self.control.is_stopped() || self.control.input_fenced() {
             return Err(Error::Closed);
         }
         queue.context_ready(context.state)
@@ -373,7 +387,7 @@ impl Source {
             )
             .map_err(input_context_error)
         })();
-        if result.is_err() {
+        if result.is_err() && !(result == Err(Error::Closed) && self.control.input_fenced()) {
             self.stop();
         }
         result
@@ -448,7 +462,8 @@ impl Source {
     /// bits never synthesize presses. Snapshots are not coalesced across actions.
     /// Sample periodically: the existing sender permits at most four snapshots
     /// per second and discards early samples without postponing or retiming them.
-    /// Focus loss, hiding and suspension still require immediate `stop` instead.
+    /// Hiding and suspension still require immediate `stop` instead, and a paused
+    /// focus loss needs explicit releases: a snapshot may be discarded as early.
     pub fn reconcile_held(
         &mut self,
         observed: HeldState,
@@ -460,6 +475,7 @@ impl Source {
         // These whole-value refusals admitted nothing. Keep physical keys
         // usable, and let a still-valid local draft await a compositor gap.
         if result.is_err()
+            && !(result == Err(Error::Closed) && self.control.input_fenced())
             && !matches!(
                 result,
                 Err(Error::UnsupportedText | Error::StaleTextContext | Error::TextNotReady)
@@ -531,7 +547,7 @@ impl Source {
         }
         let shared = self.queue.upgrade().ok_or(Error::Closed)?;
         let mut queue = shared.lock().map_err(|_| Error::Unavailable)?;
-        if self.control.is_stopped() {
+        if self.control.is_stopped() || self.control.input_fenced() {
             return Err(Error::Closed);
         }
         if let Some(until) = until {
@@ -564,9 +580,15 @@ fn native_deadline_expired(captured: &Captured, current: ClientInstant) -> bool 
     !matches!(captured.event, Event::Text(_))
         && captured.send_until.is_some_and(|until| current >= until)
 }
-fn aged(sampled: ClientInstant, current: ClientInstant) -> Result<bool, Error> {
-    let age = current.0.checked_sub(sampled.0).ok_or(Error::Clock)?;
-    Ok(age >= MAX_EVENT_AGE_US)
+/// `current` is the dispatch turn's own earlier reading of the same monotonic
+/// clock the producer stamps with, and every push refuses a stamp from its own
+/// future (`not_future`). A stamp newer than `current` is therefore an event
+/// the producer pushed while this turn ran between its clock read and the
+/// queue lock (a preempted dispatcher on a saturated CPU): fresh, age zero.
+/// Before 2026-11-18 it was `Clock`, which ended the session
+/// (`Control(Capture(Clock))`).
+fn aged(sampled: ClientInstant, current: ClientInstant) -> bool {
+    current.0.saturating_sub(sampled.0) >= MAX_EVENT_AGE_US
 }
 /// A release of what the host holds, or held-state reconciliation, is cleanup
 /// (AGENTS.md 4: releasing is cleanup, not rollback): delivered late rather
@@ -694,7 +716,7 @@ impl Receiver {
             return Err(Error::Expired);
         }
         if let Some(pending) = &self.pending
-            && aged(pending.sampled, current)?
+            && aged(pending.sampled, current)
             && !cleanup(&pending.event, holds)
         {
             let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
@@ -707,7 +729,7 @@ impl Receiver {
                     if native_deadline_expired(first, current) && !cleanup(&first.event, holds) {
                         return Err(Error::Expired);
                     }
-                    if !aged(first.sampled, current)? || cleanup(&first.event, holds) {
+                    if !aged(first.sampled, current) || cleanup(&first.event, holds) {
                         break;
                     }
                     let Captured { event, .. } =
@@ -793,6 +815,9 @@ impl ControlledViewer {
     /// path, grant, ticket, wire sequence or async runtime is created.
     pub fn capture_input(&mut self) -> Result<Source, super::Error> {
         let at = self.check()?;
+        if self.control.input_fenced() {
+            return Err(super::Error::Closed);
+        }
         if self.events.is_some() {
             return Err(super::Error::Capture(Error::AlreadyAttached));
         }
@@ -836,6 +861,11 @@ impl ControlledViewer {
         Ok(())
     }
     pub(super) fn dispatch_captured(&mut self) -> Result<(), super::Error> {
+        if self.control.input_fenced() {
+            self.events = None;
+            self.pending = None;
+            return Ok(());
+        }
         let Some(mut receiver) = self.events.take() else {
             return Ok(());
         };
@@ -942,6 +972,14 @@ impl ControlledViewer {
                     &mut receiver.refused_keys,
                     &mut receiver.refused_buttons,
                 );
+                receiver.pending = None;
+                Ok(())
+            }
+            Err(super::Error::Closed)
+                if self.control.input_fenced() && !self.control.is_stopped() =>
+            {
+                // The source was fenced after this event left the queue, but
+                // before input admission. No replay and no cancelled close I/O.
                 receiver.pending = None;
                 Ok(())
             }

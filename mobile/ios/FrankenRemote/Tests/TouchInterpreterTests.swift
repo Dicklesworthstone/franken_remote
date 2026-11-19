@@ -18,6 +18,33 @@ final class TouchInterpreterTests: XCTestCase {
 
     private var middle: CGPoint { CGPoint(x: 192, y: 400) }
 
+    func testSessionReplacementReleasesOnlyTheOldGestureOwnerAndDropsItsMapping() {
+        let next = RecordingSink()
+        touch.controlling = true
+        _ = touch.began(1, at: middle, time: 0)
+        _ = touch.tick(time: 0.51)
+        XCTAssertEqual(sink.buttons, [.button(.primary, true, CGPoint(x: 960, y: 540))])
+
+        touch.replaceSink(next)
+        XCTAssertEqual(sink.buttons.last, .button(.primary, false, CGPoint(x: 960, y: 540)))
+        XCTAssertTrue(next.calls.isEmpty, "cleanup belongs to the original session")
+        XCTAssertFalse(touch.controlling)
+        XCTAssertTrue(touch.isIdle)
+        XCTAssertFalse(touch.hasPointer)
+        XCTAssertFalse(touch.mapper.isReady)
+
+        // Even a later grant with identical picture dimensions cannot turn
+        // the old finger's final callback into an action on this display.
+        touch.mapper.setPicture(CGSize(width: 1920, height: 1080))
+        touch.controlling = true
+        _ = touch.ended(1, at: middle, time: 1)
+        _ = touch.tick(time: 1.1)
+        XCTAssertTrue(next.calls.isEmpty)
+        _ = touch.began(2, at: middle, time: 2)
+        _ = touch.ended(2, at: middle, time: 2.1)
+        XCTAssertEqual(next.buttons.count, 2)
+    }
+
     // MARK: Trackpad
 
     func testTrackpadTapClicksAtThePointerNotTheFinger() {
@@ -288,4 +315,90 @@ final class TouchInterpreterTests: XCTestCase {
         _ = touch.ended(1, at: CGPoint(x: 250, y: 400), time: 0.6)
         XCTAssertTrue(sink.calls.isEmpty)
     }
+
+    func testScaledDirectInputRejectsEncodedBarsAndReleasesAtTheLastImagePoint() {
+        touch.mapper = PictureMapper(viewSize: CGSize(width: 1582, height: 888),
+                                     picture: CGSize(width: 1582, height: 888),
+                                     display: CGSize(width: 5120, height: 2880))
+        touch.controlling = true
+        touch.mode = .direct
+        _ = touch.began(1, at: CGPoint(x: 1, y: 444), time: 0)
+        _ = touch.ended(1, at: CGPoint(x: 1, y: 444), time: 0.1)
+        XCTAssertTrue(sink.calls.isEmpty)
+        _ = touch.began(2, at: CGPoint(x: 30, y: 444), time: 1)
+        _ = touch.moved(2, to: CGPoint(x: 10, y: 444), time: 1.1)
+        _ = touch.moved(2, to: CGPoint(x: 1, y: 444), time: 1.2)
+        _ = touch.ended(2, at: CGPoint(x: 1, y: 444), time: 1.3)
+        XCTAssertEqual(sink.buttons, [
+            .button(.primary, true, CGPoint(x: 30, y: 444)),
+            .button(.primary, false, CGPoint(x: 10, y: 444))
+        ])
+        XCTAssertTrue(sink.pointers.allSatisfy { touch.mapper.containsPicture($0) })
+    }
+
+    func testScaledTrackpadStartsAtTheDisplayCursorAndNeverEntersEncodedBars() throws {
+        touch.mapper = PictureMapper(viewSize: CGSize(width: 1582, height: 888),
+                                     picture: CGSize(width: 1582, height: 888),
+                                     display: CGSize(width: 5120, height: 2880))
+        touch.controlling = true
+        let host = try XCTUnwrap(touch.mapper.picturePoint(forDisplay: CGPoint(x: 2560, y: 1440)))
+        touch.seedPointer(host)
+        _ = touch.began(1, at: CGPoint(x: 700, y: 400), time: 0)
+        _ = touch.ended(1, at: CGPoint(x: 700, y: 400), time: 0.1)
+        XCTAssertEqual(sink.buttons, [.button(.primary, true, host), .button(.primary, false, host)])
+        touch.seedPointer(CGPoint(x: 1, y: 444))
+        XCTAssertEqual(touch.pointer, host, "a bar cannot replace the host cursor seed")
+        _ = touch.began(2, at: CGPoint(x: 700, y: 400), time: 1)
+        _ = touch.moved(2, to: CGPoint(x: -10_000, y: -10_000), time: 1.1)
+        XCTAssertEqual(touch.pointer, CGPoint(x: 2, y: 0))
+        _ = touch.moved(2, to: CGPoint(x: 10_000, y: 10_000), time: 1.2)
+        let last = try XCTUnwrap(touch.pointer)
+        XCTAssertGreaterThan(last.x, 1579)
+        XCTAssertLessThan(last.x, 1580)
+        XCTAssertTrue(sink.pointers.allSatisfy { touch.mapper.containsPicture($0) })
+    }
+
+    func testFrameOwnerRetirementDropsHeldAndQueuedTouchesEvenAtTheSameSize() {
+        touch.controlling = true
+        _ = touch.began(1, at: middle, time: 0)
+        _ = touch.tick(time: 0.51)
+        XCTAssertEqual(sink.buttons.count, 1)
+        sink.calls.removeAll()
+        touch.retirePresentation(at: 1)
+        XCTAssertTrue(sink.calls.isEmpty, "old releases belong to Rust's retired grant")
+        XCTAssertFalse(touch.controlling)
+        XCTAssertFalse(touch.mapper.isReady)
+        XCTAssertFalse(touch.hasPointer)
+
+        touch.mapper.setPicture(CGSize(width: 1920, height: 1080))
+        touch.controlling = true
+        _ = touch.ended(1, at: middle, time: 1.1)
+        _ = touch.began(2, at: middle, time: 0.9)
+        _ = touch.ended(2, at: middle, time: 1.2)
+        _ = touch.began(3, at: middle, time: 1)
+        _ = touch.ended(3, at: middle, time: 1.3)
+        _ = touch.tick(time: 1.4)
+        XCTAssertTrue(sink.calls.isEmpty, "queued old down events cannot become new gestures")
+        _ = touch.began(4, at: middle, time: 2)
+        _ = touch.ended(4, at: middle, time: 2.1)
+        XCTAssertEqual(sink.buttons.count, 2)
+    }
+
+    func testExtremeAspectPanStillSeedsTheTrackpadInsideTheVisibleImage() throws {
+        touch.mapper = PictureMapper(viewSize: CGSize(width: 400, height: 600),
+                                     picture: CGSize(width: 500, height: 2),
+                                     display: CGSize(width: 8192, height: 64))
+        touch.mapper.setZoom(1000, at: CGPoint(x: 200, y: 300))
+        touch.mapper.pan(by: CGVector(dx: 100_000, dy: 100_000))
+        touch.controlling = true
+        _ = touch.began(1, at: CGPoint(x: 200, y: 300), time: 0)
+        _ = touch.ended(1, at: CGPoint(x: 200, y: 300), time: 0.1)
+        let pointer = try XCTUnwrap(touch.pointer)
+        XCTAssertTrue(touch.mapper.containsPicture(pointer))
+        XCTAssertTrue(touch.mapper.imageRect.intersects(touch.mapper.content))
+        XCTAssertEqual(sink.buttons, [
+            .button(.primary, true, pointer), .button(.primary, false, pointer)
+        ])
+    }
+
 }

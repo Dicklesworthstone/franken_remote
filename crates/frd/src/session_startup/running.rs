@@ -296,6 +296,15 @@ impl HostSession {
             return Err(Error::InvalidConfiguration);
         }
         self.opened.check()?;
+        // A peer may have acknowledged while this host task was descheduled.
+        // Reconcile that bounded native evidence before synchronous services
+        // can expire its retained record. This sends no application work and
+        // dispatches no input; the same local/native permission gates apply.
+        self.renewal
+            .reconcile_checked(&mut self.opened.transport, || other.permitted())
+            .await
+            .map_err(Error::Renewal)?;
+        self.opened.check()?;
         let mut timed = TimedServices {
             clock: self.clock.as_mut(),
             other,
@@ -381,7 +390,7 @@ impl<S: Services> Services for TimedServices<'_, S> {
         if let Some(clock) = &mut self.clock {
             clock
                 .service(transport)
-                .map_err(|_| Error::ClockSynchronization)?;
+                .map_err(super::viewer::clock_synchronization)?;
         }
         Ok(())
     }
@@ -440,6 +449,18 @@ async fn pump_refresh(
             return Err(Error::Expired);
         }
         control.check().map_err(|_| Error::Authority)?;
+        renewal
+            .reconcile_checked(transport, || {
+                other.permitted()
+                    && (refreshed || now(cx).is_ok_and(|current| current < turn.until))
+            })
+            .await
+            .map_err(Error::Renewal)?;
+        // Reconciliation cannot consume the old admission proof's last instant.
+        // A successful refresh remains the only operation that can replace it.
+        if !refreshed && now(cx)? >= turn.until {
+            return Err(Error::Expired);
+        }
         service(renewal, transport, nonce, other)?;
         // Never exceed the old proof's deadline while it is still pending. Once
         // refreshed, the shared live lease, not this old snapshot, authorizes I/O.

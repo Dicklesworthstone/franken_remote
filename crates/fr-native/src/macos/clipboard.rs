@@ -111,13 +111,22 @@ impl Clipboard {
         self.report
     }
 
-    pub(crate) fn install(&mut self, window: &Window) -> Result<(), crate::NativeError> {
+    pub(crate) fn install(&mut self, window: &Window) {
         if !self.available() {
-            return Ok(());
+            return;
         }
-        window.clipboard_bind(self.privacy.clone())?;
+        if window.clipboard_bind(self.privacy.clone()).is_err() {
+            // An optional privacy surface must fail closed without turning a
+            // usable desktop into a connection failure. Never retry it under
+            // this owner or inherit its consent in a later viewing attempt.
+            self.spent = true;
+            self.privacy.stop(false);
+            self.report
+                .retain_reason(Error::NativeSetup(PlatformError::Unavailable));
+            let _ = window.clipboard_update(3);
+            return;
+        }
         self.bound = true;
-        Ok(())
     }
 
     pub(crate) fn configure(
@@ -218,8 +227,7 @@ impl Clipboard {
             let visible = window
                 .and_then(|window| window.clipboard_visible().ok())
                 .unwrap_or(false);
-            if !visible || !self.privacy.heartbeat.progress() {
-                self.privacy.stop(false);
+            if !self.privacy.heartbeat.observe(visible) {
                 source.stop();
             }
         }
@@ -236,6 +244,7 @@ impl Clipboard {
             && let Some(window) = window
         {
             if window.clipboard_update(display).is_err() {
+                self.report.retain_reason(Error::NativeCleanup);
                 self.privacy.stop(false);
                 if let Some(source) = &self.source {
                     source.stop();
@@ -250,7 +259,12 @@ impl Clipboard {
         let Some(source) = &self.source else {
             return;
         };
-        while let Some(received) = source.take_received() {
+        // The native worker has one ordinary slot and one final in-flight
+        // receipt. Bound a pump even if it produces again while we collect.
+        for _ in 0..2 {
+            let Some(received) = source.take_received() else {
+                break;
+            };
             match received {
                 Received::Consumed(Some(receipt)) => {
                     self.report.active = true;
@@ -295,8 +309,9 @@ impl Clipboard {
         self.collect();
         if self.report.configured
             && let Some(window) = window
+            && window.clipboard_update(2).is_err()
         {
-            let _ = window.clipboard_update(2);
+            self.report.retain_reason(Error::NativeCleanup);
         }
     }
 

@@ -119,6 +119,18 @@ final class RemoteSession: ObservableObject, InputSink {
     @Published private(set) var detail: String = ""
     /// The pin this session observed (for saving with the host).
     @Published private(set) var observedPin: String?
+    /// One original catalog awaiting a choice, published only after approval.
+    @Published private(set) var displaySelection: DisplaySelection?
+    /// Content-free progress belongs to the original upload owner. A local
+    /// filename exists only while its explicit choice is on this screen.
+    @Published private(set) var uploadStatus: FileUploadStatus?
+    @Published private(set) var uploadStatusCurrent = false
+    @Published private(set) var uploadChoice: FileUploadChoice?
+    @Published private(set) var preparingUpload = false
+    private var uploadChoiceResource: FileUploadResource?
+    /// Accepted resources stay scoped until ALL original native readers retire.
+    private var uploadResources: [FileUploadResource] = []
+    private var lastUploadPoll: ContinuousClock.Instant?
 
     private var wantsControl: Bool
     private(set) var everViewed = false
@@ -141,7 +153,9 @@ final class RemoteSession: ObservableObject, InputSink {
                                       direct: host.dialsDirectly, pin: pin,
                                       picture_width: screen.width,
                                       picture_height: screen.height)
-                return fr_session_start(&config, &out)
+                return control
+                    ? fr_session_start_with_upload(&config, UInt32(FR_DISPLAY_CHOOSE), &out)
+                    : fr_session_start_with_display(&config, UInt32(FR_DISPLAY_CHOOSE), &out)
             }
             if let pin = host.pin {
                 return pin.withCString { start($0) }
@@ -160,17 +174,69 @@ final class RemoteSession: ObservableObject, InputSink {
     }
 
     deinit {
-        _ = fr_session_free(handle)
+        if let choice = uploadChoice {
+            _ = fr_session_discard_upload_selection(handle, choice.token)
+        }
+        // Preparation strongly retains this object until its native call has
+        // returned. Any prepared-but-unsent descriptor was discarded above.
+        FileUploadResource.retire(handle: handle, resources: uploadResources)
     }
 
     /// Drain pending events. Call on the main thread, once per refresh.
+    @MainActor
     func pump() {
         var event = FrEvent()
         while fr_session_poll_event(handle, &event) {
             apply(event)
         }
+        pollDisplays()
+        pollUploads()
     }
 
+    private func pollDisplays() {
+        var request = FrDisplayRequest()
+        guard !phase.isEnded, fr_session_display_request(handle, &request) else {
+            if displaySelection != nil { displaySelection = nil }
+            return
+        }
+        if displaySelection?.token == request.token { return }
+        let next = DisplaySelection.copy(request) { token, index in
+            var info = FrDisplayInfo()
+            return fr_session_display_info(handle, token, index, &info) ? info : nil
+        }
+        if next != displaySelection { displaySelection = next }
+    }
+
+    func selectDisplay(_ selection: DisplaySelection, index: UInt32) {
+        guard displaySelection?.token == selection.token else { return }
+        let status = fr_session_select_display(handle, selection.token, index)
+        if status == FR_OK {
+            displaySelection = nil
+        } else {
+            notice = "That display choice is no longer available. Choose from the current list."
+            pollDisplays()
+        }
+    }
+
+    /// The sheet's cancel and interactive dismissal retain their original
+    /// request. A stale dismissal cannot cancel a replacement attempt.
+    @MainActor
+    func cancelDisplay(_ selection: DisplaySelection) {
+        let status = fr_session_cancel_display(handle, selection.token)
+        if displaySelection?.token == selection.token { displaySelection = nil }
+        if status == FR_OK { setPhase(.closing) }
+    }
+
+    /// Read the original core pin directly in case an event was coalesced.
+    /// The next viewing session keeps this target and the offered profile,
+    /// but no pending control intent, input, catalog or selected host alias.
+    func displaySwitchHost() -> SavedHost? {
+        DisplayReopen.pinnedHost(host, observedPin: copyString(fr_session_copy_pin))
+    }
+
+    var reopenStatus: Int32 { fr_session_reopen_status(handle) }
+
+    @MainActor
     private func apply(_ event: FrEvent) {
         switch Int32(bitPattern: event.kind) {
         case FR_EVENT_STATE:
@@ -213,8 +279,14 @@ final class RemoteSession: ObservableObject, InputSink {
         }
     }
 
+    @MainActor
     private func setPhase(_ next: SessionPhase) {
         if phase.isEnded { return }
+        switch next {
+        case .connecting, .reconnecting, .closing, .ended:
+            discardUploadSelection()
+        default: break
+        }
         if phase != next { phase = next }
     }
 
@@ -244,6 +316,16 @@ final class RemoteSession: ObservableObject, InputSink {
         return Frame(buffer: buffer, info: info)
     }
 
+    /// Original display geometry for this retained frame's live owner.
+    /// VIDEO events are informational and may be split or dropped.
+    func display(forFrame frame: UInt64) -> CGSize? {
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+        guard fr_session_frame_display(handle, frame, &width, &height),
+              width > 0, height > 0 else { return nil }
+        return CGSize(width: Int(width), height: Int(height))
+    }
+
     /// The picture with frame id `frame` reached the screen.
     func drawn(_ frame: UInt64) {
         fr_session_frame_drawn(handle, frame)
@@ -264,22 +346,39 @@ final class RemoteSession: ObservableObject, InputSink {
         var rgba: [UInt8]
     }
 
-    /// The host-drawn cursor when the host sends it separately.
-    func cursor(knownGeneration: UInt64) -> CursorShape? {
+    enum CursorRead {
+        case unavailable
+        case unchanged
+        case shape(CursorShape)
+    }
+
+    /// A cursor belongs to this exact frame owner and must follow the
+    /// decoder's reset floor. A refused scope clears the renderer's cache;
+    /// it is distinct from an unchanged generation in the same scope.
+    func cursor(for frame: FrFrameInfo, knownGeneration: UInt64) -> CursorRead {
         var state = FrCursor()
-        guard fr_session_cursor(handle, &state), state.generation != knownGeneration else { return nil }
+        guard fr_session_frame_cursor(handle, frame.frame, frame.sequence, &state) else {
+            return .unavailable
+        }
+        if state.generation == knownGeneration { return .unchanged }
         let length = fr_session_copy_cursor_rgba(handle, nil, 0)
+        guard length == Int(state.width) * Int(state.height) * 4 else { return .unavailable }
         var rgba = [UInt8](repeating: 0, count: length)
         if length > 0 {
-            _ = fr_session_copy_cursor_rgba(handle, &rgba, rgba.count)
+            guard fr_session_copy_cursor_rgba(handle, &rgba, rgba.count) == length else {
+                return .unavailable
+            }
         }
-        return CursorShape(state: state, rgba: rgba)
+        var after = FrCursor()
+        guard fr_session_frame_cursor(handle, frame.frame, frame.sequence, &after),
+              after.generation == state.generation else { return .unavailable }
+        return .shape(CursorShape(state: state, rgba: rgba))
     }
 
     // MARK: Control
 
     func requestControl() {
-        guard controlCapable else { return }
+        guard controlCapable, !uploadBlocksControl else { return }
         wantsControl = true
         _ = fr_session_request_control(handle)
     }
@@ -290,9 +389,157 @@ final class RemoteSession: ObservableObject, InputSink {
         fr_session_release_control(handle)
     }
 
+    @MainActor
     func close() {
+        discardUploadSelection()
         _ = fr_session_release_all(handle)
         _ = fr_session_close(handle)
+        displaySelection = nil
+        setPhase(.closing)
+    }
+
+    // MARK: Explicit file uploads
+
+    /// Choosing a document is local selection only. The picker may cover the
+    /// desktop, so it opens only before control is requested or granted.
+    var canChooseUpload: Bool {
+        controlCapable && phase == .viewing && uploadChoice == nil && !preparingUpload
+            && uploadStatusCurrent && uploadStatus?.available == true
+            && uploadStatus?.transfer?.unavailableMessage == nil
+    }
+
+    var canSendUpload: Bool {
+        phase == .controlled && uploadChoice?.phase == .prepared && !preparingUpload
+            && uploadStatusCurrent && uploadStatus?.ready == true
+            && uploadStatus?.transfer?.unavailableMessage == nil
+            && uploadStatus?.selection.token == uploadChoice?.token
+            && uploadStatus?.selection.state == "prepared"
+    }
+
+    var uploadBlocksControl: Bool {
+        // Discard retires the choice immediately. Provider work may finish
+        // later without blocking Control. canChooseUpload still prevents
+        // a second preparation worker until the original operation returns.
+        (preparingUpload && uploadChoice != nil) || uploadChoice?.phase == .choosing
+    }
+
+    @MainActor
+    func beginUploadSelection() -> FileUploadChoice? {
+        pollUploads(force: true)
+        guard canChooseUpload else { return nil }
+        var token: UInt64 = 0
+        let status = fr_session_begin_upload_selection(handle, &token)
+        guard status == FR_OK, token != 0 else {
+            notice = "A file cannot be chosen for this view right now. Nothing was opened."
+            return nil
+        }
+        let choice = FileUploadChoice(token: token)
+        uploadChoice = choice
+        pollUploads(force: true)
+        return choice
+    }
+
+    @MainActor
+    func prepareUpload(_ url: URL, choice: FileUploadChoice) {
+        guard !preparingUpload, phase == .viewing,
+              uploadChoice?.beginPreparation(token: choice.token, name: url.lastPathComponent) == true else {
+            _ = fr_session_discard_upload_selection(handle, choice.token)
+            return
+        }
+        preparingUpload = true
+        let originalHandle = handle
+        let originalToken = choice.token
+        // Keep this exact UI owner alive until provider coordination and its
+        // native prepare have returned, even if the view is dismissed.
+        Task { @MainActor [self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                FileUploadResource.prepare(handle: originalHandle, token: originalToken, url: url)
+            }.value
+            preparingUpload = false
+            guard uploadChoice?.token == originalToken, phase == .viewing,
+                  result.status == FR_OK, let resource = result.resource else {
+                _ = fr_session_discard_upload_selection(originalHandle, originalToken)
+                if uploadChoice?.token == originalToken {
+                    uploadChoice = nil
+                    uploadChoiceResource = nil
+                    notice = "Could not prepare an upload copy. Choose one regular file up to 256 MiB from a supported provider. No file was sent."
+                }
+                pollUploads(force: true)
+                return
+            }
+            uploadChoiceResource = resource
+            _ = uploadChoice?.prepared(token: originalToken)
+            notice = "Local upload copy ready. Request control, then choose Send once."
+            pollUploads(force: true)
+        }
+    }
+
+    @MainActor
+    func discardUploadSelection(token: UInt64? = nil) {
+        guard let original = uploadChoice, token == nil || token == original.token else {
+            if let token { _ = fr_session_discard_upload_selection(handle, token) }
+            return
+        }
+        _ = fr_session_discard_upload_selection(handle, original.token)
+        uploadChoice = nil
+        uploadChoiceResource = nil
+    }
+
+    /// A new explicit Send samples the current controlled view in Rust. Even
+    /// refusal consumes the descriptor; neither this method nor polling retries.
+    @MainActor
+    func sendUploadOnce() {
+        guard canSendUpload, let choice = uploadChoice, let resource = uploadChoiceResource else { return }
+        let status = fr_session_send_upload(handle, choice.token)
+        uploadChoice = nil
+        uploadChoiceResource = nil
+        if status == FR_OK {
+            uploadResources.append(resource)
+            notice = "File queued for the host. Its publication receipt will appear below."
+        } else {
+            notice = "That file was not accepted for sending. Choose it again for a new attempt."
+        }
+        pollUploads(force: true)
+    }
+
+    @MainActor
+    func cancelUpload(batch: UInt32) {
+        if fr_session_cancel_upload(handle, batch) != FR_OK {
+            notice = "That upload no longer accepts cancellation. Its original receipt is kept."
+        }
+        pollUploads(force: true)
+    }
+
+    @MainActor
+    func pauseUpload(batch: UInt32, paused: Bool) {
+        if fr_session_pause_upload(handle, batch, paused) != FR_OK {
+            notice = "That upload no longer accepts a pacing change."
+        }
+        pollUploads(force: true)
+    }
+
+    @MainActor
+    private func pollUploads(force: Bool = false) {
+        guard controlCapable else { return }
+        let now = ContinuousClock.now
+        guard force || (lastUploadPoll.map({ $0.duration(to: now) >= .milliseconds(100) }) ?? true) else { return }
+        lastUploadPoll = now
+        // One fixed allocation at a bounded cadence. Never resize from an
+        // untrusted length or present a truncated snapshot as complete evidence.
+        var buffer = [CChar](repeating: 0, count: 16 * 1024 + 1)
+        let length = fr_session_copy_upload_status(handle, &buffer, buffer.count)
+        guard length > 0, length < buffer.count,
+              let status = FileUploadStatus.decode(Data(buffer.prefix(length).map { UInt8(bitPattern: $0) })) else {
+            uploadStatusCurrent = false
+            return // Retain earlier receipts, but disable commands.
+        }
+        if let original = uploadChoice, status.selection.token != original.token {
+            discardUploadSelection(token: original.token)
+            notice = "That file selection expired or its connection changed. No file was sent."
+        }
+        if uploadStatus != status { uploadStatus = status }
+        uploadStatusCurrent = true
+        if fr_session_upload_sources_released(handle) { uploadResources.removeAll() }
     }
 
     // MARK: InputSink

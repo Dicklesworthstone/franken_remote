@@ -359,6 +359,48 @@ fn preflight_refusals_do_not_retire_healthy_media_or_consume_new_bindings() {
         }
     });
 }
+/// 2026-11-18: the host's sender recovery horizon became 6 s (fd566abf) while
+/// this preflight still refused deadlines over 5 s ahead, so every host
+/// recovery begun within 1 s of its failure ended the session as Expired.
+#[test]
+fn a_host_recovery_at_the_six_second_send_horizon_is_not_refused_as_expired() {
+    run_test!(cx, {
+        let mut link = Link::new(&cx, true).await;
+        let (hm, _, _) = link.media(&cx).await;
+        let result = hm.begin_replacement(
+            &cx,
+            &mut link.h,
+            link.hr,
+            parent(),
+            net::clock(&cx) + 6_000_000,
+            Some(tickets()),
+            || true,
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert!(!link.h.is_closed());
+    });
+}
+#[test]
+fn a_deadline_beyond_the_send_horizon_is_refused_before_any_retirement() {
+    run_test!(cx, {
+        let mut link = Link::new(&cx, true).await;
+        let (hm, vm, _) = link.media(&cx).await;
+        let old = vm.repair_stream(&link.c).unwrap();
+        let next = link.h.next_channel_binding().unwrap();
+        let result = hm.begin_replacement(
+            &cx,
+            &mut link.h,
+            link.hr,
+            parent(),
+            net::clock(&cx) + 60_000_000,
+            Some(tickets()),
+            || true,
+        );
+        assert!(matches!(result, Err(ReplacementError::Expired)));
+        assert_eq!(link.h.next_channel_binding().unwrap(), next);
+        assert!(link.c.has_route(Route::Stream(old)));
+    });
+}
 #[test]
 fn original_deadline_expires_while_waiting_for_first_offer_without_reopening_a_connection() {
     run_test!(cx, {

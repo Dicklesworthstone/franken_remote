@@ -2,14 +2,19 @@
 //! a final reparse point, who owns an object and what its DACL grants to
 //! anyone else (the Windows form of the owner and mode bits frd's Unix stores
 //! read with `fstat`), and a rename over a file readers may hold open.
+mod receive;
 use crate::pipe::os;
 use core::ffi::c_void;
+pub use receive::{
+    PreparedReceiveRename, ReceiveRootError, create_receive_file, open_receive_root,
+    prepare_receive_rename, remove_receive_file,
+};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
+use std::path::{Component, Path};
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
@@ -23,12 +28,12 @@ use windows::Win32::Security::{
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
-    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfoEx,
-    GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    SetFileInformationByHandle,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+    FileRenameInfoEx, GetDriveTypeW, GetFileInformationByHandle, GetFileType,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileInformationByHandle,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::core::{HSTRING, PWSTR};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 // Access rights (winnt.h). The directory forms share bits with the file
 // forms: ADD_FILE is WRITE_DATA, ADD_SUBDIRECTORY is APPEND_DATA.
@@ -134,6 +139,91 @@ pub fn open_no_follow(path: &Path, how: Open) -> io::Result<File> {
         .share_mode(share)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
         .open(path)
+}
+
+/// The actual volume and file identity read from an open disk handle. It is
+/// never synthesized from Windows' Unix-compatibility metadata placeholders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    volume: u32,
+    index: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSelectionError {
+    Path,
+    Directory,
+    Reparse,
+    SpecialFile,
+    Unavailable,
+}
+
+/// Select one ordinary drive-qualified file. Reject device/UNC/verbatim/drive-relative
+/// paths before any file query. The final read handle denies write and delete
+/// sharing for its entire lifetime, including all duplicate sender handles.
+/// Ancestor junction resolution remains an OS path operation; checking the
+/// drive letter is not proof that every ancestor stays on that local volume.
+/// This function runs before connection startup, never under input authority.
+pub fn select_file(path: &Path) -> Result<(File, FileIdentity), FileSelectionError> {
+    use crate::file_selection_policy::{MAX_PATH_UNITS, ordinary_absolute};
+    let selected = if path.is_absolute() {
+        path.to_path_buf()
+    } else if path.has_root() || path.components().any(|c| matches!(c, Component::Prefix(_))) {
+        return Err(FileSelectionError::Path);
+    } else {
+        std::env::current_dir()
+            .map_err(|_| FileSelectionError::Unavailable)?
+            .join(path)
+    };
+    let units: Vec<_> = selected
+        .as_os_str()
+        .encode_wide()
+        .take(MAX_PATH_UNITS + 1)
+        .collect();
+    if !ordinary_absolute(&units) {
+        return Err(FileSelectionError::Path);
+    }
+    let root = [units[0], u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: root is a live, NUL-terminated, validated drive root. This query
+    // rejects mapped network drives before CreateFile can contact their server.
+    let drive = unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) };
+    // DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_CDROM, DRIVE_RAMDISK. UNKNOWN,
+    // NO_ROOT_DIR and REMOTE do not qualify as an ordinary local source.
+    if !matches!(drive, 2 | 3 | 5 | 6) {
+        return Err(FileSelectionError::Path);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(&selected)
+        .map_err(|_| FileSelectionError::Unavailable)?;
+    let identity = selected_file_identity(&file)?;
+    Ok((file, identity))
+}
+
+/// Validate the actual selected/duplicated object, not a pathname that another
+/// process could replace. No DACL or Unix inode approximation is used here.
+pub fn selected_file_identity(file: &File) -> Result<FileIdentity, FileSelectionError> {
+    let handle = HANDLE(file.as_raw_handle());
+    // SAFETY: File retains this live borrowed handle across the native query.
+    if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
+        return Err(FileSelectionError::SpecialFile);
+    }
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: File keeps the handle alive; info is a complete writable result.
+    unsafe { GetFileInformationByHandle(handle, &raw mut info) }
+        .map_err(|_| FileSelectionError::Unavailable)?;
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Err(FileSelectionError::Reparse);
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+        return Err(FileSelectionError::Directory);
+    }
+    Ok(FileIdentity {
+        volume: info.dwVolumeSerialNumber,
+        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
 }
 
 /// Renames the file `from` over `to`. A reader holding `to` open (sharing
@@ -388,6 +478,48 @@ mod tests {
     }
 
     #[test]
+    fn selected_upload_and_its_duplicate_pin_the_actual_read_only_file() {
+        use std::io::Read;
+        let dir = scratch("selected-upload");
+        let path = dir.join("chosen.txt");
+        std::fs::write(&path, b"chosen bytes").unwrap();
+        let (file, identity) = select_file(&path).unwrap();
+        let mut duplicate = file.try_clone().unwrap();
+        assert_eq!(selected_file_identity(&duplicate), Ok(identity));
+        assert!(std::fs::write(&path, b"replacement").is_err());
+        assert!(std::fs::rename(&path, dir.join("renamed.txt")).is_err());
+        drop(file);
+        assert!(std::fs::write(&path, b"replacement").is_err());
+        let mut bytes = Vec::new();
+        duplicate.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"chosen bytes");
+        drop(duplicate);
+        std::fs::write(&path, b"after original owner closed").unwrap();
+    }
+
+    #[test]
+    fn native_selection_refuses_namespaces_before_open_and_actual_directories() {
+        for path in [
+            r"\\.\pipe\never-open",
+            r"\\?\GLOBALROOT\Device\never-open",
+            r"\\server\share\never-open",
+            r"C:relative",
+            r"C:\NUL",
+            r"C:\chosen:stream",
+        ] {
+            assert!(matches!(
+                select_file(Path::new(path)),
+                Err(FileSelectionError::Path)
+            ));
+        }
+        let dir = scratch("selected-directory");
+        assert!(matches!(
+            select_file(&dir),
+            Err(FileSelectionError::Directory)
+        ));
+    }
+
+    #[test]
     fn a_grant_to_everyone_is_seen() {
         let dir = scratch("everyone");
         let path = dir.join("policy.json");
@@ -433,6 +565,10 @@ mod tests {
                 .unwrap()
                 .reparse
         );
+        assert!(matches!(
+            select_file(&junction),
+            Err(FileSelectionError::Reparse)
+        ));
         let file = dir.join("file");
         std::fs::write(&file, b"x").unwrap();
         std::fs::hard_link(&file, dir.join("second")).unwrap();
@@ -460,5 +596,109 @@ mod tests {
         drop(reader);
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
         assert!(!from.exists());
+    }
+
+    #[test]
+    fn receive_preparation_has_no_effect_and_publication_keeps_the_original_file() {
+        use std::io::Write;
+        use std::os::windows::io::AsHandle;
+
+        let dir = scratch("receive-publish");
+        let root = open_receive_root(&dir).unwrap();
+        let mut file = create_receive_file(root.as_handle(), ".fr-part-native").unwrap();
+        let private = inspect(&file).unwrap();
+        assert_eq!(private.owner, Owner::Us);
+        assert!(!private.directory && !private.reparse && !private.others_may_access());
+        assert_eq!(private.links, 1);
+        file.write_all(b"original received bytes").unwrap();
+        file.sync_all().unwrap();
+        let prepared =
+            prepare_receive_rename(file.as_handle(), root.as_handle(), "received.txt").unwrap();
+        assert!(!dir.join("received.txt").exists());
+        assert!(dir.join(".fr-part-native").exists());
+        drop(prepared);
+        assert!(!dir.join("received.txt").exists());
+        prepare_receive_rename(file.as_handle(), root.as_handle(), "received.txt")
+            .unwrap()
+            .commit()
+            .unwrap();
+        drop(file);
+        assert_eq!(
+            std::fs::read(dir.join("received.txt")).unwrap(),
+            b"original received bytes"
+        );
+        assert!(!dir.join(".fr-part-native").exists());
+
+        // Exercise the native record with the shortest and longest accepted
+        // components, including structure padding beyond the UTF-16 payload.
+        for name in ["x".to_owned(), "n".repeat(255)] {
+            let file = create_receive_file(root.as_handle(), ".fr-part-native").unwrap();
+            prepare_receive_rename(file.as_handle(), root.as_handle(), &name)
+                .unwrap()
+                .commit()
+                .unwrap();
+            drop(file);
+            assert_eq!(std::fs::metadata(dir.join(name)).unwrap().len(), 0);
+            assert!(!dir.join(".fr-part-native").exists());
+        }
+    }
+
+    #[test]
+    fn receive_conflict_preserves_the_destination_and_deletes_only_owned_staging() {
+        use std::io::Write;
+        use std::os::windows::io::AsHandle;
+
+        let dir = scratch("receive-conflict");
+        let root = open_receive_root(&dir).unwrap();
+        std::fs::write(dir.join("taken.txt"), b"local contents").unwrap();
+        let mut file = create_receive_file(root.as_handle(), ".fr-part-owned").unwrap();
+        file.write_all(b"incoming").unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            prepare_receive_rename(file.as_handle(), root.as_handle(), "taken.txt")
+                .unwrap()
+                .commit()
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            std::fs::read(dir.join("taken.txt")).unwrap(),
+            b"local contents"
+        );
+        assert!(std::fs::write(dir.join(".fr-part-owned"), b"replacement").is_err());
+        assert!(std::fs::rename(dir.join(".fr-part-owned"), dir.join("moved")).is_err());
+        remove_receive_file(file.as_handle()).unwrap();
+        drop(file);
+        assert!(!dir.join(".fr-part-owned").exists());
+        assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read(dir.join("taken.txt")).unwrap(),
+            b"local contents"
+        );
+    }
+
+    #[test]
+    fn receive_root_cannot_be_redirected_and_native_names_cannot_escape() {
+        use std::os::windows::io::AsHandle;
+
+        let dir = scratch("receive-root");
+        let root = open_receive_root(&dir).unwrap();
+        assert!(std::fs::rename(&*dir, dir.with_extension("replacement")).is_err());
+        let file = create_receive_file(root.as_handle(), ".fr-part-original").unwrap();
+        for name in [
+            "../escape",
+            r"..\escape",
+            "other/name",
+            "file:stream",
+            "NUL",
+            "bad.",
+        ] {
+            assert!(create_receive_file(root.as_handle(), name).is_err());
+            assert!(prepare_receive_rename(file.as_handle(), root.as_handle(), name).is_err());
+        }
+        remove_receive_file(file.as_handle()).unwrap();
+        drop(file);
+        assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 0);
     }
 }

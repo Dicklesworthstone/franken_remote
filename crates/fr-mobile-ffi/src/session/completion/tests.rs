@@ -116,6 +116,48 @@ fn a_user_visible_cancel_is_not_proof_of_orderly_service_cleanup() {
 }
 
 #[test]
+fn a_focus_close_preserves_hidden_and_needs_actual_service_and_cleanup_success() {
+    let hidden = Some(LocalStop::Hidden);
+    assert!(focus_closed(Ok(()), true, true, hidden, None));
+    assert_eq!(
+        ending(Ok(()), true, hidden, None),
+        (end::CONTROL_STOPPED, Some("Hidden".into()))
+    );
+    assert!(!orderly_closed(Ok(()), true, true, hidden, None));
+    assert!(!focus_closed(Ok(()), false, true, hidden, None));
+    assert!(!focus_closed(Ok(()), true, false, hidden, None));
+    for stopped in [
+        None,
+        Some(LocalStop::InputRefused),
+        Some(LocalStop::PictureChanged),
+        Some(LocalStop::PresentationFailed),
+    ] {
+        assert!(!focus_closed(Ok(()), true, true, stopped, None));
+    }
+    for failure in [
+        Failure::Cancelled,
+        Failure::Notification,
+        Failure::Connection(frd::native_connection::Error::Cancelled),
+        Failure::Observation(ObserverError::Application),
+        Failure::Cleanup,
+        Failure::CleanupExpired,
+        Failure::MissingRuntime,
+    ] {
+        assert!(!focus_closed(Err(failure), true, true, hidden, None));
+    }
+    for terminal in adverse() {
+        assert!(!focus_closed(Ok(()), true, true, hidden, Some(terminal)));
+        assert_eq!(
+            ending(Ok(()), true, hidden, Some(terminal)),
+            (
+                end::SESSION_FAILED,
+                Some(format!("{:?}", Failure::Observation(terminal)))
+            )
+        );
+    }
+}
+
+#[test]
 fn adverse_reports_survive_close_and_local_stop_races_with_all_effect_fields() {
     for terminal in adverse() {
         let detail = Some(format!("{:?}", Failure::Observation(terminal)));

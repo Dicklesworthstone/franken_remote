@@ -176,7 +176,7 @@ fn missing_source_evidence_ends_idle_classification_without_inventing_a_change()
     assert_eq!(r.interval_us, 200_000);
 }
 #[test]
-fn scheduling_gap_resets_estimates_and_requires_new_continuous_evidence() {
+fn scheduling_gap_resets_estimates_without_inventing_overload() {
     let mut c = controller();
     for i in 0..=40 {
         c.update(active(i * 50_000)).unwrap();
@@ -186,7 +186,7 @@ fn scheduling_gap_resets_estimates_and_requires_new_continuous_evidence() {
     stalled.send = A::Blocked;
     let r = c.update(stalled).unwrap();
     assert_eq!(r.reason, Reason::EvidenceGap);
-    assert_eq!(r.interval_us, 40_000);
+    assert_eq!(r.interval_us, 35_000);
     assert_eq!(r.pressure_us, [0; 3]);
     assert_eq!(r.headroom_us, 0);
 }

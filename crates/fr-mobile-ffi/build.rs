@@ -16,6 +16,7 @@ fn main() {
     println!("cargo::rerun-if-changed=build_support/roots.rs");
     println!("cargo::rerun-if-env-changed={}", roots::LOCAL_ROOTS_ENV);
     println!("cargo::rerun-if-changed=src/vt_decode.c");
+    println!("cargo::rerun-if-changed=../fr-native/src/apple_decode_output.h");
     println!("cargo::rerun-if-changed=src/abi_check.c");
     println!("cargo::rerun-if-changed=include/fr_mobile.h");
     println!("cargo::rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
@@ -80,7 +81,13 @@ fn main() {
     assert!(status.success(), "archiving vt_decode.o failed");
     println!("cargo::rustc-link-search=native={}", out.display());
     println!("cargo::rustc-link-lib=static=frvtdecode");
-    for framework in ["CoreFoundation", "CoreMedia", "CoreVideo", "VideoToolbox"] {
+    for framework in [
+        "CoreFoundation",
+        "CoreMedia",
+        "CoreVideo",
+        "IOSurface",
+        "VideoToolbox",
+    ] {
         println!("cargo::rustc-link-lib=framework={framework}");
     }
 }

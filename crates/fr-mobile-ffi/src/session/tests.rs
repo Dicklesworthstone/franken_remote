@@ -221,6 +221,46 @@ fn hiding_and_retirement_discard_queued_and_unused_control_choices() {
 }
 
 #[test]
+fn an_app_switch_retires_unsent_choices_but_neither_hides_nor_stops() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    assert!(
+        shared.active(),
+        "shells that never call set_active stay active"
+    );
+    shared.refresh_control_request(true).unwrap();
+    let request = shared.control_request().unwrap();
+    assert!(shared.request_control_for(&request, Duration::ZERO));
+    assert!(shared.set_active(false), "nothing held, nothing refused");
+    assert!(!shared.active());
+    // The choice made before the switch is gone, and none is offered or
+    // taken while the app is in the background.
+    assert!(!shared.request_control_for(&request, Duration::ZERO));
+    shared.refresh_control_request(true).unwrap();
+    assert!(shared.control_request().is_none());
+    shared.request_control();
+    assert!(!shared.take_control_request().unwrap());
+    // Unlike hiding: no hide is counted, no local stop recorded, nothing
+    // reported, and the session is not closing (only no choice is offered).
+    assert_eq!(shared.hides.load(Ordering::SeqCst), 0);
+    assert_eq!(shared.local_stop.load(Ordering::SeqCst), 0);
+    assert!(shared.events.is_empty());
+    assert_eq!(shared.control_state(), ControlState::WaitingForView);
+    // Without a grant the grant check still answers first.
+    assert_eq!(shared.key(0x04, true), InputResult::NotControlled);
+    // Returning offers a fresh choice; the old one stays spent.
+    assert!(shared.set_active(true));
+    shared.refresh_control_request(true).unwrap();
+    let fresh = shared.control_request().unwrap();
+    assert!(!shared.request_control_for(&request, Duration::ZERO));
+    assert!(shared.request_control_for(&fresh, Duration::ZERO));
+    assert!(shared.take_control_request().unwrap());
+    // Planted negative: hiding the same view still counts and retires.
+    shared.set_visible(false);
+    assert_eq!(shared.hides.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn expired_native_gesture_or_original_input_failure_cannot_queue_control() {
     let shared = Shared::new();
     shared.set_visible(true);
@@ -388,6 +428,68 @@ fn a_submitted_picture_counts_as_shown_once_the_app_has_drawn_it() {
 }
 
 #[test]
+fn the_opening_picture_counts_as_shown_even_late_and_a_clock_refusal_reports_it_again() {
+    use fr_media::access_unit::FrameId;
+    let opening = |stage| Presentation {
+        frame: FrameId::from_raw(3),
+        stage,
+    };
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.frames.mark_drawn(3);
+    // Planted negative: frd's callbacks never carry the opening picture, so
+    // starting with nothing pending (the old rule) never reports it. On a
+    // static host no later picture comes, and control is never offered.
+    let mut old = None;
+    assert_eq!(shown(&shared, &mut old, None), None);
+    let mut pending = submitted(opening(PresentationStage::SubmittedToCompositor));
+    assert_eq!(shown(&shared, &mut pending, None), Some(3));
+    // Before the clock is correlated the view does not exist: the refusal
+    // puts the picture back, and it is reported again on a later turn.
+    let mut last_shown = None;
+    let not_ready: Result<(), _> = Err(StreamingViewerError::Control(
+        ControlledViewerError::ClockNotReady,
+    ));
+    witness(&not_ready, 3, &mut pending, &mut last_shown);
+    assert_eq!(last_shown, None);
+    assert_eq!(shown(&shared, &mut pending, None), Some(3));
+    // Any other refusal waits for a newer picture.
+    witness(
+        &Err::<(), _>(StreamingViewerError::Closed),
+        3,
+        &mut pending,
+        &mut last_shown,
+    );
+    assert_eq!(last_shown, None);
+    assert_eq!(shown(&shared, &mut pending, None), None);
+    witness(
+        &Ok::<(), StreamingViewerError>(()),
+        3,
+        &mut pending,
+        &mut last_shown,
+    );
+    assert_eq!(last_shown, Some(3));
+    assert_eq!(pending, None);
+    // Planted negative (the old rule set `last_shown` only on Ok): a late
+    // picture is on screen, held unqualified by frd until the host verifies
+    // it. It counts as shown, so the view keeps checking its gated evidence,
+    // and it is not reported again.
+    let (mut late_pending, mut late_shown) = (None, None);
+    witness(
+        &Err::<(), _>(StreamingViewerError::Freshness(
+            FreshnessError::QueueExpired,
+        )),
+        4,
+        &mut late_pending,
+        &mut late_shown,
+    );
+    assert_eq!(late_shown, Some(4));
+    assert_eq!(late_pending, None);
+    // A decode-only opening picture never counts.
+    assert_eq!(submitted(opening(PresentationStage::DecodedOnly)), None);
+}
+
+#[test]
 fn a_picture_drawn_in_an_earlier_attempt_never_counts_in_a_later_one() {
     use fr_media::access_unit::FrameId;
     let submitted = |raw| {
@@ -398,10 +500,10 @@ fn a_picture_drawn_in_an_earlier_attempt_never_counts_in_a_later_one() {
     };
     let shared = Shared::new();
     shared.set_visible(true);
-    shared.frames.begin_attempt();
+    shared.frames.begin_attempt().unwrap();
     shared.frames.mark_drawn(shared.frames.app_id(500));
     // A reconnect: frd's frame ids start again from low numbers.
-    shared.frames.begin_attempt();
+    shared.frames.begin_attempt().unwrap();
     let mut pending = None;
     // Planted negative: compared without the generation, the earlier
     // attempt's 500 would make picture 3 count before it was drawn.
@@ -433,6 +535,53 @@ fn hiding_counts_once_per_visible_spell_and_without_a_grant_stops_nothing() {
         LocalStop::from_code(shared.local_stop.load(Ordering::SeqCst)),
         Some(LocalStop::Hidden)
     );
+}
+
+#[test]
+fn a_retired_file_chooser_cannot_hide_a_new_view_or_spend_its_control_choice() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.refresh_control_request(true).unwrap();
+    let request = shared.control_request().unwrap();
+    let clipboard = shared.clipboard_report();
+    // An orphaned original token represents a callback whose granted source
+    // has already retired. It is not evidence of a live native input grant.
+    let original = Arc::new(AtomicBool::new(false));
+    assert!(!shared.hide_file_source(&original));
+    assert!(original.load(Ordering::SeqCst));
+    assert!(shared.visible.load(Ordering::SeqCst));
+    assert_eq!(shared.hides.load(Ordering::SeqCst), 0);
+    assert_eq!(shared.local_stop.load(Ordering::SeqCst), 0);
+    assert!(!shared.close.load(Ordering::SeqCst));
+    assert_eq!(shared.clipboard_report(), clipboard);
+    assert!(shared.request_control_for(&request, Duration::ZERO));
+    // Even a repeated late callback cannot cancel the new explicit request.
+    assert!(!shared.hide_file_source(&original));
+    assert!(shared.take_control_request().unwrap());
+}
+
+#[test]
+fn focus_continuity_requires_an_actual_published_grant_not_a_view_or_request() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.serving.store(true, Ordering::SeqCst);
+    shared.refresh_control_request(true).unwrap();
+    let request = shared.control_request().unwrap();
+    let clipboard = shared.clipboard_report();
+    assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(!shared.close.load(Ordering::SeqCst));
+    assert!(!shared.focus_close_requested.load(Ordering::SeqCst));
+    assert!(!shared.focus_closed());
+    assert!(shared.visible.load(Ordering::SeqCst));
+    assert_eq!(shared.local_stop.load(Ordering::SeqCst), 0);
+    assert_eq!(shared.clipboard_report(), clipboard);
+    assert!(shared.request_control_for(&request, Duration::ZERO));
+    // A queued control gesture remains a request, never an attached grant.
+    assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(shared.take_control_request().unwrap());
+    shared.close();
+    assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(!shared.focus_close_requested.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -512,4 +661,387 @@ fn legacy_control_installation_cannot_finish_after_its_attempt_retired() {
     shared.close();
     shared.request_control();
     assert!(!shared.want_control.load(Ordering::SeqCst));
+}
+
+#[test]
+fn retained_picture_range_does_not_follow_a_new_decoder_configuration() {
+    use crate::video::tests::{picture, release};
+
+    for retained_range in [false, true] {
+        let shared = Shared::new();
+        shared.frames.begin_attempt().unwrap();
+        let attempt = shared.frames.app_id(0);
+        shared
+            .publish_configuration(attempt, (1920, 1440), (128, 96), retained_range, None)
+            .unwrap();
+        shared
+            .frames
+            .publish_for(attempt, picture(retained_range), 1)
+            .unwrap();
+        // Configuration is acknowledged before its first picture. A resize
+        // or cursor update can repaint the preceding decoder's retained image
+        // during this gap, using that image's original range in BOTH directions.
+        shared
+            .publish_configuration(attempt, (1920, 1440), (128, 96), !retained_range, None)
+            .unwrap();
+        assert_eq!(shared.full_range(), !retained_range);
+        let (raw, retained) = shared.frames.take_newer(0).unwrap();
+        release(raw);
+        assert_eq!(retained.full_range, retained_range);
+        assert_eq!(retained.frame, attempt | 1);
+        shared
+            .frames
+            .publish_for(attempt, picture(!retained_range), 2)
+            .unwrap();
+        let (raw, current) = shared.frames.take_newer(retained.sequence).unwrap();
+        release(raw);
+        assert_eq!(current.full_range, !retained_range);
+        assert_eq!(current.frame, attempt | 2);
+    }
+}
+
+#[test]
+fn native_configuration_returning_after_retirement_publishes_no_video_or_metadata() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let original = shared.frames.app_id(0);
+    shared
+        .publish_configuration(original, (1920, 1440), (128, 96), false, Some(false))
+        .unwrap();
+    assert_eq!(shared.events.poll().unwrap().kind, kind::VIDEO);
+
+    // The native configure call is still running when its bounded cleanup
+    // fails. This is the real terminal path: retire presentation, then ENDED.
+    shared.clear_presentation();
+    finish(&shared, end::INTERNAL, Some("Cleanup".into()));
+    assert!(shared.finished());
+    assert!(
+        shared
+            .publish_configuration(original, (1920, 1440), (640, 480), true, Some(true))
+            .is_err()
+    );
+    assert_eq!(*shared.picture.lock().unwrap(), (128, 96));
+    assert!(!shared.full_range());
+    assert_eq!(shared.hardware(), 0);
+    assert_eq!(shared.events.poll().unwrap().kind, kind::ENDED);
+    assert!(shared.events.poll().is_none(), "ENDED remains last");
+}
+
+#[test]
+fn configuration_metadata_cannot_migrate_to_another_attempt_or_publish_during_close() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let original = shared.frames.app_id(0);
+    shared.frames.begin_attempt().unwrap();
+    let current = shared.frames.app_id(0);
+    shared
+        .publish_configuration(current, (1920, 1440), (128, 96), false, None)
+        .unwrap();
+    assert_eq!(shared.events.poll().unwrap().kind, kind::VIDEO);
+    assert!(
+        shared
+            .publish_configuration(original, (1920, 1440), (640, 480), true, Some(true))
+            .is_err()
+    );
+    shared.close();
+    assert!(
+        shared
+            .publish_configuration(current, (1920, 1440), (640, 480), true, Some(true))
+            .is_err()
+    );
+    assert_eq!(*shared.picture.lock().unwrap(), (128, 96));
+    assert!(!shared.full_range());
+    assert_eq!(shared.hardware(), -1);
+    assert!(shared.events.poll().is_none());
+}
+
+#[test]
+fn presentation_display_is_original_and_survives_notification_overflow() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let original = shared.frames.app_id(0);
+    assert_eq!(shared.display_for(0), None);
+    assert_eq!(shared.display_for(original), None);
+    shared
+        .publish_configuration(original, (5120, 2880), (1582, 888), false, None)
+        .unwrap();
+    for _ in 0..events::CAPACITY * 2 {
+        shared.events.state(state::VIEWING, 1);
+    }
+    assert_eq!(shared.events.poll().unwrap().kind, kind::OVERFLOW);
+    assert_eq!(shared.display_for(original), Some((5120, 2880)));
+
+    shared.frames.begin_attempt().unwrap();
+    let current = shared.frames.app_id(0);
+    assert_eq!(shared.display_for(original), None);
+    assert_eq!(shared.display_for(current), None);
+    assert!(
+        shared
+            .publish_configuration(original, (5120, 2880), (1000, 562), false, None)
+            .is_err()
+    );
+    shared
+        .publish_configuration(current, (1920, 1080), (1280, 720), false, None)
+        .unwrap();
+    assert_eq!(shared.display_for(current), Some((1920, 1080)));
+    assert_eq!(shared.display_for(original), None);
+    shared.clear_presentation();
+    assert_eq!(shared.display_for(current), None);
+}
+
+#[test]
+fn configuration_cannot_redefine_display_coordinates_or_accept_a_noncanonical_crop() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let attempt = shared.frames.app_id(0);
+    shared
+        .publish_configuration(attempt, (5120, 2880), (1582, 888), false, None)
+        .unwrap();
+    shared
+        .publish_configuration(attempt, (5120, 2880), (1000, 562), false, None)
+        .unwrap();
+    let notifications = shared.events.len();
+    for (display, picture) in [
+        ((2560, 1440), (1280, 720)),
+        ((5120, 2880), (1000, 564)),
+        ((0, 2880), (1000, 562)),
+    ] {
+        assert_eq!(
+            shared.publish_configuration(attempt, display, picture, true, Some(true)),
+            Err(WorkerError::GeometryChanged)
+        );
+        assert_eq!(shared.display_for(attempt), Some((5120, 2880)));
+        assert_eq!(*shared.picture.lock().unwrap(), (1000, 562));
+        assert_eq!(shared.events.len(), notifications);
+        assert!(!shared.full_range());
+        assert_eq!(shared.hardware(), -1);
+    }
+    shared.close();
+    assert_eq!(shared.display_for(attempt), None);
+    assert!(
+        shared
+            .publish_configuration(attempt, (5120, 2880), (1280, 720), false, None)
+            .is_err()
+    );
+}
+
+#[test]
+fn retained_frame_display_never_uses_a_replacement_attempt_even_at_the_same_size() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let first = shared.frames.app_id(0);
+    shared
+        .publish_configuration(first, (5120, 2880), (1582, 888), false, None)
+        .unwrap();
+    let retained = shared.frames.app_id(17);
+    assert_eq!(shared.display_for_frame(retained), Some((5120, 2880)));
+    assert_eq!(shared.display_for_frame(0), None);
+    assert_eq!(shared.display_for_frame(17), None);
+
+    shared.frames.begin_attempt().unwrap();
+    let replacement = shared.frames.app_id(0);
+    assert_eq!(shared.display_for_frame(retained), None);
+    assert_eq!(shared.display_for_frame(replacement | 0x11), None);
+    shared
+        .publish_configuration(replacement, (5120, 2880), (1582, 888), false, None)
+        .unwrap();
+    assert_eq!(shared.display_for_frame(retained), None);
+    assert_eq!(
+        shared.display_for_frame(replacement | 0x11),
+        Some((5120, 2880))
+    );
+    shared.clear_presentation();
+    assert_eq!(shared.display_for_frame(replacement | 0x11), None);
+}
+
+fn reset_frame_cursor(shared: &Shared, attempt: u64) {
+    let mut cursor = shared.cursor.lock().unwrap();
+    cursor.reset(attempt, shared.frames.sequence()).unwrap();
+    cursor.source_width = 1920;
+    cursor.source_height = 1440;
+    cursor
+        .apply_for(
+            attempt,
+            &fr_media::worker::overlay::Update::Shape {
+                x: 4,
+                y: 5,
+                width: 2,
+                height: 2,
+                hotspot_x: 1,
+                hotspot_y: 1,
+                rgba: &[255; 16],
+            },
+        )
+        .unwrap();
+}
+
+fn begin_cursor_attempt(shared: &Shared) -> u64 {
+    shared.frames.begin_attempt().unwrap();
+    let attempt = shared.frames.app_id(0);
+    shared
+        .publish_configuration(attempt, (1920, 1440), (128, 96), false, None)
+        .unwrap();
+    reset_frame_cursor(shared, attempt);
+    attempt
+}
+
+fn publish_cursor_picture(shared: &Shared, raw_frame: u64) -> crate::video::FrameInfo {
+    shared
+        .frames
+        .publish_for(
+            shared.frames.app_id(0),
+            crate::video::tests::picture(false),
+            raw_frame,
+        )
+        .unwrap();
+    let (raw, info) = shared.frames.take_newer(0).unwrap();
+    crate::video::tests::release(raw);
+    info
+}
+
+#[test]
+fn cursor_metadata_requires_a_picture_after_the_original_decoder_reset() {
+    let shared = Shared::new();
+    let attempt = begin_cursor_attempt(&shared);
+    let first = publish_cursor_picture(&shared, 7);
+    assert_eq!(
+        shared.with_cursor_for_frame(first.frame, first.sequence, |cursor| {
+            (cursor.x, cursor.y, cursor.visible)
+        }),
+        Some((4, 5, true))
+    );
+    for (frame, sequence) in [
+        (0, first.sequence),
+        (7, first.sequence),
+        (first.frame, 0),
+        (first.frame, first.sequence + 1),
+    ] {
+        assert_eq!(
+            shared.with_cursor_for_frame(frame, sequence, |_| true),
+            None
+        );
+    }
+
+    // A fresh shape in the SAME attempt must not repaint the retained picture
+    // from before configure. Only an actually published later picture admits it.
+    reset_frame_cursor(&shared, attempt);
+    assert_eq!(
+        shared.with_cursor_for_frame(first.frame, first.sequence, |_| true),
+        None
+    );
+    let next = publish_cursor_picture(&shared, 8);
+    assert_eq!(
+        shared.with_cursor_for_frame(next.frame, next.sequence, |cursor| cursor.visible),
+        Some(true)
+    );
+    shared
+        .cursor
+        .lock()
+        .unwrap()
+        .apply_for(attempt, &fr_media::worker::overlay::Update::Hidden)
+        .unwrap();
+    assert_eq!(
+        shared.with_cursor_for_frame(next.frame, next.sequence, |cursor| cursor.visible),
+        Some(false),
+        "a current hidden cursor must clear the app's previous overlay"
+    );
+}
+
+#[test]
+fn retained_cursor_metadata_never_crosses_an_identical_size_reconnect() {
+    let shared = Shared::new();
+    let original = begin_cursor_attempt(&shared);
+    let retained = publish_cursor_picture(&shared, 7);
+    shared.frames.begin_attempt().unwrap();
+    let replacement = shared.frames.app_id(0);
+    assert_ne!(original, replacement);
+    let unconfigured = publish_cursor_picture(&shared, 7);
+    assert_eq!(
+        shared.with_cursor_for_frame(unconfigured.frame, unconfigured.sequence, |_| true),
+        None,
+        "the previous display's metadata is not a replacement configuration"
+    );
+    shared
+        .publish_configuration(replacement, (1920, 1440), (128, 96), false, None)
+        .unwrap();
+    assert_eq!(
+        shared.with_cursor_for_frame(unconfigured.frame, unconfigured.sequence, |_| true),
+        None,
+        "identical source dimensions do not authenticate an old cursor attempt"
+    );
+    reset_frame_cursor(&shared, replacement);
+    assert_eq!(
+        shared.with_cursor_for_frame(unconfigured.frame, unconfigured.sequence, |_| true),
+        None
+    );
+    let current = publish_cursor_picture(&shared, 8);
+    assert_eq!(
+        shared.with_cursor_for_frame(retained.frame, retained.sequence, |_| true),
+        None
+    );
+    assert_eq!(
+        shared.with_cursor_for_frame(current.frame, current.sequence, |_| true),
+        Some(true)
+    );
+}
+
+#[test]
+fn cursor_metadata_refuses_mismatched_source_or_uninitialized_revision() {
+    let shared = Shared::new();
+    let attempt = begin_cursor_attempt(&shared);
+    let picture = publish_cursor_picture(&shared, 7);
+    shared.cursor.lock().unwrap().source_width = 128;
+    assert_eq!(
+        shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+        None
+    );
+    {
+        let mut cursor = shared.cursor.lock().unwrap();
+        cursor.source_width = 1920;
+        cursor.source_height = 96;
+    }
+    assert_eq!(
+        shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+        None
+    );
+    {
+        let mut cursor = shared.cursor.lock().unwrap();
+        cursor.source_height = 1440;
+        cursor.attempt = 0;
+    }
+    assert_eq!(
+        shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+        None
+    );
+    {
+        let mut cursor = shared.cursor.lock().unwrap();
+        cursor.attempt = attempt;
+        cursor.generation = 0;
+    }
+    assert_eq!(
+        shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+        None
+    );
+}
+
+#[test]
+fn closing_finished_and_retired_sessions_refuse_retained_cursor_metadata() {
+    for terminal in 0..3 {
+        let shared = Shared::new();
+        begin_cursor_attempt(&shared);
+        let picture = publish_cursor_picture(&shared, 7);
+        assert_eq!(
+            shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+            Some(true)
+        );
+        match terminal {
+            0 => shared.close(),
+            1 => finish(&shared, end::OK, None),
+            _ => shared.clear_presentation(),
+        }
+        assert_eq!(
+            shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+            None
+        );
+    }
 }

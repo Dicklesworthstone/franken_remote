@@ -37,11 +37,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var cursor: FrCursor?
     private var dirty = true
 
-    /// The host's cursor hotspot (picture pixels) when the host sends its
-    /// cursor separately and shows it; nil otherwise.
+    /// The host's original-display hotspot mapped into the encoded-size
+    /// input area. A retired frame or unavailable scoped cursor never seeds
+    /// a replacement gesture.
     var hostCursor: CGPoint? {
-        guard let cursor, cursor.visible != 0 else { return nil }
-        return CGPoint(x: CGFloat(cursor.x), y: CGFloat(cursor.y))
+        guard let session, let current else { return nil }
+        refreshCursor(for: current.info)
+        let geometry = mapper()
+        guard geometry.frame == current.info.frame,
+              session.display(forFrame: current.info.frame) == geometry.display,
+              let cursor, cursor.visible != 0 else { return nil }
+        return geometry.picturePoint(forDisplay: CGPoint(x: Int(cursor.x), y: Int(cursor.y)))
     }
 
     /// Where to draw the host's cursor shape instead of its reported
@@ -104,26 +110,64 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         dirty = true
     }
 
-    func draw(in view: MTKView) {
-        let now = CACurrentMediaTime()
-        onRefresh?(now)
-        guard let session else { return }
-        if let frame = session.frame(after: lastSequence), let picture = makePicture(frame) {
+    /// Acquire the newest actual frame before the surface maps any input.
+    /// The metadata queue does not own this geometry: the retained frame does.
+    func prepareFrame() -> (frame: UInt64, picture: CGSize, display: CGSize)? {
+        guard let session else { reset(); return nil }
+        if let frame = session.frame(after: lastSequence) {
+            guard session.display(forFrame: frame.info.frame) != nil,
+                  let picture = makePicture(frame) else { reset(); return nil }
             current = picture
             lastSequence = frame.info.sequence
             dirty = true
         }
-        if let shape = session.cursor(knownGeneration: cursor?.generation ?? 0) {
+        guard let current, let display = session.display(forFrame: current.info.frame) else {
+            reset()
+            return nil
+        }
+        refreshCursor(for: current.info)
+        // Cursor copying can cross a decoder reset or connection replacement.
+        guard session.display(forFrame: current.info.frame) == display else {
+            reset()
+            return nil
+        }
+        return (current.info.frame,
+                CGSize(width: current.luma.width, height: current.luma.height), display)
+    }
+
+    private func refreshCursor(for frame: FrFrameInfo) {
+        guard let session else { return }
+        switch session.cursor(for: frame, knownGeneration: cursor?.generation ?? 0) {
+        case .unavailable:
+            if cursor != nil || cursorTexture != nil { dirty = true }
+            cursor = nil
+            cursorTexture = nil
+        case .unchanged:
+            break
+        case .shape(let shape):
             updateCursor(shape)
             dirty = true
         }
+    }
+
+    func draw(in view: MTKView) {
+        let now = CACurrentMediaTime()
+        onRefresh?(now)
+        guard let session, let current else { return }
+        refreshCursor(for: current.info)
         let geometry = mapper()
+        guard geometry.frame == current.info.frame,
+              geometry.picture == CGSize(width: current.luma.width, height: current.luma.height),
+              session.display(forFrame: current.info.frame) == geometry.display else {
+            reset()
+            return
+        }
         if geometry != lastMapper || view.drawableSize != lastDrawableSize {
             lastMapper = geometry
             lastDrawableSize = view.drawableSize
             dirty = true
         }
-        guard dirty, let current, geometry.isReady,
+        guard dirty, geometry.isReady,
               let pass = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let commands = queue.makeCommandBuffer(),
@@ -133,13 +177,18 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         let drawableSize = view.drawableSize
         let sx = drawableSize.width / max(1, bounds.width)
         let sy = drawableSize.height / max(1, bounds.height)
-        let content = geometry.content
-        if let scissor = scissorRect(content, sx: sx, sy: sy, drawable: drawableSize) {
-            encoder.setScissorRect(scissor)
+        let rect = geometry.imageRect
+        let visible = rect.intersection(geometry.content)
+        guard !visible.isNull,
+              let scissor = scissorRect(visible, sx: sx, sy: sy, drawable: drawableSize) else {
+            encoder.endEncoding()
+            return
         }
-        let rect = geometry.pictureRect
-        let devicePerPixel = geometry.scale * sx
-        let exact = abs(devicePerPixel - devicePerPixel.rounded()) < 0.001 && devicePerPixel >= 0.999
+        encoder.setScissorRect(scissor)
+        let dx = rect.width * sx / CGFloat(current.luma.width)
+        let dy = rect.height * sy / CGFloat(current.luma.height)
+        let exact = dx >= 0.999 && dy >= 0.999
+            && abs(dx - dx.rounded()) < 0.001 && abs(dy - dy.rounded()) < 0.001
         var uniforms = PictureUniforms(
             rect: clipRect(rect, sx: sx, sy: sy, drawable: drawableSize),
             textureSize: SIMD2(Float(current.luma.width), Float(current.luma.height)),
@@ -151,16 +200,14 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentTexture(current.luma, index: 0)
         encoder.setFragmentTexture(current.chroma, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        if let cursor, cursor.visible != 0, let texture = cursorTexture {
-            // Whole picture pixels, like the host's report: a crisp shape.
-            let at = localCursor.map { CGPoint(x: $0.x.rounded(.down), y: $0.y.rounded(.down)) }
-                ?? CGPoint(x: Int(cursor.x), y: Int(cursor.y))
-            let origin = geometry.toView(CGPoint(x: at.x - CGFloat(cursor.hotspot_x),
-                                                 y: at.y - CGFloat(cursor.hotspot_y)))
-            let size = CGSize(width: CGFloat(cursor.width) * geometry.scale,
-                              height: CGFloat(cursor.height) * geometry.scale)
+        if let cursor, cursor.visible != 0, let texture = cursorTexture,
+           let at = localCursor ?? geometry.picturePoint(
+                forDisplay: CGPoint(x: Int(cursor.x), y: Int(cursor.y))),
+           let shapeRect = geometry.cursorRect(
+                at: at, size: CGSize(width: Int(cursor.width), height: Int(cursor.height)),
+                hotspot: CGPoint(x: Int(cursor.hotspot_x), y: Int(cursor.hotspot_y))) {
             var shape = PictureUniforms(
-                rect: clipRect(CGRect(origin: origin, size: size), sx: sx, sy: sy, drawable: drawableSize),
+                rect: clipRect(shapeRect, sx: sx, sy: sy, drawable: drawableSize),
                 textureSize: SIMD2(Float(texture.width), Float(texture.height)), fullRange: 0, exact: 1)
             encoder.setRenderPipelineState(cursorPipeline)
             encoder.setVertexBytes(&shape, length: MemoryLayout<PictureUniforms>.stride, index: 0)
@@ -168,6 +215,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         encoder.endEncoding()
+        // Do not submit a drawable prepared for a retired frame owner.
+        guard session.display(forFrame: current.info.frame) == geometry.display else {
+            reset()
+            return
+        }
         let frame = current.info.frame
         let handle = session.handle
         drawnPictures += 1
@@ -196,7 +248,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private func makePicture(_ frame: RemoteSession.Frame) -> Picture? {
         guard let cache else { return nil }
         let buffer = frame.buffer
-        guard CVPixelBufferGetPlaneCount(buffer) == 2 else { return nil }
+        guard CVPixelBufferGetPlaneCount(buffer) == 2,
+              CVPixelBufferGetWidth(buffer) == Int(frame.info.width),
+              CVPixelBufferGetHeight(buffer) == Int(frame.info.height),
+              CVPixelBufferGetWidthOfPlane(buffer, 0) == Int(frame.info.width),
+              CVPixelBufferGetHeightOfPlane(buffer, 0) == Int(frame.info.height) else { return nil }
         func plane(_ index: Int, _ format: MTLPixelFormat) -> (MTLTexture, CVMetalTexture)? {
             let width = CVPixelBufferGetWidthOfPlane(buffer, index)
             let height = CVPixelBufferGetHeightOfPlane(buffer, index)
@@ -214,6 +270,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func updateCursor(_ shape: RemoteSession.CursorShape) {
         cursor = shape.state
+        // A failed upload must not pair the new hotspot with an old texture.
+        cursorTexture = nil
         let width = Int(shape.state.width)
         let height = Int(shape.state.height)
         guard width > 0, height > 0, shape.rgba.count == width * height * 4 else {

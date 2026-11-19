@@ -9,6 +9,27 @@ input only there, so there is no system-wide daemon.
 
 ## Install
 
+Without a checkout, the one-line installer builds (or, once releases exist,
+downloads) everything on this Mac and registers the same LaunchAgent:
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.sh?$(date +%s)" | bash -s -- --host
+```
+
+It signs with the first Developer ID Application identity it finds
+(`--signing-identity` to choose). Without one it signs ad-hoc and warns,
+because macOS then asks for Screen Recording and Accessibility again after
+every update.
+
+`--view-only` omits control, `--no-clipboard` disables the clipboard, and
+`--audio` adds host playback audio, which needs Homebrew's `opus`. The
+installer leaves alone a LaunchAgent that runs an `frd` from another
+folder. `install-host.sh` uses the same program folder, so an agent it
+registered is updated in place and restarted.
+
+Its macOS client-only path has run. Its `--host` path has not yet been run
+against a live Mac, so `install-host.sh` below remains the verified route.
+
 From a checkout, on any Apple-silicon Mac with Xcode:
 
 ```sh

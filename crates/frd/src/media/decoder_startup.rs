@@ -21,7 +21,26 @@ use std::{fmt, time::Duration};
 mod host_capture;
 use host_capture::Bootstrap;
 
-const MAX_STARTUP_US: u64 = 2_000_000;
+/// The longest a viewer's first picture may take. On the host it runs from
+/// capturing the startup IDR to the viewer's decoded-picture report, and on
+/// the viewer from the decoder configuration to the first decoded picture.
+/// It was 2 s: a 3240x1822 first picture over a 23 Mbit/s, 75 ms path took
+/// 1.9-2.0 s, so large first views failed intermittently.
+pub(crate) const MAX_STARTUP_US: u64 = 6_000_000;
+/// [`MAX_STARTUP_US`] as a duration, for the startup stages that feed it.
+pub(crate) const MAX_STARTUP: Duration = Duration::from_micros(MAX_STARTUP_US);
+
+/// The host's sender policy for a viewer. Its recovery horizon, from capture
+/// to QUIC hand-off of a recovery IDR, matches [`MAX_STARTUP_US`]: the
+/// startup IDR is sent as a recovery picture, and a 2 s horizon would expire
+/// it before the 6 s startup limit. Mid-session recovery IDRs get the same
+/// horizon; every other sender bound keeps fr-media's default.
+pub(crate) fn host_send_policy() -> fr_media::delivery::SendPolicy {
+    fr_media::delivery::SendPolicy {
+        recovery_horizon_micros: MAX_STARTUP_US,
+        ..fr_media::delivery::SendPolicy::default()
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Wire(WireError),

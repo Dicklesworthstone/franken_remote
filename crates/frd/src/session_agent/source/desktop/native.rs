@@ -5,7 +5,7 @@ use crate::{
     session_agent::source::prepare::{Prepared, Setup},
     session_startup::{
         Approval, Host, HostSession,
-        shared_viewers::{Admission, Entropy, Hub, Policy, Ticket},
+        shared_viewers::{Admission, Entropy, FIRST_VIEW_TIMEOUT, Hub, Policy, Ticket},
     },
 };
 use asupersync::{
@@ -364,7 +364,7 @@ where
     let opening = session.start_shared_display_capped(
         &mut prepared.publisher,
         &prepared.initial,
-        policy.join_timeout,
+        FIRST_VIEW_TIMEOUT,
         deadline.until,
         policy.send,
         move || random(),

@@ -101,8 +101,9 @@ impl AudioFeed {
         Ok(report)
     }
     /// Dispatch from the ORIGINAL session only, after its connection/authority
-    /// checks. A stopped or invalidated subscription never consumes another
-    /// application's route, and stale records cannot reopen its lane.
+    /// checks. Once audio alone ends, bounded replies on its exact original
+    /// route are discarded without parsing or reopening capture. Other routes
+    /// remain unowned, and the original observation must still be live.
     pub fn receive_exclusive(
         &self,
         route: Route,
@@ -112,10 +113,15 @@ impl AudioFeed {
             return Err(Error::WrongSource);
         };
         let mut state = shared.lock().map_err(|_| Error::Poisoned)?;
-        if state.closed {
-            return Ok(None);
-        }
         let now = state.owner.check().map_err(Error::Media)?.as_micros();
+        if state.closed {
+            // Audio can stop before its reliable reply route is retired. A
+            // queued cleanup/reconfiguration reply still belongs to this
+            // original subscription; passing it to another service would turn
+            // optional audio shutdown into a desktop handler failure.
+            let original = route == Route::Stream(state.lanes.replies);
+            return Ok(original.then_some(Disposition::Consumed));
+        }
         let State { ring, audio, .. } = &mut *state;
         Ok(audio.receive(ring, route, bytes, now))
     }

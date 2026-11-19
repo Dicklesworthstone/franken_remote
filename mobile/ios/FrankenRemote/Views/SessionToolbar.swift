@@ -6,6 +6,9 @@ struct SessionToolbar: View {
     @Binding var keyboard: Bool
     @Binding var zoom: SessionSurface.ZoomCommand?
     let close: () -> Void
+    let changeDisplay: () -> Void
+    let chooseFile: () -> Void
+    let releaseControl: () -> Void
     @EnvironmentObject private var settings: AppSettings
     @State private var confirmRelease = false
 
@@ -37,6 +40,23 @@ struct SessionToolbar: View {
                     Button { zoom = .fit } label: { Label("Fit to screen", systemImage: "arrow.down.right.and.arrow.up.left") }
                     Button { zoom = .actualPixels } label: { Label("Actual pixels", systemImage: "1.magnifyingglass") }
                     Toggle("Statistics", isOn: $settings.showStats)
+                    Divider()
+                    Button(action: changeDisplay) {
+                        Label("Change display…", systemImage: "display.2")
+                    }
+                    if session.controlCapable {
+                        Divider()
+                        Text("Creates a local copy, up to 256 MiB.")
+                        Text("May download from your file provider.")
+                        Button(action: chooseFile) {
+                            Label("Choose upload copy…", systemImage: "doc.badge.plus")
+                        }
+                        .accessibilityHint("Creates a local copy up to 256 mebibytes and may download the file. Nothing is sent until you choose Send once.")
+                        .disabled(!session.canChooseUpload)
+                        if session.phase == .controlled || session.phase == .requestingControl {
+                            Text("Give back control to choose another file.")
+                        }
+                    }
                 } label: {
                     Image(systemName: settings.touchMode == .trackpad ? "rectangle.and.hand.point.up.left" : "hand.point.up.left")
                 }
@@ -51,9 +71,9 @@ struct SessionToolbar: View {
         .padding(.top, 4)
         .environment(\.colorScheme, .dark)
         .confirmationDialog("Give back control?", isPresented: $confirmRelease, titleVisibility: .visible) {
-            Button("Give back control and disconnect", role: .destructive) { session.releaseControl() }
+            Button("Give back control and keep viewing") { releaseControl() }
         } message: {
-            Text("Ending control ends this session. Reconnect to view again.")
+            Text("Control ends first. A fresh viewing connection opens only after this session confirms cleanup.")
         }
     }
 
@@ -81,6 +101,7 @@ struct SessionToolbar: View {
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
+                .disabled(session.uploadBlocksControl)
             }
         }
     }

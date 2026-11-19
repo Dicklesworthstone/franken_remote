@@ -280,7 +280,6 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
             &["--observation-indicator", r"C:\fr\indicator.exe"],
             "observation_indicator_unavailable",
         ),
-        (&["--control", "--files", r"C:\drop"], "files_unavailable"),
         (
             &["--control", "--microphone"],
             "microphone_endpoint_unavailable",
@@ -302,4 +301,242 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
         ])
         .is_err()
     );
+}
+
+#[test]
+fn initial_send_reaches_the_pinned_selection_without_an_external_input_agent() {
+    use frd::native_files::HostSelection;
+    let root = Root::new();
+    let source = root.0.join("selected.txt");
+    fs::write(&source, b"selected locally").unwrap();
+    let options = run_options(&[
+        "--encoder",
+        "mediafoundation",
+        "--once",
+        "--control",
+        "--approval",
+        "local",
+        "--send",
+        source.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert!(options.once && options.control && options.input_agent.is_none());
+    assert_eq!(options.send, [source.clone()]);
+    assert_eq!(options.approval, Some(Approval::Local));
+    assert!(options.files.is_none() && options.send_control.is_none());
+    assert_eq!(options.windows_refusal(Approval::Local), None);
+    // This is the public selector called by frd run before desktop/network
+    // startup. It opens a native file handle; no transport or control grant is
+    // manufactured by accepting the command line or selecting a source.
+    let selection = HostSelection::select(&options.send).unwrap();
+    assert!(selection.is_available());
+    assert!(fs::write(&source, b"replacement").is_err());
+    assert!(fs::remove_file(&source).is_err());
+    assert!(fs::rename(&source, root.0.join("renamed.txt")).is_err());
+    let retained = selection.clone();
+    drop(selection);
+    assert!(fs::write(&source, b"replacement").is_err());
+    assert!(!format!("{retained:?}").contains(source.to_str().unwrap()));
+    drop(retained);
+    fs::write(&source, b"released after the original owner").unwrap();
+}
+
+#[test]
+fn initial_send_keeps_control_scope_bounds_and_other_windows_refusals() {
+    let source = r"C:\selected\report.pdf";
+    for args in [
+        vec!["--send", source],
+        vec!["--once", "--send", source],
+        vec!["--control", "--send", source],
+        vec!["--once", "--control", "--send", "relative.txt"],
+        vec!["--once", "--control", "--send", r"C:relative.txt"],
+        vec!["--once", "--control", "--send", r"\rooted.txt"],
+        vec!["--once", "--control", "--send", r"C:\selected\..\file.txt"],
+        vec!["--once", "--control", "--send"],
+        vec!["--once", "--control", "--send-control", "desk"],
+        vec![
+            "--once",
+            "--control",
+            "--send",
+            source,
+            "--send-control",
+            "desk",
+        ],
+    ] {
+        assert!(run_options(&args).is_err(), "{args:?}");
+    }
+    let mut args = vec!["--once", "--control"];
+    for _ in 0..frd::native_files::MAX_SENDS {
+        args.extend(["--send", source]);
+    }
+    assert_eq!(run_options(&args).unwrap().send.len(), 8);
+    args.extend(["--send", source]);
+    assert!(run_options(&args).is_err());
+    assert_eq!(
+        refusal(
+            &[
+                "--once",
+                "--control",
+                "--send",
+                source,
+                "--files",
+                r"C:\drop"
+            ],
+            Approval::Local,
+        ),
+        None,
+    );
+    assert_eq!(
+        refusal(
+            &[
+                "--once",
+                "--input-agent",
+                r"C:\fr\agent.exe",
+                "--send",
+                source,
+            ],
+            Approval::Local,
+        ),
+        Some("input_agent_unavailable"),
+    );
+}
+
+#[test]
+fn initial_send_refuses_directories_and_nonordinary_windows_sources() {
+    use frd::native_files::{HostSelection, SelectReason};
+    let root = Root::new();
+    assert_eq!(
+        HostSelection::select(std::slice::from_ref(&root.0))
+            .unwrap_err()
+            .reason,
+        SelectReason::Directory,
+    );
+    for source in [
+        r"\\server\share\file.txt",
+        r"\\?\C:\selected\file.txt",
+        r"\\.\pipe\never-open",
+        r"C:\selected\file.txt:stream",
+        r"C:\selected\NUL",
+    ] {
+        let options = run_options(&["--once", "--control", "--send", source]).unwrap();
+        let refused = HostSelection::select(&options.send).unwrap_err();
+        assert_eq!(refused.index, 0);
+        assert_eq!(refused.reason, SelectReason::NotPortable, "{source}");
+    }
+}
+
+#[test]
+fn receive_selects_a_real_private_root_without_starting_transfers_or_granting_control() {
+    use frd::native_files::{DirectoryRefusal, Limits};
+
+    let root = Root::new();
+    let inbox = root.0.join("inbox");
+    fs::create_dir(&inbox).unwrap();
+    let options = run_options(&[
+        "--control",
+        "--files",
+        inbox.to_str().unwrap(),
+        "--files-conflict",
+        "keep-both",
+        "--files-max-file-bytes",
+        "3",
+        "--files-max-session-bytes",
+        "6",
+    ])
+    .unwrap();
+    assert!(options.control && options.input_agent.is_none());
+    assert_eq!(options.windows_refusal(Approval::Local), None);
+    let directory = options.open_files().unwrap().unwrap();
+    assert_eq!(
+        directory.limits(),
+        Limits {
+            max_file_bytes: 3,
+            max_session_bytes: 6,
+        }
+    );
+    assert!(!format!("{directory:?}").contains(inbox.to_str().unwrap()));
+    assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    drop(directory);
+
+    // Native validation checks the actual final directory DACL. The chosen
+    // collision policy and positive control option cannot waive that check.
+    grant(&inbox, "(AD,WD)");
+    assert_eq!(options.open_files().unwrap_err(), DirectoryRefusal::Unsafe);
+    assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    assert_eq!(DirectoryRefusal::Unsafe.code(), "files_directory_unsafe");
+}
+
+#[test]
+fn receive_refuses_reparse_roots_and_nonordinary_windows_names() {
+    use frd::native_files::DirectoryRefusal;
+
+    let root = Root::new();
+    let real = root.0.join("real");
+    fs::create_dir(&real).unwrap();
+    let junction = root.0.join("junction");
+    let status = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&real)
+        .output()
+        .unwrap()
+        .status;
+    assert!(status.success());
+    let selected = run_options(&["--control", "--files", junction.to_str().unwrap()]).unwrap();
+    assert_eq!(selected.open_files().unwrap_err(), DirectoryRefusal::Unsafe);
+    assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
+    for path in [
+        r"\\server\share\inbox",
+        r"\\?\C:\inbox",
+        r"\\.\pipe\never-open",
+        r"C:relative",
+        r"\rooted",
+        r"C:\selected\..\inbox",
+    ] {
+        let selected = run_options(&["--control", "--files", path]).unwrap();
+        assert_eq!(
+            selected.open_files().unwrap_err(),
+            DirectoryRefusal::Relative,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn receive_cli_requires_explicit_control_then_uses_the_checked_native_root() {
+    let root = Root::new();
+    let policy = root.0.join("host.json");
+    root.store("host.json")
+        .update(Change::Approval(Approval::None))
+        .unwrap();
+    let missing = root.0.join("receive-destination-must-stay-missing");
+    for (control, code) in [
+        (false, "files_requires_input_agent"),
+        (true, "files_directory_missing"),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_frd"));
+        command.args([
+            "run",
+            "--config",
+            policy.to_str().unwrap(),
+            "--encoder",
+            "mediafoundation",
+            "--no-clipboard",
+            "--files",
+            missing.to_str().unwrap(),
+            "--json",
+        ]);
+        if control {
+            command.arg("--control");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{code}");
+        let response = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            response.contains(&format!("\"code\":\"{code}\"")),
+            "{response}"
+        );
+        assert!(!response.contains("receive-destination-must-stay-missing"));
+    }
+    assert!(!missing.exists());
 }

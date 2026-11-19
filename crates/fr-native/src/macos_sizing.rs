@@ -183,8 +183,9 @@ pub(crate) fn sharing_points_with_selections(
     Ok((width.max(minimum), height))
 }
 
-/// Reserve the optional 44-point playback row before establishing a viewport.
-/// The local volume and mute controls never resize an existing remote picture.
+/// Reserve the optional playback row and Stop control button before establishing
+/// a viewport. Stop control uses 136 points in the existing sharing row; local
+/// controls never resize an existing remote picture.
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(crate) fn sharing_points_with_audio(
     pixels: (u32, u32),
@@ -195,7 +196,19 @@ pub(crate) fn sharing_points_with_audio(
     text: bool,
     selections: bool,
     audio: bool,
+    stop_control: bool,
 ) -> Result<(u32, u32), ()> {
+    if directions > 2 || (selections && directions == 0) {
+        return Err(());
+    }
+    let minimum = 152
+        + 230 * directions
+        + u32::from(clipboard) * 184
+        + u32::from(selections) * 144
+        + u32::from(stop_control) * 136;
+    if fit.is_some_and(|(width, _)| width < minimum) {
+        return Err(());
+    }
     let fit = if audio {
         match fit {
             Some((width, height)) if width >= 320 => {
@@ -210,6 +223,7 @@ pub(crate) fn sharing_points_with_audio(
     let (width, height) = sharing_points_with_selections(
         pixels, logical, fit, directions, clipboard, text, selections,
     )?;
+    let width = width.max(minimum);
     Ok((if audio { width.max(320) } else { width }, height))
 }
 
@@ -245,7 +259,8 @@ mod tests {
                                 clipboard,
                                 text,
                                 selections,
-                                true
+                                true,
+                                false,
                             ),
                             Ok((width, 64))
                         );
@@ -258,7 +273,8 @@ mod tests {
                                 clipboard,
                                 text,
                                 selections,
-                                true
+                                true,
+                                false,
                             )
                             .is_err()
                         );
@@ -271,7 +287,8 @@ mod tests {
                                 clipboard,
                                 text,
                                 selections,
-                                true
+                                true,
+                                false,
                             )
                             .is_err()
                         );
@@ -285,6 +302,7 @@ mod tests {
                             text,
                             selections,
                             true,
+                            false,
                         )
                         .unwrap();
                         assert!(picture_height + reserved <= 600);
@@ -297,7 +315,8 @@ mod tests {
                                 clipboard,
                                 text,
                                 selections,
-                                false
+                                false,
+                                false,
                             ),
                             sharing_points_with_selections(
                                 (1920, 1080),
@@ -309,6 +328,52 @@ mod tests {
                                 selections
                             )
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stop_control_has_reserved_space_with_every_sharing_combination() {
+        for directions in 0..=2 {
+            for clipboard in [false, true] {
+                for text in [false, true] {
+                    for selections in [false, true] {
+                        if selections && directions == 0 {
+                            continue;
+                        }
+                        for audio in [false, true] {
+                            let width = (288
+                                + directions * 230
+                                + u32::from(clipboard) * 184
+                                + u32::from(selections) * 144)
+                                .max(if text {
+                                    480
+                                } else if audio {
+                                    320
+                                } else {
+                                    0
+                                });
+                            let reserved = 44 + u32::from(text) * 76 + u32::from(audio) * 44;
+                            let size = |fit| {
+                                sharing_points_with_audio(
+                                    (64, 64),
+                                    (64, 64),
+                                    fit,
+                                    directions,
+                                    clipboard,
+                                    text,
+                                    selections,
+                                    audio,
+                                    true,
+                                )
+                            };
+                            assert_eq!(size(Some((width, reserved + 64))), Ok((width, 64)));
+                            assert!(size(Some((width - 1, reserved + 64))).is_err());
+                            assert!(size(Some((width, reserved + 63))).is_err());
+                            assert_eq!(size(None), Ok((width, 64)));
+                        }
                     }
                 }
             }

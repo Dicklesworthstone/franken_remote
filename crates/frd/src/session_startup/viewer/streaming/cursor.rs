@@ -83,11 +83,7 @@ impl ViewerCursor {
             .map_err(Error::Routes)?
             .ok_or(Error::Routes(crate::media_quic::Error::InvalidRoutes))?;
         if lanes.view != self.lanes.view {
-            self.remote.tracker.reset(lanes.view.geometry);
-            // A drawn overlay belongs to the old view: re-address it (hide).
-            // Nothing is sent to a presenter that never composited a cursor.
-            self.remote.rendered.overlay_unknown();
-            self.remote.installed = None;
+            self.remote.reset(lanes.view.geometry);
         }
         self.lanes = lanes;
         Ok(())
@@ -141,6 +137,15 @@ impl Remote {
             installed: None,
             local_lost: false,
         }
+    }
+    fn reset(&mut self, geometry: fr_core::ids::DisplayGeometryGeneration) {
+        self.tracker.reset(geometry);
+        // Retire both renderers' old image meaning. The native cursor owner
+        // may survive a recovery and still show its previous shape; preserve
+        // that knowledge until a fresh request is actually acknowledged.
+        self.rendered.overlay_unknown();
+        self.rendered.window_unknown();
+        self.installed = None;
     }
     /// The latest confirmed host state resolved against the bounded cache: an
     /// unknown shape is the built-in fallback; hidden, locked and
@@ -285,6 +290,11 @@ impl StreamingViewer {
             let Some(cursor) = &mut self.cursor else {
                 return Ok(());
             };
+            // Recovery can replace the decoder/media before another ordinary
+            // network turn. Retire its old cursor cache BEFORE requesting a
+            // native pointer image or publishing an overlay in the new scope.
+            let (session, media) = self.peer.parts()?;
+            cursor.refresh(media, &session.transport)?;
             let now = super::now(cx).map_err(Error::Session)?;
             // Do not promote/change rendering owners during this request. The
             // installed input owner still services its capture and stop handles.

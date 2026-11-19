@@ -167,6 +167,9 @@ fn host_downloads_files_empty_file_and_directory_with_ordered_client_receipts() 
                 let after = state.viewer.file_receive_status().unwrap();
                 assert_eq!(after.results, received.results);
                 assert_eq!(after.cleanup, Some(Ok(())));
+                assert_eq!(after.phase, crate::native_files::ReceivePhase::Ended);
+                assert_eq!(after.absence, None);
+                assert_eq!(after.progress, None);
             },
             driver,
         ))
@@ -226,6 +229,66 @@ fn early_download_cancel_settles_attachment_without_starting_a_client_disk_worke
         ))
         .await;
         assert!(done.handoff_safe());
+    });
+}
+
+#[test]
+fn refused_download_setup_finishes_its_original_status_without_a_disk_worker() {
+    run(|c, h| async move {
+        let cleanup = Cx::current().unwrap();
+        let mut state = Box::pin(setup_download(&c, &h)).await;
+        let source = Disk::new();
+        let dest = Disk::new();
+        let mut config = dest.config();
+        config.reply_lifetime = Duration::ZERO;
+        let control = ReceiveControl::new();
+        state
+            .viewer
+            .expect_file_download_with_control(config, control.clone(), Duration::from_secs(2))
+            .unwrap();
+        offer(
+            &mut state,
+            selection(&source, b"refused before disk ownership", "never"),
+        );
+        let driver = state.driver.take().unwrap();
+        let ((), done) = Box::pin(support::both(
+            async {
+                let (mut n, mut t) = (80_000, 90_000);
+                let until = now(&c).unwrap() + 3_000_000;
+                loop {
+                    assert!(now(&c).unwrap() < until, "bounded original setup refusal");
+                    let (host, viewer) = turn(&mut state, &c, &h, &mut n, &mut t).await;
+                    match viewer {
+                        Ok(()) => host.unwrap(),
+                        Err(error) => {
+                            assert_eq!(error, Error::Files(SendError::Limits));
+                            break;
+                        }
+                    }
+                }
+                let status = control.status();
+                assert_eq!(status.phase, crate::native_files::ReceivePhase::Ended);
+                assert_eq!(
+                    status.absence,
+                    Some(Absence::ReceiveFailed(fr_files::quic::Error::Limits))
+                );
+                assert_eq!(status.cleanup, Some(Ok(())));
+                assert_eq!(status.progress, None);
+                assert_eq!(status.results, [] as [fr_files::wire::ResultReceipt; 0]);
+                assert!(state.viewer.file_receive_state().is_none());
+                assert_eq!(
+                    state.viewer.file_receive_setup_failure(),
+                    Some(SendError::Limits)
+                );
+                assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 0);
+                retire(&mut state, &cleanup).await;
+                assert_eq!(control.status(), status);
+            },
+            driver,
+        ))
+        .await;
+        assert!(done.handoff_safe());
+        assert!(!state.seat.is_occupied());
     });
 }
 

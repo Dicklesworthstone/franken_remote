@@ -370,10 +370,14 @@ fn missing_capability_wrong_routes_and_repeat_attachment_are_refused() {
         );
     });
 }
+// A reply past its exchange bound used to cancel the viewer session at once.
+// Now that probe is given up and the next one measures again; only a host that
+// answers nothing for a whole correlation lifetime cancels the session.
 #[test]
-fn lost_reply_times_out_without_another_packet_and_cancels_viewer_session() {
+fn unanswered_probes_are_given_up_until_a_correlation_lifetime_of_silence_cancels_the_viewer() {
     run_clock!(cx, vc, {
         let (mut c, mut s, r) = pair(&cx).await;
+        let started = network::clock(&cx);
         let mut viewer = ClockSync::viewer(
             vc.clone(),
             &mut c,
@@ -382,28 +386,41 @@ fn lost_reply_times_out_without_another_packet_and_cancels_viewer_session() {
             &selection(),
             ClockPolicy {
                 max_exchange_us: 250_000,
+                valid_for_us: 600_000,
                 ..ClockPolicy::default()
             },
         )
         .unwrap();
         viewer.service(&mut c).unwrap();
-        let deadline = network::clock(&cx) + 200_000;
-        let mut received = 0;
-        while received == 0 || c.usage().critical_send_records != 0 {
-            assert!(network::clock(&cx) < deadline);
-            raw_drive(&cx, &mut c, &mut s).await;
-            received += s
-                .receive(
-                    &cx,
-                    || true,
-                    |_, bytes| {
-                        assert_eq!(bytes, record(Message::Probe { sequence: 1 }));
-                        Ok(Disposition::Consumed)
-                    },
-                )
-                .unwrap();
+        for sequence in 1..=2 {
+            let deadline = network::clock(&cx) + 200_000;
+            let mut received = 0;
+            while received == 0 || c.usage().critical_send_records != 0 {
+                assert!(network::clock(&cx) < deadline);
+                raw_drive(&cx, &mut c, &mut s).await;
+                received += s
+                    .receive(
+                        &cx,
+                        || true,
+                        |_, bytes| {
+                            assert_eq!(bytes, record(Message::Probe { sequence }));
+                            Ok(Disposition::Consumed)
+                        },
+                    )
+                    .unwrap();
+            }
+            if sequence == 1 {
+                // Past probe 1's bound and the 300 ms cadence: it is given up
+                // and probe 2 goes out on the same, still open session.
+                std::thread::sleep(Duration::from_millis(310));
+                assert_eq!(viewer.service(&mut c), Ok(Event::ProbeQueued));
+                assert!(!c.is_closed() && vc.checkpoint().is_ok());
+            }
         }
-        std::thread::sleep(Duration::from_millis(260));
+        let silent_until = started + 620_000;
+        std::thread::sleep(Duration::from_micros(
+            silent_until.saturating_sub(network::clock(&cx)),
+        ));
         assert_eq!(
             viewer.service(&mut c),
             Err(Error::Client(fr_client::clock::Error::Expired))

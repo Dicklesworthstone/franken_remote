@@ -42,6 +42,26 @@ fn capture(receiver: &Receiver, event: Event, until: u64) {
 }
 
 #[test]
+fn an_event_stamped_after_the_dispatch_turn_read_its_clock_is_fresh_not_a_clock_fault() {
+    let mut receiver = receiver();
+    // The producer pushed at 50 while the dispatch turn, which read its clock
+    // at 40, was preempted before taking the queue lock.
+    receiver
+        .queue
+        .lock()
+        .unwrap()
+        .push(key(0x04, KeyTransition::Press), ClientInstant(50), None)
+        .unwrap();
+    receiver.expire(ClientInstant(40), &|_| false).unwrap();
+    assert_eq!(receiver.dropped(), 0);
+    assert!(receiver.front(view(), ClientInstant(40)).unwrap().is_some());
+    // Its own age bound still applies: obsolete once 100 ms old, as before.
+    receiver
+        .expire(ClientInstant(50 + MAX_EVENT_AGE_US), &|_| false)
+        .unwrap();
+    assert_eq!(receiver.dropped(), 1);
+}
+#[test]
 fn an_expired_native_modifier_cannot_rebind_or_send_its_dependent_letter() {
     for already_pending in [false, true] {
         let mut receiver = receiver();

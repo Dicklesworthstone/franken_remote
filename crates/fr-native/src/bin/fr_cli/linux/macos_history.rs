@@ -51,6 +51,45 @@ fn display_change_history(report: &Report, json: &mut String, text: &mut String)
     );
 }
 
+/// Stop control: original close evidence, not proof a later view opened.
+fn control_release_history(report: &Report, json: &mut String, text: &mut String) {
+    let mut entries = String::new();
+    for release in &report.control_release_closes {
+        if !entries.is_empty() {
+            entries.push(',');
+        }
+        let close = release.close_exchange.map(crate::closure::Report::from);
+        let _ = write!(
+            entries,
+            "{{\"attempt\":{},\"close_exchange\":{},\"lease_report\":{}}}",
+            release.attempt,
+            close.map_or_else(|| "null".to_owned(), crate::closure::Report::json),
+            crate::terminal::lease_json(release.lease_revocation),
+        );
+        let _ = write!(
+            text,
+            " Control release after attempt {}: {} A fresh viewing attempt was requested; control requires a new F8 request.",
+            release.attempt,
+            close.map_or_else(
+                || "No completed close exchange; host cleanup remains unknown.".to_owned(),
+                crate::closure::Report::text,
+            ),
+        );
+        if let Some(lease) = release.lease_revocation {
+            let _ = write!(
+                text,
+                " Lease report: {}.",
+                crate::terminal::lease_text(lease)
+            );
+        }
+    }
+    let _ = write!(
+        json,
+        ",\"control_releases\":{},\"control_release_closes\":[{entries}]",
+        report.control_releases,
+    );
+}
+
 /// Window geometry changes: the original close each one interrupted.
 fn window_resize_history(report: &Report, json: &mut String, text: &mut String) {
     let mut resizes = String::new();
@@ -100,6 +139,15 @@ fn history(report: &Report) -> crate::ControlHistory {
     let mut json = String::new();
     let mut text = String::new();
     display_change_history(report, &mut json, &mut text);
+    control_release_history(report, &mut json, &mut text);
+    if report.control_pauses != 0 {
+        let _ = write!(json, ",\"control_pauses\":{}", report.control_pauses);
+        let _ = write!(
+            text,
+            " Control paused while the window was in the background: {} (each pause released every held key and button on the host).",
+            report.control_pauses,
+        );
+    }
     window_resize_history(report, &mut json, &mut text);
     if refused_scroll(report) {
         let _ = write!(
@@ -177,7 +225,9 @@ pub(super) fn finish(
     json: bool,
 ) -> Result<String, Failure> {
     if report.display_change_closes.is_empty()
+        && report.control_release_closes.is_empty()
         && report.window_resize_closes.is_empty()
+        && report.control_pauses == 0
         && !refused_scroll(report)
         && !text_activity(report)
         && !report.input_receipts.observed()
@@ -247,6 +297,126 @@ mod tests {
             }],
             ..Report::default()
         }
+    }
+
+    fn released() -> Report {
+        Report {
+            control_releases: 1,
+            control_release_closes: vec![DisplayChangeReport {
+                attempt: 1,
+                close_exchange: None,
+                lease_revocation: None,
+            }],
+            ..Report::default()
+        }
+    }
+
+    #[test]
+    fn control_pauses_are_reported_and_no_pause_adds_nothing() {
+        let paused = Report {
+            control_pauses: 2,
+            ..Report::default()
+        };
+        let rendered = finish(&paused, Ok("{\"outcome\":\"success\"}\n".to_owned()), true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["control_pauses"], 2);
+        let rendered = finish(&paused, Ok("Session ended.\n".to_owned()), false).unwrap();
+        assert!(rendered.contains("Control paused while the window was in the background: 2"));
+        let rendered = finish(
+            &Report::default(),
+            Ok("{\"outcome\":\"success\"}\n".to_owned()),
+            true,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert!(value["control_pauses"].is_null());
+        let rendered =
+            finish(&Report::default(), Ok("Session ended.\n".to_owned()), false).unwrap();
+        assert!(!rendered.contains("Control paused"));
+    }
+
+    #[test]
+    fn stop_control_history_survives_later_success_without_claiming_host_cleanup() {
+        let rendered = finish(
+            &released(),
+            Ok("{\"outcome\":\"success\"}\n".to_owned()),
+            true,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["control_releases"], 1);
+        assert_eq!(value["control_release_closes"][0]["attempt"], 1);
+        assert!(value["control_release_closes"][0]["close_exchange"].is_null());
+        assert!(value["control_release_closes"][0]["lease_report"].is_null());
+        assert_eq!(value["display_changes"], 0);
+        let rendered = finish(&released(), Ok("Session ended.\n".to_owned()), false).unwrap();
+        assert!(rendered.contains("Control release after attempt 1"));
+        assert!(rendered.contains("host cleanup remains unknown"));
+        assert!(rendered.contains("control requires a new F8 request"));
+    }
+
+    #[test]
+    fn cancelled_fresh_view_preserves_the_original_control_release_and_prior_evidence() {
+        let mut failure = Failure::new("display_choice_cancelled", "Cancelled.", 130);
+        failure.control_history = Some(Box::leak(Box::new(crate::ControlHistory {
+            json: ",\"files_requested\":1".to_owned(),
+            text: " Earlier file receipt.".to_owned(),
+        })));
+        let retained = finish(&released(), Err(failure), true).unwrap_err();
+        assert_eq!(retained.code, failure.code);
+        assert_eq!(retained.exit, failure.exit);
+        let history = retained.control_history.unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&format!("{{\"outcome\":\"error\"{}}}", history.json)).unwrap();
+        assert_eq!(value["files_requested"], 1);
+        assert_eq!(value["control_releases"], 1);
+        assert_eq!(value["control_release_closes"][0]["attempt"], 1);
+        assert!(value["control_release_closes"][0]["close_exchange"].is_null());
+        assert!(history.text.contains("Earlier file receipt"));
+        assert!(
+            history
+                .text
+                .contains("A fresh viewing attempt was requested")
+        );
+        assert!(!history.text.contains("Viewing reopened"));
+    }
+
+    #[test]
+    fn a_later_dial_failure_keeps_actual_release_cleanup_and_effect_stages() {
+        let mut report = released();
+        report.control_release_closes[0].close_exchange = Some(fr_transport::quic::CloseOutcome {
+            request_acknowledged: true,
+            report: Some(fr_wire::closure::Closed {
+                reason: fr_wire::closure::ClosedReason::ClientRequested,
+                cleanup: fr_wire::closure::Cleanup::Complete,
+                effects: fr_wire::closure::OutstandingEffects::Known {
+                    pending: 2,
+                    uncertain: 1,
+                },
+            }),
+            transport: Ok(()),
+        });
+        report.control_release_closes[0].lease_revocation = Some(fr_wire::lease_revoked::Revoked {
+            lease: fr_core::ids::InputLeaseId::from_raw(7),
+            reason: fr_wire::lease_revoked::Reason::ClientRequested,
+            cleanup: fr_wire::lease_revoked::CleanupStage::Fenced,
+            effects: fr_wire::lease_revoked::EffectStage::ReceiptsPending,
+        });
+        let failure = Failure::new("native_session_failed", "Dial failed.", 1);
+        let retained = finish(&report, Err(failure), true).unwrap_err();
+        assert_eq!(retained.code, failure.code);
+        let history = retained.control_history.unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", &history.json[1..])).unwrap();
+        let original = &value["control_release_closes"][0];
+        assert_eq!(original["close_exchange"]["request_acknowledged"], true);
+        let host = &original["close_exchange"]["host_report"];
+        assert_eq!(host["cleanup_stage"], "complete");
+        assert_eq!(host["outstanding_effects"]["pending"], 2);
+        assert_eq!(host["outstanding_effects"]["uncertain"], 1);
+        assert_eq!(original["lease_report"]["reason"], "client_requested");
+        assert_eq!(original["lease_report"]["cleanup_stage"], "fenced");
+        assert_eq!(original["lease_report"]["effect_stage"], "receipts_pending");
     }
 
     #[test]

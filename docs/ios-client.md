@@ -139,6 +139,12 @@ against the Rust side (also asserted in `ffi/tests.rs`).
   so; the end event is never dropped.
 - Pictures cross by reference: `fr_session_copy_frame` returns a +1
   IOSurface-backed NV12 `CVPixelBuffer` (no pixel copies).
+- `fr_session_frame_display` supplies the approved original display for a
+  retained frame's live connection attempt. The app uses that lookup and the
+  frame's own picture dimensions for mapping; lossy VIDEO events remain
+  notifications. `fr_session_frame_cursor` also requires the frame's sequence
+  to follow the cursor's decoder reset. Both additions preserve the existing
+  `FrFrameInfo` and `FrCursor` layouts and write nothing on refusal.
 - Nothing in the core logs. Error detail (`fr_session_copy_detail`) is the
   typed failure's name only: no names, addresses, pixels, keys or text.
 
@@ -182,6 +188,197 @@ simulator's Metal has no presentation feedback, so simulator builds report a
 frame when the GPU completes the command buffer that presents it (the
 nearest evidence there; device builds never use it).
 
+### Scaled picture, touch and cursor geometry
+
+The original display supplies the image aspect and cursor coordinate space.
+The encoded picture supplies the texture samples and the input area's size.
+`PictureMapper` fits the original display into that area using the shared Rust
+viewport's integer dimensions and centered offsets, then applies local zoom,
+pan and safe-area placement. Metal draws the complete texture into that same
+image rectangle. Direct touches in the internal bars are refused; trackpad
+movement stays inside the image.
+
+For example, a 5120-by-2880 display encoded as 1582-by-888 has an input image
+rectangle starting at x=2 with width 1578. Drawing across all 1582 columns
+would make visible edge clicks fall outside the shared input viewport.
+The mapper retains those offsets explicitly. Host cursor positions, shape
+dimensions and hotspots start in original display pixels and scale through
+that same rectangle before drawing or seeding the trackpad pointer.
+
+Each mapping belongs to a live retained frame owner. An identical-size
+reconnect still retires its predecessor's gestures, pointer and queued typing.
+A decoder reset within one attempt cannot place its new cursor on an earlier
+picture: the scoped cursor accessor requires a later publication sequence.
+Cursor metadata is checked again after copying shape bytes so a concurrent
+shape update cannot pair one revision's geometry with another revision's data.
+
+The added Rust/C and Swift regressions cover geometry, ownership and refusal
+policy. They are source-reviewed changes, not a live device result. The
+`macos-session` Rust suite and the Xcode builds/tests below still require
+execution after the 2026-11-16 changes. The dedicated
+[iOS client workflow](../.github/workflows/ios-client.yml) now targets the
+Apple session and shipping Simulator app; its results remain required.
+
+## Approved display selection
+
+The app opens a host with `fr_session_start_with_display` and
+`FR_DISPLAY_CHOOSE`. A catalog containing one approved display opens it
+directly. With several displays, a native sheet lists every approved row
+(at most eight), with pixel resolution, desktop position, scale and
+rotation. This runs before the first frame: the session screen polls startup
+even when Metal has no picture or the picker covers its surface. Host
+approval, catalog validation and the original startup deadlines continue
+while the user chooses; opening a picker grants no input authority.
+The remote surface remains hidden through the sheet's actual dismissal,
+so a frame behind the picker cannot count as observed. As with any hidden
+view, this retires a queued control-on-connect request; after choosing from
+multiple displays the user takes control with a fresh **Control** action.
+
+The C bridge copies a complete catalog using one nonzero, never-reused local
+request token. The original host aliases, geometry generations and catalog
+remain in Rust's existing bounded `DisplayRequest`. Row reads, selection
+and cancellation must name that exact request. An incomplete copy is never
+displayed, an accepted selection is consumed once, and a delayed tap or
+sheet dismissal cannot act on a replacement attempt with identical rows.
+Interactive dismissal and Cancel close the original still-pending startup.
+The existing `FrConfig` layout and `fr_session_start` primary-display
+behavior remain compatible with earlier callers.
+
+**View options → Change display…** closes the current session first. The
+app retains its original handle until `fr_session_reopen_status` confirms
+that both its service and bounded cleanup succeeded; an ended UI event,
+including `FR_END_OK` after a cancelled dial, is insufficient. A failed or
+unconfirmed cleanup refuses the switch. The UI waits at most ten seconds
+and, after successful cleanup, uses the same cancellation-bound 400 ms host
+listener cooldown as the Windows viewer and directory handoff (fr-w4yu).
+Disconnect, scene inactivity and backgrounding cancel the pending switch.
+
+The replacement opens the original host name, port, dial mode and observed
+address pin, even if its saved-machine row changed meanwhile. It obtains a
+fresh approved catalog and starts observing. A control-capable session
+stays capable of a fresh **Control** action, but the automatic control-on-
+connect preference does not carry into a display switch. Queued typing,
+held keys, sticky modifiers, gestures, inertia and the old picture mapping
+are retired with their original owner; even an identically sized display
+starts with a new mapping. This changes one selected full display by opening
+a new session; it does not add simultaneous multi-display streams or an
+in-place protocol switch.
+
+Evidence: portable Rust selection tests cover one/many displays, original
+request identity, token exhaustion, catalog changes and consumed choices.
+C/Rust layout and prototype assertions cover the new bridge. Swift tests
+cover bounded complete catalog copies, cleanup/cooldown/refusal sequencing,
+original pinned destinations and gesture owner replacement. Apple SDK
+builds, XCTest execution and live iPhone/iPad display switching still need
+native qualification; source policy is not hardware evidence.
+
+## Send a selected file to the host
+
+A control-capable session now offers **View options → Choose upload copy…**
+while it is viewing, before control is requested. Before that action the menu
+explains that choosing creates a local copy, up to **256 MiB**, and may download
+the file from its provider. The system document picker selects one regular
+file; folders, packages, symbolic links and unknown metadata are refused. The
+picker can cover the desktop, so the app marks the remote view hidden
+throughout its actual presentation and dismissal. It never keeps an obscured
+controlling session alive or claims that frames behind the picker were seen.
+
+Selection asks the OS to make an upload snapshot on the one preparation worker
+and pins that snapshot's native descriptor. This local copy and any provider
+download happen before Send; no file bytes are sent to the remote host. After
+the picker closes and a fresh picture is visible, choose
+**Control**, wait for the host grant and file channel, then press **Send once**
+in the small transfer panel. The host must separately enable receiving files
+through its existing `frd run --files DIR` configuration. A host that declines
+the optional file capability still permits ordinary viewing and control.
+
+Choosing is disabled while control is pending or granted. If already controlling,
+use **In control → Give back control and keep viewing**. This fences the original
+input, waits for successful service and cleanup plus the existing host-listener
+cooldown, then opens a fresh observing session to the same original pinned host.
+It clears automatic control intent even when **Ask for control on connect** is
+enabled. A multi-display host may ask for a fresh approved display choice.
+Backgrounding, disconnect, expiry or failed original cleanup prevents that
+replacement. Selected files, earlier Send actions and input never carry into it.
+
+The local choice has the native owner's original two-minute budget and exact
+connection-attempt token. Provider preparation, picker time and waiting for a
+grant all consume that same budget. A changed connection, close, background
+transition or discarded choice cannot adopt a later token. A provider callback
+that returns after cancellation is collected only for its original selection;
+it cannot replace a newer choice or send automatically. Only one preparation
+task exists per session, including a cancelled task still waiting on its file
+provider.
+
+**Send once** is a separate explicit action after selection. It samples the
+current granted input view and original native deadline, consumes the prepared
+descriptor even if refused, and never queues a retry with a renewed ticket.
+The current session cannot replay a chosen file after reconnect or display
+switch. Files are uploaded through the existing bounded ATP lane and original
+disk worker. Swift does not hash or buffer contents; the OS prepares the
+disclosed local copy, and native content reads require the later granted Send.
+Source validation, host quotas, safe staging and atomic publication remain in
+the existing Rust file implementation. The host's receiving quota can be lower
+than the iOS copy limit. A published file is not opened automatically.
+
+The transfer panel distinguishes bytes **queued** from the host's actual
+publication receipt. It also preserves host refusal, interrupted or uncertain
+publication, unconfirmed durability and failed local cleanup. **Pause** and
+**Resume** affect only that original batch's pacing and do not extend its
+deadline. **Cancel** stops the current upload without deliberately ending the
+desktop; it cannot retract a file the host already published. Every command
+retains the batch whose state the user saw. Earlier receipts remain in the
+native owner's bounded history, and the panel summarizes received and other
+outcomes independently of the current transfer.
+
+### Document-provider access and cleanup
+
+The picker obtains open-in-place access without creating persistent bookmarks.
+On the preparation worker, an ordinary coordinated read keeps the original
+file protected while its type and known size are checked. A nested
+`NSFileCoordinator.ReadingOptions.forUploading` read then creates the OS-owned
+snapshot. Both the original and snapshot must be regular non-package files,
+at most 256 MiB, with the same byte count and exact basename. A provider that
+renames the snapshot is refused instead of publishing a temporary filename.
+
+The native bridge opens the snapshot descriptor inside its accessor. Apple
+explicitly permits later upload from that descriptor after the OS unlinks the
+snapshot when the accessor returns. No coordination claim remains open while
+the user requests control or the network transfer runs; the original document
+can be edited without changing this selected upload copy. The app does not
+implement its own temporary-file copying or deletion. Ordinary coordination
+may itself download a provider placeholder before size preflight, so the copy
+limit does not promise a limit on provider download traffic.
+
+The original security-scoped URL remains retained for every accepted upload
+until the native session reports that all of its original file sources have
+actually been released. A terminal event or a cleanup deadline is insufficient
+proof.
+
+Closing the UI hands the original session handle and its bounded access owners
+to a cleanup task. That task frees the handle and balances document access only
+after the source-release witness. A stuck cleanup retains its original slot
+under the existing four-session bound; it does not recycle permissions or
+create unlimited replacement workers. Discarded, refused and expired choices
+release their own access after preparation returns and their unsent descriptor
+is discarded. Nothing from a selected URL, local filename or file contents is
+written into diagnostic JSON.
+
+Source regression coverage includes original selection tokens, bounded status
+decoding, one-use picker callbacks, publication versus queue progress,
+independent cleanup outcomes, and local-copy type, size and name boundaries.
+The executor became unavailable during this implementation; Apple SDK
+compilation, XCTest execution and live
+iPhone/iPad transfers with local, iCloud and third-party providers remain
+unverified. In particular, real picker dismissal, provider cancellation,
+background cleanup and host publication require native qualification.
+
+Apple API contracts:
+[document-picker access](https://developer.apple.com/documentation/uikit/uidocumentpickerviewcontroller),
+[balanced security-scoped access](https://developer.apple.com/documentation/foundation/url/startaccessingsecurityscopedresource()),
+[coordinated reads](https://developer.apple.com/documentation/foundation/nsfilecoordinator/coordinate(readingitemat:options:error:byaccessor:)),
+and [upload snapshots and descriptor lifetime](https://developer.apple.com/documentation/foundation/nsfilecoordinator/readingoptions/foruploading).
+
 ## Input
 
 The app requests keys, absolute pointer, buttons, line scroll and optional
@@ -192,10 +389,11 @@ the host's negotiated profile before the control request: a host without text
 support keeps physical-key control, and a text call returns
 `FR_UNSUPPORTED`. Pixel-precise scrolling remains unrequested.
 
-- Positions are encoded picture pixels. The app undoes its own zoom, pan,
-  letterbox, rotation and safe-area placement (`PictureMapper`); a point
-  outside the picture is refused (`FR_OUTSIDE`), never moved onto an edge.
-  A drag that leaves the picture releases at its last point inside.
+- Positions use the encoded-picture-sized input area. The app undoes its
+  local zoom, pan, rotation and safe-area placement (`PictureMapper`) and
+  keeps the original display's integer image rectangle within that area.
+  Points in its letterbox bars or outside it are refused (`FR_OUTSIDE`).
+  A drag that leaves the image releases at its last point inside.
 - Scrolling sends whole 16.16 lines, at most 16 per axis in one event.
   Fractional carry retains its earliest input deadline and clears when it
   expires or other input intervenes. Oversized whole actions are refused;
@@ -388,6 +586,7 @@ own screen.
   pixel scrolls), a full native text-composition interface, and live device
   qualification of the committed-Unicode callback path. The callback and
   negotiation regressions establish source policy, not native OS insertion.
-- iPad pointer devices as a real mouse (hover, secondary click), clipboard,
-  audio and display switching.
+- iPad pointer devices as a real mouse (hover, secondary click), clipboard
+  and audio. Approved display selection and cleanup-confirmed switching
+  are implemented above; native device qualification remains outstanding.
 - Release signing, App Store entitlements and a device-tested build.

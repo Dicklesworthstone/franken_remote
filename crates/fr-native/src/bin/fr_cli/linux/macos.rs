@@ -198,6 +198,11 @@ fn connect_selected(
     } else {
         crate::saved_hosts::select(&connection.target)?
     };
+    // `--pick-only` (fr app): the selection report is the whole result; the
+    // application starts the connection as a separate command.
+    if connection.pick.is_some() {
+        return Ok(String::new());
+    }
     let roots = read_roots(&connection.target.roots)?;
     let mut client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
         failure(

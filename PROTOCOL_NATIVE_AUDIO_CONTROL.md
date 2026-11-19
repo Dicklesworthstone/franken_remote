@@ -45,6 +45,14 @@ No decoder restart, automatic reattachment or longer deadline follows expiry.
 Only the exact retired pair's cause on its original live connection permits
 this isolation; retained send failure and parent-control failure remain fatal.
 
+Stopping the optional audio source does not immediately remove its reliable
+reply route. While the original observation remains authorized, the exclusive
+publisher consumes and discards late records on that exact original reply
+route. Cleanup and configuration replies cannot reopen capture or mutate the
+stopped audio epoch. Unrelated routes remain unowned, and an expired or revoked
+original observation still refuses the record. This keeps queued audio cleanup
+from becoming a parent desktop-session handler failure.
+
 ## Authority, scheduling and teardown
 
 Original observation approval and expiry gate audio, including any observation before the local control request. Input still requires its separate explicit grant, presented-view checks, valid tickets and native submission checks. Audio never supplies evidence of screen freshness and cannot renew or resume input authority.

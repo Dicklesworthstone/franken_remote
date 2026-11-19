@@ -603,3 +603,9 @@ fn the_source_age_bound_follows_the_path_and_a_smaller_one_applies_at_once() {
 
 #[path = "freshness/late_observation.rs"]
 mod late_observation;
+
+#[path = "freshness/decode_only.rs"]
+mod decode_only;
+
+#[path = "freshness/pending_source.rs"]
+mod pending_source;

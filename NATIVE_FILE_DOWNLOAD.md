@@ -1,19 +1,37 @@
 # Native file downloads
 
-A controlling native Linux or macOS viewer can receive files and portable
-directories explicitly selected by the host operator. The transfer uses the existing ATP profiles on
-the original session's independently admitted, one-use file attachment.
+A controlling native Linux, macOS or Windows viewer can receive files explicitly selected
+by a Linux, macOS or Windows host operator. Linux and macOS hosts can also select
+portable directories. The transfer uses the existing ATP profiles on the original
+session's independently admitted, one-use file attachment.
 
 ## Select a source and destination
 
-On a host already configured for native control, add `--once` and one or more
-`--send` selections:
+On a Linux host already configured for native control, add `--once` and one or
+more `--send` selections. macOS uses the same options with its native input agent:
 
 ```bash
 frd run --software-explicit --display :0 \
   --input-agent /opt/fr/fr-input-agent --once \
   --send /home/alice/report.pdf --send /home/alice/project --json
 ```
+
+On a Windows host built with `windows-host`, use its in-process `--control`
+executor instead of an input-agent path:
+
+```powershell
+.\frd.exe run --encoder auto --once --control --send 'C:\Users\Alice\Documents\report.pdf' --json
+```
+
+Repeat `--send` for up to eight regular files on ordinary local drives. Windows
+selection rejects directories, final reparse points, device/UNC/verbatim paths,
+alternate data streams and mapped network drives. Each selected native handle
+denies write and delete sharing until its original transfer owner closes it;
+another process cannot replace that file while it is selected. Ancestor junction
+resolution remains an OS path operation, so a drive letter is not evidence that
+every ancestor stays on the same local volume. The current Windows host supports
+this initial batch; `--send-control` remains unavailable. Its explicit `--files`
+receive directory can independently accept regular files on a duplex session.
 
 On the client, select an existing private destination and request control:
 
@@ -22,13 +40,19 @@ fr connect NODE_ID --control --experimental-native --display only \
   --receive /home/bob/received --json
 ```
 
+The native Windows viewer exposes the same explicit consent with
+`fr-windows view NODE_ID --control --receive C:\Users\me\FrankenRemoteDrop`.
+It receives regular files through the existing Windows handle-pinned directory
+owner. Local limits, conflict choices, cancellation, publication receipts and
+validation scope are described in the [Windows client guide](docs/windows-client.md#receive-files-selected-by-the-host).
+
 The existing tailnet, ingress, executable-trust and display prerequisites in
 [README.md](README.md) still apply. The destination must be absolute, owned by
 the receiving process's effective user, not writable by other users, and reached
 without symlinks. It is pinned by descriptor, so changing the path after startup
 does not redirect publication.
 
-Up to eight explicit regular-file or directory selections run in order. Host
+Up to eight explicit selections run in order. Host
 selection pins no-follow descriptors before connecting; content reads, directory
 traversal and hashing start only after the controlling grant and authenticated
 Files attachment. Sources use portable basenames; the viewer cannot browse the

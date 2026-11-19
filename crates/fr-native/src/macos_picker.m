@@ -18,6 +18,14 @@ enum {
 #define FR_PICK_ROWS 1024
 #define FR_PICK_LABEL 384
 #define FR_PICK_EVENTS 128
+// Optional host-picker connection choices (the desktop application's
+// `fr app`). Bits are local preferences for the next command line, never
+// authority: the connector still requests control and clipboard itself.
+#define FR_CHOICE_NONE UINT32_MAX
+#define FR_CHOICE_CONTROL 1u
+#define FR_CHOICE_CLIPBOARD 2u
+#define FR_CHOICE_DISPLAY 4u
+#define FR_CHOICE_ALL 7u
 
 // Must match RawRow in macos/picker.rs. Each byte range is borrowed only for
 // fr_mac_picker_open; NSString makes its own immutable copy before return.
@@ -28,19 +36,23 @@ typedef struct {
     size_t detail_len;
 } FrPickerRow;
 
+// The title is a plain subview, not NSTableCellView's textField outlet. As
+// that outlet, the title did not appear (macOS 27.0.1, 2026-11-18): every row
+// showed only its detail line, the node ID, so machines had no names.
 @interface FrPickerCell : NSTableCellView
+@property(strong) NSTextField *title;
 @property(strong) NSTextField *detail;
 @end
 @implementation FrPickerCell
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (!self) return nil;
-    self.textField = [NSTextField labelWithString:@""];
-    self.textField.font = [NSFont systemFontOfSize:13];
-    self.textField.frame = NSMakeRect(8, 22, fmax(1, frame.size.width - 16), 18);
-    self.textField.autoresizingMask = NSViewWidthSizable;
-    self.textField.lineBreakMode = NSLineBreakByClipping;
-    [self addSubview:self.textField];
+    self.title = [NSTextField labelWithString:@""];
+    self.title.font = [NSFont systemFontOfSize:13];
+    self.title.frame = NSMakeRect(8, 22, fmax(1, frame.size.width - 16), 18);
+    self.title.autoresizingMask = NSViewWidthSizable;
+    self.title.lineBreakMode = NSLineBreakByClipping;
+    [self addSubview:self.title];
     self.detail = [NSTextField labelWithString:@""];
     self.detail.font = [NSFont systemFontOfSize:11];
     self.detail.textColor = NSColor.secondaryLabelColor;
@@ -59,16 +71,24 @@ typedef struct {
     NSScrollView *scroll;
     NSButton *accept;
     NSButton *cancel;
+    NSButton *viewOnly;
+    NSButton *viewControl;
+    NSButton *clipboard;
+    NSButton *chooseDisplay;
     NSArray<NSString *> *titles;
     NSArray<NSString *> *details;
     int outcome;
     NSUInteger chosen;
     double validAfter;
+    BOOL hasChoices;
+    uint32_t choices;
 }
 - (BOOL)fresh:(NSEvent *)event;
 - (void)choose:(id)sender;
 - (void)cancel:(id)sender;
 - (void)input:(NSEvent *)event;
+- (BOOL)toggle:(NSEvent *)event;
+- (void)showChoices;
 @end
 
 static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
@@ -89,7 +109,7 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
         cell = [[FrPickerCell alloc] initWithFrame:NSMakeRect(0, 0, view.bounds.size.width, 44)];
         cell.identifier = @"choice";
     }
-    cell.textField.stringValue = titles[(NSUInteger)row];
+    cell.title.stringValue = titles[(NSUInteger)row];
     cell.detail.stringValue = details[(NSUInteger)row];
     return cell;
 }
@@ -137,6 +157,29 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     // Cancellation is deliberately independent of age, focus or readiness.
     outcome = FR_PICK_CANCELLED;
 }
+- (void)showChoices {
+    if (!hasChoices) return;
+    BOOL control = (choices & FR_CHOICE_CONTROL) != 0;
+    viewOnly.state = control ? NSControlStateValueOff : NSControlStateValueOn;
+    viewControl.state = control ? NSControlStateValueOn : NSControlStateValueOff;
+    // Clipboard sharing follows a control grant; view-only never offers it.
+    clipboard.enabled = control;
+    clipboard.state = (choices & FR_CHOICE_CLIPBOARD) ? NSControlStateValueOn : NSControlStateValueOff;
+    chooseDisplay.state = (choices & FR_CHOICE_DISPLAY) ? NSControlStateValueOn : NSControlStateValueOff;
+}
+// A fresh local click on one of the choice controls changes only the local
+// preference; it never confirms a row. Returns YES when the event was used.
+- (BOOL)toggle:(NSEvent *)event {
+    if (!hasChoices || event.type != NSEventTypeLeftMouseDown) return NO;
+    if (fr_picker_hit(viewOnly, event)) choices &= ~FR_CHOICE_CONTROL;
+    else if (fr_picker_hit(viewControl, event)) choices |= FR_CHOICE_CONTROL;
+    else if (fr_picker_hit(clipboard, event)) {
+        if (clipboard.enabled) choices ^= FR_CHOICE_CLIPBOARD;
+    } else if (fr_picker_hit(chooseDisplay, event)) choices ^= FR_CHOICE_DISPLAY;
+    else return NO;
+    [self showChoices];
+    return YES;
+}
 - (void)input:(NSEvent *)event {
     // Dispatch our input directly, instead of entering NSControl, scroller,
     // table drag or title-bar tracking loops that can wait for a held mouse.
@@ -151,6 +194,7 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
         return;
     }
     if (outcome != FR_PICK_WAIT || ![self fresh:event]) return;
+    if ([self toggle:event]) return;
     if (event.type == NSEventTypeLeftMouseDown) {
         if (fr_picker_hit(accept, event)) {
             NSInteger row = table.selectedRow;
@@ -229,14 +273,24 @@ static NSString *fr_picker_string(const char *bytes, size_t length) {
     return [[NSString alloc] initWithBytes:bytes length:length encoding:NSASCIIStringEncoding];
 }
 
-int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, void **out) {
+int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uint32_t initial,
+                       const char *notice_bytes, size_t notice_len, void **out) {
     if (!out) return FR_PICK_INVALID;
     *out = NULL;
     if ((kind != 1 && kind != 2) || !rows || !count || count > FR_PICK_ROWS ||
         (kind == 2 && count > 8)) return FR_PICK_INVALID;
+    // Choices and a notice belong only to the host picker.
+    if (initial != FR_CHOICE_NONE && (kind != 1 || (initial & ~FR_CHOICE_ALL))) return FR_PICK_INVALID;
+    if ((notice_len && kind != 1) || (!notice_bytes && notice_len)) return FR_PICK_INVALID;
     if (![NSThread isMainThread]) return FR_PICK_THREAD;
     if (!NSApp || !NSScreen.mainScreen) return FR_PICK_NATIVE;
     @autoreleasepool {
+        NSString *notice = nil;
+        if (notice_len) {
+            notice = fr_picker_string(notice_bytes, notice_len);
+            if (!notice) return FR_PICK_INVALID;
+        }
+        BOOL hasChoices = initial != FR_CHOICE_NONE;
         NSMutableArray<NSString *> *titles = [NSMutableArray arrayWithCapacity:count];
         NSMutableArray<NSString *> *details = [NSMutableArray arrayWithCapacity:count];
         CGFloat columnWidth = 680;
@@ -251,15 +305,19 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, voi
         }
         if (!isfinite(columnWidth) || columnWidth > 8192) return FR_PICK_INVALID;
         NSRect available = NSScreen.mainScreen.visibleFrame;
+        // Room for the optional notice line and choices row.
+        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 30 : 0);
         CGFloat width = fmin(760, available.size.width - 40);
-        CGFloat height = fmin(520, available.size.height - 60);
-        if (width < 360 || height < 240) return FR_PICK_NATIVE;
+        CGFloat height = fmin(520 + extra, available.size.height - 60);
+        if (width < (hasChoices ? 720 : 360) || height < 240 + extra) return FR_PICK_NATIVE;
         FrPickerOwner *owner = [FrPickerOwner new];
         owner->titles = [titles copy];
         owner->details = [details copy];
         owner->outcome = FR_PICK_WAIT;
         owner->chosen = NSNotFound;
         owner->validAfter = NSProcessInfo.processInfo.systemUptime;
+        owner->hasChoices = hasChoices;
+        owner->choices = hasChoices ? initial : 0;
         owner->window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
             backing:NSBackingStoreBuffered defer:NO];
@@ -280,7 +338,31 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, voi
         subtitle.frame = NSMakeRect(20, height - 68, width - 40, 20);
         subtitle.font = [NSFont systemFontOfSize:11];
         [content addSubview:subtitle];
-        owner->scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 78, width - 40, height - 160)];
+        if (notice) {
+            // The previous session's plain-language outcome or guidance.
+            NSTextField *line = [NSTextField labelWithString:notice];
+            line.frame = NSMakeRect(20, height - 94, width - 40, 20);
+            line.font = [NSFont systemFontOfSize:12];
+            line.textColor = NSColor.systemOrangeColor;
+            line.lineBreakMode = NSLineBreakByTruncatingTail;
+            [content addSubview:line];
+        }
+        CGFloat bottom = hasChoices ? 108 : 78;
+        if (hasChoices) {
+            owner->viewOnly = [NSButton radioButtonWithTitle:@"View only" target:nil action:nil];
+            owner->viewOnly.frame = NSMakeRect(20, 50, 110, 24);
+            owner->viewControl = [NSButton radioButtonWithTitle:@"View and control" target:nil action:nil];
+            owner->viewControl.frame = NSMakeRect(135, 50, 150, 24);
+            owner->clipboard = [NSButton checkboxWithTitle:@"Share clipboard text" target:nil action:nil];
+            owner->clipboard.frame = NSMakeRect(295, 50, 180, 24);
+            owner->chooseDisplay = [NSButton checkboxWithTitle:@"Ask which display to show" target:nil action:nil];
+            owner->chooseDisplay.frame = NSMakeRect(480, 50, 230, 24);
+            for (NSButton *choice in @[owner->viewOnly, owner->viewControl, owner->clipboard, owner->chooseDisplay])
+                [content addSubview:choice];
+            [owner showChoices];
+        }
+        owner->scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, bottom, width - 40,
+                                                                       height - bottom - 82 - (notice ? 26 : 0))];
         owner->scroll.borderType = NSBezelBorder;
         // Wheel/trackpad and keyboard scrolling are handled as bounded events,
         // never a scroller's mouse-tracking loop. Wide labels stay intact and
@@ -309,7 +391,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, voi
             kind == 1 ? @"hosts" : @"displays"]];
         hint.font = [NSFont systemFontOfSize:10];
         hint.textColor = NSColor.secondaryLabelColor;
-        hint.frame = NSMakeRect(20, 54, width - 40, 18);
+        hint.frame = NSMakeRect(20, bottom - 24, width - 40, 18);
         [content addSubview:hint];
         owner->accept = [NSButton buttonWithTitle:kind == 1 ? @"Connect" : @"View display"
                                           target:owner action:@selector(choose:)];
@@ -337,9 +419,10 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, voi
     return FR_PICK_WAIT;
 }
 
-int fr_mac_picker_poll(void *handle, size_t *row) {
-    if (!handle || !row) return FR_PICK_INVALID;
+int fr_mac_picker_poll(void *handle, size_t *row, uint32_t *chosen_choices) {
+    if (!handle || !row || !chosen_choices) return FR_PICK_INVALID;
     *row = SIZE_MAX;
+    *chosen_choices = FR_CHOICE_NONE;
     if (![NSThread isMainThread]) return FR_PICK_THREAD;
     FrPickerOwner *owner = (__bridge FrPickerOwner *)handle;
     @autoreleasepool {
@@ -385,6 +468,8 @@ int fr_mac_picker_poll(void *handle, size_t *row) {
         if (owner->outcome == FR_PICK_CHOSEN) {
             if (owner->chosen >= owner->titles.count) return FR_PICK_INVALID;
             *row = owner->chosen;
+            // The choices shown at the moment of confirmation, never later edits.
+            if (owner->hasChoices) *chosen_choices = owner->choices;
         }
         return owner->outcome;
     }
@@ -410,6 +495,10 @@ int fr_mac_picker_close(void *handle) {
         owner->scroll = nil;
         owner->accept = nil;
         owner->cancel = nil;
+        owner->viewOnly = nil;
+        owner->viewControl = nil;
+        owner->clipboard = nil;
+        owner->chooseDisplay = nil;
         owner->titles = nil;
         owner->details = nil;
         // Consume only the original bridge retain. Rust clears its pointer

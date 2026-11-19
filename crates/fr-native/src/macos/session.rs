@@ -6,12 +6,16 @@
 //! With control, the session confirms the window's mapping, reports frames as
 //! visible only while the window is actually on screen, requests control once
 //! the session reports current evidence, and after the grant hands `AppKit`
-//! input to the granted session's one event `Source`. Focus loss, hiding, a
-//! changed picture size, event overflow or a closed window stop that source
-//! (frd's contract for a native producer): control then ends with the session.
+//! input to the granted session's one event `Source`. An app switch releases
+//! held keys/buttons and pauses input while the original clipboard's separate
+//! Off surface stays live. Hiding, a changed picture size, event overflow or a
+//! closed window stop that source (frd's contract for a native producer):
+//! control then ends with the session.
 //! Checked native geometry changes can reopen a fresh viewing window after
 //! original cleanup, retaining only local point size/position. They never reuse
 //! the old mapping, control, clipboard, file selection or text composition.
+//! Stop control uses the same orderly close and confirmed cleanup as Change
+//! Display, then opens a fresh viewing attempt with a new catalog selection.
 //! The invocation's initial control choice is consumed once. A recovered
 //! window stays viewing until a fresh F8 press and release requests a new
 //! grant; Ctrl+Alt+Shift+Escape closes the session locally.
@@ -19,14 +23,15 @@
 //! Main thread only: `AppKit` owns the window and its event loop, which this
 //! session services between network turns of the same runtime.
 use super::{
-    AUDIO_FLAG, HevcDecoder, PicturePoint, Surface, TEXT_COMPOSER_FLAG, TextCommit, TextRetireMode,
-    TextRetirement, TextTaken, Window, WindowEvent, clipboard, event_time, files, picker, sharing,
+    AUDIO_FLAG, HevcDecoder, PicturePoint, STOP_CONTROL_FLAG, Surface, TEXT_COMPOSER_FLAG,
+    TextCommit, TextRetireMode, TextRetirement, TextTaken, Window, WindowEvent, clipboard,
+    event_time, files, picker, sharing,
 };
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
 use crate::macos_resize::{Intent as ResizeIntent, Placement};
 use crate::macos_scroll::{CaptureClock, Refusal as ScrollRefusal, Scroll};
-use crate::macos_switch::{Intent as DisplayIntent, Mode as DisplayMode};
+use crate::macos_switch::{Action as ReopenAction, Intent as ReopenIntent, Mode as ReopenMode};
 use asupersync::{
     cx::Cx,
     time::{Sleep, sleep},
@@ -36,7 +41,7 @@ use fr_core::input::{DesktopPoint, InputBounds, KeyTransition, PhysicalKey, Poin
 use fr_core::input_submission::{Capabilities, Capability};
 use fr_media::{
     access_unit::EncodedAccessUnit,
-    freshness::ClockPolicy,
+    freshness::{ClockPolicy, Error as FreshnessError},
     hevc::DecoderRecord,
     worker::{
         Configuration as WorkerConfiguration, Error as WorkerError, overlay::Update as CursorUpdate,
@@ -52,11 +57,12 @@ use frd::{
         self, Application, CallbackError, CompletionAction, LocalLayoutChange, Status,
     },
     session_startup::{
-        ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
-        Presentation, StreamingViewerControl, Viewer,
+        ControlledViewer, ControlledViewerError, InteractiveViewerState, NativeObserver,
+        ObserverError, ObserverPolicy, Presentation, StreamingViewerControl, StreamingViewerError,
+        Viewer,
         viewer_events::{
-            Error as CaptureError, Event, Layout, LocalPoint, MAX_EVENT_AGE_US, NativeCapture,
-            PositionedAction, Source, TextContext,
+            Error as CaptureError, Event, Layout, LocalPoint, Located, MAX_EVENT_AGE_US,
+            NativeCapture, PositionedAction, Source, TextContext,
         },
     },
     worker::{Deadline, Launch, LocalPresenter},
@@ -137,6 +143,13 @@ pub struct Report {
     pub viewing_reconnects: u32,
     pub display_changes: u32,
     pub display_change_closes: Vec<DisplayChangeReport>,
+    pub control_releases: u32,
+    /// Times a grant paused because the window lost focus or was covered.
+    /// Each pause released every held key and button on the host.
+    pub control_pauses: u32,
+    /// Original close evidence from explicit Stop control actions, retained
+    /// separately from the subsequent viewing attempts and their results.
+    pub control_release_closes: Vec<DisplayChangeReport>,
     pub window_resizes: u32,
     /// Failed original attempts, retained separately from a successful reopen.
     pub window_resize_closes: Vec<WindowResizeReport>,
@@ -159,7 +172,7 @@ pub struct Report {
     pub lease_revocation: Option<fr_wire::lease_revoked::Revoked>,
 }
 
-/// Original terminal evidence retained before opening another display.
+/// Original terminal evidence retained before opening a fresh viewing attempt.
 #[derive(Debug, Clone, Copy)]
 pub struct DisplayChangeReport {
     pub attempt: u8,
@@ -210,6 +223,12 @@ struct Input {
     text_context: Option<TextContext>,
     text_serial: Option<u64>,
     text_until: u64,
+    /// The window lost focus or was covered: everything held was released and
+    /// nothing is delivered until it is key and visible again.
+    paused: bool,
+    /// The host location of the latest positioned event, where a pause
+    /// releases held buttons.
+    last: Option<Located>,
 }
 impl Drop for Input {
     fn drop(&mut self) {
@@ -246,6 +265,11 @@ impl Input {
     /// Keep native composition attached to its original source and uninterrupted
     /// view. A compositor gap disables Send without cancelling a valid draft.
     fn text_status(&mut self) -> (Option<u64>, u64, bool) {
+        if self.paused {
+            // The native draft was discarded at the pause. The same context
+            // returns on resume, so a new draft needs no new context.
+            return (None, 0, false);
+        }
         if self.stopped() || !self.source.supports_text() {
             self.text_context = None;
             self.text_until = 0;
@@ -278,7 +302,8 @@ impl Input {
             if self.stopped() {
                 return Err(());
             }
-            if self.text_serial != Some(commit.context)
+            if self.paused
+                || self.text_serial != Some(commit.context)
                 || self.keys.iter().any(|held| *held)
                 || self.buttons.iter().any(|held| *held)
             {
@@ -342,6 +367,9 @@ impl Input {
     }
     /// One window event to the granted session. Err means stop control.
     fn deliver(&mut self, event: &WindowEvent, report: &mut Report) -> Result<(), ()> {
+        if self.paused {
+            return Ok(());
+        }
         let caps = self.source.capabilities();
         let now = self.source.clock().map_err(|_| ())?;
         let captured = match *event {
@@ -386,7 +414,9 @@ impl Input {
                     return Ok(());
                 }
                 report.pointer += 1;
-                Event::Pointer(self.layout.at(self.local(at)))
+                let location = self.layout.at(self.local(at));
+                self.last = Some(location.clone());
+                Event::Pointer(location)
             }
             WindowEvent::Button {
                 button,
@@ -406,8 +436,10 @@ impl Input {
                 }
                 self.buttons[index] = pressed;
                 report.buttons += 1;
+                let location = self.layout.at(self.local(at));
+                self.last = Some(location.clone());
                 Event::Positioned {
-                    location: self.layout.at(self.local(at)),
+                    location,
                     action: PositionedAction::Button { button, pressed },
                 }
             }
@@ -465,8 +497,10 @@ impl Input {
             }
         };
         report.scrolls += 1;
+        let location = self.layout.at(self.local(at));
+        self.last = Some(location.clone());
         let event = Event::Positioned {
-            location: self.layout.at(self.local(at)),
+            location,
             action: PositionedAction::Scroll {
                 x: delta.x,
                 y: delta.y,
@@ -474,6 +508,84 @@ impl Input {
             },
         };
         Some((event, ClientInstant(delta.sampled)))
+    }
+
+    /// Release every key, then every button, this owner holds on the host, and
+    /// deliver nothing more until [`Input::resume`]. Nothing is restored on
+    /// resume. Err: a release was refused, so control must end.
+    fn pause(&mut self, report: &mut Report) -> Result<(), ()> {
+        if self.paused {
+            return Ok(());
+        }
+        self.paused = true;
+        report.control_pauses = report.control_pauses.saturating_add(1);
+        self.scroll.reset();
+        let sampled = self.source.clock().map_err(|_| ())?;
+        for usage in 0..=u8::MAX {
+            if !std::mem::take(&mut self.keys[usize::from(usage)]) {
+                continue;
+            }
+            // `deliver` holds only keys `PhysicalKey` accepts.
+            let key = PhysicalKey::new(u16::from(usage)).ok_or(())?;
+            let release = Event::Key {
+                key,
+                transition: KeyTransition::Release,
+            };
+            self.source.push(release, sampled).map_err(|_| ())?;
+        }
+        for (index, button) in HELD_BUTTONS.into_iter().enumerate() {
+            if !std::mem::take(&mut self.buttons[index]) {
+                continue;
+            }
+            // Every press carried a location, so a held button has one.
+            let location = self.last.clone().ok_or(())?;
+            let release = Event::Positioned {
+                location,
+                action: PositionedAction::Button {
+                    button,
+                    pressed: false,
+                },
+            };
+            self.source.push(release, sampled).map_err(|_| ())?;
+        }
+        Ok(())
+    }
+
+    /// The window is key and visible again: input flows from the next turn.
+    const fn resume(&mut self) {
+        self.paused = false;
+    }
+}
+
+/// `Input::buttons` slots, in `deliver`'s order.
+const HELD_BUTTONS: [PointerButton; 5] = [
+    PointerButton::Primary,
+    PointerButton::Secondary,
+    PointerButton::Middle,
+    PointerButton::Back,
+    PointerButton::Forward,
+];
+
+/// What a granted owner does about focus this turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusStep {
+    Continue,
+    Pause,
+    Resume,
+}
+
+/// `away`: the window is not key or not visible now. `pause_event`: this
+/// batch reported a pausing focus loss. An app switch and back within one poll
+/// still pauses, because native forgot the keys it held and will not report
+/// their releases. Pause and resume each discard their turn's batch: those
+/// events may predate the change.
+const fn focus_step(paused: bool, away: bool, pause_event: bool) -> FocusStep {
+    if away || (pause_event && !paused) {
+        FocusStep::Pause
+    } else if paused {
+        FocusStep::Resume
+    } else {
+        FocusStep::Continue
     }
 }
 
@@ -629,7 +741,7 @@ pub struct Session {
     report: Rc<RefCell<Report>>,
     closed: Rc<Cell<bool>>,
     intent: Rc<RefCell<Intent>>,
-    display_intent: Rc<RefCell<DisplayIntent>>,
+    reopen_intent: Rc<RefCell<ReopenIntent>>,
     service_succeeded: bool,
     service_failure: Option<ObserverError>,
     started: bool,
@@ -690,7 +802,7 @@ impl Session {
             report: Rc::default(),
             closed: Rc::default(),
             intent: Rc::new(RefCell::new(Intent::new(control.is_some()))),
-            display_intent: Rc::default(),
+            reopen_intent: Rc::default(),
             service_succeeded: false,
             service_failure: None,
             started: false,
@@ -843,7 +955,7 @@ impl Session {
             }
         } else if self.resize.changed() {
             self.intent.borrow_mut().retire_initial();
-            self.display_intent.borrow_mut().cancel();
+            self.reopen_intent.borrow_mut().cancel();
             self.report
                 .borrow_mut()
                 .local_stop
@@ -874,7 +986,7 @@ impl Session {
             || self.picker.borrow().is_some()
             || self.closed.get()
             || report.local_stop != Some(LocalStop::PictureChanged)
-            || self.display_intent.borrow().pending()
+            || self.reopen_intent.borrow().pending()
             || self.terminal_failure().is_some()
             || !(1..32).contains(&report.attempts)
             || report.window_resize_closes.len() >= 31
@@ -1094,7 +1206,7 @@ fn service(
     input: &RefCell<Option<Input>>,
     report: &RefCell<Report>,
     intent: &RefCell<Intent>,
-    display_intent: &RefCell<DisplayIntent>,
+    reopen_intent: &RefCell<ReopenIntent>,
     resize: &Rc<ResizeIntent>,
     can_resize: bool,
     closed: &Cell<bool>,
@@ -1108,7 +1220,7 @@ fn service(
     let halt = |reason: LocalStop, input: &mut Option<Input>, report: &mut Report| {
         report.local_stop.get_or_insert(reason);
         resize.cancel();
-        display_intent.borrow_mut().cancel();
+        reopen_intent.borrow_mut().cancel();
         *input = None;
         stop.stop();
         let _ = retire_text(window, TextRetireMode::Fenced);
@@ -1121,7 +1233,7 @@ fn service(
         input.borrow_mut().take();
         stop.stop();
         intent.borrow_mut().retire_initial();
-        display_intent.borrow_mut().cancel();
+        reopen_intent.borrow_mut().cancel();
         report
             .borrow_mut()
             .local_stop
@@ -1148,7 +1260,7 @@ fn service(
         }
         files.borrow_mut().cancel();
         intent.borrow_mut().invalidate();
-        let pending = display_intent.borrow().pending();
+        let pending = reopen_intent.borrow().pending();
         if !pending {
             stop.stop();
         }
@@ -1180,7 +1292,7 @@ fn service(
         };
         // A parked producer never republishes its old context or allows native
         // editor cleanup before the original close fences its owners.
-        let text_updated = if display_intent.borrow().pending() {
+        let text_updated = if reopen_intent.borrow().pending() {
             true
         } else {
             // Drop every source/queue borrow before AppKit. An ordinary update
@@ -1195,12 +1307,15 @@ fn service(
             input
                 .borrow()
                 .as_ref()
-                .is_some_and(|input| !input.stopped()),
+                .is_some_and(|input| !input.stopped() && !input.paused),
         );
         if !text_updated
             || opened.file_selection_update().is_err()
             || opened
-                .display_change_enabled(display_intent.borrow().enabled())
+                .reopen_enabled(
+                    reopen_intent.borrow().enabled(ReopenAction::ChangeDisplay),
+                    reopen_intent.borrow().enabled(ReopenAction::StopControl),
+                )
                 .is_err()
         {
             Some(LocalStop::NativeFailure)
@@ -1242,15 +1357,15 @@ fn service(
             if reason == LocalStop::NativeFailure
                 || input.is_some()
                 || intent.requested()
-                || display_intent.borrow().pending()
+                || reopen_intent.borrow().pending()
             {
                 halt(reason, &mut input, &mut report);
             } else {
                 // No input owner exists. Keep viewing, but discard old local
                 // composition and any display choice across focus/queue loss.
-                display_intent
+                reopen_intent
                     .borrow_mut()
-                    .set_mode(DisplayMode::Disabled, event_time());
+                    .set_mode(ReopenMode::Disabled, event_time());
                 let _ = retire_text(window, TextRetireMode::Fenced);
             }
         }
@@ -1267,9 +1382,9 @@ fn service(
     files
         .borrow()
         .file_drop_ready(input.is_some() && state.is_some_and(super::WindowState::input_ready));
-    let display_action = opened.take_display_change();
+    let reopen_action = opened.take_reopen();
     drop(slot);
-    let reason = if display_action.is_err() {
+    let reason = if reopen_action.is_err() {
         Some(LocalStop::NativeFailure)
     } else {
         match state {
@@ -1287,11 +1402,51 @@ fn service(
             Some(_) => None,
         }
     };
+    // An app switch or a covered window pauses a grant instead of ending it.
+    // Minimizing, hiding, an unavailable session and closing stay terminal
+    // (`terminal_event`), as does a pending explicit close.
+    let away = matches!(reason, Some(LocalStop::FocusLost | LocalStop::WindowHidden));
+    let focus = match input.as_ref() {
+        Some(granted) if (reason.is_none() || away) && !reopen_intent.borrow().pending() => {
+            focus_step(
+                granted.paused,
+                away,
+                events.contains(&WindowEvent::FocusPaused),
+            )
+        }
+        _ => FocusStep::Continue,
+    };
+    match focus {
+        FocusStep::Pause => {
+            intent.suspend();
+            let paused = input
+                .as_mut()
+                .is_some_and(|granted| granted.pause(&mut report).is_ok());
+            if paused {
+                // Release held input before querying AppKit. Clipboard owns
+                // a separate visible Off panel; an app switch cannot starve
+                // its original watchdog merely by pausing keyboard input.
+                clipboard.borrow_mut().turn(window.borrow().as_ref());
+            } else {
+                intent.invalidate();
+                halt(LocalStop::NativeFailure, &mut input, &mut report);
+            }
+            return;
+        }
+        FocusStep::Resume => {
+            if let Some(granted) = input.as_mut() {
+                granted.resume();
+            }
+            clipboard.borrow_mut().turn(window.borrow().as_ref());
+            return;
+        }
+        FocusStep::Continue => {}
+    }
     if let Some(reason) = reason {
         intent.suspend();
         if input.is_some()
             || intent.requested()
-            || (display_intent.borrow().pending() && reason != LocalStop::PictureChanged)
+            || (reopen_intent.borrow().pending() && reason != LocalStop::PictureChanged)
         {
             halt(reason, &mut input, &mut report);
             return;
@@ -1302,11 +1457,47 @@ fn service(
         // picture. Focus, hiding and invalid native state never carry a click
         // forward to a later eligible window.
         if reason != LocalStop::PictureChanged {
-            display_intent
+            reopen_intent
                 .borrow_mut()
-                .set_mode(DisplayMode::Disabled, event_time());
+                .set_mode(ReopenMode::Disabled, event_time());
             return;
         }
+    }
+    let now = event_time();
+    if let Ok(Some((action, captured))) = reopen_action {
+        let accepted = reopen_intent.borrow_mut().request(action, captured, now);
+        if !accepted && action == ReopenAction::StopControl {
+            // A stale/refused release gesture cannot authorize a fresh view,
+            // but it must still stop the original control immediately.
+            halt(LocalStop::NativeFailure, &mut input, &mut report);
+            return;
+        }
+        if accepted {
+            // Park this exact producer; dropping Source would cancel the original
+            // session before its orderly close callback can fence the actual grant.
+            // No new event enters it after this turn, including the click itself.
+            intent.retire_initial();
+            if retire_text(window, TextRetireMode::Park).is_err() {
+                halt(LocalStop::NativeFailure, &mut input, &mut report);
+                return;
+            }
+            files.borrow_mut().cancel();
+            // Native already retired its clipboard callback. Do not enter
+            // chrome/IME work before the original service fences its grant.
+            clipboard.borrow_mut().stop(None);
+        }
+    }
+    let pending = reopen_intent.borrow().pending();
+    let expired = reopen_intent.borrow().expired(now);
+    if pending {
+        intent.invalidate();
+        if expired {
+            halt(LocalStop::NativeFailure, &mut input, &mut report);
+        }
+        return;
+    }
+    if reason.is_some() {
+        return;
     }
     if can_resize && !resize.armed() && state.is_some_and(super::WindowState::input_ready) {
         let watched = window
@@ -1328,33 +1519,9 @@ fn service(
         halt(LocalStop::NativeFailure, &mut input, &mut report);
         return;
     }
+    // Ordinary input still samples time after native chrome work; the earlier
+    // handoff sample must not make a delayed key gesture appear current.
     let now = event_time();
-    if let Ok(Some(captured)) = display_action
-        && display_intent.borrow_mut().request(captured, now)
-    {
-        // Park this exact producer; dropping Source would cancel the original
-        // session before its orderly close callback can fence the actual grant.
-        // No new event enters it after this turn, including the click itself.
-        intent.retire_initial();
-        if retire_text(window, TextRetireMode::Park).is_err() {
-            halt(LocalStop::NativeFailure, &mut input, &mut report);
-            return;
-        }
-        files.borrow_mut().cancel();
-        clipboard.borrow_mut().stop(window.borrow().as_ref());
-    }
-    let pending = display_intent.borrow().pending();
-    let expired = display_intent.borrow().expired(now);
-    if pending {
-        intent.invalidate();
-        if expired {
-            halt(LocalStop::NativeFailure, &mut input, &mut report);
-        }
-        return;
-    }
-    if reason.is_some() {
-        return;
-    }
     let mut routes = Vec::with_capacity(events.len());
     for event in events.iter() {
         let route = match *event {
@@ -1459,17 +1626,72 @@ fn service(
 
 /// The frame's on-screen evidence: drawn through Metal while some of the
 /// window is visible. Decode-only frames are never visible.
-fn shown(window: &RefCell<Option<Window>>, frame: Option<Presentation>) -> Option<u64> {
-    let frame = frame?;
-    if frame.stage != PresentationStage::SubmittedToCompositor {
-        return None;
-    }
+fn shown(
+    window: &RefCell<Option<Window>>,
+    pending: &mut Option<u64>,
+    frame: Option<Presentation>,
+) -> Option<u64> {
     let visible = window
         .borrow()
         .as_ref()
         .and_then(|w| w.state().ok())
         .is_some_and(|s| s.visible && s.geometry_current);
-    visible.then_some(frame.frame.as_raw())
+    take_shown(pending, frame, visible)
+}
+
+/// frd hands each later picture to the callback once, then calls again with
+/// `None` after every network turn; the opening picture never comes through
+/// the callback. Keep the newest submitted picture pending until the window is
+/// visible, and report it once. A newer callback picture replaces it. An idle
+/// host may send nothing newer, so without this the opening picture of a
+/// static desktop would never count and control would never be requested.
+fn take_shown(
+    pending: &mut Option<u64>,
+    frame: Option<Presentation>,
+    visible: bool,
+) -> Option<u64> {
+    if let Some(frame) = frame {
+        *pending = submitted(frame);
+    }
+    if !visible {
+        return None;
+    }
+    pending.take()
+}
+
+/// frd's id for a picture it submitted for display. A decode-only picture is
+/// never shown.
+fn submitted(frame: Presentation) -> Option<u64> {
+    (frame.stage == PresentationStage::SubmittedToCompositor).then(|| frame.frame.as_raw())
+}
+
+/// Record the answer to a visibility report for `frame`, which [`shown`] has
+/// just taken out of `pending`.
+///
+/// - The view exists only once the session clock is correlated. A picture
+///   drawn while the session opened therefore meets `ClockNotReady` on the
+///   first turns, so that refusal puts it back to report on a later turn.
+/// - `QueueExpired` means the picture arrived on screen after its display
+///   budget. frd still holds it as the visible picture, unqualified, until the
+///   host verifies the source again, and its evidence gates input until then.
+///   It counts as shown, so the view keeps checking that evidence; otherwise
+///   a late opening picture on a static host would never offer control.
+/// - Any other refusal waits for a newer picture, as in the Linux viewer.
+fn witness<T>(
+    result: &Result<T, StreamingViewerError>,
+    frame: u64,
+    pending: &mut Option<u64>,
+    last_shown: &mut Option<u64>,
+) {
+    match result {
+        Ok(_) | Err(StreamingViewerError::Freshness(FreshnessError::QueueExpired)) => {
+            *last_shown = Some(frame);
+        }
+        Err(StreamingViewerError::Control(ControlledViewerError::ClockNotReady)) => {
+            *pending = Some(frame);
+        }
+        Err(_) => {}
+    }
 }
 
 /// Attach this window's input to the granted session with a layout that
@@ -1528,6 +1750,8 @@ fn attach(
                 text_context: None,
                 text_serial: Some(0),
                 text_until: 0,
+                paused: false,
+                last: None,
             });
             Ok::<_, ()>(capture)
         })
@@ -1601,6 +1825,7 @@ impl Application for Session {
         let clipboard = self.clipboard.clone();
         let clipboard_requested = clipboard.borrow().available();
         let audio_requested = self.audio_install.is_some();
+        let stop_control_requested = self.control.is_some() && self.close_cx.is_some();
         let audio_owner = self.audio_owner.clone();
         let file_directions = sharing::flags(&files.borrow()).count_ones();
         let file_selections = files.borrow().file_drop_requested();
@@ -1620,20 +1845,25 @@ impl Application for Session {
             } else {
                 0
             }
-            | if audio_requested { AUDIO_FLAG } else { 0 };
+            | if audio_requested { AUDIO_FLAG } else { 0 }
+            | if stop_control_requested {
+                STOP_CONTROL_FLAG
+            } else {
+                0
+            };
         let report = self.report.clone();
         let closed = self.closed.clone();
         let intent = self.intent.clone();
-        let display_intent = self.display_intent.clone();
+        let reopen_intent = self.reopen_intent.clone();
         let resize = self.resize.clone();
         let can_resize = Cell::new(false);
         let close_cx = self.close_cx.clone();
         let switchable = self.control.is_none() || close_cx.is_some();
-        display_intent.borrow_mut().set_mode(
+        reopen_intent.borrow_mut().set_mode(
             if switchable {
-                DisplayMode::Viewing
+                ReopenMode::Viewing
             } else {
-                DisplayMode::Disabled
+                ReopenMode::Disabled
             },
             event_time(),
         );
@@ -1686,6 +1916,7 @@ impl Application for Session {
                     text_requested,
                     file_selections,
                     audio_requested,
+                    stop_control_requested,
                 )?;
                 // From this point onward, losing the observer is not proof
                 // that AppKit, the renderer or its worker finished cleanup.
@@ -1704,7 +1935,7 @@ impl Application for Session {
                         opened.enter_full_screen().map_err(|_| ())?;
                     }
                 }
-                clipboard_ui.borrow_mut().install(&opened).map_err(|_| ())?;
+                clipboard_ui.borrow_mut().install(&opened);
                 if let Some(ingress) = file_ui.borrow().file_drop_ingress() {
                     opened.file_selection_bind(ingress).map_err(|_| ())?;
                 }
@@ -1751,7 +1982,7 @@ impl Application for Session {
                 &input,
                 &report,
                 &intent,
-                &display_intent,
+                &reopen_intent,
                 &resize,
                 can_resize.get(),
                 &closed,
@@ -1764,7 +1995,7 @@ impl Application for Session {
             service_audio(
                 &window,
                 &audio_owner,
-                stop.is_stopped() || closed.get() || display_intent.borrow().pending(),
+                stop.is_stopped() || closed.get() || reopen_intent.borrow().pending(),
             );
         };
         let opened = pumped(opening, &mut pump).await?;
@@ -1777,6 +2008,9 @@ impl Application for Session {
             }
         }
         let display = opened.display();
+        // frd decodes and submits the opening picture before serving; its
+        // callbacks carry only later pictures (see `take_shown`).
+        let opening_picture = submitted(opened.initial_presentation());
         let observer = self.observer.insert(opened);
         if let Some(install) = &mut self.audio_install {
             *self.audio_owner.borrow_mut() = Some(Rc::from(install(observer)));
@@ -1810,7 +2044,7 @@ impl Application for Session {
         let outcome = match control {
             None => {
                 let closing = closed.clone();
-                let switching = display_intent.clone();
+                let switching = reopen_intent.clone();
                 let ui_window = window.clone();
                 let served = observer.serve_until(move |frame| {
                     frames(frame);
@@ -1819,15 +2053,13 @@ impl Application for Session {
                         .as_ref()
                         .and_then(|window| window.state().ok())
                         .is_some_and(|state| state.key && state.visible);
-                    switching.borrow_mut().set_mode(
-                        if eligible {
-                            DisplayMode::Viewing
-                        } else {
-                            DisplayMode::Disabled
-                        },
-                        event_time(),
-                    );
-                    if switching.borrow_mut().reject_ineligible(eligible) {
+                    let mode = if eligible {
+                        ReopenMode::Viewing
+                    } else {
+                        ReopenMode::Disabled
+                    };
+                    switching.borrow_mut().set_mode(mode, event_time());
+                    if switching.borrow_mut().reject_ineligible(mode) {
                         return Err(());
                     }
                     Ok(if closing.get() || switching.borrow_mut().begin_close() {
@@ -1844,12 +2076,13 @@ impl Application for Session {
             Some(policy) => {
                 let mut mapped = false;
                 let mut last_shown = None;
+                let mut pending = opening_picture;
                 let mut attached = false;
                 let ui_window = window.clone();
                 let ui_input = input.clone();
                 let ui_report = report.clone();
                 let ui_intent = intent.clone();
-                let switching = display_intent.clone();
+                let switching = reopen_intent.clone();
                 let results = report.clone();
                 let ui_resize = resize.clone();
                 let mut ui = move |state: InteractiveViewerState<'_>, frame| {
@@ -1861,17 +2094,12 @@ impl Application for Session {
                             .and_then(|window| window.state().ok())
                             .is_some_and(|state| state.key && state.visible);
                     let mode = match &state {
-                        InteractiveViewerState::Viewing(_) if eligible => DisplayMode::Viewing,
-                        InteractiveViewerState::Controlled(_) if eligible => {
-                            DisplayMode::Controlled
-                        }
-                        _ => DisplayMode::Disabled,
+                        InteractiveViewerState::Viewing(_) if eligible => ReopenMode::Viewing,
+                        InteractiveViewerState::Controlled(_) if eligible => ReopenMode::Controlled,
+                        _ => ReopenMode::Disabled,
                     };
                     switching.borrow_mut().set_mode(mode, event_time());
-                    if switching
-                        .borrow_mut()
-                        .reject_ineligible(mode != DisplayMode::Disabled)
-                    {
+                    if switching.borrow_mut().reject_ineligible(mode) {
                         return Err(());
                     }
                     if switching.borrow().pending() {
@@ -1886,7 +2114,8 @@ impl Application for Session {
                         }
                         return Err(());
                     }
-                    let fresh = shown(&ui_window, frame).filter(|f| last_shown != Some(*f));
+                    let fresh =
+                        shown(&ui_window, &mut pending, frame).filter(|f| last_shown != Some(*f));
                     match state {
                         InteractiveViewerState::Viewing(view) => {
                             let Some(frame) = fresh.or(last_shown) else {
@@ -1899,8 +2128,8 @@ impl Application for Session {
                                     .map_err(|_| ())?;
                                 mapped = true;
                             }
-                            if fresh.is_some() && view.visible(frame).is_ok() {
-                                last_shown = Some(frame);
+                            if fresh.is_some() {
+                                witness(&view.visible(frame), frame, &mut pending, &mut last_shown);
                             }
                             let local_ready = ui_window
                                 .borrow()
@@ -1917,7 +2146,7 @@ impl Application for Session {
                                 drop(report);
                                 switching
                                     .borrow_mut()
-                                    .set_mode(DisplayMode::Disabled, event_time());
+                                    .set_mode(ReopenMode::Disabled, event_time());
                                 view.request_control().map_err(|_| ())?;
                             }
                         }
@@ -2103,10 +2332,10 @@ impl Application for Session {
                 self.report.borrow_mut().close_exchange = None;
                 self.report.borrow_mut().lease_revocation = None;
                 self.intent.borrow_mut().begin_attempt();
-                self.display_intent.borrow_mut().begin_attempt();
+                self.reopen_intent.borrow_mut().begin_attempt();
                 Ok(())
             }
-            Status::Reconnecting { .. } if self.display_intent.borrow().pending() => {
+            Status::Reconnecting { .. } if self.reopen_intent.borrow().pending() => {
                 Err(CallbackError)
             }
             Status::Reconnecting { .. } | Status::Reopening { .. }
@@ -2118,7 +2347,7 @@ impl Application for Session {
         }
     }
     fn completion_action(&mut self) -> Result<CompletionAction, CallbackError> {
-        if !self.display_intent.borrow().pending() {
+        if !self.reopen_intent.borrow().pending() {
             return Ok(CompletionAction::Finish);
         }
         let report = self.report.borrow();
@@ -2133,7 +2362,11 @@ impl Application for Session {
             || report.close_exchange.is_none()
             || self.terminal_failure().is_some()
             || !(1..32).contains(&report.attempts)
-            || report.display_change_closes.len() >= 31
+            || report
+                .display_change_closes
+                .len()
+                .saturating_add(report.control_release_closes.len())
+                >= 31
         {
             return Err(CallbackError);
         }
@@ -2143,13 +2376,25 @@ impl Application for Session {
             lease_revocation: report.lease_revocation,
         };
         drop(report);
-        if !self.display_intent.borrow_mut().consume() {
-            return Err(CallbackError);
-        }
+        let action = self
+            .reopen_intent
+            .borrow_mut()
+            .consume()
+            .ok_or(CallbackError)?;
         let mut report = self.report.borrow_mut();
-        report.display_changes += 1;
-        report.display_change_closes.push(closed);
-        self.display_picker = true;
+        match action {
+            ReopenAction::ChangeDisplay => {
+                report.display_changes += 1;
+                report.display_change_closes.push(closed);
+                self.display_picker = true;
+            }
+            ReopenAction::StopControl => {
+                report.control_releases += 1;
+                report.control_release_closes.push(closed);
+            }
+        }
+        // Every attempt re-evaluates the configured chooser against the fresh
+        // approved catalog. No old display alias is retained by either action.
         self.intent.borrow_mut().retire_initial();
         // Original handles remain for the completion report; no new observer
         // can acquire another source or destination from this invocation.
@@ -2254,6 +2499,70 @@ mod tests {
     use super::*;
     use asupersync::{runtime::RuntimeBuilder, types::Budget};
 
+    #[test]
+    fn the_opening_picture_counts_once_visible_even_late_and_a_clock_refusal_reports_it_again() {
+        use fr_media::access_unit::FrameId;
+        let picture = |raw, stage| Presentation {
+            frame: FrameId::from_raw(raw),
+            stage,
+        };
+        let submitted_at = |raw| Some(picture(raw, PresentationStage::SubmittedToCompositor));
+        // Planted negative: frd's callbacks never carry the opening picture,
+        // so the old rule (only a callback picture counts) never reported it.
+        assert_eq!(take_shown(&mut None, None, true), None);
+        let mut pending = submitted(picture(3, PresentationStage::SubmittedToCompositor));
+        // The window is not visible yet: it stays pending.
+        assert_eq!(take_shown(&mut pending, None, false), None);
+        assert_eq!(take_shown(&mut pending, None, true), Some(3));
+        assert_eq!(take_shown(&mut pending, None, true), None, "reported once");
+        // Before the clock is correlated the view does not exist: the refusal
+        // puts the picture back for a later turn.
+        let mut last_shown = None;
+        let not_ready: Result<(), _> = Err(StreamingViewerError::Control(
+            ControlledViewerError::ClockNotReady,
+        ));
+        witness(&not_ready, 3, &mut pending, &mut last_shown);
+        assert_eq!(last_shown, None);
+        assert_eq!(take_shown(&mut pending, None, true), Some(3));
+        // Any other refusal waits for a newer picture.
+        witness(
+            &Err::<(), _>(StreamingViewerError::Closed),
+            3,
+            &mut pending,
+            &mut last_shown,
+        );
+        assert_eq!(take_shown(&mut pending, None, true), None);
+        witness(
+            &Ok::<(), StreamingViewerError>(()),
+            3,
+            &mut pending,
+            &mut last_shown,
+        );
+        assert_eq!(last_shown, Some(3));
+        // Planted negative (the old rule set `last_shown` only on Ok): a late
+        // picture is on screen, held unqualified by frd until the host
+        // verifies it. It counts as shown, so the view keeps checking its
+        // gated evidence, and it is not reported again.
+        let (mut late_pending, mut late_shown) = (None, None);
+        witness(
+            &Err::<(), _>(StreamingViewerError::Freshness(
+                FreshnessError::QueueExpired,
+            )),
+            4,
+            &mut late_pending,
+            &mut late_shown,
+        );
+        assert_eq!(late_shown, Some(4));
+        assert_eq!(late_pending, None);
+        // A newer callback picture replaces a pending one; decode-only never counts.
+        let mut pending = submitted(picture(4, PresentationStage::SubmittedToCompositor));
+        assert_eq!(take_shown(&mut pending, submitted_at(5), true), Some(5));
+        let mut pending = submitted(picture(6, PresentationStage::SubmittedToCompositor));
+        let decoded = Some(picture(7, PresentationStage::DecodedOnly));
+        assert_eq!(take_shown(&mut pending, decoded, true), None);
+        assert_eq!(submitted(picture(8, PresentationStage::DecodedOnly)), None);
+    }
+
     #[derive(Default)]
     struct AudioCleanup {
         stopped: Cell<bool>,
@@ -2321,6 +2630,10 @@ mod tests {
     }
 
     fn selected_close() -> Session {
+        selected_action(ReopenAction::ChangeDisplay)
+    }
+
+    fn selected_action(action: ReopenAction) -> Session {
         let mut session = failed_startup(false);
         // Typed completion-policy fixture only: no native window, connection,
         // grant or physical display is created or claimed by these tests.
@@ -2339,9 +2652,20 @@ mod tests {
             }),
             transport: Ok(()),
         });
-        let mut intent = session.display_intent.borrow_mut();
-        intent.set_mode(DisplayMode::Viewing, Some(Duration::from_millis(1)));
-        assert!(intent.request(Duration::from_millis(2), Some(Duration::from_millis(3))));
+        let mut intent = session.reopen_intent.borrow_mut();
+        intent.set_mode(
+            if action == ReopenAction::StopControl {
+                ReopenMode::Controlled
+            } else {
+                ReopenMode::Viewing
+            },
+            Some(Duration::from_millis(1)),
+        );
+        assert!(intent.request(
+            action,
+            Duration::from_millis(2),
+            Some(Duration::from_millis(3))
+        ));
         assert!(intent.begin_close());
         drop(intent);
         session
@@ -2521,11 +2845,13 @@ mod tests {
                 8 => session.service_failure = Some(ObserverError::Application),
                 9 => failure = reconnect::Failure::Clock,
                 10 => {
-                    let mut display = session.display_intent.borrow_mut();
-                    display.set_mode(DisplayMode::Viewing, Some(Duration::from_millis(1)));
-                    assert!(
-                        display.request(Duration::from_millis(2), Some(Duration::from_millis(3)))
-                    );
+                    let mut display = session.reopen_intent.borrow_mut();
+                    display.set_mode(ReopenMode::Viewing, Some(Duration::from_millis(1)));
+                    assert!(display.request(
+                        ReopenAction::ChangeDisplay,
+                        Duration::from_millis(2),
+                        Some(Duration::from_millis(3)),
+                    ));
                     assert!(display.begin_close());
                 }
                 _ => unreachable!(),
@@ -2606,7 +2932,7 @@ mod tests {
                 .borrow_mut()
                 .take_request(true, Some(Duration::from_millis(10)))
         );
-        assert!(!session.display_intent.borrow().pending());
+        assert!(!session.reopen_intent.borrow().pending());
         assert!(session.report().close_exchange.is_none());
         assert_eq!(
             session.report().display_change_closes[0].close_exchange,
@@ -2616,21 +2942,62 @@ mod tests {
 
     #[test]
     fn uncertain_cleanup_failed_service_adverse_terminal_and_local_stop_prevent_reopen() {
-        for refusal in 0..7 {
-            let mut session = selected_close();
-            match refusal {
-                0 => session.cleanup_confirmed = false,
-                1 => session.service_succeeded = false,
-                2 => session.terminal = Some(ObserverError::Application),
-                3 => session.closed.set(true),
-                4 => session.report.borrow_mut().local_stop = Some(LocalStop::FocusLost),
-                5 => session.report.borrow_mut().close_exchange = None,
-                6 => session.report.borrow_mut().attempts = 32,
-                _ => unreachable!(),
+        for action in [ReopenAction::ChangeDisplay, ReopenAction::StopControl] {
+            for refusal in 0..9 {
+                let mut session = selected_action(action);
+                match refusal {
+                    0 => session.cleanup_confirmed = false,
+                    1 => session.service_succeeded = false,
+                    2 => session.terminal = Some(ObserverError::Application),
+                    3 => session.closed.set(true),
+                    4 => session.report.borrow_mut().local_stop = Some(LocalStop::FocusLost),
+                    5 => session.report.borrow_mut().close_exchange = None,
+                    6 => session.report.borrow_mut().attempts = 32,
+                    7 => session.started = true,
+                    8 => session.native_started.set(true),
+                    _ => unreachable!(),
+                }
+                assert_eq!(session.completion_action(), Err(CallbackError));
+                let report = session.report();
+                assert_eq!(report.display_changes, 0);
+                assert!(report.display_change_closes.is_empty());
+                assert_eq!(report.control_releases, 0);
+                assert!(report.control_release_closes.is_empty());
             }
-            assert_eq!(session.completion_action(), Err(CallbackError));
-            assert_eq!(session.report().display_changes, 0);
-            assert!(session.report().display_change_closes.is_empty());
+        }
+    }
+
+    #[test]
+    fn stop_control_reopens_viewing_once_with_a_fresh_choice_and_no_control_consent() {
+        for picker in [false, true] {
+            let mut session = selected_action(ReopenAction::StopControl);
+            session.display_picker = picker;
+            let original = session.report.borrow().close_exchange;
+            assert_eq!(session.completion_action(), Ok(CompletionAction::Reopen));
+            // Keep the invocation's fresh-catalog chooser; retain no display alias.
+            assert_eq!(session.display_picker, picker);
+            assert!(session.intent.borrow().needs_explicit_request());
+            let report = session.report();
+            assert_eq!(report.control_releases, 1);
+            assert_eq!(report.control_release_closes.len(), 1);
+            assert_eq!(report.control_release_closes[0].attempt, 1);
+            assert_eq!(report.control_release_closes[0].close_exchange, original);
+            assert_eq!(report.display_changes, 0);
+            assert!(report.display_change_closes.is_empty());
+            assert_eq!(session.completion_action(), Ok(CompletionAction::Finish));
+            session.status(Status::Connecting { attempt: 2 }).unwrap();
+            assert!(!session.reopen_intent.borrow().pending());
+            assert!(session.report().close_exchange.is_none());
+            assert_eq!(
+                session.report().control_release_closes[0].close_exchange,
+                original
+            );
+            assert!(
+                !session
+                    .intent
+                    .borrow_mut()
+                    .take_request(true, Some(Duration::from_millis(10)))
+            );
         }
     }
 
@@ -2645,19 +3012,21 @@ mod tests {
         let error = |report| {
             ObserverError::Streaming(StreamingViewerError::Session(Error::RemoteClosed(report)))
         };
-        let mut session = selected_close();
-        session.terminal = Some(error(report));
-        assert_eq!(session.terminal_failure(), None);
-        session.service_succeeded = false;
-        assert_eq!(session.terminal_failure(), Some(error(report)));
-        session.service_succeeded = true;
-        let adverse = fr_wire::closure::Closed {
-            cleanup: fr_wire::closure::Cleanup::Incomplete,
-            ..report
-        };
-        session.terminal = Some(error(adverse));
-        assert_eq!(session.terminal_failure(), Some(error(adverse)));
-        assert_eq!(session.completion_action(), Err(CallbackError));
+        for action in [ReopenAction::ChangeDisplay, ReopenAction::StopControl] {
+            let mut session = selected_action(action);
+            session.terminal = Some(error(report));
+            assert_eq!(session.terminal_failure(), None);
+            session.service_succeeded = false;
+            assert_eq!(session.terminal_failure(), Some(error(report)));
+            session.service_succeeded = true;
+            let adverse = fr_wire::closure::Closed {
+                cleanup: fr_wire::closure::Cleanup::Incomplete,
+                ..report
+            };
+            session.terminal = Some(error(adverse));
+            assert_eq!(session.terminal_failure(), Some(error(adverse)));
+            assert_eq!(session.completion_action(), Err(CallbackError));
+        }
     }
 
     /// A control session's attempts only ever remove from the original offer:
@@ -2729,6 +3098,27 @@ mod tests {
             .unwrap()
             .required = true;
         assert_eq!(session.offer(3, &required), Err(CallbackError));
+    }
+
+    #[test]
+    fn an_app_switch_pauses_a_grant_and_return_resumes_it_without_ending_control() {
+        // The pause event is not terminal: only close, escape, a minimize or
+        // hide (FocusLost) and overflow end the batch.
+        assert_eq!(terminal_event(&[WindowEvent::FocusPaused]), None);
+        assert_eq!(
+            terminal_event(&[WindowEvent::FocusPaused, WindowEvent::FocusLost]),
+            Some(LocalStop::FocusLost)
+        );
+        // Away: pause (again, harmlessly, while still away).
+        assert_eq!(focus_step(false, true, true), FocusStep::Pause);
+        assert_eq!(focus_step(true, true, false), FocusStep::Pause);
+        // Back: resume once, then deliver normally.
+        assert_eq!(focus_step(true, false, false), FocusStep::Resume);
+        assert_eq!(focus_step(false, false, false), FocusStep::Continue);
+        // Away and back within one poll: native forgot its held keys, so the
+        // host's must still be released before input continues.
+        assert_eq!(focus_step(false, false, true), FocusStep::Pause);
+        assert_eq!(focus_step(true, false, true), FocusStep::Resume);
     }
 
     #[test]

@@ -97,12 +97,15 @@ OPTIONS:
                     Unsupported clipboard keeps control usable.
                     --clipboard explicitly selects the default. View-only
                     sessions never expose either clipboard
-    --send PATH     With --once and --input-agent: send this explicit absolute
-                    file or portable directory root to a controller using --receive.
-                    Repeat up to 8 times. May combine with --files for independent
-                    transfers in both directions when both peers support them.
-                    No browsing or automatic replay.
-    --send-control NAME  With --once and --input-agent: enable same-user local
+    --send PATH     With --once and native control (--control on Windows,
+                    --input-agent elsewhere): send this explicit absolute file
+                    to a controller using --receive. Repeat up to 8 times.
+                    Windows selects ordinary local drive files; directories,
+                    reparse points and device/network paths refuse. Linux/macOS
+                    also select portable directories. All three desktop hosts
+                    may combine with --files for independent transfers in both
+                    directions. No browsing or automatic replay.
+    --send-control NAME  Linux/macOS, with --once and --input-agent: enable same-user local
                     `frd send` commands for later file/directory selections on
                     this original controlled session. The client must opt in
                     with --receive DIR. Cannot combine with --send. NAME is
@@ -110,13 +113,16 @@ OPTIONS:
                     Commands report admission separately from publication;
                     retain the reported instance and request for status/cancel.
                     Ending the session closes the intake; no reconnect replay.
-    --files DIR     With --input-agent: the controller may send files or portable
-                    directory trees
-                    (fr connect --control --send) into DIR, an existing absolute
-                    directory owned by this user and not group/other-writable,
-                    reached without symlinks. Only under the live input lease;
-                    never overwrites; staged privately and published atomically.
-                    Off by default
+    --files DIR     With native control (--control on Windows, --input-agent
+                    elsewhere): accept the controller's explicit file sends in
+                    an existing absolute directory owned by this user and
+                    protected from other writers. Windows requires an ordinary
+                    local drive path without reparse points and receives regular
+                    files only; Linux/macOS also accept portable directory trees.
+                    Only under the live input lease; never overwrites; staged
+                    privately and published atomically. Windows publication
+                    retains an unknown durability result unless metadata flush
+                    is proven. Off by default
     --files-conflict reject|keep-both  Taken destination names are refused by
                     default. keep-both publishes the complete verified file/tree
                     under a conflict-marked name; never merges or overwrites.
@@ -165,11 +171,13 @@ OPTIONS:
     --fps FPS       Maximum capture/codec frame rate, integer 1..240 (default 30).
                     Native backpressure skips opportunities; this is not measured
                     throughput. No queued catch-up frames
-    --adaptive-capture  Adapt raw capture cadence to measured source pressure and
-                    verified idle, for controlled and shared viewing sessions.
-                    Normally bounded at 200 ms; a slower --fps remains fixed.
-                    Codec settings stay fixed. Per-viewer feedback applies to control.
-                    Off by default; see ADAPTIVE_CAPTURE.md
+    --adaptive-capture  Adapt raw capture cadence to measured source pressure,
+                    viewer decoder load (shared: only when every viewer is
+                    behind) and verified idle, for controlled and shared viewing
+                    sessions. Normally bounded at 200 ms; a slower --fps remains
+                    fixed. An explicit software encoder, VideoToolbox or Media
+                    Foundation may also lower its bitrate target, never above
+                    --bitrate. Off by default; see ADAPTIVE_CAPTURE.md
     --directory     Answer an admitted viewer's request for this host's tailnet
                     directory: this machine and that viewer's own untagged
                     machines (name, node ID, OS, online, tailnet addresses),
@@ -755,12 +763,13 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             2,
         );
     }
-    if options.files.is_some() && options.input_agent.is_none() {
+    if options.files.is_some() && options.input_agent.is_none() && !options.control {
         return run_refusal(
             json,
             "files_requires_input_agent",
             "--files receives the controller's explicit sends for the life of its input lease; \
-             it needs --input-agent (a view-only share never receives files)",
+             it needs --input-agent, or --control on Windows (a view-only share never \
+             receives files)",
             2,
         );
     }
@@ -1043,8 +1052,13 @@ fn send(
                 json,
                 refusal.reason.code(),
                 &format!(
-                    "host file selection {} was refused; select an existing absolute regular file or portable directory root",
-                    refusal.index + 1
+                    "host file selection {} was refused; select {}",
+                    refusal.index + 1,
+                    if cfg!(windows) {
+                        "an existing absolute regular file on an ordinary local drive"
+                    } else {
+                        "an existing absolute regular file or portable directory root"
+                    }
                 ),
                 2,
             )
@@ -1061,6 +1075,9 @@ fn files(
     use frd::native_files::DirectoryRefusal;
     options.open_files().map_err(|refusal| {
         let detail = match refusal {
+            DirectoryRefusal::Relative if cfg!(windows) => {
+                "--files needs an ordinary absolute local drive directory path"
+            }
             DirectoryRefusal::Relative => "--files needs an absolute directory path",
             DirectoryRefusal::Missing => "--files names no existing directory; create it first",
             DirectoryRefusal::NotDirectory => "--files names something that is not a directory",
@@ -1070,6 +1087,10 @@ fn files(
             DirectoryRefusal::NotOwned => "--files must be owned by the user running frd",
             DirectoryRefusal::WritableByOthers => {
                 "--files must not be group- or other-writable (chmod go-w)"
+            }
+            DirectoryRefusal::Unsafe => {
+                "--files must be owned by this user, deny other-user writes in its DACL, \
+                 and be reached without reparse points"
             }
             DirectoryRefusal::Limits => {
                 "--files-max-session-bytes must be at least --files-max-file-bytes"

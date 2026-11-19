@@ -1,7 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "linux-media"))]
 //! Actual local X11 picker lifecycle. This is not remote authentication proof.
 
-use fr_native::host_picker::{Control, HostPicker, PathHint, Row, Status};
+use fr_native::host_picker::{Choices, Control, HostPicker, PathHint, Row, Status};
 use std::{
     ffi::{CString, c_char, c_int, c_uint, c_ulong, c_void},
     io::{BufRead, BufReader, Read},
@@ -197,6 +197,77 @@ fn actual_1024_row_selection_returns_original_ordinal_only_after_native_join() {
         );
         thread::sleep(Duration::from_millis(2));
     }
+}
+
+#[test]
+fn actual_choice_keys_change_only_the_confirmed_choices() {
+    let screen = Screen::start();
+    let initial = Choices {
+        control: true,
+        clipboard: true,
+        choose_display: false,
+    };
+    let mut picker = HostPicker::start_with(
+        &screen.name,
+        &rows(12),
+        Some(initial),
+        Some("host-3: The host did not complete the connection in time."),
+    )
+    .unwrap();
+    let window = mapped(&mut picker);
+    screen.focus(window);
+    // F3 then F4: clipboard off, display choice on; F2 twice leaves control on.
+    for symbol in [0xffc0, 0xffc1, 0xffbf, 0xffbf] {
+        screen.key(symbol, true);
+        screen.key(symbol, false);
+        thread::sleep(Duration::from_millis(10));
+    }
+    screen.key(0xff54, true); // Down: the second row.
+    screen.key(0xff54, false);
+    thread::sleep(Duration::from_millis(25));
+    // No toggle confirms a row.
+    assert_eq!(picker.poll().unwrap(), None);
+    assert_eq!(picker.choices(), None);
+    screen.key(0xff0d, true);
+    thread::sleep(Duration::from_millis(15));
+    screen.key(0xff0d, false);
+    let deadline = Instant::now().checked_add(Duration::from_secs(2)).unwrap();
+    let ordinal = loop {
+        if let Some(ordinal) = picker.poll().unwrap() {
+            break ordinal;
+        }
+        assert!(Instant::now() < deadline, "fresh Enter did not choose");
+        thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(ordinal, 1);
+    assert_eq!(
+        picker.choices(),
+        Some(Choices {
+            control: true,
+            clipboard: false,
+            choose_display: true,
+        })
+    );
+}
+
+#[test]
+fn actual_picker_without_choices_reports_none() {
+    let screen = Screen::start();
+    let mut picker = HostPicker::start(&screen.name, &rows(3)).unwrap();
+    let window = mapped(&mut picker);
+    screen.focus(window);
+    screen.key(0xffc0, true); // F3 has nothing to toggle here.
+    screen.key(0xffc0, false);
+    thread::sleep(Duration::from_millis(25));
+    screen.key(0xff0d, true);
+    thread::sleep(Duration::from_millis(15));
+    screen.key(0xff0d, false);
+    let deadline = Instant::now().checked_add(Duration::from_secs(2)).unwrap();
+    while picker.poll().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "fresh Enter did not choose");
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(picker.choices(), None);
 }
 
 #[test]

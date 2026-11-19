@@ -67,3 +67,33 @@ keyboard/consent glue, and the regression target. Native execution was
 `AF_UNIX` socket creation with `EPERM`, so private Xvfb could not start. This
 was not a stale display socket or directory ownership failure. No native pass,
 physical desktop result, or full workspace test pass is claimed from that run.
+
+## Native requested close retains the original input owner
+
+The mobile/Windows session now fences input admission before optional clipboard
+or file cleanup and retains its original native input source through the close
+exchange. Previously, dropping that source at the first close request cancelled
+the session context before its existing ordered close could complete. This
+prevented a controlled viewer from proving the cleanup required for a fresh
+view after a resize or display change.
+
+`Source::fence_for_close` is irreversible. New native callbacks, captured input,
+direct input creation and final transport admission all refuse further input.
+Queued payloads and never-admitted transport bytes retire, while the original
+action ledger remains available for receipts and unresolved effects. The
+already running bounded service turn can finish and enter its existing terminal
+exchange. No lease, ticket, input deadline or cleanup deadline is extended.
+
+The native source is still dropped and reaped by the original cleanup owner.
+Source loss, hidden-window faults and emergency stops continue to cancel the
+session. A requested close is not evidence that cleanup succeeded: replacement
+still requires the actual successful service result, native cleanup and absence
+of an adverse terminal report. Neither a benign end code nor elapsed time can
+satisfy that check.
+
+Two regression sources exercise the real original UDP/TLS close path with
+explicit native/media fixtures: no fenced action reaches the host, retained
+action identities survive closure, and losing a fenced source remains an
+emergency stop. They are not native Windows or live-tailnet qualification.
+Their final execution and the complete workspace gates remain pending while
+the pinned Asupersync dependency exceeds this local compiler's resource limit.

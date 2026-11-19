@@ -3,8 +3,42 @@
 //! A picker returns an original ID/name pair, never a cached network address
 //! or admission result. The connector revalidates that exact pair before it
 //! opens a remote session.
-use crate::{Failure, options::Target};
+use crate::{
+    Failure,
+    options::{Connection, DisplayChoice, Target},
+};
 use fr_client::discovery::picker::{Candidate, Catalog, PathHint};
+
+/// The desktop application's connection choices, shown beside the list for
+/// `--pick-only` and reported with the chosen host. They shape only the next
+/// command line; that connector requests control and clipboard itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "three independent check boxes"
+)]
+pub(super) struct Choices {
+    pub control: bool,
+    pub clipboard: bool,
+    pub choose_display: bool,
+}
+impl Choices {
+    /// The window's initial choices, only for a `--pick-only` request.
+    pub(super) fn initial(connection: &Connection) -> Option<Self> {
+        connection.pick.as_ref().map(|pick| Self {
+            control: connection.control,
+            clipboard: pick.clipboard,
+            choose_display: matches!(connection.display, DisplayChoice::Choose),
+        })
+    }
+}
+
+pub(super) fn notice(connection: &Connection) -> Option<&str> {
+    connection
+        .pick
+        .as_ref()
+        .and_then(|pick| pick.notice.as_deref())
+}
 
 pub(super) fn validate(target: &Target) -> Result<(), Failure> {
     if !target.node.is_empty() || target.saved.is_some() || target.by_name || target.port == 0 {
@@ -56,17 +90,46 @@ pub(super) fn invalid_snapshot() -> Failure {
     )
 }
 
-pub(super) fn selected_report(candidate: &Candidate, port: u16, json: bool) -> String {
+pub(super) fn selected_report(
+    candidate: &Candidate,
+    port: u16,
+    json: bool,
+    choices: Option<Choices>,
+) -> String {
     if json {
+        let mut report = serde_json::json!({
+            "schema_version": 1, "event": "host_selected",
+            "node_id": candidate.stable_id(),
+            "certificate_name": candidate.certificate_name(), "port": port,
+            "selection_only": true, "fresh_lookup_required": true,
+            "remote_session_started": false, "input_requested": false
+        });
+        if let (Some(choices), Some(object)) = (choices, report.as_object_mut()) {
+            object.insert("control".into(), choices.control.into());
+            object.insert("clipboard".into(), choices.clipboard.into());
+            object.insert("choose_display".into(), choices.choose_display.into());
+        }
+        format!("{report}\n")
+    } else if let Some(choices) = choices {
         format!(
-            "{}\n",
-            serde_json::json!({
-                "schema_version": 1, "event": "host_selected",
-                "node_id": candidate.stable_id(),
-                "certificate_name": candidate.certificate_name(), "port": port,
-                "selection_only": true, "fresh_lookup_required": true,
-                "remote_session_started": false, "input_requested": false
-            })
+            "Selected {} ({}), port {port}: {}, clipboard {}, {}.\n",
+            candidate.certificate_name(),
+            candidate.stable_id(),
+            if choices.control {
+                "view and control"
+            } else {
+                "view only"
+            },
+            if choices.control && choices.clipboard {
+                "shared"
+            } else {
+                "not shared"
+            },
+            if choices.choose_display {
+                "ask which display"
+            } else {
+                "only display"
+            }
         )
     } else {
         format!(

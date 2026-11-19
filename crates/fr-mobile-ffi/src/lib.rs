@@ -18,6 +18,16 @@
     allow(unused)
 )]
 
+// The real bounded file-choice owner is shared with portable policy tests.
+#[cfg(any(
+    test,
+    all(
+        feature = "session",
+        any(target_os = "ios", all(target_os = "macos", feature = "macos-session"))
+    )
+))]
+mod upload_selection;
+
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod events;
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
@@ -26,6 +36,51 @@ pub mod input;
 pub mod roots;
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod video;
+
+#[cfg(any(windows, test))]
+#[path = "video/windows_contract.rs"]
+mod windows_video_contract;
+
+// The native cursor exchange is safe, platform-neutral state. Its exact
+// bounds/ownership tests run on every test host; the session opts into it.
+#[cfg(any(
+    test,
+    all(
+        feature = "session",
+        any(
+            target_os = "ios",
+            all(target_os = "macos", feature = "macos-session"),
+            all(windows, feature = "windows-session")
+        )
+    )
+))]
+#[path = "session/local_cursor.rs"]
+pub mod local_cursor;
+
+// These platform-neutral policies use the real file/session types on portable
+// test hosts too. No decoder substitute or alternate production path is built.
+#[cfg(all(
+    test,
+    feature = "session",
+    not(any(target_os = "ios", target_os = "macos", windows))
+))]
+#[path = "session/download.rs"]
+mod download;
+#[cfg(all(
+    test,
+    feature = "session",
+    not(any(target_os = "ios", target_os = "macos", windows))
+))]
+#[path = "session/file_offer.rs"]
+mod file_offer;
+
+#[cfg(all(
+    test,
+    feature = "session",
+    not(any(target_os = "ios", target_os = "macos", windows))
+))]
+#[path = "session/files.rs"]
+mod files;
 
 #[cfg(all(
     feature = "session",

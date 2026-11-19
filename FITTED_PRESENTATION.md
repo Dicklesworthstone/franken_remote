@@ -16,7 +16,8 @@ Each actual window dimension is capped at the selected remote display dimension
 and rounded down to even pixels. Without `--fit`, the local screen's usable
 size (the X root, narrowed to `_NET_WORKAREA`) is the default box, so a display
 larger than the screen is fitted the same way instead of refused, and one that
-fits keeps its exact 1:1 window.
+fits keeps its native window size, with odd axes rounded down to even pixels.
+The original display bounds still govern input and cursor coordinates.
 An explicit fit box of at least 64 pixels per axis uses the existing optional
 `scaled-picture` negotiation. A host that can scale capture selects a canonical
 even picture inside that box. Hosts without that capability and sessions whose
@@ -35,6 +36,10 @@ shift clicks and the remote cursor. A 1000x750 window can likewise contain its
 The worker uses integer nearest-neighbour CPU sampling and opaque black bars.
 An existing shared source may supply a larger or smaller canonical picture;
 sampling in either direction remains bounded by the original target and display.
+Stating a picture box selects this mapped path even when the local window is
+native-sized: it must accept a smaller shared picture without changing the
+display's input space. An even native display with no picture box or clipboard
+space keeps the original exact-size worker path.
 This is an explicit quality/copy cost, not GPU or zero-copy evidence. At most one
 reusable target-sized BGRA frame is retained, with actual allocation
 capacity observable through `FittedFrame::retained_bytes`. It is allocated once,

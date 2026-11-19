@@ -8,6 +8,20 @@
 //! granted `LineScroll`), keeping the remainder.
 
 mod scroll;
+// Typing plans serve only the native session (the same gate as
+// `crate::session`). A build without it, such as the workspace's featureless
+// macOS check, compiles them for their own tests alone.
+#[cfg_attr(
+    not(all(
+        feature = "session",
+        any(
+            target_os = "ios",
+            all(target_os = "macos", feature = "macos-session"),
+            all(windows, feature = "windows-session")
+        )
+    )),
+    allow(dead_code)
+)]
 pub(crate) mod typing;
 pub use scroll::{LINE, LineScroller, MAX_LINES_PER_EVENT};
 

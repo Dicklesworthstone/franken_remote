@@ -10,14 +10,34 @@ use fr_core::{
 use fr_wire::negotiation::{Error, Offer};
 use frd::session_startup::viewer_events::Error as CaptureError;
 
-pub(super) fn offer(control: bool) -> Result<Offer, Error> {
+pub(super) fn offer(control: bool, clipboard: bool, files: bool) -> Result<Offer, Error> {
     if control {
         // This must be the original reconnect offer. An application callback
         // may remove optional markers later, but cannot add a new one.
-        fr_client::native::control_offer_with_text()
+        let original = fr_client::native::control_offer_with_auxiliary(clipboard, files, false);
+        fr_wire::control::with_committed_text(original)
     } else {
         Ok(fr_client::native::observation_offer())
     }
+}
+
+// Control and three independently selected optional capabilities.
+#[allow(clippy::fn_params_excessive_bools)]
+pub(super) fn offer_with_download(
+    control: bool,
+    clipboard: bool,
+    upload: bool,
+    download: bool,
+) -> Result<Offer, Error> {
+    if !control || !download {
+        return offer(control, clipboard, upload);
+    }
+    let original = if upload {
+        fr_client::native::control_offer_with_duplex(clipboard, false)
+    } else {
+        fr_client::native::control_offer_with_download(clipboard, false)
+    };
+    fr_wire::control::with_committed_text(original)
 }
 
 /// The app produces whole committed text but never synthesizes physical repeat.
@@ -54,12 +74,42 @@ pub(super) fn text_result(result: Result<(), CaptureError>) -> InputResult {
 mod tests {
     use super::*;
     use fr_wire::control::{TEXT_CAPABILITY, requestable, with_committed_text};
-    use frd::session_startup::{host_offer, with_line_scroll};
+    use frd::session_startup::{host_offer, host_offer_with, with_line_scroll};
+
+    #[test]
+    fn selected_download_and_duplex_profiles_keep_text_clipboard_and_input_gates() {
+        use fr_wire::{attachment, files};
+        for clipboard in [false, true] {
+            for upload in [false, true] {
+                let offered = offer_with_download(true, clipboard, upload, true).unwrap();
+                let has = |name: &str| offered.capabilities.iter().any(|cap| cap.name == name);
+                assert!(has(files::DOWNLOAD_CAPABILITY));
+                assert!(has(files::CAPABILITY));
+                assert!(has(attachment::FILES_CAPABILITY));
+                assert!(has(TEXT_CAPABILITY));
+                assert_eq!(has(files::CHANNEL_SCOPE_CAPABILITY), upload);
+                assert_eq!(has(files::DUPLEX_CAPABILITY), upload);
+                assert_eq!(has(attachment::CLIPBOARD_CAPABILITY), clipboard);
+                assert!(offered.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
+                assert!(
+                    fr_client::native::control_offer()
+                        .capabilities
+                        .iter()
+                        .filter(|cap| cap.required)
+                        .all(|cap| offered.capabilities.contains(cap))
+                );
+            }
+        }
+        assert_eq!(
+            offer_with_download(false, true, true, true).unwrap(),
+            fr_client::native::observation_offer()
+        );
+    }
 
     #[test]
     fn original_control_offer_adds_only_optional_text_and_preserves_required_gates() {
         let original = fr_client::native::control_offer();
-        let selected = offer(true).unwrap();
+        let selected = offer(true, false, false).unwrap();
         assert_eq!(selected.role, original.role);
         assert_eq!(selected.versions, original.versions);
         assert_eq!(selected.profile, original.profile);
@@ -80,14 +130,14 @@ mod tests {
         );
         assert!(selected.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
         assert_eq!(
-            offer(false).unwrap(),
+            offer(false, true, true).unwrap(),
             fr_client::native::observation_offer()
         );
     }
 
     #[test]
     fn actual_host_offer_intersection_keeps_legacy_control_and_selects_text_only_bilaterally() {
-        let client = offer(true).unwrap();
+        let client = offer(true, false, false).unwrap();
         let legacy = with_line_scroll(host_offer(true));
         let text = with_committed_text(legacy.clone()).unwrap();
         let mut wrong_version = text.clone();
@@ -118,6 +168,215 @@ mod tests {
         assert!(requested.contains(Capability::Keys));
         assert!(!requested.contains(Capability::Text));
         assert!(!requested.contains(Capability::LineScroll));
+    }
+
+    #[test]
+    fn clipboard_is_optional_and_composes_with_text_without_changing_legacy_input() {
+        let client = offer(true, true, false).unwrap();
+        let without = offer(true, false, false).unwrap();
+        for (name, version) in [
+            (
+                fr_wire::attachment::CLIPBOARD_CAPABILITY,
+                fr_wire::attachment::CLIPBOARD_VERSION,
+            ),
+            (fr_wire::clipboard::CAPABILITY, fr_wire::clipboard::VERSION),
+            (
+                fr_wire::clipboard::startup::CAPABILITY,
+                fr_wire::clipboard::startup::VERSION,
+            ),
+        ] {
+            assert!(
+                client
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == name && cap.version == version && !cap.required)
+            );
+            assert!(!without.capabilities.iter().any(|cap| cap.name == name));
+        }
+        assert!(
+            client
+                .capabilities
+                .iter()
+                .any(|cap| cap.name == TEXT_CAPABILITY && !cap.required)
+        );
+        let legacy = with_line_scroll(host_offer(true));
+        assert_eq!(
+            legacy.intersect(&client).unwrap(),
+            legacy.intersect(&without).unwrap()
+        );
+        let text = with_committed_text(legacy).unwrap();
+        assert_eq!(
+            text.intersect(&client).unwrap(),
+            text.intersect(&without).unwrap()
+        );
+        assert_eq!(
+            offer(false, true, true).unwrap(),
+            offer(false, false, false).unwrap()
+        );
+        assert!(client.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
+        let bilateral = with_committed_text(with_line_scroll(host_offer_with(true, true)))
+            .unwrap()
+            .intersect(&client)
+            .unwrap();
+        for name in [
+            TEXT_CAPABILITY,
+            fr_wire::attachment::CLIPBOARD_CAPABILITY,
+            fr_wire::clipboard::CAPABILITY,
+            fr_wire::clipboard::startup::CAPABILITY,
+        ] {
+            assert!(bilateral.capabilities.iter().any(|cap| cap.name == name));
+        }
+    }
+
+    #[test]
+    fn clipboard_adds_only_optional_markers_selected_only_with_a_clipboard_host() {
+        let plain = offer(true, false, false).unwrap();
+        let clipboard = offer(true, true, false).unwrap();
+        assert_eq!(
+            (clipboard.role, &clipboard.versions, &clipboard.limits),
+            (plain.role, &plain.versions, &plain.limits)
+        );
+        assert!(
+            plain
+                .capabilities
+                .iter()
+                .all(|cap| clipboard.capabilities.contains(cap))
+        );
+        // Preserve the upstream exact-set regression, including the optional
+        // bulk-record extension used by this separate auxiliary lane.
+        let mut added: Vec<_> = clipboard
+            .capabilities
+            .iter()
+            .filter(|cap| !plain.capabilities.contains(cap))
+            .collect();
+        assert!(added.iter().all(|cap| !cap.required));
+        added.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut expected = [
+            fr_wire::attachment::BULK_RECORD_CAPABILITY,
+            fr_wire::attachment::CLIPBOARD_CAPABILITY,
+            fr_wire::clipboard::CAPABILITY,
+            fr_wire::clipboard::startup::CAPABILITY,
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            added
+                .iter()
+                .map(|cap| cap.name.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(clipboard.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
+        for host_clipboard in [true, false] {
+            let host = with_committed_text(with_line_scroll(host_offer_with(true, host_clipboard)))
+                .unwrap();
+            let selected = host.intersect(&clipboard).unwrap();
+            let lane = selected
+                .capabilities
+                .iter()
+                .any(|cap| cap.name == fr_wire::clipboard::CAPABILITY);
+            assert_eq!(lane, host_clipboard);
+            let requested = requested_capabilities().meet(requestable(&selected.capabilities));
+            assert!(requested.contains(Capability::Keys));
+            assert!(requested.contains(Capability::Text));
+        }
+    }
+
+    #[test]
+    fn explicit_downloads_are_optional_and_compose_with_existing_control_and_uploads() {
+        for upload in [false, true] {
+            for clipboard in [false, true] {
+                assert_eq!(
+                    offer_with_download(true, clipboard, upload, false).unwrap(),
+                    offer(true, clipboard, upload).unwrap()
+                );
+                let offered = offer_with_download(true, clipboard, upload, true).unwrap();
+                offered.validate().unwrap();
+                let has = |name| offered.capabilities.iter().any(|cap| cap.name == name);
+                assert!(has(fr_wire::files::DOWNLOAD_CAPABILITY));
+                assert_eq!(has(fr_wire::files::DUPLEX_CAPABILITY), upload);
+                assert_eq!(has(fr_wire::files::CHANNEL_SCOPE_CAPABILITY), upload);
+                assert!(has(fr_wire::control::TEXT_CAPABILITY));
+                assert!(
+                    offered
+                        .capabilities
+                        .iter()
+                        .filter(|cap| {
+                            cap.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                                || cap.name == fr_wire::files::DUPLEX_CAPABILITY
+                        })
+                        .all(|cap| !cap.required)
+                );
+                let legacy = with_line_scroll(host_offer(true));
+                let selected = legacy.intersect(&offered).unwrap();
+                assert!(
+                    !selected
+                        .capabilities
+                        .iter()
+                        .any(|cap| cap.name == fr_wire::files::DOWNLOAD_CAPABILITY)
+                );
+                assert!(requestable(&selected.capabilities).contains(Capability::Keys));
+            }
+        }
+        assert_eq!(
+            offer_with_download(false, true, true, true).unwrap(),
+            fr_client::native::observation_offer()
+        );
+    }
+
+    #[test]
+    fn explicit_files_compose_with_text_and_clipboard_only_on_a_controlling_peer() {
+        let original = offer(true, true, false).unwrap();
+        let upload = offer(true, true, true).unwrap();
+        assert!(upload.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
+        assert!(
+            original
+                .capabilities
+                .iter()
+                .all(|cap| upload.capabilities.contains(cap))
+        );
+        let file_names = [
+            fr_wire::attachment::FILES_CAPABILITY,
+            fr_wire::files::CAPABILITY,
+            fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+        ];
+        for name in file_names {
+            assert!(
+                upload
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == name && !cap.required)
+            );
+            assert!(!original.capabilities.iter().any(|cap| cap.name == name));
+        }
+        for enabled in [true, false] {
+            let host = with_committed_text(with_line_scroll(
+                frd::session_startup::host_offer_with_files(true, true, false, enabled),
+            ))
+            .unwrap();
+            let selected = host.intersect(&upload).unwrap();
+            for name in file_names {
+                assert_eq!(
+                    selected.capabilities.iter().any(|cap| cap.name == name),
+                    enabled
+                );
+            }
+            assert!(
+                selected
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == TEXT_CAPABILITY)
+            );
+            assert!(
+                selected
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == fr_wire::clipboard::CAPABILITY)
+            );
+        }
+        assert_eq!(
+            offer(false, true, true).unwrap(),
+            fr_client::native::observation_offer()
+        );
     }
 
     #[test]

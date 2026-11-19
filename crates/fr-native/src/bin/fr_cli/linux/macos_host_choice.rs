@@ -4,7 +4,7 @@
 use super::{Cell, Connection, Cx, Failure, LocalApi, Runtime, Shutdown, failure, tailnet};
 use crate::{host_choice, saved_hosts::Selection};
 use fr_client::discovery::picker::Candidate;
-use fr_native::macos::picker::{Error, HostPicker};
+use fr_native::macos::picker::{Choices, Error, HostPicker};
 use std::time::Duration;
 
 const POLL: Duration = Duration::from_millis(10);
@@ -33,7 +33,17 @@ pub(super) fn select(
             "The installed Tailscale daemon returned no selectable peers. Check its account, peer visibility and key expiry; no remote connection was opened.",
         ));
     }
-    let mut picker = HostPicker::open(catalog).map_err(picker_failure)?;
+    let initial = host_choice::Choices::initial(connection);
+    let mut picker = HostPicker::open_with(
+        catalog,
+        initial.map(|choices| Choices {
+            control: choices.control,
+            clipboard: choices.clipboard,
+            choose_display: choices.choose_display,
+        }),
+        host_choice::notice(connection),
+    )
+    .map_err(picker_failure)?;
     let choice = runtime.block_on(shutdown.run(cx, stopped, wait(cx, &mut picker)));
     // Retire the exact main-thread native owner even when the operation was
     // cancelled. A choice cannot start a connection before actual UI cleanup.
@@ -47,11 +57,21 @@ pub(super) fn select(
         return Err(host_choice::cancelled());
     }
     let candidate = choice?;
+    // Choices were offered exactly when this is a picker request.
+    let confirmed = picker.choices().map(|choices| host_choice::Choices {
+        control: choices.control,
+        clipboard: choices.clipboard,
+        choose_display: choices.choose_display,
+    });
+    if confirmed.is_some() != initial.is_some() {
+        return Err(unavailable());
+    }
     let selected = Selection::from_candidate(&candidate, connection.target.port);
     crate::output::write(&host_choice::selected_report(
         &candidate,
         selected.port,
         json,
+        confirmed,
     ))
     .map_err(|_| {
         Failure::new(

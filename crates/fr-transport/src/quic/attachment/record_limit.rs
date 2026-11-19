@@ -62,14 +62,18 @@ pub(super) fn negotiated_maximum(
     )
 }
 
-/// The clipboard may keep several bounded records in flight. Its grant limits
-/// each record, not the entire reliable stream window. Using that record ceiling
-/// as native credit serialized legacy 8 KiB chunks at roughly one per round trip.
-/// Both reservation and ticket arming keep the endpoint's existing policy cap;
-/// framing, negotiated records, aggregate receive credit and lifetimes are
-/// unchanged. Other roles retain their existing window calculation.
+/// The clipboard and the recovery lane may keep several bounded records in
+/// flight. Their grants limit each record, not the entire reliable stream
+/// window. Using that record ceiling as native credit serialized legacy 8 KiB
+/// clipboard chunks at roughly one per round trip, and it held the first
+/// viewer's startup IDR, which arrives as 1150-byte recovery records, to 8 KiB
+/// per round trip: ~110 KB/s at 75 ms, so a 2890x1624 IDR missed the host's
+/// two-second startup deadline on a 23 Mbit/s path. Both reservation and
+/// ticket arming keep the endpoint's existing policy cap; framing, negotiated
+/// records, aggregate receive credit and lifetimes are unchanged. Other roles
+/// retain their existing window calculation.
 pub(super) fn receive_window(role: MediaRole, allowance: u64, stream_window: u64) -> u64 {
-    if role == MediaRole::Clipboard {
+    if matches!(role, MediaRole::Clipboard | MediaRole::Recovery) {
         stream_window
     } else {
         allowance
@@ -82,7 +86,7 @@ mod tests {
     use fr_core::limits::LimitOverrides;
 
     #[test]
-    fn clipboard_window_is_local_even_when_the_record_grant_is_narrower() {
+    fn clipboard_and_recovery_windows_are_local_even_when_the_record_grant_is_narrower() {
         for (allowance, window) in [
             (8192, 65_536),
             (4096, 65_536),
@@ -90,13 +94,11 @@ mod tests {
             (4096, 4096),
             (65_536, 65_536),
         ] {
-            assert_eq!(
-                receive_window(MediaRole::Clipboard, allowance, window),
-                window
-            );
+            for role in [MediaRole::Clipboard, MediaRole::Recovery] {
+                assert_eq!(receive_window(role, allowance, window), window);
+            }
             for role in [
                 MediaRole::Configuration,
-                MediaRole::Recovery,
                 MediaRole::Video,
                 MediaRole::Input,
                 MediaRole::Files,

@@ -1,10 +1,12 @@
 //! The window's picture: a flip-model swap chain on the decoder's own D3D11
 //! device, and the D3D11 video processor turning each decoded NV12 picture
-//! into the BGRA back buffer. 1:1 whenever the picture fits the window
-//! (`geometry::fit`); the picture never leaves the GPU.
-use crate::geometry::{Rect, fit};
+//! into the BGRA back buffer. The original display aspect determines the
+//! destination; encoded dimensions determine sampling. The picture never
+//! leaves the GPU.
+use crate::geometry::{Presentation, Rect};
+mod cursor;
 use core::mem::ManuallyDrop;
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, RECT, S_OK};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_COLOR, D3D11_VIDEO_COLOR_0,
     D3D11_VIDEO_COLOR_RGBA, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -12,8 +14,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
     D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11Texture2D, ID3D11VideoContext1,
-    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
@@ -35,11 +37,16 @@ struct Conversion {
 }
 
 pub struct Renderer {
+    device: ID3D11Device,
     video: ID3D11VideoDevice,
     context: ID3D11VideoContext1,
     swap_chain: IDXGISwapChain1,
     size: (u32, u32),
     conversion: Option<Conversion>,
+    cursor: cursor::Overlay,
+    /// Only exact `S_OK` admits picture/cursor handoff accounting. Other
+    /// successful DXGI statuses do not prove this presentation was accepted.
+    present_accepted: bool,
 }
 
 impl Renderer {
@@ -72,11 +79,14 @@ impl Renderer {
                 .GetImmediateContext()?
                 .cast::<ID3D11VideoContext1>()?;
             Ok(Self {
+                device: device.clone(),
                 video: device.cast()?,
                 context,
                 swap_chain,
                 size,
                 conversion: None,
+                cursor: cursor::Overlay::default(),
+                present_accepted: false,
             })
         }
     }
@@ -87,6 +97,7 @@ impl Renderer {
             return Ok(());
         }
         self.conversion = None;
+        self.present_accepted = false;
         // SAFETY: no back-buffer reference outlives `draw`, as ResizeBuffers
         // requires.
         unsafe {
@@ -104,6 +115,55 @@ impl Renderer {
 
     pub const fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    pub const fn present_accepted(&self) -> bool {
+        self.present_accepted
+    }
+
+    pub fn cursor_state(&self) -> crate::cursor::State {
+        self.cursor.state()
+    }
+
+    pub fn update_cursor(
+        &mut self,
+        state: crate::cursor::State,
+        pixels: Option<&[u8]>,
+    ) -> Result<()> {
+        self.cursor.update(&self.device, state, pixels)
+    }
+
+    pub fn clear_cursor(&mut self) {
+        self.cursor.clear();
+    }
+
+    pub fn cursor_visible(&self, dest: Rect, attempt: u64, sequence: u64) -> bool {
+        self.cursor.visible(dest, attempt, sequence)
+    }
+
+    /// Replace the retired session's visible image with black. Input is fenced
+    /// before the caller enters this native work. No frame or presentation
+    /// freshness is reported for the clear.
+    pub fn clear(&mut self) -> Result<()> {
+        self.present_accepted = false;
+        self.conversion = None;
+        self.cursor.clear();
+        // SAFETY: all COM interfaces belong to the same live D3D device. The
+        // temporary back-buffer/view references end before any later resize.
+        unsafe {
+            let context = self.context.cast::<ID3D11DeviceContext>()?;
+            let device = context.GetDevice()?;
+            let back_buffer: ID3D11Texture2D = self.swap_chain.GetBuffer(0)?;
+            let mut target = None;
+            device.CreateRenderTargetView(&back_buffer, None, Some(&raw mut target))?;
+            context.ClearRenderTargetView(target.as_ref(), &[0.0, 0.0, 0.0, 1.0]);
+            drop(target);
+            drop(back_buffer);
+            let status = self.swap_chain.Present(0, DXGI_PRESENT(0));
+            self.present_accepted = status == S_OK;
+            status.ok()?;
+        }
+        Ok(())
     }
 
     fn conversion(&mut self, input: (u32, u32)) -> Result<&Conversion> {
@@ -143,20 +203,25 @@ impl Renderer {
         Ok(self.conversion.as_ref().expect("set above"))
     }
 
-    /// Converts slice `slice` of `texture` (the `picture`-sized visible part
-    /// of a decoded NV12 surface) into the back buffer and presents it on
-    /// the next vertical blank. Returns where the picture landed.
+    /// Converts the complete admitted crop of `texture` into its original
+    /// display-space placement and presents it on the next vertical blank.
+    /// Cursor rendering and input use the same checked placement.
     #[allow(clippy::too_many_lines, reason = "one ordered sequence of COM calls")]
     pub fn draw(
         &mut self,
         texture: &ID3D11Texture2D,
         slice: u32,
-        picture: (u32, u32),
+        presentation: Presentation,
         full_range: bool,
+        attempt: u64,
+        sequence: u64,
     ) -> Result<Option<Rect>> {
-        let Some(dest) = fit(picture, self.size) else {
+        self.present_accepted = false;
+        if presentation.window() != self.size {
             return Ok(None);
-        };
+        }
+        let picture = presentation.picture();
+        let dest = presentation.destination;
         let size = self.size;
         let video = self.video.clone();
         let context = self.context.clone();
@@ -256,8 +321,11 @@ impl Renderer {
             ManuallyDrop::drop(&mut entry.pInputSurface);
             blt?;
             drop(output);
+            self.cursor.draw(&back_buffer, dest, attempt, sequence)?;
             drop(back_buffer);
-            swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+            let status = swap_chain.Present(1, DXGI_PRESENT(0));
+            self.present_accepted = status == S_OK;
+            status.ok()?;
         }
         Ok(Some(dest))
     }

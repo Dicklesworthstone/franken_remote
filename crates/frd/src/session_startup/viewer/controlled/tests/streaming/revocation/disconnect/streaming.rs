@@ -323,3 +323,124 @@ fn cancelled_application_context_cannot_become_the_streams_terminal_cleanup_cont
         reap(&mut viewer, &cleanup_cx).await;
     });
 }
+
+#[test]
+fn native_input_fence_preserves_the_original_orderly_close_and_action_ledger() {
+    run(|c, h| async move {
+        let cleanup_cx = Cx::current().unwrap();
+        let mut f = Box::pin(media_fixture(&c, &h)).await;
+        let report = arm_report(&mut f, &cleanup_cx);
+        let (stopped, reaped) = capture(&mut f.viewer);
+        let mut source = f.viewer.capture_input().unwrap();
+        let sampled = source.clock().unwrap();
+        source
+            .push(
+                crate::session_startup::viewer_events::Event::Key {
+                    key: PhysicalKey::new(5).unwrap(),
+                    transition: KeyTransition::Press,
+                },
+                sampled,
+            )
+            .unwrap();
+        // Encoded before Stop, but not yet admitted to the transport. Preserve
+        // its original pending-effect identity instead of inventing a receipt.
+        let _ = f.viewer.action(key(true)).unwrap();
+        assert!(f.viewer.pending_send());
+        // A native callback must fence queued input even while another native
+        // operation holds the original producer lock. The independent handle
+        // must not borrow the source or cancel its orderly close I/O.
+        let lifecycle = source.control();
+        let producer = std::sync::Mutex::new(source);
+        let held = producer.lock().unwrap();
+        lifecycle.fence_for_close();
+        assert!(!lifecycle.is_stopped());
+        drop(held);
+        let mut source = producer.into_inner().unwrap();
+        assert!(!source.control().is_stopped());
+        assert!(!c.is_cancel_requested());
+        assert_eq!(
+            source.clock(),
+            Err(crate::session_startup::viewer_events::Error::Closed)
+        );
+        assert_eq!(
+            source.reconcile_held(fr_core::held_state::HeldState::empty(), sampled),
+            Err(crate::session_startup::viewer_events::Error::Closed)
+        );
+        assert!(
+            !c.is_cancel_requested(),
+            "late native callbacks cannot cancel close I/O"
+        );
+        assert!(!f.viewer.is_closed());
+        let ((outcome, sent), summary) = Box::pin(support::both(
+            support::both(
+                async {
+                    // Exercise the actual controlled network turn after the
+                    // native UI fenced input but before it requested close.
+                    f.viewer
+                        .drive(Duration::from_millis(1), |_| {}, block)
+                        .await
+                        .unwrap();
+                    assert!(!f.viewer.pending_send());
+                    assert_eq!(f.viewer.pending_actions(), 1);
+                    assert_eq!(f.viewer.action(key(false)), Err(Error::Closed));
+                    assert!(matches!(f.viewer.capture_input(), Err(Error::Closed)));
+                    assert!(!f.viewer.is_closed());
+                    let mut viewer = f
+                        .viewer
+                        .into_streaming(f.presenter.take().unwrap(), f.receiver)
+                        .unwrap();
+                    let outcome = viewer
+                        .serve_control_until(
+                            &cleanup_cx,
+                            |_, _| Ok(ControlFlow::Break(closure::Reason::Requested)),
+                            |_| panic!("fenced input was never submitted"),
+                            block,
+                        )
+                        .await
+                        .unwrap();
+                    assert!(stopped.load(Ordering::Acquire));
+                    assert_eq!(viewer.pending_control_actions(), 1);
+                    assert_eq!(viewer.control_disconnect_outcome(), Some(outcome));
+                    reaped.store(true, Ordering::Release);
+                    assert_eq!(
+                        viewer
+                            .reap_input_capture(
+                                &cleanup_cx,
+                                crate::worker::Deadline::after(&cleanup_cx, Duration::from_secs(1))
+                                    .unwrap(),
+                            )
+                            .await,
+                        Ok(CaptureCleanup::Complete)
+                    );
+                    reap(&mut viewer, &cleanup_cx).await;
+                    outcome
+                },
+                host_close(&mut f.host, report),
+            ),
+            f.driver.take().unwrap(),
+        ))
+        .await;
+        assert_eq!(outcome.exchange.transport, Ok(()));
+        assert_eq!(sent, Some(Ok(())));
+        assert!(summary.handoff_safe());
+        assert!(outcome.revocation.is_some());
+        assert_eq!(f.effects.lock().unwrap().operations, []);
+        f.observation.revoke();
+    });
+}
+
+#[test]
+fn losing_a_fenced_native_source_remains_an_emergency_stop() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture(&c, &h)).await;
+        let source = f.viewer.capture_input().unwrap();
+        source.fence_for_close();
+        assert!(!c.is_cancel_requested());
+        drop(source);
+        assert!(c.is_cancel_requested());
+        assert!(f.viewer.is_closed());
+        assert_eq!(f.viewer.disconnect_outcome(), None);
+        f.observation.revoke();
+        f.host.close();
+    });
+}

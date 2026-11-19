@@ -70,6 +70,8 @@ final class TouchInterpreter {
     private(set) var pointer: CGPoint?
     /// When this device last moved the trackpad pointer (touch time).
     private var pointerMovedAt: Double?
+    /// Samples captured before a replacement mapping cannot start gestures.
+    private var presentationStartedAt: Double?
 
     private struct One {
         var id: Int
@@ -116,6 +118,7 @@ final class TouchInterpreter {
     // MARK: Touches
 
     func began(_ id: Int, at location: CGPoint, time: Double) -> [TouchEffect] {
+        guard acceptsSample(time) else { return [] }
         var effects: [TouchEffect] = []
         if scroller.coasting {
             scroller.stop()
@@ -150,6 +153,7 @@ final class TouchInterpreter {
     }
 
     func moved(_ id: Int, to location: CGPoint, time: Double) -> [TouchEffect] {
+        guard acceptsSample(time) else { return [] }
         guard touches[id] != nil else { return [] }
         touches[id] = location
         var effects: [TouchEffect] = []
@@ -244,6 +248,7 @@ final class TouchInterpreter {
     }
 
     func ended(_ id: Int, at location: CGPoint, time: Double) -> [TouchEffect] {
+        guard acceptsSample(time) else { return [] }
         guard touches[id] != nil else { return [] }
         touches[id] = location
         var effects: [TouchEffect] = []
@@ -350,7 +355,40 @@ final class TouchInterpreter {
         pointerMovedAt = nil
     }
 
+    /// Retire all gestures against their old owner before installing another
+    /// session. Even an identically sized new display needs a new picture and
+    /// an explicit grant; old releases, inertia and tap history cannot follow.
+    func replaceSink(_ next: InputSink?) {
+        reset()
+        controlling = false
+        lastTick = nil
+        lastTap = nil
+        scrollAnchor = nil
+        mapper.setPicture(.zero)
+        presentationStartedAt = nil
+        sink = next
+    }
+
+    /// The frame owner or geometry was retired. Rust owns the original
+    /// grant's release cleanup; no stale release may target a successor.
+    func retirePresentation(at time: Double? = nil) {
+        presentationStartedAt = time
+        let original = sink
+        sink = nil
+        reset()
+        controlling = false
+        lastTick = nil
+        lastTap = nil
+        scrollAnchor = nil
+        mapper.setPicture(.zero)
+        sink = original
+    }
+
     // MARK: Internals
+
+    private func acceptsSample(_ time: Double) -> Bool {
+        time.isFinite && presentationStartedAt.map { time > $0 } != false
+    }
 
     private func releaseHeld() {
         switch state {
@@ -441,10 +479,7 @@ final class TouchInterpreter {
 
     /// The trackpad pointer, placed mid-view when unknown or off-picture.
     private func ensurePointer() -> CGPoint {
-        if let pointer, pointer.x >= 0, pointer.y >= 0,
-           pointer.x < mapper.picture.width, pointer.y < mapper.picture.height {
-            return pointer
-        }
+        if let pointer, mapper.containsPicture(pointer) { return pointer }
         let visible = mapper.visiblePicture
         let seed = CGPoint(x: visible.midX.rounded(.down), y: visible.midY.rounded(.down))
         pointer = seed
@@ -468,8 +503,7 @@ final class TouchInterpreter {
 
     /// Place the trackpad pointer (e.g. at the host's reported cursor).
     func seedPointer(_ point: CGPoint) {
-        guard point.x >= 0, point.y >= 0, point.x < mapper.picture.width,
-              point.y < mapper.picture.height else { return }
+        guard mapper.containsPicture(point) else { return }
         pointer = point
     }
 
@@ -477,11 +511,11 @@ final class TouchInterpreter {
                              effects: inout [TouchEffect]) {
         let start = ensurePointer()
         let travel = acceleration.travel(delta, interval: interval, scale: mapper.scale)
-        // The pointer is ours to keep inside the picture (unlike a touch).
-        let limit = CGSize(width: mapper.picture.width - 1.0 / 256,
-                           height: mapper.picture.height - 1.0 / 256)
-        let next = CGPoint(x: min(max(0, start.x + travel.dx), limit.width),
-                           y: min(max(0, start.y + travel.dy), limit.height))
+        // The pointer is ours to keep inside the image (unlike a touch).
+        // Encoded-size bars are outside Rust's original-display viewport.
+        let image = mapper.imageBounds
+        let next = CGPoint(x: min(max(image.minX, start.x + travel.dx), image.maxX - 1.0 / 256),
+                           y: min(max(image.minY, start.y + travel.dy), image.maxY - 1.0 / 256))
         pointer = next
         if next != start {
             pointerMovedAt = time

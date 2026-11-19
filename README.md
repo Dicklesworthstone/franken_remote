@@ -11,6 +11,59 @@ The two binaries are:
 
 Helper processes they launch (all built from `fr-native`): `fr-media-worker` (capture/encode, the sandboxed decoder/presenter, host audio capture), `fr-input-agent` (the per-lease XTest or Quartz executor with its indicator, and the separate `--clipboard` X11 or macOS pasteboard owner), `fr-opus-worker` (the client's restricted Opus decoder) and `fr-session-monitor` (read-only logind evidence for `frd run --logind-session`, and required [console/sleep evidence on macOS](docs/macos-host.md#console-session-lifecycle); graphical screen-lock qualification on macOS remains open). The separate `fr-observation-indicator` provides the [required macOS host Stop sharing surface](docs/observation-indicator.md), including view-only hosting; native visibility/input qualification remains pending.
 
+## Install
+
+**macOS and Linux.** This installs the client (`fr`) and the host programs (`frd` and its helpers) for the current user:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.sh?$(date +%s)" | bash
+```
+
+Append `-s -- --host` to that command to also share this machine's desktop, which registers a per-user LaunchAgent on macOS or a systemd user service on Linux. Append `-s -- --client-only` to install only the viewer.
+
+**Windows.** This installs the FrankenRemote desktop app, which lists your tailnet's machines, and the `fr-windows` command. Run it in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.ps1 | iex
+```
+
+Both installers check for Tailscale and offer to install it.
+
+They download the release archive for the machine and check it against the release's `SHA256SUMS`. When cosign 2.6.2 or later is installed, they also verify the archive's Sigstore bundle. A checksum or signature mismatch stops the install and leaves the existing install untouched. If no release archive fits the machine, they build from source with the pinned toolchain.
+
+Beyond the programs themselves:
+
+- `install.sh` installs bash, zsh and fish completions.
+- Both install a `franken-remote` agent skill for Claude Code and Codex.
+
+Running the installer again upgrades in place. `--uninstall` (or `-Uninstall` on Windows) removes everything it added. All options are listed by `install.sh --help` and `install.ps1 -Help`. To pass options on Windows, use `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.ps1))) -NoLaunch` or set the `FR_INSTALL_*` environment variables.
+
+[Release v0.1.0](https://github.com/Dicklesworthstone/franken_remote/releases/tag/v0.1.0) has archives for:
+
+- macOS on Apple silicon;
+- Linux x86_64 on Ubuntu 24.04 and 26.04;
+- 64-bit ARM Linux on Ubuntu 24.04;
+- Windows x86_64 (the client).
+
+On Ubuntu, a release install took under a minute, runtime packages included. On macOS it took a few seconds.
+
+Other machines build from source. That needs about 12 GB free (10 GB on Windows), and the installers ask before installing anything system-wide:
+
+- **Linux:** the distribution's build packages (apt, dnf, pacman or zypper).
+- **macOS:** the Xcode command line tools.
+- **Windows:** rustup and a MinGW-w64 GCC (WinLibs, through winget).
+
+The first build took about 8 minutes for the Mac client, about 15 minutes for the Linux client and host, and 34 to 42 minutes for the Windows app.
+
+What has been run:
+
+- **v0.1.0:** the plain one-liners installed it in clean Ubuntu 24.04 and 26.04 containers with no Rust toolchain, and every program's libraries resolved. They also installed it on macOS (in a sandboxed home folder) and on Windows 11, where `fr-windows hosts` listed the tailnet's machines. A rerun and an uninstall were checked on each.
+- **Linux:** source installs in clean Ubuntu 24.04 and 26.04 containers.
+- **macOS:** a client-only source install, plus installs from local release archives. Wrong checksums, path traversal and symlinks were all refused.
+- **Windows 11:** installs from a local release zip, covering the app, its Apps & features entry, Start menu shortcut, PATH, `fr-windows hosts` and uninstall. A native source build of the app also ran on a Windows 11 laptop.
+
+Not run yet: `--host` on a live Linux or macOS desktop.
+
 ## What runs today
 
 Evidence levels: *live* = run against this repository's binaries on a real tailnet host; *namespace e2e* = real processes, UDP/TLS/QUIC, admission and media in an isolated network namespace with fixture Tailscale LocalAPI, test CA and synthetic firewall; *Xvfb* = real X server in CI; *unit* = tests only.
@@ -21,7 +74,9 @@ Evidence levels: *live* = run against this repository's binaries on a real tailn
 | `frd run --encoder videotoolbox --input-agent PATH` on macOS | Controlling shares include bounded bidirectional UTF-8 text clipboard through an isolated native child and an independent local Off panel. `--no-clipboard` disables it and is preserved by LaunchAgent installation. See [Mac host clipboard](docs/macos-host.md#text-clipboard) | implementation and regression sources; Mac-host native/tailnet qualification remains open |
 | `frd status [--json]` | Probes the installed Tailscale LocalAPI for this node's identity; every media/permission row stays `not_tested` (nothing is measured) | live |
 | `fr hosts [--json]` | Lists machines from installed Tailscale discovery (machines, not ready desktops) | live |
+| `FrankenRemote.exe` (Windows) | [Windows desktop app](docs/windows-client.md#install-and-use-the-desktop-app): per-user install (`--install`, Start menu, Apps & features, `Path`; `--uninstall`), a searchable Tailscale machine list with view/control options, and GPU (DXVA) or CPU HEVC decode (`--decoder auto\|hardware\|software`) | live on one Windows 11 laptop on 2026-11-16: install/uninstall round trip, app list to viewer and back, GPU and CPU decode against a macOS host |
 | `fr hosts save/saved/forget`; `fr connect ALIAS --saved` | [Saved native hosts](NATIVE_SAVED_HOSTS.md), pinned to both the stable Tailscale node ID and certificate name; fresh authorization on every connection | source and regression coverage; live qualification pending |
+| `fr app` (macOS, Linux) | Desktop application, the counterpart of `FrankenRemote.exe`: the native machine picker with View only / View and control, Share clipboard text and Ask which display to show (remembered), then the viewer, then back to the picker with the outcome. `fr app --install` adds `~/Applications/FrankenRemote.app` (macOS) or an applications-menu entry (Linux); `install.sh` does this. Built on `fr connect --choose-host --pick-only` | unit tests on macOS and Linux and actual Xvfb choice-key/confirmation tests; on one Mac on 2026-11-18: launcher, picker choices, a failed connection attempt and back to the picker with its outcome, Cancel. A successful session started from `fr app` has not run yet |
 | `fr connect --choose-host --view-only --experimental-native --display choose` | [Native machine picker](docs/native-client-cli.md#choose-a-machine-in-the-native-window): paginated Tailscale peers, exact identity pin, then authenticated connection and display choice | discovery/lifecycle tests and actual Xvfb keyboard/cancellation/cleanup passed; full CLI and live qualification pending |
 | `fr inspect NODE_ID --probe --experimental-native [--json]` | Authenticated [native capability intersection](NATIVE_CAPABILITY_INSPECTION.md), acknowledged and closed before observation or approval | source and regression coverage; live qualification pending |
 | `fr hosts --probe --experimental-native [--probe-limit 1..64] [--json]` | Bounded [tailnet capability discovery](NATIVE_CAPABILITY_INSPECTION.md#bounded-tailnet-discovery), four peers at a time under one original deadline, with separate per-peer results | deterministic scheduler and command-parser tests; native CLI and live qualification tracked separately |
@@ -44,7 +99,7 @@ Evidence levels: *live* = run against this repository's binaries on a real tailn
 | `fr robot session open … --accept-input` + `fr robot input … --connection-id …` | Experimental bounded clicks, drags, physical key taps, modifier shortcuts and line scrolling through the original foreground control owner, with pinned source age, all view generations, focus and replay-safe host receipts | client ledger suite 77 tests passed; native focus gate 3 Rust and 6 real C/Xvfb checks passed; command/native network qualification remains separate. See [NATIVE_ROBOT_INPUT.md](NATIVE_ROBOT_INPUT.md) |
 | `fr robot observe … --connection-id … --screenshot PATH` | Explicit PNG of one retained viewport from the original opted-in observation/control owner; control output keeps the pictured frame’s original input pin and source age | source plus 111 focused parser/owner/metadata/PNG tests and strict Clippy; socket/full-session regression build blocked by upstream compiler memory. See [live screenshots](docs/native-client-cli.md#screenshots-from-an-existing-foreground-owner) |
 
-Not available: text, pixel-scroll and relative-pointer input (discrete wheel scrolling is forwarded and covered by the control e2e), observers alongside a controller or observer-to-controller handoff, resumed/synchronized transfers, image clipboard and any clipboard for observers, Wayland, Windows, browser and mobile clients, and on the macOS client: audio, microphone, files, clipboard and the host/display pickers. Wired but not exercised live: explicit client microphone forwarding (the source and qualification limits are in the table above), `frd run --approval local` desktop consent (docs/desktop-approval.md; namespace e2e with the real consent child: an XTest ALLOW is ignored, an ALLOW attributed to Xvfb's pointer admits, close denies, no answer ends `host_approval_unanswered`; no physical-device consent yet), directory sends with `--send DIR` (fr-files real-QUIC tests only), and `--encoder vaapi` (only its startup refusal ran live, on an NVIDIA host without VA-API; no VA-API encode has run). `--encoder nvenc` ran live on 2026-10-13: a 5-minute session from a GTX 1070 host stayed within 0.13-0.19% of the host's pixels with an active encoder session. A hardware encoder is probed once at startup (one admitted IDR at the display's size); one that cannot open refuses `frd run` with `encoder_unavailable` before anything is bound. Earlier documents that marked GNOME/KDE/Hyprland, Windows GPU rows or Windows/macOS worker sandboxes as passed or enforced were withdrawn on 2026-09-24: no evidence existed.
+Not available: text, pixel-scroll and relative-pointer input (discrete wheel scrolling is forwarded and covered by the control e2e), observers alongside a controller or observer-to-controller handoff, resumed/synchronized transfers, image clipboard and any clipboard for observers, Wayland, browser and mobile clients, and on the macOS client: audio, microphone, files, clipboard and the host/display pickers. Wired but not exercised live: explicit client microphone forwarding (the source and qualification limits are in the table above), `frd run --approval local` desktop consent (docs/desktop-approval.md; namespace e2e with the real consent child: an XTest ALLOW is ignored, an ALLOW attributed to Xvfb's pointer admits, close denies, no answer ends `host_approval_unanswered`; no physical-device consent yet), directory sends with `--send DIR` (fr-files real-QUIC tests only), and `--encoder vaapi` (only its startup refusal ran live, on an NVIDIA host without VA-API; no VA-API encode has run). `--encoder nvenc` ran live on 2026-10-13: a 5-minute session from a GTX 1070 host stayed within 0.13-0.19% of the host's pixels with an active encoder session. A hardware encoder is probed once at startup (one admitted IDR at the display's size); one that cannot open refuses `frd run` with `encoder_unavailable` before anything is bound. Earlier documents that marked GNOME/KDE/Hyprland, Windows GPU rows or Windows/macOS worker sandboxes as passed or enforced were withdrawn on 2026-09-24: no evidence existed.
 
 **Size gate:** the owner lifted the handwritten-Rust hard stop on 2026-11-08 (it had been raised from 250,000 to 500,000 on 2026-09-24); the 20k non-Rust glue allowance was lifted on 2026-11-13. `./scripts/verify.sh count` still reports both sizes. On 2026-09-24 the owner also approved deleting the clearly fake modules (about 15k lines removed). The fixed counter (`./scripts/verify.sh count`) reported about 312,800 handwritten Rust lines on 2026-09-27 (302,562 on 2026-09-26): over the 240,000 planned maximum, within the 500,000 hard stop.
 

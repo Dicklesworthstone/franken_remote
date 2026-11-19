@@ -55,7 +55,8 @@ impl SendPolicy {
             || u64::try_from(self.max_cached_bytes).map_err(|_| SendError::InvalidPolicy)?
                 > limits.protocol().per_viewer_compressed_bytes()
             || !(1..=250_000).contains(&self.reference_horizon_micros)
-            || !(1..=5_000_000).contains(&self.recovery_horizon_micros)
+            // frd's hosts use up to its 6 s first-view startup limit.
+            || !(1..=10_000_000).contains(&self.recovery_horizon_micros)
             || self.minimum_repair_interval_micros == 0
             || self.minimum_repair_interval_micros > self.reference_horizon_micros
             || !(1..=8).contains(&self.max_repair_rounds)

@@ -20,6 +20,39 @@ use std::{
 
 const MAX_LABEL: usize = 384;
 const CHOICE_LIMIT: Duration = Duration::from_secs(120);
+/// Native "no choices row" marker; must match `FR_CHOICE_NONE`.
+const NO_CHOICES: u32 = u32::MAX;
+
+/// Local connection preferences shown beside the host list (`fr app`). They
+/// only shape the next command line; the connector still requests control
+/// and clipboard sharing itself, under the host's own approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "three independent check boxes"
+)]
+pub struct Choices {
+    pub control: bool,
+    pub clipboard: bool,
+    pub choose_display: bool,
+}
+impl Choices {
+    fn bits(self) -> u32 {
+        u32::from(self.control)
+            | (u32::from(self.clipboard) << 1)
+            | (u32::from(self.choose_display) << 2)
+    }
+    const fn from_bits(bits: u32) -> Option<Self> {
+        if bits & !7 != 0 {
+            return None;
+        }
+        Some(Self {
+            control: bits & 1 != 0,
+            clipboard: bits & 2 != 0,
+            choose_display: bits & 4 != 0,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -56,9 +89,12 @@ unsafe extern "C" {
         kind: u32,
         rows: *const RawRow,
         count: usize,
+        choices: u32,
+        notice: *const c_char,
+        notice_len: usize,
         out: *mut *mut c_void,
     ) -> c_int;
-    fn fr_mac_picker_poll(handle: *mut c_void, row: *mut usize) -> c_int;
+    fn fr_mac_picker_poll(handle: *mut c_void, row: *mut usize, choices: *mut u32) -> c_int;
     fn fr_mac_picker_close(handle: *mut c_void) -> c_int;
 }
 
@@ -78,24 +114,35 @@ struct Native {
     handle: Option<NonNull<c_void>>,
     _main_thread: PhantomData<Rc<()>>,
 }
+fn label_ok(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= MAX_LABEL
+        && label
+            .bytes()
+            .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+}
+
 impl Native {
-    fn open(kind: u32, rows: &[Row]) -> Result<Self, Error> {
+    fn open(
+        kind: u32,
+        rows: &[Row],
+        choices: Option<Choices>,
+        notice: Option<&str>,
+    ) -> Result<Self, Error> {
         if rows.is_empty() {
             return Err(Error::EmptyCatalog);
         }
         if rows.len() > MAX_CANDIDATES
-            || rows.iter().any(|row| {
-                [&row.title, &row.detail].into_iter().any(|label| {
-                    label.is_empty()
-                        || label.len() > MAX_LABEL
-                        || !label
-                            .bytes()
-                            .all(|byte| byte == b' ' || byte.is_ascii_graphic())
-                })
-            })
+            || rows
+                .iter()
+                .any(|row| !label_ok(&row.title) || !label_ok(&row.detail))
+            || notice.is_some_and(|notice| !label_ok(notice))
         {
             return Err(Error::InvalidRows);
         }
+        let (notice_ptr, notice_len) = notice.map_or((core::ptr::null(), 0), |text| {
+            (text.as_ptr().cast(), text.len())
+        });
         let raw: Vec<_> = rows
             .iter()
             .map(|row| RawRow {
@@ -106,10 +153,21 @@ impl Native {
             })
             .collect();
         let mut pointer = core::ptr::null_mut();
-        // SAFETY: each bounded row and byte range remains borrowed throughout
-        // this synchronous call; native code copies all text before returning,
-        // retains no Rust pointer, and refuses a non-main-thread invocation.
-        let code = unsafe { fr_mac_picker_open(kind, raw.as_ptr(), raw.len(), &raw mut pointer) };
+        // SAFETY: each bounded row, the optional notice and their byte ranges
+        // remain borrowed throughout this synchronous call; native code copies
+        // all text before returning, retains no Rust pointer, and refuses a
+        // non-main-thread invocation.
+        let code = unsafe {
+            fr_mac_picker_open(
+                kind,
+                raw.as_ptr(),
+                raw.len(),
+                choices.map_or(NO_CHOICES, Choices::bits),
+                notice_ptr,
+                notice_len,
+                &raw mut pointer,
+            )
+        };
         if code != 0 {
             return Err(native_error(code));
         }
@@ -118,15 +176,16 @@ impl Native {
             _main_thread: PhantomData,
         })
     }
-    fn poll(&mut self) -> Result<Option<usize>, Error> {
+    fn poll(&mut self) -> Result<Option<(usize, u32)>, Error> {
         let handle = self.handle.ok_or(Error::AlreadyUsed)?;
         let mut row = usize::MAX;
+        let mut choices = NO_CHOICES;
         // SAFETY: this is the original live retained main-thread owner; the
-        // output points to a valid exclusive scalar. Native polling does not
-        // retain it or invoke Rust, and drains at most 128 AppKit events.
-        match unsafe { fr_mac_picker_poll(handle.as_ptr(), &raw mut row) } {
+        // outputs point to valid exclusive scalars. Native polling does not
+        // retain them or invoke Rust, and drains at most 128 AppKit events.
+        match unsafe { fr_mac_picker_poll(handle.as_ptr(), &raw mut row, &raw mut choices) } {
             0 => Ok(None),
-            1 => Ok(Some(row)),
+            1 => Ok(Some((row, choices))),
             code => Err(native_error(code)),
         }
     }
@@ -187,15 +246,25 @@ struct Picker {
     rows: usize,
     decision: Decision,
     opened: Instant,
+    /// Whether this picker showed choices, and the ones confirmed with the row.
+    offered: bool,
+    choices: Option<Choices>,
 }
 impl Picker {
-    fn open(kind: u32, rows: &[Row]) -> Result<Self, Error> {
+    fn open(
+        kind: u32,
+        rows: &[Row],
+        choices: Option<Choices>,
+        notice: Option<&str>,
+    ) -> Result<Self, Error> {
         let opened = Instant::now();
         Ok(Self {
-            native: Native::open(kind, rows)?,
+            native: Native::open(kind, rows, choices, notice)?,
             rows: rows.len(),
             decision: Decision::Waiting,
             opened,
+            offered: choices.is_some(),
+            choices: None,
         })
     }
     fn poll(&mut self) -> Result<Option<usize>, Error> {
@@ -211,7 +280,21 @@ impl Picker {
         if matches!(self.decision, Decision::Waiting) {
             match self.native.poll() {
                 Ok(None) => return Ok(None),
-                Ok(Some(row)) if row < self.rows => self.decision = Decision::Chosen(row),
+                Ok(Some((row, bits))) if row < self.rows => {
+                    // A picker that offered choices must return valid ones; one
+                    // that did not must return none.
+                    let choices = if bits == NO_CHOICES {
+                        None
+                    } else {
+                        Choices::from_bits(bits)
+                    };
+                    if choices.is_some() == self.offered {
+                        self.choices = choices;
+                        self.decision = Decision::Chosen(row);
+                    } else {
+                        self.decision = Decision::Ended(Error::InvalidRows);
+                    }
+                }
                 Ok(Some(_)) => self.decision = Decision::Ended(Error::InvalidRows),
                 Err(error) => self.decision = Decision::Ended(error),
             }
@@ -234,11 +317,29 @@ pub struct HostPicker {
 }
 impl HostPicker {
     pub fn open(original: HostCatalog) -> Result<Self, Error> {
+        Self::open_with(original, None, None)
+    }
+    /// The desktop application's picker: the host list plus connection
+    /// choices (`initial`), and optionally the previous session's outcome.
+    pub fn open_with(
+        original: HostCatalog,
+        initial: Option<Choices>,
+        notice: Option<&str>,
+    ) -> Result<Self, Error> {
         let rows = host_rows(&original);
         Ok(Self {
-            picker: Picker::open(1, &rows)?,
+            picker: Picker::open(1, &rows, initial, notice)?,
             original,
         })
+    }
+    /// The choices confirmed together with the row returned by [`Self::poll`];
+    /// `None` before a choice, or when the picker offered no choices.
+    pub fn choices(&self) -> Option<Choices> {
+        if matches!(self.picker.decision, Decision::Consumed) {
+            self.picker.choices
+        } else {
+            None
+        }
     }
     /// Poll a bounded `AppKit` turn. Selection is returned once, only after
     /// positive native cleanup; the caller must recheck its exact ID/name.
@@ -270,7 +371,7 @@ impl DisplayPicker {
     pub fn open(original: &DisplayCatalog) -> Result<Self, Error> {
         let rows = display_rows(original);
         Ok(Self {
-            picker: Picker::open(2, &rows)?,
+            picker: Picker::open(2, &rows, None, None)?,
             original: *original,
         })
     }

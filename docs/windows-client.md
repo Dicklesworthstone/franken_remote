@@ -39,7 +39,143 @@ Run the resulting executable in the interactive desktop session. Tailscale
 must be installed, signed in and running on this machine. The remote host must
 be running FrankenRemote and its own admission policy must allow this viewer.
 
+## Install and use the desktop app
+
+The quickest install is the PowerShell one-liner. It downloads the release
+zip (or builds from source if no release zip fits) and runs the app's own
+`--install`, described below:
+
+```powershell
+irm https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.ps1 | iex
+```
+
+It checks the zip against the release's `SHA256SUMS`. It also checks the zip's
+Sigstore bundle when cosign 2.6.2 or later is installed. It refuses an archive
+with absolute or `..` paths, links, or more than one top-level folder.
+
+Before installing, it checks for Tailscale and offers to install it with
+winget. It also checks for the HEVC Video Extensions and opens their Store page
+if they are missing. It writes the agent skill for Claude Code and Codex.
+
+`-Uninstall` runs `FrankenRemote.exe --uninstall` and removes the skill.
+`-Help` lists the options. The zip-based install and uninstall ran on
+Windows 11 (oldsurface). A complete source build has not run on Windows yet.
+
+The release build produces two programs from one library:
+
+- `FrankenRemote.exe`: the desktop app, a window with no console.
+- `fr-windows.exe`: the command line described in the rest of this page.
+
+Both embed an application manifest (visual styles, per-monitor DPI
+awareness, `asInvoker`), the app icon and version information. The build
+compiles that resource with `windres` (or `$RC`) for GNU targets and `rc` or
+`llvm-rc` for MSVC targets; without a resource compiler it prints a warning
+and the programs run with default visuals.
+
+Install for the current user:
+
+```powershell
+.\FrankenRemote.exe --install
+```
+
+Installation needs no administrator rights and changes nothing outside the
+user's profile:
+
+- Both programs are copied to `%LOCALAPPDATA%\Programs\FrankenRemote`.
+- A FrankenRemote shortcut is added to the Start menu.
+- An Apps & features entry is registered for this user, with a quiet
+  uninstall command.
+- The folder is added to the user `Path`, so a new terminal finds
+  `fr-windows`.
+
+`--install --quiet` shows no dialogs and returns exit code 0 on success.
+Installing again from a newer build replaces the programs in place; close a
+running FrankenRemote first. Started from anywhere else, the app shows an
+**Install for this user** button that performs the same installation and
+opens the installed copy.
+
+To remove it, use **Settings > Apps > Installed apps**, or run
+`FrankenRemote --uninstall` (`--quiet` skips the confirmation). Uninstall
+removes the shortcut, the Apps & features entry, the `Path` entry, the saved
+settings and both programs. Files that the running app was started from are
+deleted a moment after it exits. Tailscale is not changed.
+
+### Choose a machine in the app
+
+The app opens a list of machines read from the installed Tailscale service.
+Its columns are machine, status, system, connection path and Tailscale
+address. Online machines that can host a desktop come first, then machines
+whose state is unknown, then offline ones, then phones and tablets. Offline
+machines and phones are dimmed but stay selectable, because the list
+describes the Tailscale snapshot only. A listed machine is not necessarily
+running FrankenRemote, and a listing does not mean it will admit this viewer.
+
+- Type in the search box (Ctrl+F) to filter on any column.
+- **Refresh** (F5) reads a new snapshot and keeps the selected machine
+  selected when it is still listed. The list also refreshes itself after 90
+  seconds without a choice, inside the two-minute choice budget described
+  below.
+- Choose **View only** or **View and control**. **Share clipboard text**
+  applies to control sessions. **Ask which display to show** opens the
+  remote display picker after connecting.
+- Press Enter, double-click the machine or choose **Connect**.
+
+The viewer opens in its own window and runs as a child process of the app,
+with the same options the command line would use. When it closes, the list
+returns with one line about the session. It reports how long the session
+lasted and whether pictures were decoded on the GPU or the CPU, or the reason
+it could not start. Starting a view-only session leaves control requests
+disabled in the viewer. Its control status names the app's **View and
+control** choice instead of F8.
+
+The last machine and the three options are saved in
+`%LOCALAPPDATA%\FrankenRemote\settings.json`. That file holds only the
+machine's stable ID and the option values.
+
+The status area's second line names the decoder this PC offers (see
+[Decoder selection](#decoder-selection)). When Windows has no HEVC decoder, a
+**Get the HEVC decoder** button opens Microsoft's HEVC Video Extensions in
+the Microsoft Store.
+
 ## Find and select a host
+
+Run `fr-windows` or `fr-windows view` without a destination to open the native
+machine picker. It lists the eligible machines from one bounded, authenticated
+installed-Tailscale snapshot. Select a row and choose **Connect**, press Enter,
+or double-click it. **Cancel**, Escape, or closing the picker starts no session.
+The local choice expires within two minutes of starting discovery. Reading
+the snapshot, constructing the window, choosing a row and closing the picker
+all consume that same budget; the connection's startup budget begins only
+after the choice and confirmed picker cleanup have completed.
+
+The click must come from after this picker was shown and remain fresh when
+the native selection read and window cleanup complete. Cancel, Escape or a queued close can
+still cancel a pending Connect during the same native event batch. A queue
+flood, clock regression, expired snapshot or unconfirmed window cleanup
+refuses the choice. The command reports the reason and asks you to start a
+new choice; it never retries that click against a replacement catalog.
+
+```text
+fr-windows
+fr-windows view --control
+fr-windows view --control --no-clipboard --ipv6 --display choose
+```
+
+The picker retains the exact stable device ID and canonical certificate name
+shown in its original catalog. It never interprets an old row number against a
+new discovery result. After selection, the ordinary installed connector
+revalidates that identity through the daemon before dialing and on renewal.
+A removed or renamed device cannot silently turn the choice into another host.
+
+The sampled direct/relayed path labels are informational. They do not claim
+the machine is online, that FrankenRemote is running, or that a desktop is
+available. No remote probe or observation starts while the picker is open.
+An empty snapshot remains empty; it never falls back to a guessed hostname.
+
+All viewing options retain their existing meaning with the picker. In
+particular, choosing a machine alone starts an observing session; `--control`
+still uses the host's separate admission and grant flow. Explicit destination
+commands remain available, and `directory` still requires a destination:
 
 ```text
 fr-windows hosts
@@ -52,6 +188,9 @@ LocalAPI. Its JSON document contains:
 
 - `machines`: each eligible peer's `stable_id`, canonical `name`, current
   Tailscale `addresses`, and sampled `path` (`direct`, `relayed` or `unknown`).
+  `os` (for example `"windows"`, `"macOS"`, `"linux"`) and `online` are the
+  daemon's own display metadata when it reports them, otherwise `null`. They
+  label and order rows only and never admit or refuse a machine.
 - `readiness: "not_probed"`: listing a machine says nothing about whether
   FrankenRemote is running or whether its desktop is available.
 - `excluded`: counts of shared, expired and otherwise unusable peers.
@@ -71,6 +210,7 @@ ends the command with an explanatory, content-free error.
 ```text
 fr-windows view remote.example.ts.net
 fr-windows view remote.example.ts.net --control
+fr-windows view remote.example.ts.net --control --no-clipboard
 fr-windows view remote.example.ts.net --ipv6
 fr-windows view n-selected --ipv4 --port 8443 --seconds 30
 ```
@@ -93,21 +233,126 @@ after a positive number of seconds. Closing the window also closes the session.
 The viewer prints its existing JSON completion document with counts, timings
 and the typed ending.
 
+### Scaled pictures keep the original display coordinates
+
+A scaling-capable host can send a smaller HEVC picture for the viewer's physical
+client area. The Windows viewer preserves the original selected display's
+aspect ratio when placing that picture. The encoded crop supplies texture
+samples; it does not redefine the desktop's input or cursor coordinates.
+
+For example, a 5120-by-2880 display can produce a canonical 1582-by-888 crop.
+Its exact display-space rectangle is 1578-by-888, with two columns on each
+side in that picture-sized window. Video, the cursor overlay and the native
+pointer use that same rectangle. Mouse positions are translated into the
+shared input owner's matching rectangle inside the encoded picture, so edge
+clicks and drag releases remain in the granted display.
+
+The existing policy still avoids enlarging small pictures in a larger window.
+Letterbox clicks remain outside the remote desktop. A reconnect, including one
+with identical dimensions, requires a fresh presentation mapping; old queued
+native coordinates cannot inherit it. Original display dimensions come from
+the current frame owner and remain available even if a VIDEO notification was
+dropped from the bounded event queue.
+
+Portable geometry and original-owner regression sources cover these cases.
+Native Windows rendering and pointer-injection qualification remain pending.
+
+## See the remote cursor
+
+When the host sends a separate cursor, the viewer draws its confirmed shape
+and position over the decoded picture. Cursor motion, shape changes and hiding
+repaint even when the desktop has no new video frame. The overlay follows the
+picture's scale, hotspot and clipping; it cannot draw into the letterbox.
+Hosts that already include their cursor in video keep that existing picture
+without a second overlay.
+
+During control, the viewer installs the admitted host shape as its native
+Windows pointer while the host's confirmed position follows submitted input.
+The native pointer moves locally; it does not wait for a video frame or a
+network round trip. The existing shared cursor policy decides whether that
+local pointer explains the confirmed host position. If the host moves or
+confines its pointer elsewhere, the native pointer is blanked before the
+confirmed overlay appears. The host-shaped native pointer returns only after
+the old overlay has been erased. The viewer uses the ordinary Windows arrow
+outside the picture, over local dialogs, and while another application is
+active. It never changes system/class cursor images or the global cursor
+visibility count.
+
+Native shape geometry and its hotspot follow the actually presented picture,
+including downscaling and a later window resize. The original bounded RGBA
+image is retained for that resize, so ordinary pointer motion creates no new
+native bitmap. Changing applications retains the original granted source as
+described below, pauses this native shape, and requires a foreground repaint
+before using its picture geometry again. Returning from an owned text/display
+dialog also repaints a static desktop without inventing a new video frame.
+Ending control, a reconnect, or decoder reconfiguration invalidates the old
+native image and its pending acknowledgement, even if the host reuses a shape
+ID. When the host reports its cursor already composited into video, the
+existing shared policy suppresses the managed local cursor and separate
+overlay instead of installing a second host shape. An unknown cursor or an
+unnegotiated cursor lane remains a distinct policy state.
+
+The overlay uses one bounded 256-by-256 bitmap on the existing GPU device;
+decoded video stays on the GPU. A replacement briefly retains the old and new
+GPU bitmaps. Native cursor creation likewise retains at most the old image
+and one replacement, using checked top-down premultiplied BGRA and a bounded
+monochrome transparency mask. A single pending request replaces obsolete
+work at the shared/UI boundary. Each native acknowledgement names the exact
+original capture, attempt, decoder configuration and request generation;
+preparing a cursor is not acknowledgement of its installation. The original
+capture cannot report native cleanup complete until its pointer is restored
+and its resources are released. Unproven native destruction remains a failed
+cleanup and cannot admit a replacement owner.
+
+Cursor-only draws retain the original video frame ID and color range and count
+separately as `repaints` in completion JSON. They provide no new video freshness
+or input authority. Only an exact `S_OK` presentation result admits draw
+accounting and native shape handoff; another successful DXGI status retains
+the pending repaint and old overlay knowledge without marking a frame drawn.
+This is evidence of accepted API submission, not measurement of physical
+scanout. Live Direct2D rendering, native cursor handoff, focus changes and
+failed-cleanup qualification on a Windows desktop remain pending.
+
+## Full screen and Windows shortcuts
+
+`--fullscreen` (the app's **Full screen at this screen's resolution**, on by
+default) opens the viewer as a borderless window over its whole monitor, before
+the first picture size is stated. The host is asked for exactly the monitor's
+pixel size (for example 3240x2160 on a Surface Book 2), fitted to its own
+display's shape, and the picture is drawn 1:1: the host scales once and
+nothing is resampled on this PC. **Ctrl+Alt+Enter** switches full screen on or
+off at any time; the view reopens at the new size and control resumes by
+itself. Full screen hides the menu bar; leave it to reach **Input** and **File
+transfer**.
+
+While a session controls the host and its window is in front, Windows
+shortcuts go to the host instead of Windows: the Windows key (Command on a
+Mac), Alt+Tab, Alt+Esc, Ctrl+Esc, Alt+Space, Alt+F4, F10 and the rest. A
+low-level keyboard hook takes the keys from Windows only during that time and
+hands them to the viewer's normal key path. `--no-shortcuts` (or clearing
+**Send Windows shortcuts** in the app) keeps them with Windows. Two keys
+always stay local: **Ctrl+Alt+Enter**, and Ctrl+Alt+Del (and Win+L), which no
+application can take. To leave the viewer, use Ctrl+Alt+Enter and then click
+another window, or Ctrl+Alt+Del.
+
 ## Request or stop control in the viewer
 
 The native **Input** menu now contains **Request control**, **Stop control and
-disconnect**, and **Send text…**. The window title shows whether it is waiting
+keep viewing**, **Change display…**, and **Send text…**. The window title shows whether it is waiting
 for a ready view, viewing, requesting control, controlling, or stopping. A
 request is not a grant: keys and pointer actions stay local until the host has
 granted control and the original input producer is attached.
 
-Start with `--control` to make explicit control requests available. If an
-automatic reconnect or a permitted resize opens a replacement view, it retains
-that control-capable profile but starts viewing. Open **Input → Request
-control** to make a fresh choice for that current view. A connection started
-without `--control` remains observation-only, and its Request action is
-disabled. Neither receiving a picture nor reopening a connection restores the
-earlier control request.
+Start with `--control` (the app's **View and control**) and control is
+automatic. The first view requests it, and so does every replacement view of
+that command: after an automatic reconnect, a resize, full screen on or off, a
+display change, or a return to a window that had stopped. Each is a fresh
+request in the new session through the host's normal admission and grant; no
+input from the earlier session is replayed. The text clipboard follows the
+same choice in replacement views, unless an earlier clipboard owner ended
+abnormally (a refusal, a native failure or **Turn off**); then it stays off
+for the rest of the window. A connection started without `--control` remains
+observation-only, and its Request action is disabled.
 
 Request is enabled only while the shared session has current visible-view
 evidence. Each menu choice belongs to its original view and is consumed once.
@@ -117,17 +362,61 @@ session's bounded callback wait count against the same request lifetime; a
 delayed command is never automatically retried. Reopen the menu for a fresh
 choice after the view is ready again.
 
-**Stop control and disconnect** cancels a pending request or fences the
-original input source immediately, before native composition cleanup. It then
-closes that connection through the existing bounded cleanup path. Ending
-control ends the session; Stop does not silently reopen another view or grant.
-The menu remains local even while the remote desktop is controlled.
+**Stop control and keep viewing** is available after control has been granted.
+It fences that original input source immediately, then closes the controlled
+connection through its existing terminal exchange and bounded cleanup. Only
+positive original service and cleanup results permit a fresh viewing connection
+to the same selected machine. The new view requires the normal host admission
+and approval again. After your own Stop it does not request control, restart
+the clipboard or send any file selection again; **Request control** resumes.
 
-Switching to another application or minimizing the viewer invalidates pending
-control choices and ends any granted control. Returning to the application
-cannot restore it. A view-only session can remain connected. Existing resize
-rules still require successful original cleanup before reopening; a controlled
-resize that cannot establish orderly closure ends the session instead.
+The Stop choice is bound to the original session, connection attempt, native
+window lifetime and menu gesture. Failed cleanup, a hidden window or expiry
+ends the connection instead of reopening. The existing ten-second replacement
+budget, finite replacement count and invocation-wide `--seconds` still apply.
+Close the window to disconnect completely, including while a control request
+is pending. The final JSON counts completed handoffs in `control_releases`.
+
+Switching to another application pauses granted control instead of ending
+it. At the switch the viewer releases every key and mouse button it pressed on
+the host, and discards an open **Send text** draft and any unsent menu choice.
+While another application is in front nothing is forwarded, including pointer
+motion over the still-visible viewer window. Viewing, the control grant and
+its renewal, and the text clipboard lane continue: text copied in the other
+application reaches the host, ready to paste after you return. Use **Turn
+off** in the clipboard window when that is not wanted. Input resumes once the
+viewer window is in front again. Only new input is sent: a key or button
+pressed in the other application and released over the viewer sends nothing,
+and nothing from before the switch is replayed.
+
+If a release cannot be sent at the switch (the input queue refuses it), the
+viewer does not pause with input held. It ends control instead. The window
+stays open while the original connection closes and its held input,
+clipboard and file owners finish cleanup, and the old picture is cleared. If
+that original service and cleanup both succeed within the existing ten-second
+bound, the disconnected window waits for you to return; it opens no
+connection while waiting. Its title shows **Control stopped; return to this
+window to keep viewing**. A fresh foreground event opens a new viewing
+connection to the same selected machine, subject to normal host admission and
+approval. That event has its own bounded opening request; repeated activation
+callbacks do not renew it. That new view requests control by itself. Previous
+file selections are retired permanently for that invocation's replacement
+connections. Closing
+the dormant window or reaching `--seconds` ends the invocation. Failed or late
+original cleanup, another hide during an accepted return, a failed picture
+clear, or an exhausted replacement count ends the connection instead of
+reopening. The existing cap of 32 native session owners includes these
+replacements, display changes and resizes. The JSON completion document
+counts them in `focus_releases`. `last_focus_end` keeps the original
+`CONTROL_STOPPED` / `Hidden` ending and its cleanup result. These fields
+contain no input, clipboard text or file paths.
+
+Minimizing the viewer, native resize/mapping changes, and external focus loss
+from a file picker still end any granted control; restoring the window cannot
+bring control back. A view-only session can remain connected. Existing resize
+rules still require successful original cleanup before reopening; a
+controlled resize that cannot establish orderly closure ends the session
+instead.
 
 ## Choose a remote display
 
@@ -167,11 +456,54 @@ cancel it. Existing resize rules still resume viewing only. The selected
 display's own signed origin and geometry feed the existing pointer mapping,
 including displays left of or above the desktop origin.
 
-This selects the display before video starts. To choose a different display
-later, close the viewer and run the command again. Selecting a display does
-not itself request control; `--control` retains the existing separate grant
-and visible-view requirements. The existing mobile C interface retains its
-primary-display default.
+### Change displays while viewing
+
+After a picture is visible, choose **Input → Change display…** to choose a
+different remote monitor in the same window. The action is available while
+viewing or controlling, with no pending control request, text editor, native
+resize, queued key transition or held mouse button. It consumes one fresh
+menu choice from that original session. A queued command from an earlier
+popup, native mapping or connection is refused.
+
+Changing displays immediately fences the original input and clipboard owners.
+The viewer waits for that original session's actual successful service and
+cleanup result, then the serial host listener's 400 ms cooldown. Only then
+does it open a new authenticated viewing session to the original selected
+machine and request a new approved display catalog. The host's current
+admission and local-approval policy still applies. No old display handle,
+coordinate mapping, queued input, text composition or clipboard owner is
+carried into the new session.
+
+The replacement always shows the native picker, including when the command
+started with `--display primary`, `only` or an exact handle. Subsequent resize
+replacements also ask from a fresh catalog; they do not silently return to the
+command's original display. Selecting a row starts viewing only. If the
+original command offered `--control`, **Input → Request control** supplies a
+fresh request for the new ready view. Clipboard sharing stays retired for that
+command and requires a new controlling command to enable again.
+
+Closing the window, stopping, hiding the application or changing the native
+mapping cancels a pending display switch. A host refusal, revoked grant,
+incomplete cleanup or local failure also prevents replacement and retains the
+original completion report. In particular, a controlled session whose
+cancellation cannot prove orderly cleanup ends rather than opening another
+display. Elapsed time alone is never cleanup evidence.
+
+Each replacement has a 10-second absolute retirement/cooldown budget,
+including time the client spends suspended. That same deadline is checked
+again after native preparation immediately before starting the replacement.
+The new connection retains its existing separate startup deadline. One
+command opens at most 32 fresh native session owners, counting the initial
+owner and resize replacements. `--seconds` remains a deadline for the entire
+command and prevents a replacement once it expires. Completion JSON records
+`display_changes` and any content-free `reopen_refusal` separately from the
+original session's ending. Runtime and live Windows multi-monitor
+qualification remain pending.
+
+A Change display popup also belongs to one internal connection attempt. If the
+shared session reconnects while the popup is open, that old choice is refused.
+The replacement must have a picture drawn from its own attempt before a fresh
+display choice becomes available.
 
 ## Send Unicode and IME text
 
@@ -194,8 +526,9 @@ invalidates the draft even if the same geometry later returns. A short
 compositor readiness gap temporarily disables Send without moving the draft
 to another context. Resize, minimization, closure and reconnection discard it.
 
-**Switching applications, minimizing, or resizing the viewer while the editor
-is open ends the original control session.** Its independent lifecycle fence
+**Minimizing or resizing the viewer while the editor is open ends the original
+control session; switching applications discards the draft and pauses
+control as described above.** Its independent lifecycle fence
 stops input before native IME cleanup, including during a nested Windows
 callback. This also prevents queued text from being sent after that boundary.
 Cancel clears only local composition; text already admitted to the host path
@@ -220,6 +553,259 @@ The status **Queued once for the host** confirms bounded local admission only.
 It does not promise atomic host insertion. Existing host scalar-level
 partial/uncertain outcomes still apply, and neither the original value nor an
 unconfirmed suffix is retried automatically.
+
+## Share the text clipboard
+
+`--control` enables the optional text clipboard by default. Add
+`--no-clipboard` to keep it off for that command. Observing sessions do not
+offer clipboard capability or open the local clipboard. The host must also
+enable the same optional capability, admit control, and complete bilateral
+clipboard readiness. A host that omits clipboard still permits its ordinary
+negotiated keyboard, pointer and direct-text capabilities.
+
+A Windows host enables its clipboard with `frd run --control`. An X11 host
+needs `--input-agent` and a `fr-input-agent` built with the `linux-clipboard`
+feature. The controller offers its current local text once when the lane
+starts; the host sends only copies made after its lane starts, preserving the
+controller's initial selection instead of swapping both pre-session values.
+
+Once the lane starts, its independent **Text clipboard sharing is on.** window
+provides **Turn off** on this Windows machine. The host has its own local Off
+control. The window does not activate over the viewer; its independent
+supervisor fences clipboard publication if the window closes or stops
+responding. Turn off retires only this clipboard lane. Ordinary control can
+continue. Closing or minimizing the viewer fences the original clipboard
+immediately along with the existing input lifecycle. Switching to another
+application does not: the lane keeps running while control is paused, so a
+copy made there is offered to the host. Use **Turn off** when that is not
+wanted.
+
+The existing native adapter copies validated Unicode text in both directions,
+up to **1 MiB of UTF-8 per item**. It checks the local clipboard revision
+around reads and final publication, preserves source labels to suppress echoes,
+and discards superseded or expired work. Clipboard text remains in the bounded
+clipboard worker. It is never routed through keyboard synthesis or the local
+Send text editor; updating a clipboard does not paste into an application.
+
+Each command retains its original configured clipboard owner. Turn off,
+retirement, a viewing reconnect or a permitted resize cannot restart that owner
+or replay an earlier clipboard value. Start a new controlling command to
+enable sharing again. A replacement view still requires its own explicit
+**Input → Request control** choice for keyboard and pointer input.
+
+The completion JSON includes a `clipboard` object with `requested`,
+`configured`, historical `native_started`, `received_submitted`,
+`received_unknown`, `received_refused`, `cleanup`, and a typed content-free
+`reason`. The three receipt counters describe host-to-local publication:
+submitted to the Windows API, uncertain effect, or refused. Native startup
+does not claim publication. Counters survive Off, later failures and permitted
+viewing reopens; no text, clipboard item identifiers or revision values appear
+in the report.
+
+The session reaps clipboard, media and input owners under the original cleanup
+deadline before any reconnect. Pending native cleanup ends the command with a
+failure and prevents a replacement session. The original session thread keeps
+the same stopped owner until its native cleanup actually completes; a later
+completion cannot change the earlier failure into success.
+
+## Send files from the connected desktop
+
+Start a controlling viewer with `--control`, then open **File transfer → Pick
+and send one file…** after the host grants control. Choose one regular file in the
+native Windows dialog. The original session negotiates an optional file lane
+even without `--send`; no file is opened or read merely by connecting. A host
+that does not offer files leaves this action unavailable without preventing
+ordinary viewing and control.
+
+The native chooser runs on a separate thread so the viewer keeps presenting
+and servicing the original connection. Physical input stays local during the
+choice. Its result belongs to the original input source, view, connection
+attempt and window lifetime. A real view suspension/recovery, hidden window,
+close or replacement cancels the choice; a temporary compositor candidate gap
+does not invent a new view. The actual Send admission rechecks the original
+context after lock waits. There is no queued choice that becomes valid later.
+
+Focus can move between the viewer and its open file dialog. Switching to
+another application while the dialog is open cancels the choice and ends the
+original control grant (unlike a switch from the viewer itself).
+Returning does not restore that grant. A delayed dialog callback cannot hide
+or end control on a replacement connection, and sending also requires the
+original viewer to be back in the foreground after the dialog has closed.
+
+The dialog has one original two-minute budget. Its accepted native gesture has
+a further two-second bound covering native destruction, selected-handle
+preparation, worker collection and submission. Expiry discards the selection;
+it never reopens the path or retries with a fresh deadline. Native worker
+cleanup is checked separately from file selection. Closing the viewer gives
+that original cancelled worker a bounded collection interval; an unresolved
+or failed cleanup cannot count as successful completion or permit replacement.
+
+### Select the first file on the command line
+
+```powershell
+fr-windows view remote.example.ts.net --control --send 'C:\Users\me\Documents\draft.txt'
+fr-windows view --control --send 'C:\Users\me\Documents\Résumé final.txt'
+```
+
+`--send FILE` selects one regular file before the remote session starts. It
+requires `--control`, may appear once, and also works with the native machine
+chooser. The host must separately enable its existing file receiver with
+`frd run ... --files DIR`, alongside the host's normal control configuration.
+Linux, macOS and Windows hosts can enable regular-file receiving through that
+existing option. Directory uploads and drag-and-drop remain separate workflows.
+For files selected by the host operator, explicitly choose a local destination
+with `--receive DIR` as described below.
+
+The sender retains the selected read-only Windows handle and its actual file
+identity. It never reopens the source pathname during transfer. Conflicting
+writes and renames are denied while that original handle or its duplicates
+remain open. Directories, leaf reparse points, device namespaces, alternate
+streams and explicitly mapped network drives are refused. Ordinary relative
+paths resolve against the original working directory. The existing portable
+basename checks still apply; no remote-supplied path selects local content.
+
+No file contents are read until the host grants control and the original
+optional file attachment is ready. Hashing and reads use the existing bounded
+disk worker, ATP object protocol, quotas and session authorization. The host
+stages privately and publishes without overwriting an existing destination;
+a conflicting name is a refusal. The transfer does not open the received file.
+If the host does not negotiate files, ordinary viewing and control can still
+continue, and the upload reports that refusal.
+
+The native **File transfer** menu shows the current upload's state, queued
+bytes, host receipt and source-cleanup state. **Pause** and **Resume** change
+only that original upload's pacing; they do not extend its transfer deadline.
+**Cancel this upload** requests file-only cancellation and leaves the desktop
+connection running. Every command names the exact batch shown when its popup
+opened, so an old command cannot affect a newer selected file. Cancellation
+cannot retract a file the host already published, erase its receipt, or turn an
+uncertain result into success. A transport or authority failure can still end
+the containing session under its existing rules.
+
+A command admits at most nine explicit single-file selections, including an
+initial `--send`. After a batch finishes, **Pick and send one file…** becomes
+available again only if the original lane remains ready. Earlier publication
+receipts and failures remain in bounded history. A cancelled or failed batch
+is never silently repeated.
+
+A resize, Change display, Stop control or reconnect never sends a selection
+again. The menu and final report retain the original transfer evidence across
+a permitted viewing replacement; that replacement has no upload configured.
+Closing or minimizing an active controlled viewer also fences its original
+file work through the existing control lifecycle. Switching to another
+application retires an unsent file choice but leaves a started transfer
+running with the paused control grant.
+
+The completion JSON includes `upload` for a configured original upload owner
+and `null` for an observation-only command. It retains the current batch,
+bounded `batches` history, chooser result and chooser-cleanup outcome.
+Per-file fields include `selected_bytes`, `configured`, `phase`,
+`cancel_requested`, `queued_bytes`, `total_bytes`, `receipt`, `receipt_detail`,
+`published_bytes`, `cleanup`, `reason`, and `succeeded`.
+These fields contain no path, filename or contents. Queued bytes are not proof
+of host publication. Receipts distinguish durable host publication, publication
+with unknown durability, refusal, interruption before publication, and unknown
+publication. Every accepted explicit upload must have a durable host receipt
+and successful original source cleanup for the combined upload result to
+succeed. An interactive lane on which no file was selected adds no file-success
+requirement to the command. Successful video alone cannot make a refused or
+unfinished upload look successful.
+
+File cleanup shares the original session cleanup deadline. If that deadline
+expires, the command fails and no replacement session starts. The original
+session thread retains the stopped file owner and nonblockingly collects it
+when its actual worker returns. Later collection cannot repair the earlier
+failure or supply a new transfer deadline.
+
+## Receive files selected by the host
+
+Select an existing private directory on this Windows machine when starting a
+controlling viewer:
+
+```powershell
+fr-windows view remote.example.ts.net --control --receive 'C:\Users\me\FrankenRemoteDrop'
+fr-windows view --control --receive 'C:\Users\me\FrankenRemoteDrop' --receive-conflict keep-both
+fr-windows view --control --send 'C:\Users\me\Documents\draft.txt' --receive 'C:\Users\me\FrankenRemoteDrop'
+```
+
+The host operator separately selects the files. On a configured Linux or macOS
+host, add `--once --send /absolute/path/to/report.pdf` to the normal
+`frd run ... --input-agent PATH` command. A Windows host uses its own
+`--once --control --send FILE` options. Linux and macOS hosts can also use
+their existing local `--send-control` endpoint for later explicit selections.
+See [native downloads](../NATIVE_FILE_DOWNLOAD.md) for those host commands.
+
+`--receive DIR` requires `--control` and may appear once. The selected directory
+is opened before the remote session begins and retained by its original native
+handle. It must already exist on an ordinary local drive, belong to the current
+user, and have a DACL that prevents other users from writing to it. Reparse
+points, traversal and UNC/device paths are refused with a typed, content-free
+error. Renaming the path after selection cannot redirect the transfer. No
+directory is created automatically and the viewer never opens a received file.
+
+The first receive slice accepts regular files, including empty files. Directory
+trees are refused before staging by the existing Windows receiver. Files stage
+privately and are published atomically without replacing an existing destination.
+The default conflict policy is `reject`; `--receive-conflict keep-both` uses the
+receiver's bounded alternate-name policy while retaining the original file.
+
+The default limits are 268,435,456 bytes per file (256 MiB) and 1,073,741,824
+declared bytes per session (1 GiB). Override them with
+`--receive-max-file-bytes N` and `--receive-max-session-bytes N`. Both values
+must be positive decimal integers; the session limit must be at least the file
+limit after applying defaults. These options require `--receive`. Admission
+also retains the existing 64-transfer session limit. Failed or cancelled
+transfers consume their original declared-byte allowance.
+
+The destination supplies independent file consent. Receiving starts only with
+the original live control authority and a positively negotiated download
+attachment. A host without that optional capability leaves viewing and control
+available and reports its receive refusal. Clipboard has its own consent and
+cancellation. Upload and download can run together when the host offers the
+existing duplex profile; retiring either direction cannot remove the framing
+capabilities still needed by the other.
+
+The native **Receive files** menu shows the original lane's state, staged bytes,
+published-file count, unconfirmed durability count and receiver-cleanup state.
+**Stop receiving files** stops that original receive permission without closing the
+desktop. It cannot undo an already published file, erase a receipt, request new
+control or approve a new destination. An old menu command still names the owner
+shown when that popup opened.
+
+A resize, Change display, Stop control, suspension or reconnect cannot approve
+this directory again. The original receive owner, cancellation and receipts
+remain available in the menu after a permitted viewing replacement; that new
+session has no receive destination. Starting another receive session requires
+a fresh explicit invocation. Native focus and control retirement retain their
+existing authority checks; returning to the window never replays a transfer.
+
+The completion JSON adds a `download` object for this explicit destination, or
+`null` when receiving was not requested. It contains `configured`, `phase`,
+`cancel_requested`, `cleanup`, a typed `reason`, a stable `reason_code`, current
+`progress`, bounded `receipts`, `results_truncated` and `succeeded`. Existing
+receipt `index`, `outcome` and `bytes` fields remain available. Additive `id`,
+`receipt` and `published_bytes` fields expose the original transfer ID and
+publication classification. Bytes and durability appear only when actual
+publication was observed; no paths, filenames or file contents enter this report.
+
+Fully staged bytes are not a publication receipt. A successful Windows rename
+keeps `outcome: locally_published` and adds
+`receipt: published_durability_unknown`, with `durable: false`, because crash
+durability is unconfirmed. That file was committed and must not be retried as
+though no file was saved. Refusals, cancellation and `publication_unknown` remain
+distinct. Staging all bytes, including a zero-byte file, does not establish
+publication.
+
+When receiving was requested, successful command completion also requires the
+original receive lane to end with confirmed cleanup and verified publication for
+every attempted file. A failure, unknown publication or truncated result set
+cannot become success. This does not claim crash durability or demand that the
+host select a particular number of files; permission without any host selection
+is allowed.
+
+Receive cleanup shares the session's original deadline. Pending or failed
+cleanup prevents replacement; late native collection cannot repair an earlier
+failure. Actual receipt evidence survives cancellation and cleanup failure.
 
 ## Explicit address constraints
 
@@ -261,6 +847,71 @@ It performs one bounded fetch, prints the shared directory JSON document, and
 exits successfully only when the host returned a listing. The host must enable
 directory service; its refusal remains visible in the result.
 
+## Decoder selection
+
+The viewer decodes HEVC with the Media Foundation transform that Windows
+provides. When the transform accepts this viewer's D3D11 device, decoding
+runs on the GPU (DXVA). Each decoded NV12 surface goes straight to the D3D11
+video processor that draws the window. Otherwise the same transform decodes
+on the CPU. Its NV12 pictures are copied into a small ring of GPU textures
+for the same presentation path.
+
+```text
+fr-windows view <machine> --decoder auto       # default: GPU when available
+fr-windows view <machine> --decoder hardware   # GPU or refuse
+fr-windows view <machine> --decoder software   # CPU decode
+```
+
+`--decoder hardware` refuses at decoder setup when the transform cannot use
+the GPU. It never falls back. The completion document's `dxva` field reports
+what the session used: `1` for GPU decode, `0` for CPU decode and `-1` when
+no decoder was opened.
+
+The HEVC transform is part of Microsoft's HEVC Video Extensions (or the
+device manufacturer's equivalent), not of every Windows installation. Without
+it, the session ends at decoder setup, and the app's status line offers the
+Store page.
+
+Live on 2026-11-16 on one Surface Laptop 3 (Windows 11, Intel Iris Plus,
+150% scaling), viewing a macOS host's 5120x2880 display as a 2008x1128
+picture for 15 seconds per run:
+
+| Decoder | Pictures drawn | Mean decode | Frame interval p50 / p95 / p99 |
+|---|---|---|---|
+| `hardware` (`dxva: 1`) | 705 | 0.55 ms | 16 / 32 / 47 ms |
+| `software` (`dxva: 0`) | 708 | 10.5 ms | 16 / 32 / 47 ms |
+
+These are single runs on one machine (a hardware measurement, not a
+qualification). The CPU row shows that this processor keeps up at this
+picture size. Larger pictures or slower processors will cost proportionally
+more CPU time.
+
+## HEVC decoder requirements
+
+The viewer requires the system HEVC decoder to return each admitted frame's
+own NV12 picture synchronously. A missing picture, delayed picture belonging
+to an earlier frame, incomplete output or unexpected native event fails the
+current decoder through the existing typed error path. It cannot advance the
+reference chain or report an older picture as a newly decoded frame. Native
+samples carry the original frame ID for ownership checking, independently of
+capture timestamps; capture times and freshness deadlines remain unchanged.
+
+Output types must retain the admitted coded dimensions or visible crop.
+Buffer requests are checked before allocation, including their required
+alignment. The per-picture NV12 budget allows rows padded to 512-byte
+boundaries and heights padded to 64-line boundaries; returned texture arrays
+are limited to 16 surfaces with a valid slice. Larger requests, changed
+geometry and oversized returned memory are refused. These checks also apply
+when the decoder renegotiates its output type.
+
+The CPU path keeps the same one-input, one-picture contract. Microsoft's
+software decoder completes a picture only when the next access unit starts,
+so the viewer ends each CPU-decoded access unit with an HEVC access unit
+delimiter (NAL type 35). Each picture is then returned for its own input,
+with no extra delay. The GPU path sends access units unchanged. Caller-allocated
+output buffers may be contiguous rather than two-dimensional. Those are read
+with the negotiated output stride, and the same row and length bounds apply.
+
 ## Local capture probe
 
 ```text
@@ -273,17 +924,109 @@ interactive session and prints counts and timings.
 
 ## Validation scope
 
+The Windows receive integration adds actual-source portable regressions in
+`crates/frd/tests/windows_client_download.rs` for one-session destination
+ownership, registration refusal, pre-start cancellation, original cleanup failure
+and publication evidence. The existing Windows clipboard/offer and upload
+targets exercise optional download/duplex composition and independent capability
+retirement; `fr-windows` parser tests cover destination consent and byte/conflict
+policy. Additional regressions cover setup refusal before disk-worker creation,
+retention of the first cleanup failure, original receipt bounds and independently
+retired file capabilities. See [implementation status](../IMPLEMENTATION_STATUS.md)
+for the current check results. Native Windows DACL, menu, focus and filesystem
+behavior still require an actual Windows desktop transfer; source review and
+portable tests do not establish that qualification.
+
+For the native host-shaped cursor slice (`fr-s6qi`), the actual
+`cargo test --locked -p fr-windows --bin fr-windows` run passed all 117 portable
+tests, including alpha premultiplication, mask padding, original-display
+scaling, hotspot bounds, tiny downscales and rejected geometry. Strict
+bin/tests Clippy also passed. The actual mobile library passed ten bounded
+cursor-exchange tests, including request replacement, configuration changes
+during preparation, nonblocking contention, generation exhaustion, original
+stop/cleanup fencing and numerically identical requests belonging to distinct
+owners. These are portable policy tests, not native Windows observations.
+
+The actual native cursor, image preparation, renderer and overlay source
+passed a narrow Windows GNU target check and strict Clippy against pinned
+`windows` 0.62.2 bindings. A separate compile-only check of the UI cursor
+manager used the real exchange/native modules with fixture declarations for
+the surrounding session/frame/lifetime APIs; it checks those local types and
+borrows, not complete viewer integration or behavior. The full native
+viewer/session dependency build remains blocked by compiler memory limits in
+this environment. Native cursor creation/assignment/destruction, live GPU
+handoff and focus/resize behavior still require a Windows desktop run.
+
+`cargo test --locked -p fr-mobile-ffi --lib` passes ten portable decoder-policy
+regressions with the pinned toolchain, covering original frame ownership,
+missing/incomplete output, geometry, allocation bounds, alignment and readable
+luma rows. A Windows-only real HEVC regression additionally checks distinct
+frame ownership when capture timestamps are identical and exceed signed
+native timestamp range. That new native regression has not run on a Windows
+desktop; portable checks do not qualify decoder or GPU behavior.
+
 `cargo test -p fr-mobile-ffi --test build_roots --locked` exercises the actual
 build-time PEM parser, byte bounds and wrong-certificate rejection on every
 build host. With `FR_MOBILE_ISRG_ROOTS_DIR` set to the two public local roots,
 add `-- --ignored` to check both published pins and reject swaps and changed
 certificate bytes. This never uses a live host or changes runtime trust.
 
+Portable machine-picker lifecycle regressions live in
+`crates/fr-windows/src/host_picker.rs`. They cover exact original identity,
+one-use selection, empty and invalid rows, cancellation after Connect, queued
+event freshness and timestamp wrap, clock regression, original-deadline
+expiry through setup and cleanup, and repeated selection/show attempts.
+The actual package's 85 portable tests and strict all-target Clippy passed with
+the pinned toolchain after integration with the explicit Windows uploader.
+The real window, cancellation ordering and blocked or failed native
+destruction still require Windows desktop qualification.
+
+For focus continuity (`fr-o26d`), the package's 106 portable tests and strict
+all-target Clippy passed with the pinned toolchain. The new regressions cover
+positive original cleanup, failed/late cleanup, long disconnected dormancy,
+exclusive foreground/opening deadlines, stale callback/attempt identity,
+repeated activation without deadline renewal, close/expiry cancellation and
+the shared replacement limit. The exact original-grant claim policy is also
+tested for a stopped source and a prior explicit close. An additional actual
+controlled-session regression fences through an independent lifecycle handle
+while the original producer mutex is held, then checks queued input and the
+original orderly-close ledger.
+
+The repository's actual render and geometry modules also passed a narrow
+Windows GNU target compile and strict Clippy check against their existing
+Windows bindings. This checked the D3D11 clear API boundary; it did not run the
+native viewer or GPU. Real application switching, covered-window presentation,
+held-key cleanup, host reapproval and explicit control reacquisition still need
+Windows desktop qualification. Portable policy and boundary compile checks do
+not establish those native observations.
+
 Portable command-line regressions live in
 `crates/fr-windows/src/options.rs`. Installed target selection and named-route
 compatibility regressions live in
 `crates/fr-mobile-ffi/src/session/connection/tests.rs`. The exact address
 selector's metadata, fresh-read and renewal regressions live in `fr-tailnet`.
+
+Clipboard policy regressions cover the default and explicit opt-out, optional
+clipboard/Text composition with legacy-host negotiation, initial invisibility
+versus actual visibility loss, publication-result retention, and cleanup
+states that must prevent a replacement. The production Win32 owner and its
+native cleanup protocol are shared with the Windows host. Cross-target build
+checks exercise the actual client wiring. Bidirectional copies, real
+clipboard managers, the independent Off window and blocked native teardown
+still require Windows desktop qualification; portable tests do not establish
+those OS observations.
+
+Earlier native evidence is retained separately: revision `1dc02ae3` was run
+on 2026-11-14 as a Windows viewer on `oldsurface` controlling the X11 host on
+`ts2` at `dd06a4ae` for 75 seconds. The controller's pre-session text reached
+the host, the host's pre-session text stayed local, new copies crossed in
+both directions, and Turn off blocked later copies while ordinary control
+continued. One host-to-Windows copy arrived in about 0.5 seconds in that run.
+The `fr-p2-shared-clipboard-wgd` bead records the run and limits: an X11 input
+agent built without clipboard support never started the lane, and stopping
+the lane emptied its Xvfb-owned selection without a clipboard manager. This
+earlier run does not qualify the subsequent retained-cleanup changes, other
+Windows clipboard managers, or an iOS or macOS host clipboard implementation.
 
 The native editor's portable whole-value and one-use-context regressions live
 in `crates/fr-windows/src/text.rs` and compile on every host, including Linux.

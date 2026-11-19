@@ -13,8 +13,11 @@
 //! browsing, synchronization or picker UI. Native copy drops can submit fresh
 //! selections on the original upload intake. Status retains actual publication
 //! separately from progress, refusal and cleanup, without names or contents.
+#[cfg(not(windows))]
 use crate::sys::rustix;
+#[cfg(not(windows))]
 use crate::sys::rustix::fs::{Mode, OFlags};
+#[cfg(not(windows))]
 use crate::sys::unix::fs::{MetadataExt, PermissionsExt};
 use fr_files::{
     receive::{DropDirectory, Limits as DirectoryLimits},
@@ -74,6 +77,9 @@ pub enum DirectoryRefusal {
     Symlink,
     NotOwned,
     WritableByOthers,
+    /// The Windows path contains a reparse point, or the actual directory
+    /// has an untrusted owner or writable DACL.
+    Unsafe,
     Limits,
     Unavailable,
 }
@@ -86,6 +92,7 @@ impl DirectoryRefusal {
             Self::Symlink => "files_directory_symlink",
             Self::NotOwned => "files_directory_not_owned",
             Self::WritableByOthers => "files_directory_writable_by_others",
+            Self::Unsafe => "files_directory_unsafe",
             Self::Limits => "files_limits_invalid",
             Self::Unavailable => "files_directory_unavailable",
         }
@@ -109,11 +116,11 @@ impl fmt::Debug for Directory {
     }
 }
 impl Directory {
-    /// Accept only an existing absolute directory, owned by this effective
-    /// user, not group/other-writable, reached without any symbolic link.
-    /// The typed classification uses `lstat`; `DropDirectory::open` then
-    /// re-checks ownership and mode on the pinned no-follow descriptor, so a
-    /// swap between the two is refused rather than trusted.
+    /// Accept an existing absolute directory owned by this user, inaccessible
+    /// to other writers, reached without links or reparse points. Windows
+    /// validates the actual pinned handle and its DACL in `DropDirectory`;
+    /// no Unix metadata approximation or second pathname walk grants access.
+    /// Unix first classifies the path, then rechecks the pinned descriptor.
     pub fn open(path: &Path, limits: Limits) -> Result<Self, DirectoryRefusal> {
         if limits.max_file_bytes == 0 || limits.max_session_bytes < limits.max_file_bytes {
             return Err(DirectoryRefusal::Limits);
@@ -121,28 +128,31 @@ impl Directory {
         if !path.is_absolute() {
             return Err(DirectoryRefusal::Relative);
         }
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(DirectoryRefusal::Missing);
-            }
-            Err(_) => return Err(DirectoryRefusal::Unavailable),
-        };
-        if metadata.file_type().is_symlink()
-            || path.ancestors().skip(1).any(|parent| {
-                std::fs::symlink_metadata(parent).is_ok_and(|m| m.file_type().is_symlink())
-            })
+        #[cfg(not(windows))]
         {
-            return Err(DirectoryRefusal::Symlink);
-        }
-        if !metadata.is_dir() {
-            return Err(DirectoryRefusal::NotDirectory);
-        }
-        if metadata.uid() != rustix::process::geteuid().as_raw() {
-            return Err(DirectoryRefusal::NotOwned);
-        }
-        if metadata.permissions().mode() & 0o022 != 0 {
-            return Err(DirectoryRefusal::WritableByOthers);
+            let metadata = match std::fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(DirectoryRefusal::Missing);
+                }
+                Err(_) => return Err(DirectoryRefusal::Unavailable),
+            };
+            if metadata.file_type().is_symlink()
+                || path.ancestors().skip(1).any(|parent| {
+                    std::fs::symlink_metadata(parent).is_ok_and(|m| m.file_type().is_symlink())
+                })
+            {
+                return Err(DirectoryRefusal::Symlink);
+            }
+            if !metadata.is_dir() {
+                return Err(DirectoryRefusal::NotDirectory);
+            }
+            if metadata.uid() != rustix::process::geteuid().as_raw() {
+                return Err(DirectoryRefusal::NotOwned);
+            }
+            if metadata.permissions().mode() & 0o022 != 0 {
+                return Err(DirectoryRefusal::WritableByOthers);
+            }
         }
         let directory = DropDirectory::open(
             path,
@@ -154,9 +164,19 @@ impl Directory {
             },
         )
         .map_err(|error| match error {
-            fr_files::receive::Error::UnsafeRoot => DirectoryRefusal::NotOwned,
+            fr_files::receive::Error::UnsafeRoot => {
+                if cfg!(windows) {
+                    DirectoryRefusal::Unsafe
+                } else {
+                    DirectoryRefusal::NotOwned
+                }
+            }
             fr_files::receive::Error::InvalidLimits => DirectoryRefusal::Limits,
             fr_files::receive::Error::InvalidRoot => DirectoryRefusal::Relative,
+            fr_files::receive::Error::Io(io::ErrorKind::NotFound) => DirectoryRefusal::Missing,
+            fr_files::receive::Error::Io(io::ErrorKind::NotADirectory) => {
+                DirectoryRefusal::NotDirectory
+            }
             _ => DirectoryRefusal::Unavailable,
         })?;
         Ok(Self { directory, limits })
@@ -237,6 +257,8 @@ struct Selected {
     file: File,
     name: String,
     kind: SelectedKind,
+    #[cfg(windows)]
+    identity: fr_winsys::fs::FileIdentity,
 }
 /// The user's explicit local selection: open regular-file/directory descriptors and
 /// their portable basenames (the host name is the final path component,
@@ -263,7 +285,10 @@ impl Selection {
     /// racing FIFO cannot block us). Require the descriptor to retain its
     /// classified type and identity. No file content or directory is read here;
     /// tree traversal, structural bounds, link rejection and hashing run on the
-    /// sender's bounded disk thread only after control is granted.
+    /// sender's bounded disk thread only after control is granted. Windows
+    /// instead selects one disk handle without write/delete sharing,
+    /// validates its real type/identity, and refuses directories and reparse
+    /// points; its Unix-compatible dev/ino placeholders are never evidence.
     pub fn select(paths: &[PathBuf]) -> Result<Self, SelectRefusal> {
         if paths.is_empty() || paths.len() > MAX_SENDS {
             return Err(SelectRefusal {
@@ -274,6 +299,7 @@ impl Selection {
         let mut files: Vec<Selected> = Vec::with_capacity(paths.len());
         for (index, path) in paths.iter().enumerate() {
             let refuse = |reason| SelectRefusal { index, reason };
+            #[cfg(not(windows))]
             let before = match std::fs::symlink_metadata(path) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -281,10 +307,13 @@ impl Selection {
                 }
                 Err(_) => return Err(refuse(SelectReason::Unreadable)),
             };
+            #[cfg(not(windows))]
             let kind = before.file_type();
+            #[cfg(not(windows))]
             if kind.is_symlink() {
                 return Err(refuse(SelectReason::Symlink));
             }
+            #[cfg(not(windows))]
             if !kind.is_file() && !kind.is_dir() {
                 return Err(refuse(SelectReason::SpecialFile));
             }
@@ -296,17 +325,33 @@ impl Selection {
             if files.iter().any(|selected| selected.name == name) {
                 return Err(refuse(SelectReason::DuplicateName));
             }
-            let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-            if kind.is_dir() {
-                flags |= OFlags::DIRECTORY;
-            }
-            let file = File::from(
-                rustix::fs::open(path, flags, Mode::empty())
-                    .map_err(|_| refuse(SelectReason::Unreadable))?,
-            );
+            #[cfg(not(windows))]
+            let file = {
+                let mut flags =
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+                if kind.is_dir() {
+                    flags |= OFlags::DIRECTORY;
+                }
+                File::from(
+                    rustix::fs::open(path, flags, Mode::empty())
+                        .map_err(|_| refuse(SelectReason::Unreadable))?,
+                )
+            };
+            #[cfg(windows)]
+            let (file, identity) = fr_winsys::fs::select_file(path).map_err(|error| {
+                use fr_winsys::fs::FileSelectionError;
+                refuse(match error {
+                    FileSelectionError::Path => SelectReason::NotPortable,
+                    FileSelectionError::Directory => SelectReason::Directory,
+                    FileSelectionError::Reparse => SelectReason::Symlink,
+                    FileSelectionError::SpecialFile => SelectReason::SpecialFile,
+                    FileSelectionError::Unavailable => SelectReason::Unreadable,
+                })
+            })?;
             let after = file
                 .metadata()
                 .map_err(|_| refuse(SelectReason::Unreadable))?;
+            #[cfg(not(windows))]
             if after.file_type() != kind
                 || (after.dev(), after.ino()) != (before.dev(), before.ino())
             {
@@ -315,11 +360,13 @@ impl Selection {
             files.push(Selected {
                 file,
                 name: name.to_owned(),
-                kind: if kind.is_dir() {
+                kind: if after.is_dir() {
                     SelectedKind::Directory
                 } else {
                     SelectedKind::File(after.len())
                 },
+                #[cfg(windows)]
+                identity,
             });
         }
         Ok(Self { files })
@@ -351,6 +398,10 @@ impl Selection {
                 .file
                 .try_clone()
                 .map_err(|_| refuse(SelectReason::Unreadable))?;
+            #[cfg(windows)]
+            if fr_winsys::fs::selected_file_identity(&file) != Ok(selected.identity) {
+                return Err(refuse(SelectReason::Changed));
+            }
             let queued = match selected.kind {
                 SelectedKind::File(_) => selection.push(file, &selected.name),
                 SelectedKind::Directory => selection.push_directory(file, &selected.name),

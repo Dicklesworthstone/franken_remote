@@ -32,12 +32,17 @@ pub struct Policy {
     pub join_timeout: Duration,
     pub send: SendPolicy,
 }
+/// The first viewer's whole source budget: display selection, attachments
+/// and decoder startup up to its first picture. Separate from
+/// [`Policy::join_timeout`], which keeps bounding each late join at 2 s.
+pub const FIRST_VIEW_TIMEOUT: Duration = crate::media::decoder_startup::MAX_STARTUP;
+
 impl Default for Policy {
     fn default() -> Self {
         Self {
             viewers: 3,
             join_timeout: Duration::from_secs(2),
-            send: SendPolicy::default(),
+            send: crate::media::decoder_startup::host_send_policy(),
         }
     }
 }

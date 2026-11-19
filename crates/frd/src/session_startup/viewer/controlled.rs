@@ -78,14 +78,26 @@ impl From<presentation::Error> for Error {
 pub struct ViewerControl {
     cx: Cx,
     stopped: Arc<AtomicBool>,
+    // Irreversible local input admission fence. Unlike emergency stop, this
+    // leaves the original bounded network turn available for orderly close.
+    input_fenced: Arc<AtomicBool>,
 }
 impl ViewerControl {
+    /// Permanently refuse new and queued input while the original owner
+    /// completes its existing orderly close. This lock-free fence neither
+    /// cancels that close's I/O nor grants a replacement any input authority.
+    pub fn fence_for_close(&self) {
+        self.input_fenced.store(true, Ordering::Release);
+    }
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.cx.cancel_fast(CancelKind::User);
     }
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire) || self.cx.is_cancel_requested()
+    }
+    fn input_fenced(&self) -> bool {
+        self.input_fenced.load(Ordering::Acquire)
     }
 }
 struct Pending {
@@ -215,6 +227,7 @@ impl ViewerSession {
         let control = ViewerControl {
             cx: self.cx.clone(),
             stopped: Arc::new(AtomicBool::new(false)),
+            input_fenced: Arc::new(AtomicBool::new(false)),
         };
         let viewport = input.viewport();
         Ok(ControlledViewer {
@@ -503,6 +516,12 @@ impl ControlledViewer {
         let ready = self.input.tick(t)?;
         self.publish_text_context(ready, t)?;
         self.abandon_if_suspended(t)?;
+        if self.control.input_fenced() {
+            // Retire captured payloads and never-admitted bytes, retaining the
+            // original action ledger for terminal receipts/unknown effects.
+            self.events = None;
+            self.pending = None;
+        }
         if let Some(events) = &mut self.events {
             let input = &self.input;
             events
@@ -548,6 +567,9 @@ impl ControlledViewer {
     }
     fn slot(&mut self) -> Result<ClientInstant, Error> {
         let t = self.check()?;
+        if self.control.input_fenced() {
+            return Err(Error::Closed);
+        }
         if self.pending.is_some() {
             return Err(Error::Backpressure);
         }
@@ -670,6 +692,10 @@ impl ControlledViewer {
                 }
             }
         }
+        if self.control.input_fenced() {
+            self.pending = None;
+            return Ok(());
+        }
         if let Some(p) = &self.pending {
             let view = std::cell::Cell::new(None);
             let admission = {
@@ -685,6 +711,12 @@ impl ControlledViewer {
                     p.until,
                     || maintenance_gate(&mut input.borrow_mut(), &self.control, cx, &view),
                     || {
+                        // The native close can race this final, per-record
+                        // admission after its encoding/allocation. Refuse only
+                        // this never-admitted input; keep terminal I/O alive.
+                        if self.control.input_fenced() {
+                            return Err(Error::Closed);
+                        }
                         let t = ClientInstant(now(cx)?);
                         input
                             .borrow_mut()
@@ -696,6 +728,11 @@ impl ControlledViewer {
             };
             match admission {
                 Ok(quic::SendAdmission::Accepted) => self.pending = None,
+                Ok(quic::SendAdmission::Refused(Error::Closed))
+                    if self.control.input_fenced() && !self.control.is_stopped() =>
+                {
+                    self.pending = None;
+                }
                 Ok(quic::SendAdmission::Refused(error)) => {
                     if self.input.suspended_since().is_some() && self.input.stopped().is_none() {
                         self.abandon_if_suspended(t)?;
@@ -942,6 +979,7 @@ impl ControlledViewer {
             if wait > Duration::from_millis(100) {
                 return Err(Error::Session(super::Error::InvalidConfiguration));
             }
+            operation.viewer.reconcile_acknowledgements().await?;
             // Check the file setup horizon without sampling the input clock.
             // Clipboard permission/service advances that same input clock, so
             // tick's timestamp must be obtained AFTER clipboard servicing.
@@ -1020,6 +1058,34 @@ impl ControlledViewer {
             viewer.step(&mut result, &mut other)?;
             operation.complete = true;
             Ok(())
+        }
+    }
+
+    /// Read only already-queued ACK evidence before synchronous optional-owner
+    /// and input maintenance. The original control/view gate is mandatory and
+    /// no input, clipboard, file, or microphone payload is sent by this turn.
+    pub(super) async fn reconcile_acknowledgements(&mut self) -> Result<(), Error> {
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        let view = std::cell::Cell::new(None);
+        let cx = self.session.cx.clone();
+        let result = self
+            .session
+            .reconcile_acknowledgements(|| {
+                self.microphone.permits_io()
+                    && self.files.permits_io()
+                    && self
+                        .clipboard
+                        .as_ref()
+                        .is_none_or(crate::clipboard_quic::Bridge::permits_io)
+                    && self.clipboard_setup.permits_io()
+                    && maintenance_gate(&mut self.input, &self.control, &cx, &view)
+            })
+            .await;
+        match result {
+            Err(super::Error::Transport(error)) => Err(gated(error, view.take())),
+            result => result.map_err(Error::Session),
         }
     }
 }

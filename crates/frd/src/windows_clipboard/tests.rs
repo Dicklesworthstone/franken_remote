@@ -12,12 +12,16 @@ use std::{
 /// The Win32 clipboard as the owner sees it: the number is checked once
 /// open, a write is five changes (empty, set, three synthesized formats).
 #[derive(Default)]
+// Encoding, ownership and cleanup faults are independently injected.
+#[allow(clippy::struct_excessive_bools)]
 struct Board {
     sequence: u32,
     text: Option<String>,
     /// Native calls of any kind.
     calls: usize,
     closed: usize,
+    cleanup_pending: bool,
+    cleanup_failed: bool,
     /// Another program copies this between the owner's last look and the
     /// write's open.
     race: Option<&'static str>,
@@ -126,6 +130,15 @@ impl Native for Fake {
 
     fn close(&mut self) {
         self.0.borrow_mut().closed += 1;
+    }
+
+    fn poll_close(&mut self) -> Option<Result<(), Failure>> {
+        let board = self.0.borrow();
+        (!board.cleanup_pending).then_some(if board.cleanup_failed {
+            Err(Failure::Cleanup)
+        } else {
+            Ok(())
+        })
     }
 }
 
@@ -415,4 +428,112 @@ fn close_closes_the_window_once_and_never_touches_the_text() {
     drop(clipboard);
     assert_eq!(fake.0.borrow().closed, 1);
     assert_eq!(fake.text().as_deref(), Some("local"));
+}
+
+#[test]
+fn pending_cleanup_fences_native_access_without_repeating_close() {
+    let fake = Fake::default();
+    fake.copy("local");
+    let mut clipboard = owner(&fake, |_| true);
+    clipboard.watch().unwrap();
+    clipboard.prepare("remote", stamp(1)).unwrap();
+    fake.0.borrow_mut().cleanup_pending = true;
+    let calls = fake.calls();
+    for _ in 0..3 {
+        assert_eq!(clipboard.poll_close(), None);
+        assert!(clipboard.changes().is_err());
+        assert!(clipboard.watch().is_err());
+        assert_eq!(
+            clipboard.publish_until("remote", stamp(1), UNTIL),
+            Publication::NotSubmitted(PlatformError::Unavailable)
+        );
+    }
+    assert_eq!(fake.calls(), calls);
+    assert_eq!(fake.0.borrow().closed, 1);
+    fake.0.borrow_mut().cleanup_pending = false;
+    assert_eq!(clipboard.poll_close(), Some(Ok(())));
+    assert_eq!(clipboard.poll_close(), Some(Ok(())));
+    assert_eq!(fake.0.borrow().closed, 1);
+    assert_eq!(fake.text().as_deref(), Some("local"));
+}
+
+#[test]
+fn native_cleanup_error_reaches_the_original_clipboard_owner() {
+    let fake = Fake::default();
+    fake.0.borrow_mut().cleanup_failed = true;
+    let mut clipboard = owner(&fake, |_| true);
+    assert_eq!(clipboard.poll_close(), Some(Err(Error::Cleanup)));
+    assert_eq!(clipboard.poll_close(), Some(Err(Error::Cleanup)));
+    assert_eq!(fake.0.borrow().closed, 1);
+}
+
+fn completed(cleanup: &mut CleanupThread) -> Result<(), Failure> {
+    let until = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(result) = cleanup.poll() {
+            return result;
+        }
+        assert!(Instant::now() < until, "original supervisor did not finish");
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn supervisor_poll_retains_the_original_thread_until_it_exits() {
+    let (release, wait) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _ = wait.recv();
+        true
+    });
+    let mut cleanup = CleanupThread::new(worker);
+    let pending = cleanup.poll();
+    let retained = cleanup.worker.is_some();
+    // Release before assertions so a failed assertion cannot strand the test's
+    // intentionally held original thread in its retaining Drop.
+    release.send(()).unwrap();
+    assert_eq!(pending, None);
+    assert!(retained);
+    assert_eq!(completed(&mut cleanup), Ok(()));
+    assert_eq!(cleanup.poll(), Some(Ok(())));
+    assert!(cleanup.worker.is_none());
+}
+
+#[test]
+fn supervisor_failure_and_panic_cannot_become_success_after_join() {
+    for panicked in [false, true] {
+        let worker = std::thread::spawn(move || {
+            assert!(!panicked, "controlled supervisor panic");
+            false
+        });
+        let mut cleanup = CleanupThread::new(worker);
+        assert_eq!(completed(&mut cleanup), Err(Failure::Cleanup));
+        assert_eq!(cleanup.poll(), Some(Err(Failure::Cleanup)));
+        assert!(cleanup.worker.is_none());
+    }
+}
+
+#[test]
+fn dropped_supervisor_owner_keeps_custody_until_original_thread_exits() {
+    let (release, wait) = std::sync::mpsc::channel();
+    let (dropping, started) = std::sync::mpsc::channel();
+    let (finished, ended) = std::sync::mpsc::channel();
+    let owner = std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
+            let _ = wait.recv();
+            true
+        });
+        let cleanup = CleanupThread::new(worker);
+        dropping.send(()).unwrap();
+        drop(cleanup);
+        finished.send(()).unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let while_native_pending = ended.recv_timeout(Duration::from_millis(20));
+    release.send(()).unwrap();
+    assert_eq!(
+        while_native_pending,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    );
+    ended.recv_timeout(Duration::from_secs(2)).unwrap();
+    owner.join().unwrap();
 }

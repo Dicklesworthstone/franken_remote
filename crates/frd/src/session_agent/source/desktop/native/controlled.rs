@@ -502,7 +502,7 @@ fn configure_clipboard(
     #[cfg(windows)]
     let configuration = {
         let _ = (profile, cx);
-        crate::native_clipboard::Configuration::new_with_guard(
+        crate::native_clipboard::Configuration::new_with_guard_and_cleanup(
             true,
             Duration::from_secs(2),
             crate::windows_clipboard::factory(),

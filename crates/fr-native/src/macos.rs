@@ -23,6 +23,7 @@ pub(crate) use crate::macos_text::Commit as TextCommit;
 pub(crate) const TEXT_COMPOSER_FLAG: u32 = 16;
 pub(crate) const FILE_SELECTION_FLAG: u32 = 32;
 pub(crate) const AUDIO_FLAG: u32 = 64;
+pub(crate) const STOP_CONTROL_FLAG: u32 = 128;
 
 /// A consumed native slot, including a locally refused gesture. A native error
 /// is separate because it must fence the original owner before native cleanup.
@@ -120,8 +121,12 @@ unsafe extern "C" {
         muted: *mut c_int,
         changed: *mut c_int,
     ) -> c_int;
-    fn fr_mac_window_display_change_enabled(window: *mut c_void, enabled: c_int) -> c_int;
-    fn fr_mac_window_take_display_change(window: *mut c_void, captured: *mut f64) -> c_int;
+    fn fr_mac_window_reopen_enabled(window: *mut c_void, display: c_int, control: c_int) -> c_int;
+    fn fr_mac_window_take_reopen(
+        window: *mut c_void,
+        action: *mut u32,
+        captured: *mut f64,
+    ) -> c_int;
     fn fr_mac_window_text_update(
         window: *mut c_void,
         context: u64,
@@ -327,8 +332,13 @@ pub enum WindowEvent {
     },
     /// The user asked to close the window. It stays open until dropped.
     CloseRequested,
-    /// Keyboard focus left the window: held remote keys must be released.
+    /// The window was minimized or hidden, or its session became unavailable:
+    /// held remote keys must be released, and control ends.
     FocusLost,
+    /// Another window or app took keyboard focus, or the window was covered or
+    /// moved to another Space. Held remote keys must be released; a grant
+    /// pauses until the window is key and visible again.
+    FocusPaused,
     FocusGained,
     /// Events arrived faster than they were polled and some were lost.
     Overflow,
@@ -562,21 +572,35 @@ impl Window {
         let volume = u8::try_from(volume).map_err(|_| NativeError::Unavailable)?;
         Ok((changed != 0).then_some((volume, muted != 0)))
     }
-    pub(crate) fn display_change_enabled(&self, enabled: bool) -> Result<(), NativeError> {
-        // SAFETY: live window on its owning main thread; a bounded local flag.
+    pub(crate) fn reopen_enabled(&self, display: bool, control: bool) -> Result<(), NativeError> {
+        // SAFETY: live window on its owning main thread; bounded local flags.
         status(unsafe {
-            fr_mac_window_display_change_enabled(self.raw.as_ptr(), c_int::from(enabled))
+            fr_mac_window_reopen_enabled(
+                self.raw.as_ptr(),
+                c_int::from(display),
+                c_int::from(control),
+            )
         })
     }
-    pub(crate) fn take_display_change(&self) -> Result<Option<Duration>, NativeError> {
+    pub(crate) fn take_reopen(
+        &self,
+    ) -> Result<Option<(crate::macos_switch::Action, Duration)>, NativeError> {
+        let mut action = 0;
         let mut captured = 0.0;
-        // SAFETY: live main-thread window and one writable scalar output.
-        status(unsafe { fr_mac_window_take_display_change(self.raw.as_ptr(), &raw mut captured) })?;
-        if captured == 0.0 {
+        // SAFETY: live main-thread window and two writable scalar outputs.
+        status(unsafe {
+            fr_mac_window_take_reopen(self.raw.as_ptr(), &raw mut action, &raw mut captured)
+        })?;
+        if action == 0 && captured == 0.0 {
             return Ok(None);
         }
+        let action =
+            crate::macos_switch::Action::from_native(action).ok_or(NativeError::Unavailable)?;
+        if captured <= 0.0 {
+            return Err(NativeError::Unavailable);
+        }
         Duration::try_from_secs_f64(captured)
-            .map(Some)
+            .map(|captured| Some((action, captured)))
             .map_err(|_| NativeError::Unavailable)
     }
     /// One original producer per window; a new grant cannot reuse native serials.
@@ -848,6 +872,10 @@ impl Window {
                 events.push(WindowEvent::FocusLost);
             }
             10 => events.push(WindowEvent::FocusGained),
+            11 => {
+                self.modifiers = Modifiers::default();
+                events.push(WindowEvent::FocusPaused);
+            }
             _ => {}
         }
     }
@@ -1239,7 +1267,12 @@ impl HevcDecoder {
         let sample = admission
             .prepare_hvc1(unit.bytes(), idr)
             .map_err(|_| NativeError::UnsupportedBitstream)?;
-        let pts = i64::try_from(unit.capture_micros()).unwrap_or(i64::MAX);
+        // Positive original-frame identity, never a saturating/repeated capture
+        // clock. The native output gate matches this token before publication.
+        let pts = i64::try_from(unit.frame().as_raw())
+            .ok()
+            .and_then(|frame| frame.checked_add(1))
+            .ok_or(NativeError::StaleGeneration)?;
         let bytes = sample.bytes();
         // SAFETY: the admitted sample lives for this synchronous call and the
         // glue copies it into a CoreMedia block buffer before decoding.

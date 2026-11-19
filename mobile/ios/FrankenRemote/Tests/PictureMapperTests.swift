@@ -154,4 +154,85 @@ final class PictureMapperTests: XCTestCase {
         XCTAssertTrue(m.reveal(edge, margin: 44))
         XCTAssertEqual(m.pictureRect.maxX, m.content.maxX, accuracy: 1e-6)
     }
+
+    func testScaledPictureUsesOneOriginalDisplayRectangleForImageInputAndCursor() throws {
+        let m = PictureMapper(viewSize: CGSize(width: 1582, height: 888),
+                              picture: CGSize(width: 1582, height: 888),
+                              display: CGSize(width: 5120, height: 2880))
+        let image = CGRect(x: 2, y: 0, width: 1578, height: 888)
+        XCTAssertEqual(m.imageBounds, image)
+        XCTAssertEqual(m.imageRect, image)
+        XCTAssertNil(m.toPicture(CGPoint(x: 1, y: 444)))
+        XCTAssertNil(m.toPicture(CGPoint(x: 1580, y: 444)))
+        XCTAssertEqual(m.toPicture(CGPoint(x: 2, y: 444)), CGPoint(x: 2, y: 444))
+
+        let cursor = try XCTUnwrap(m.picturePoint(forDisplay: CGPoint(x: 2560, y: 1440)))
+        XCTAssertEqual(cursor, CGPoint(x: 791, y: 444))
+        let shape = try XCTUnwrap(m.cursorRect(
+            at: cursor, size: CGSize(width: 64, height: 32), hotspot: CGPoint(x: 8, y: 4)))
+        XCTAssertEqual(shape.width, 64 * 1578.0 / 5120, accuracy: 1e-9)
+        XCTAssertEqual(shape.height, 32 * 888.0 / 2880, accuracy: 1e-9)
+        XCTAssertEqual(shape.minX + 8 * 1578.0 / 5120, m.toView(cursor).x, accuracy: 1e-9)
+        XCTAssertEqual(shape.minY + 4 * 888.0 / 2880, m.toView(cursor).y, accuracy: 1e-9)
+        XCTAssertLessThan(shape.width, 64, "a source cursor is not an encoded-size cursor")
+    }
+
+    func testScaledPictureZoomAndPanKeepTheInputAnchorAndImageVisible() throws {
+        var m = PictureMapper(viewSize: CGSize(width: 800, height: 500),
+                              picture: CGSize(width: 1582, height: 888),
+                              display: CGSize(width: 5120, height: 2880))
+        let anchor = CGPoint(x: 500, y: 300)
+        let before = try XCTUnwrap(m.toPicture(anchor))
+        m.zoom(by: 3, at: anchor)
+        let after = try XCTUnwrap(m.toPicture(anchor))
+        XCTAssertEqual(after.x, before.x, accuracy: 1e-6)
+        XCTAssertEqual(after.y, before.y, accuracy: 1e-6)
+        for direction in [CGFloat(1), -1] {
+            m.pan(by: CGVector(dx: direction * 100_000, dy: direction * 100_000))
+            XCTAssertFalse(m.imageRect.intersection(m.content).isEmpty)
+            let visible = m.visiblePicture
+            XCTAssertTrue(m.containsPicture(CGPoint(x: visible.midX, y: visible.midY)))
+        }
+    }
+
+    func testExtremeAspectRatioCannotPanTheActualImageOutOfView() {
+        var m = PictureMapper(viewSize: CGSize(width: 400, height: 600),
+                              picture: CGSize(width: 500, height: 2),
+                              display: CGSize(width: 8192, height: 64))
+        XCTAssertEqual(m.imageBounds, CGRect(x: 122, y: 0, width: 256, height: 2))
+        XCTAssertEqual(m.imageRect.width, 400, accuracy: 1e-9)
+        m.setZoom(1000, at: CGPoint(x: 200, y: 300))
+        for direction in [CGFloat(1), -1] {
+            m.pan(by: CGVector(dx: direction * 100_000, dy: direction * 100_000))
+            let visible = m.imageRect.intersection(m.content)
+            XCTAssertFalse(visible.isNull)
+            XCTAssertFalse(visible.isEmpty)
+            XCTAssertEqual(visible.width, 400, accuracy: 1e-6)
+            let pixels = m.visiblePicture
+            XCTAssertTrue(m.containsPicture(CGPoint(x: pixels.midX, y: pixels.midY)))
+        }
+    }
+
+    func testFrameUpdatesPreserveZoomButMissingOrChangedDisplayRetiresGeometry() {
+        var m = PictureMapper(viewSize: CGSize(width: 400, height: 800),
+                              picture: CGSize(width: 640, height: 358),
+                              display: CGSize(width: 1365, height: 767))
+        XCTAssertEqual(m.imageBounds, CGRect(x: 1, y: 0, width: 637, height: 358))
+        m.setPicture(m.picture, display: m.display, frame: 10)
+        m.setZoom(3, at: CGPoint(x: 200, y: 400))
+        let center = m.center
+        m.setPicture(m.picture, display: m.display, frame: 11)
+        XCTAssertEqual(m.frame, 11)
+        XCTAssertEqual(m.zoom, 3)
+        XCTAssertEqual(m.center, center)
+        m.setPicture(m.picture, display: .zero, frame: 12)
+        XCTAssertFalse(m.isReady)
+        XCTAssertNil(m.toPicture(CGPoint(x: 200, y: 400)))
+        XCTAssertNil(m.picturePoint(forDisplay: CGPoint(x: 100, y: 100)))
+        m.setPicture(CGSize(width: 640, height: 358))
+        XCTAssertEqual(m.frame, 0)
+        XCTAssertEqual(m.display, m.picture, "legacy native geometry remains exact")
+        XCTAssertEqual(m.imageBounds, CGRect(x: 0, y: 0, width: 640, height: 358))
+    }
+
 }

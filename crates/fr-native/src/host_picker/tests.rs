@@ -13,6 +13,7 @@ fn shared(started: Instant, mapped: bool) -> Arc<Shared> {
             mapped,
             window: None,
             choice: None,
+            choices: None,
             joined: false,
         }),
     })
@@ -23,6 +24,34 @@ fn complete(control: &Control) {
     while !control.is_complete() {
         assert!(Instant::now() < deadline, "original worker did not join");
         thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn choices_cross_the_native_boundary_as_three_bits_only() {
+    for bits in 0..8 {
+        let choices = Choices::from_bits(bits).unwrap();
+        assert_eq!(choices.bits(), bits);
+    }
+    assert_eq!(Choices::from_bits(8), None);
+    assert_eq!(Choices::from_bits(NO_CHOICES), None);
+    let choices = Choices {
+        control: true,
+        clipboard: false,
+        choose_display: true,
+    };
+    assert_eq!(choices.bits(), 5);
+}
+
+#[test]
+fn an_invalid_notice_is_refused_before_any_window_opens() {
+    let rows = [Row::new("alpha.tail.example", "n-alpha", PathHint::Direct).unwrap()];
+    for notice in ["", "tab\there", "\u{e9}", &"x".repeat(MAX_NOTICE + 1)] {
+        assert_eq!(
+            HostPicker::start_with(":0", &rows, Some(Choices::default()), Some(notice)).err(),
+            Some(Error::InvalidNotice),
+            "{notice:?}"
+        );
     }
 }
 

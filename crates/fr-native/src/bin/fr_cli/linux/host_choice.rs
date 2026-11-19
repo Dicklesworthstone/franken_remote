@@ -2,7 +2,9 @@
 //! The immutable displayed identity is re-resolved by the existing connector.
 use super::{Cell, Connection, Cx, Failure, LocalApi, Runtime, Shutdown, failure, tailnet};
 use crate::{
-    host_choice::{cancelled, catalog, invalid_snapshot, selected_report, validate},
+    host_choice::{
+        Choices, cancelled, catalog, invalid_snapshot, notice, selected_report, validate,
+    },
     saved_hosts::Selection,
 };
 #[cfg(test)]
@@ -43,7 +45,18 @@ pub(super) fn select(
         ));
     }
     let rows = rows(&catalog)?;
-    let mut picker = HostPicker::start(&display, &rows).map_err(|_| unavailable())?;
+    let initial = Choices::initial(connection);
+    let mut picker = HostPicker::start_with(
+        &display,
+        &rows,
+        initial.map(|choices| host_picker::Choices {
+            control: choices.control,
+            clipboard: choices.clipboard,
+            choose_display: choices.choose_display,
+        }),
+        notice(connection),
+    )
+    .map_err(|_| unavailable())?;
     let result = runtime.block_on(shutdown.run(cx, stopped, wait(cx, &mut picker)));
     // Cancellation fences the local choice immediately. The independent join
     // receipt, including failed-open paths, precedes any remote session owner.
@@ -58,8 +71,20 @@ pub(super) fn select(
         return Err(cancelled());
     }
     let candidate = catalog.get(result?).map_err(|_| invalid_snapshot())?;
+    // Choices were offered exactly when this is a picker request.
+    let confirmed = picker.choices().map(|choices| Choices {
+        control: choices.control,
+        clipboard: choices.clipboard,
+        choose_display: choices.choose_display,
+    });
+    if confirmed.is_some() != initial.is_some() {
+        return Err(unavailable());
+    }
     let selected = Selection::from_candidate(candidate, connection.target.port);
-    print!("{}", selected_report(candidate, selected.port, json));
+    print!(
+        "{}",
+        selected_report(candidate, selected.port, json, confirmed)
+    );
     Ok(selected)
 }
 

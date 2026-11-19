@@ -84,8 +84,11 @@ fn selection_report_is_identity_metadata_without_a_readiness_or_authority_claim(
     )
     .unwrap();
     let report: serde_json::Value =
-        serde_json::from_str(&selected_report(&choice, 9443, true)).unwrap();
+        serde_json::from_str(&selected_report(&choice, 9443, true, None)).unwrap();
     assert_eq!(report["event"], "host_selected");
+    for absent in ["control", "clipboard", "choose_display"] {
+        assert!(report.get(absent).is_none());
+    }
     assert_eq!(report["node_id"], "n-first");
     assert_eq!(report["certificate_name"], "alpha.fixture.ts.net");
     assert_eq!(report["port"], 9443);
@@ -102,4 +105,28 @@ fn selection_report_is_identity_metadata_without_a_readiness_or_authority_claim(
     ] {
         assert!(report.get(absent).is_none());
     }
+}
+
+#[test]
+fn picker_request_reports_the_confirmed_choices_with_the_identity() {
+    let choice = Candidate::new(
+        "n-mac".into(),
+        "mac.fixture.ts.net".into(),
+        PathHint::Direct,
+    )
+    .unwrap();
+    let choices = Choices {
+        control: false,
+        clipboard: true,
+        choose_display: true,
+    };
+    let report: serde_json::Value =
+        serde_json::from_str(&selected_report(&choice, 8443, true, Some(choices))).unwrap();
+    assert_eq!(report["node_id"], "n-mac");
+    assert_eq!(report["control"], false);
+    assert_eq!(report["clipboard"], true);
+    assert_eq!(report["choose_display"], true);
+    assert_eq!(report["input_requested"], false);
+    let text = selected_report(&choice, 8443, false, Some(choices));
+    assert!(text.contains("view only") && text.contains("clipboard not shared"));
 }

@@ -77,15 +77,19 @@ fn install(cursor: &mut ViewerCursor) {
 
 #[test]
 fn redraw_services_actual_quic_and_coalesces_new_cursor_positions() {
-    scenario(false);
+    scenario(false, false);
 }
 #[test]
 fn redraw_services_reference_expiry_and_the_original_recovery_request() {
-    scenario(true);
+    scenario(true, false);
+}
+#[test]
+fn redraw_rechecks_negotiated_binding_before_admitting_cached_pixels() {
+    scenario(false, true);
 }
 
 #[allow(clippy::too_many_lines)]
-fn scenario(lose_picture: bool) {
+fn scenario(lose_picture: bool, stale_cursor_binding: bool) {
     run(move |c, h| async move {
         let cleanup = Cx::current().unwrap();
         let mut capabilities: Vec<_> = [
@@ -189,6 +193,33 @@ fn scenario(lose_picture: bool) {
         install(stream.cursor.as_mut().unwrap());
         let worker = stream.worker_id();
         let before = stream.statistics();
+        if stale_cursor_binding {
+            // Model a retained snapshot from another binding while the real
+            // negotiated media remains authoritative. Even before any network
+            // turn, apply_cursor must discard its pixels/position. The native
+            // fixture sleeps on overlay work, so an admitted old redraw would
+            // necessarily service network turns while waiting for that work.
+            let cursor = stream.cursor.as_mut().unwrap();
+            cursor.lanes.view.recovery = cursor.lanes.view.recovery.next().unwrap();
+            stream
+                .apply_cursor(&c, &mut |_| {}, &mut |_, _| Ok(Disposition::Blocked))
+                .await
+                .unwrap();
+            let cursor = stream.cursor.as_ref().unwrap();
+            assert_eq!(cursor.remote.confirmed(), Confirmed::Unknown);
+            assert_eq!(cursor.remote.installed, None);
+            assert_eq!(stream.statistics().network_turns, before.network_turns);
+            assert_eq!(stream.worker_id(), worker);
+            stream
+                .reap_media(
+                    &cleanup,
+                    Deadline::after(&cleanup, Duration::from_secs(1)).unwrap(),
+                )
+                .await
+                .unwrap();
+            host.close();
+            return;
+        }
         if lose_picture {
             let n = encode_progress(
                 Progress {
