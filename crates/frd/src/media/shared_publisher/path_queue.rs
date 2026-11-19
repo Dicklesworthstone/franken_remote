@@ -20,6 +20,11 @@
 //! that waited arrive in bursts (a 50 ms interval measured ten times a 1 Mbit/s
 //! link), so the rate is what was delivered over the busy time of the last one
 //! to two seconds, each packet counted once whenever its ACK arrived.
+//!
+//! A longer route (a relay instead of a direct path) also raises the round
+//! trip, but it does not drain. So once a path drains, the lowest round trip
+//! over the next two is its route: the first packets sent into an empty queue
+//! come back near the old baseline unless the route itself grew.
 
 use fr_transport::quic::PathLoad;
 
@@ -36,8 +41,8 @@ pub(super) const RISE_US: u64 = QUEUE_LIMIT_US / 3;
 pub(super) const DRAINED_BYTES: u64 = 4 * 1200;
 /// A path whose round trip never came within the limit of its lowest sample
 /// for a whole window of this length has a longer route now (a relay), not a
-/// queue: a queued path drains, and shows its own delay, every time capture
-/// waits for it. A longer route is a queue for one to two windows.
+/// queue. The drain probe normally finds the route first; this window covers
+/// a path that never drains.
 pub(super) const BASELINE_WINDOW_US: u64 = 5_000_000;
 /// Bytes counted per acknowledged packet. Video datagrams fill their packets,
 /// and they are what a congested path carries.
@@ -57,6 +62,8 @@ pub(super) struct PathQueue {
     base_us: Option<u64>,
     /// When the current baseline window started, and its lowest sample.
     window: Option<(u64, u64)>,
+    /// Since the path last drained: when the probe ends, and its lowest sample.
+    probe: Option<(u64, u64)>,
     /// The previous sample: when, packets acknowledged by then, and whether
     /// the path was busy.
     last: Option<(u64, u64, bool)>,
@@ -77,7 +84,9 @@ impl PathQueue {
         };
         let rtt = load.latest_rtt_us;
         let busy = load.bytes_in_flight > DRAINED_BYTES;
+        let drained = !busy && self.last.is_some_and(|(_, _, was_busy)| was_busy);
         let base = self.baseline(rtt, now);
+        let base = self.adopt_route(drained, base, rtt, now);
         self.measure(load, busy, now);
         let rate = self.rate();
         let limit = base.saturating_add(QUEUE_LIMIT_US);
@@ -102,6 +111,28 @@ impl PathQueue {
         }
         self.base_us = Some(base);
         base
+    }
+    /// Adopt a longer route once the round trips just after a drain were all
+    /// past the limit; returns the baseline to judge this sample by.
+    fn adopt_route(&mut self, drained: bool, base: u64, rtt: u64, now: u64) -> u64 {
+        if drained && self.probe.is_none() {
+            self.probe = Some((now.saturating_add(rtt.saturating_mul(2)), rtt));
+        }
+        let Some((until, lowest)) = self.probe else {
+            return base;
+        };
+        let lowest = lowest.min(rtt);
+        if now < until {
+            self.probe = Some((until, lowest));
+            return base;
+        }
+        self.probe = None;
+        if lowest <= base.saturating_add(QUEUE_LIMIT_US) {
+            return base;
+        }
+        self.base_us = Some(lowest);
+        self.window = Some((now, rtt));
+        lowest
     }
     fn measure(&mut self, load: PathLoad, busy: bool, now: u64) {
         self.rotate(now);
@@ -223,6 +254,42 @@ mod tests {
         assert!(path.queued(), "the window's low sample kept the baseline");
         path.observe(Some(load(400_000, FULL)), 3 * BASELINE_WINDOW_US);
         assert!(!path.queued(), "the next window had none");
+    }
+
+    #[test]
+    fn a_drained_path_that_stays_slow_has_a_longer_route() {
+        let mut path = PathQueue::default();
+        path.observe(Some(load(5_000, FULL)), 0);
+        // The route grows by 200 ms; capture waits for the path to drain.
+        path.observe(Some(load(205_000, FULL)), 10_000);
+        assert!(path.queued());
+        path.observe(Some(load(205_000, 0)), 20_000);
+        assert!(!path.queued());
+        path.observe(Some(load(206_000, FULL)), 200_000);
+        assert!(
+            path.queued(),
+            "judged by the old route until the probe ends"
+        );
+        path.observe(Some(load(205_500, FULL)), 430_000);
+        assert!(!path.queued(), "every sample after the drain was slow");
+        path.observe(Some(load(205_500 + QUEUE_LIMIT_US + 1, FULL)), 440_000);
+        assert!(path.queued(), "the new route still bounds the queue");
+    }
+
+    #[test]
+    fn a_drained_path_that_answers_fast_had_a_queue() {
+        let mut path = PathQueue::default();
+        path.observe(Some(load(5_000, FULL)), 0);
+        path.observe(Some(load(700_000, FULL)), 10_000);
+        assert!(path.queued());
+        path.observe(Some(load(700_000, 0)), 20_000);
+        // The first packet sent into the drained queue.
+        path.observe(Some(load(9_000, FULL)), 100_000);
+        path.observe(Some(load(400_000, FULL)), 1_420_000);
+        assert!(
+            path.queued(),
+            "a fast sample after the drain kept the baseline"
+        );
     }
 
     /// A path measured delivering 10 packets per 100 ms: 120 KB/s.

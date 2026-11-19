@@ -92,6 +92,16 @@ fn media(completion: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
+/// The decoded-picture count in [`media`]'s counters.
+fn decoded_pictures(media: &str) -> Option<u64> {
+    let start = media.find("\"decoded\":")? + "\"decoded\":".len();
+    media[start..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
 const STEPS: usize = 8;
 
 fn row(delay_ms: u32, loss_percent: f32, rate_kbit: u32) -> Row {
@@ -262,13 +272,15 @@ while True:
 /// media counters. `busy` rapid intermediate host changes (never near a
 /// measured colour) precede each measured change, so loss actually hits video.
 /// `noise` runs [`NOISE`] on the host from 2 s before the link is impaired
-/// until the measured changes are done.
+/// until the measured changes are done. `hold` keeps the impaired link that
+/// long before the first measured change.
 fn view_row(
     delay_ms: u32,
     loss_percent: f32,
     rate_kbit: u32,
     busy: i32,
     noise: bool,
+    hold: Duration,
 ) -> (usize, Vec<Duration>, Option<String>, Option<String>) {
     use super::real_control::Daemon;
     use super::real_media::{
@@ -317,6 +329,7 @@ fn view_row(
         thread::sleep(Duration::from_secs(2));
     }
     let netem = Netem::apply(delay_ms, loss_percent, rate_kbit);
+    thread::sleep(hold);
     let mut times = Vec::new();
     let mut ended = None;
     for step in 0..6 {
@@ -387,7 +400,7 @@ fn view_only_session_under_namespace_delay_and_loss() {
         .chain(limits.iter().map(|&(d, l, r)| (d, l, r, false)))
     {
         let (steps, mut times, ended, repaired) =
-            view_row(delay_ms, loss_percent, rate_kbit, 0, false);
+            view_row(delay_ms, loss_percent, rate_kbit, 0, false, Duration::ZERO);
         times.sort();
         let rate = if rate_kbit == 0 {
             "unlimited".to_owned()
@@ -432,7 +445,8 @@ fn view_only_busy_screen_under_namespace_loss() {
     // held 13/13 on ts1, so it is required too. The printed-limit branch below
     // stays for rows that are not.
     for (delay_ms, loss_percent, required) in [(0, 0.0, true), (20, 1.0, true), (20, 5.0, true)] {
-        let (steps, mut times, ended, media) = view_row(delay_ms, loss_percent, 0, 10, false);
+        let (steps, mut times, ended, media) =
+            view_row(delay_ms, loss_percent, 0, 10, false, Duration::ZERO);
         times.sort();
         let line = format!(
             "delay {delay_ms} ms (RTT {} ms) loss {loss_percent}% busy: changes shown {steps}/6, median {:?}, max {:?}, media {media:?}, ended {ended:?}",
@@ -471,7 +485,7 @@ fn view_only_incompressible_content_over_a_narrow_link() {
     // expired behind them. With it, 48 of 48 held at load 11-37. One large
     // change picture still queues for about 0.7 s at 1 Mbit/s.
     for (rate_kbit, required) in [(3000, true), (2000, false), (1000, true), (800, true)] {
-        let (steps, mut times, ended, media) = view_row(3, 0.0, rate_kbit, 0, true);
+        let (steps, mut times, ended, media) = view_row(3, 0.0, rate_kbit, 0, true, Duration::ZERO);
         times.sort();
         let line = format!(
             "rate {rate_kbit} kbit/s, noise window: changes shown {steps}/6, median {:?}, max {:?}, media {media:?}, ended {ended:?}",
@@ -492,4 +506,38 @@ fn view_only_incompressible_content_over_a_narrow_link() {
             );
         }
     }
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; tc netem on the namespace loopback"]
+fn view_only_session_whose_route_lengthens_keeps_its_pictures() {
+    // A busy view (the noise window) whose round trip grows from the clean
+    // link's to 120 ms, or to 300 ms, as on a switch from a direct path to a
+    // relay, then holds there for 8 s. A longer route is not a queue, so
+    // capture must not wait for it (path_queue.rs). Found only by its
+    // baseline window, the 300 ms route was a queue for 5-10 s: 73-79
+    // pictures decoded against 160 at 120 ms (trj); with the drain probe
+    // 156-157, and 163-171 with no queue gate at all.
+    let mut decoded = Vec::new();
+    for delay_ms in [60, 150] {
+        let (steps, mut times, ended, media) =
+            view_row(delay_ms, 0.0, 0, 0, true, Duration::from_secs(8));
+        times.sort();
+        let pictures = media.as_deref().and_then(decoded_pictures);
+        let line = format!(
+            "RTT {} ms, noise window, 8 s hold: changes shown {steps}/6, median {:?}, decoded {pictures:?}, ended {ended:?}",
+            2 * delay_ms,
+            times.get(times.len() / 2)
+        );
+        println!("VIEW ROUTE {line}");
+        assert!(
+            steps == 6 && ended.is_none(),
+            "a longer route must hold: {line}"
+        );
+        decoded.push(pictures.expect("the held session reports its decoded pictures"));
+    }
+    assert!(
+        decoded[1] * 5 >= decoded[0] * 4,
+        "a 300 ms route must keep 4/5 of the 120 ms route's pictures: {decoded:?}"
+    );
 }
