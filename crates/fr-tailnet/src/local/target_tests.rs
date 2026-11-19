@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 fn verified() -> VerifiedTarget {
     let mut status: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/linux-1.102.3/status.json"
+        "../../tests/fixtures/linux-1.102.3/status.json"
     ))
     .unwrap();
     status["Self"]["DNSName"] = json!("local.fixture.ts.net.");
