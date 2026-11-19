@@ -3,9 +3,9 @@
 //! request at a time and owns at most one rule, removed when it ends.
 use super::{
     super::{
-        Leaf, SocketAddr, address_assigned, command, delete_table, install_script, interface_index,
-        interface_valid, net_admin, new_table, observe, protected, protected_executable, read_back,
-        table_exists, validate_rule,
+        Leaf, SocketAddr, address_assigned, both, command, delete_table, install_script,
+        interface_index, interface_valid, net_admin, new_table, observe, protected,
+        protected_executable, read_back, table_exists, validate_rule,
     },
     Install, MAX_REQUEST, Refusal, Request, Response, TABLE_PREFIX, decode_request,
     encode_response, owned_table,
@@ -403,7 +403,8 @@ impl Lifecycle {
         self.active = Some(Owned {
             generation,
             table: table.to_owned(),
-            index: 1,
+            // The namespace harness's synthetic `fr-fixture` interface.
+            index: 42,
             address: SocketAddr::from(([100, 64, 0, 1], 1)),
             protocols: super::Protocols::UDP,
             renewed: false,
@@ -494,18 +495,27 @@ impl Lifecycle {
             readback,
         })
     }
-    async fn renew(&mut self, shared: &Shared<'_>, generation: u64) -> Result<Response, Refusal> {
+    pub(super) async fn renew(
+        &mut self,
+        shared: &Shared<'_>,
+        generation: u64,
+    ) -> Result<Response, Refusal> {
         let (cx, settings) = (&shared.cx, shared.settings);
-        let address = self.current(generation)?.address;
-        let observed = Self::observe(shared).await?;
-        let index = check_assigned(settings, address.ip(), &observed)?;
         let owned = self.current(generation)?;
+        // The interface report and the table read are independent, so they
+        // run together: a renewal costs the slower read, not their sum, out of
+        // the broker's snapshot validity (fr-eny1). Both finish before either
+        // is judged, in the old order, so the refusal reason is unchanged.
+        let (observed, readback) = both(
+            Box::pin(Self::observe(shared)),
+            Box::pin(read_back(cx, &settings.nft, &owned.table)),
+        )
+        .await;
+        let index = check_assigned(settings, owned.address.ip(), &observed?)?;
         if index != owned.index {
             return Err(Refusal::InterfaceChanged);
         }
-        let readback = read_back(cx, &settings.nft, &owned.table)
-            .await
-            .map_err(|_| Refusal::FirewallFailed)?;
+        let readback = readback.map_err(|_| Refusal::FirewallFailed)?;
         validate_rule(
             &readback,
             &owned.table,

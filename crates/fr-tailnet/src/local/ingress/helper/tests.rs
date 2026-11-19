@@ -552,3 +552,91 @@ fn a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends() {
         ]
     );
 }
+
+/// A root-owned stand-in for both `ip` and `nft`. Its interface report answers
+/// only once the table read has started, so a renewal that ran the two in
+/// turn could never get one. In `fail` mode both reads exit 1.
+const FAKE_RENEW_TOOLS: &str = r"#!/usr/bin/python3
+import json, pathlib, sys, time
+root = pathlib.Path(__file__).parent
+assert pathlib.Path('/run/fr-synthetic-ingress').read_text() == 'synthetic-only\n'
+fail = (root / 'mode').read_text() == 'fail'
+args = sys.argv[1:]
+if args == ['-j', 'address', 'show', 'dev', 'fr-fixture']:
+    deadline = time.monotonic() + 0.9
+    while not (root / 'table-read').exists():
+        if time.monotonic() > deadline:
+            raise SystemExit(3)
+        time.sleep(0.005)
+    if fail:
+        raise SystemExit(1)
+    print(json.dumps([{'ifindex': 42, 'ifname': 'fr-fixture', 'addr_info': [{'local': '100.64.0.1'}]}]))
+elif args[:5] == ['-j', '-n', 'list', 'table', 'inet'] and len(args) == 6:
+    (root / 'table-read').write_text('1')
+    if fail:
+        raise SystemExit(1)
+    t = args[5]
+    expr = [
+        {'match': {'op': '==', 'left': {'payload': {'protocol': 'ip', 'field': 'daddr'}}, 'right': '100.64.0.1'}},
+        {'match': {'op': '==', 'left': {'payload': {'protocol': 'udp', 'field': 'dport'}}, 'right': 1}},
+        {'match': {'op': '!=', 'left': {'meta': {'key': 'iif'}}, 'right': 42}},
+        {'drop': None},
+    ]
+    print(json.dumps({'nftables': [
+        {'metainfo': {'json_schema_version': 1}},
+        {'table': {'family': 'inet', 'name': t, 'handle': 1}},
+        {'chain': {'family': 'inet', 'table': t, 'name': 'input', 'type': 'filter', 'hook': 'input', 'prio': -310, 'policy': 'accept'}},
+        {'rule': {'family': 'inet', 'table': t, 'chain': 'input', 'expr': expr}},
+    ]}))
+else:
+    raise SystemExit(2)
+";
+
+#[test]
+#[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
+fn a_renewal_reads_the_interface_and_the_table_together_and_judges_the_interface_first() {
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+    assert_eq!(
+        fs::read_to_string("/run/fr-synthetic-ingress").unwrap(),
+        "synthetic-only\n"
+    );
+    let dir = PathBuf::from(format!("/run/fr-helper-renew-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    for name in ["ip", "nft"] {
+        fs::write(dir.join(name), FAKE_RENEW_TOOLS).unwrap();
+        fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let settings = Settings::parse(
+        json!({"interface": "fr-fixture", "allowed_uids": [1000],
+            "nft": dir.join("nft"), "ip": dir.join("ip")})
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    let record = |_: Event| {};
+    let renew = |mode: &str| {
+        fs::write(dir.join("mode"), mode).unwrap();
+        let _ = fs::remove_file(dir.join("table-read"));
+        RuntimeBuilder::new()
+            .worker_threads(1)
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cx = Cx::current().unwrap();
+                let shared = Shared::new(&cx, &settings, &record);
+                let mut rule = Lifecycle::default();
+                rule.installed(7, TABLE);
+                rule.renew(&shared, 7).await
+            })
+    };
+    match renew("ok") {
+        Ok(Response::Renewed { generation: 7, .. }) => {}
+        other => panic!("renewal with overlapping reads: {other:?}"),
+    }
+    // Both reads fail: the table read still ran, and the interface's refusal
+    // is the one reported, as when the reads ran in turn.
+    assert_eq!(renew("fail"), Err(Refusal::InterfaceUnqualified));
+    assert!(dir.join("table-read").exists());
+}
