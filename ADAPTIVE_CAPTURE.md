@@ -500,9 +500,18 @@ The ignored native test
 `native_rate_capture_keeps_the_original_decoder_and_rate_dwell` exercises the
 real Windows adapter, independently admits its units, checks 8 to 4 Mbit/s and
 4 to 8 Mbit/s IDRs, rejects an over-ceiling target, and verifies dwell and legacy
-cancellation. It requires a logged-in Windows desktop and hardware HEVC, and has
-not run in this Linux session. Windows device behavior and impaired-path quality
-remain unqualified by the portable tests.
+cancellation. It requires a logged-in Windows desktop and hardware HEVC.
+
+On oldsurface (Intel HEVC transform, 2026-11-19) that test failed: the transform
+answers `IsModifiable(AVEncCommonMeanBitRate)` with `S_FALSE`, accepts
+`SetValue`, and still reads back the opening 8 Mbit/s, before and after the
+next IDR. The first cut therefore closed the capture owner (`Unavailable`).
+`WinCapture` now asks `IsModifiable` at its first rate-aware capture. A
+transform that cannot change its rate while streaming keeps every validated
+target deferred at the opening rate: no forced IDR and no property write, and
+each reply reports the unchanged rate. The test covers both kinds and passed
+there (`rate_fixed true`). Such a host gets no bitrate adaptation, only the
+capture gate. Impaired-path quality on Windows remains unmeasured.
 
 ## Software settle-to-sharp
 

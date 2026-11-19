@@ -19,7 +19,7 @@ use core::mem::ManuallyDrop;
 use std::sync::OnceLock;
 use std::thread::JoinHandle;
 use std::time::Instant;
-use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, VARIANT_TRUE};
+use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_OK, VARIANT_TRUE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
@@ -539,6 +539,16 @@ impl Encoder {
             VariantClear(&raw mut value).map_err(|_| NativeError::Unavailable)?;
             bitrate.ok_or(NativeError::Unavailable)
         }
+    }
+
+    /// Whether the transform says its mean bitrate can change while it
+    /// streams. oldsurface's Intel HEVC transform answers `S_FALSE`, and it
+    /// accepts a new value only to keep reading back the opening one.
+    pub fn rate_modifiable(&self) -> bool {
+        // SAFETY: a property query on the live transform.
+        self.codec.as_ref().is_some_and(|codec| unsafe {
+            codec.IsModifiable(&CODECAPI_AVEncCommonMeanBitRate) == S_OK
+        })
     }
 
     /// Set and read back the mean bitrate. The capture owner still requires

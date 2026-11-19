@@ -135,6 +135,9 @@ pub struct WinCapture {
     rate: Rate,
     /// Rate-aware IPC may report the opening target only after native readback.
     rate_checked: bool,
+    /// The transform cannot change its rate while streaming: every target
+    /// stays deferred at the opening rate instead of closing the capture.
+    rate_fixed: bool,
     statistics: CaptureStatistics,
     stages: StageTimes,
     /// Why the last unit was refused: the check and the NAL types it held.
@@ -251,6 +254,7 @@ impl WinCapture {
             ceiling_bitrate: bitrate,
             rate: Rate::new(bitrate),
             rate_checked: false,
+            rate_fixed: false,
             statistics: CaptureStatistics::default(),
             stages: StageTimes::default(),
             refusal: None,
@@ -265,6 +269,13 @@ impl WinCapture {
     #[must_use]
     pub const fn bitrate(&self) -> u32 {
         self.rate.applied_bitrate()
+    }
+
+    /// Known after the first rate-aware capture: the transform keeps its
+    /// opening rate, so every target stays deferred.
+    #[must_use]
+    pub const fn rate_fixed(&self) -> bool {
+        self.rate_fixed
     }
 
     /// Why the capture closed on a refused unit, if it did.
@@ -353,6 +364,13 @@ impl WinCapture {
                     return Err(NativeError::Unavailable);
                 }
                 self.rate_checked = true;
+                self.rate_fixed = !self.encoder.rate_modifiable();
+            }
+            if self.rate_fixed {
+                // The target was validated above. It never becomes due, so it
+                // neither forces an IDR nor reaches the transform, and every
+                // reply honestly reports the unchanged opening rate.
+                self.rate.request(self.bitrate());
             }
             self.capture_inner(frame, observed_micros, force_idr, only_if_changed)
         })();
@@ -596,14 +614,19 @@ mod tests {
             true,
         );
         assert_eq!(capture.bitrate(), 8_000_000);
+        // A transform that keeps its opening rate (oldsurface's Intel one)
+        // defers every target without an IDR instead of closing the capture.
+        let fixed = capture.rate_fixed();
+        eprintln!("rate_fixed {fixed}");
+        let low = if fixed { 8_000_000 } else { 4_000_000 };
         admit(
             capture
                 .capture_with_bitrate(FrameId::from_raw(2), 2, false, false, 4_000_000)
                 .unwrap(),
             2,
-            true,
+            !fixed,
         );
-        assert_eq!(capture.bitrate(), 4_000_000);
+        assert_eq!(capture.bitrate(), low);
         admit(
             capture
                 .capture_with_bitrate(FrameId::from_raw(3), 3, false, false, 2_000_000)
@@ -611,7 +634,7 @@ mod tests {
             3,
             false,
         );
-        assert_eq!(capture.bitrate(), 4_000_000);
+        assert_eq!(capture.bitrate(), low);
         assert!(matches!(
             capture.capture_with_bitrate(FrameId::from_raw(4), 4, true, false, 8_000_001),
             Err(NativeError::InvalidConfiguration)
@@ -626,13 +649,13 @@ mod tests {
             4,
             false,
         );
-        assert_eq!(capture.bitrate(), 4_000_000);
+        assert_eq!(capture.bitrate(), low);
         admit(
             capture
                 .capture_with_bitrate(FrameId::from_raw(5), 3_000_001, false, false, 8_000_000)
                 .unwrap(),
             5,
-            true,
+            !fixed,
         );
         assert_eq!(capture.bitrate(), 8_000_000);
     }
