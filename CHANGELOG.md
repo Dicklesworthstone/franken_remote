@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-11-18 — sharing indicators live in the menu bar and the notification area
+
+- macOS host, remote control and clipboard: each is now a template icon in
+  the menu bar (`cursorarrow.rays`, `doc.on.clipboard`), with a popover
+  holding its one Stop control. Before, each was a red 300-340 x 28 pill at
+  NSStatusWindowLevel, top center over every app, for the whole session.
+  The owner found them glaring and in the way.
+- The privacy rule is unchanged: the indicator must be showing (the status
+  item installed, visible and in a visible menu bar window), or the lease
+  ends. When another app is full screen and the menu bar slides away, the
+  item still counts, as the screen sharing item already did.
+- Only a local click stops anything. A click the input agent posted for the
+  remote controller never stops control or clipboard sharing.
+- Windows (viewer and host), clipboard sharing: a notification-area icon
+  (tooltip "text clipboard sharing is on"), whose menu turns it off. Before,
+  it was a 470 x 52 always-on-top window (twice that at 200% scaling) above
+  the taskbar, which could not be hidden.
+- The indicator's hidden window still owns the clipboard. `responsive()`
+  now means the icon is registered and its thread answers. The icon is
+  added again when Explorer restarts.
+- The Windows host's Stop sharing window is unchanged.
+
 ## 2026-11-18 — Mac hosts send 30 fps at 8 Mbit/s again
 
 - Both Mac installers (`install.sh` and `scripts/macos/install-host.sh`)

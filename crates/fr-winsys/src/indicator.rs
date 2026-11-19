@@ -2,8 +2,13 @@
 //! always-on-top window that tells the person at the machine the screen is
 //! shared, with a button that stops it (closing the window does too). It runs
 //! on its own thread with its own message loop, never takes focus when it
-//! appears, and shows no text from a peer. The same window, one row higher
-//! and with a Turn off button, says the controller shares the clipboard.
+//! appears, and shows no text from a peer.
+//!
+//! Clipboard sharing is shown subtly instead: an icon in the notification
+//! area (tooltip "text clipboard sharing is on"), whose menu (either click)
+//! has Turn off clipboard sharing. Its window stays hidden. It still owns the
+//! clipboard and answers [`Indicator::responsive`], which then means "the
+//! icon is in the notification area and its thread answers".
 use std::{
     cell::{Cell, RefCell},
     io, mem,
@@ -13,7 +18,8 @@ use std::{
 };
 use windows::Win32::{
     Foundation::{
-        ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+        ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT,
+        WPARAM,
     },
     Graphics::Gdi::{COLOR_BTNFACE, CreateFontIndirectW, HBRUSH, HFONT},
     System::LibraryLoader::GetModuleHandleW,
@@ -22,15 +28,22 @@ use windows::Win32::{
             DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
             SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
         },
+        Shell::{
+            NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+            NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+        },
         WindowsAndMessaging::{
-            BN_CLICKED, BS_PUSHBUTTON, CreateWindowExW, DefWindowProcW, DestroyWindow,
-            DispatchMessageW, GetMessageW, HMENU, HWND_TOPMOST, IDC_ARROW, IsWindowVisible,
-            LoadCursorW, MSG, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW,
+            AppendMenuW, BN_CLICKED, BS_PUSHBUTTON, CreatePopupMenu, CreateWindowExW,
+            DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos,
+            GetMessageW, HMENU, HWND_TOPMOST, IDC_ARROW, IDI_INFORMATION, IsWindowVisible,
+            LoadCursorW, LoadIconW, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, NONCLIENTMETRICSW,
+            PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
             SMTO_ABORTIFHUNG, SMTO_BLOCK, SPI_GETNONCLIENTMETRICS, SPI_GETWORKAREA,
             SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-            SendMessageTimeoutW, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow,
-            SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-            WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_NULL, WM_SETFONT, WNDCLASSEXW, WS_BORDER,
+            SendMessageTimeoutW, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW,
+            ShowWindow, SystemParametersInfoW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+            TrackPopupMenuEx, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE,
+            WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_NULL, WM_SETFONT, WNDCLASSEXW, WS_BORDER,
             WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
             WS_VISIBLE,
         },
@@ -40,6 +53,17 @@ use windows::core::{PCWSTR, w};
 
 /// Posted by [`Indicator::close`]: destroy the window without a stop.
 const CLOSE: u32 = WM_APP + 1;
+/// The notification-area icon's callback message.
+const TRAY_CALLBACK: u32 = WM_APP + 2;
+/// Sent by [`Indicator::responsive`] for an icon kind: 1 while it is shown.
+const QUERY_SHOWN: u32 = WM_APP + 3;
+/// The icon's id within its window, and its menu's Turn off item.
+const TRAY_ID: u32 = 1;
+const TURN_OFF_ITEM: usize = 10;
+/// Version 4 icon events (`NIN_SELECT`, `NIN_KEYSELECT`): a left click or
+/// Enter/Space on the icon.
+const NIN_SELECT: u32 = 0x400;
+const NIN_KEYSELECT: u32 = 0x401;
 const STOP_BUTTON: u16 = 1;
 const LABEL: u16 = 2;
 /// Layout at 96 DPI, scaled to the window's DPI.
@@ -58,12 +82,17 @@ pub enum Kind {
     View,
     /// The screen is shared and a viewer may control it.
     Control,
-    /// The controller shares the clipboard; Turn off ends that sharing. It
-    /// sits one row above the Stop sharing window.
+    /// The controller shares the clipboard; Turn off ends that sharing. A
+    /// notification-area icon with a menu, not a window on screen.
     Clipboard,
 }
 
 impl Kind {
+    /// Shown as a notification-area icon rather than a window.
+    const fn icon(self) -> bool {
+        matches!(self, Self::Clipboard)
+    }
+
     /// The label, the button, the label after a stop, the width at 96 DPI and
     /// the row counted up from the bottom of the work area.
     const fn layout(self) -> (PCWSTR, PCWSTR, PCWSTR, i32, i32) {
@@ -98,11 +127,16 @@ thread_local! {
     static ON_STOP: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
     /// The UI thread's window kind.
     static KIND: Cell<Kind> = const { Cell::new(Kind::View) };
+    /// The UI thread's notification-area icon is registered.
+    static ICON_SHOWN: Cell<bool> = const { Cell::new(false) };
+    /// Explorer's "TaskbarCreated" broadcast: the icon must be added again.
+    static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
 }
 
 /// The open window. Dropping it closes the window without a stop.
 pub struct Indicator {
     window: isize,
+    kind: Kind,
     thread: Option<JoinHandle<bool>>,
     closing: bool,
     result: Option<bool>,
@@ -193,6 +227,7 @@ impl Indicator {
                 }
                 Ok(Self {
                     window,
+                    kind,
                     thread: Some(thread),
                     closing: false,
                     result: None,
@@ -228,17 +263,23 @@ impl Indicator {
         self.window
     }
 
-    /// The UI thread answered a message within `timeout` and the window is
-    /// still shown: evidence the person can still see and press Stop.
+    /// The UI thread answered a message within `timeout` and the indicator
+    /// is still shown (the window, or for an icon kind the notification-area
+    /// icon): evidence the person can still see and press Stop or Turn off.
     pub fn responsive(&self, timeout: Duration) -> bool {
         let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
         let mut result = 0usize;
+        let message = if self.kind.icon() {
+            QUERY_SHOWN
+        } else {
+            WM_NULL
+        };
         // SAFETY: a message with no pointers to a window this owner created
         // and has not destroyed; a hung or gone thread returns 0.
         let answered = unsafe {
             SendMessageTimeoutW(
                 self.handle(),
-                WM_NULL,
+                message,
                 WPARAM(0),
                 LPARAM(0),
                 SMTO_ABORTIFHUNG | SMTO_BLOCK,
@@ -246,6 +287,9 @@ impl Indicator {
                 Some(&raw mut result),
             )
         };
+        if self.kind.icon() {
+            return answered.0 != 0 && result == 1;
+        }
         // SAFETY: a query of the same window.
         answered.0 != 0 && unsafe { IsWindowVisible(self.handle()) }.as_bool()
     }
@@ -383,8 +427,120 @@ fn create(kind: Kind) -> io::Result<HWND> {
             SWP_NOACTIVATE,
         )?;
         controls(window, instance, dpi, (width, height), kind)?;
-        let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+        if kind.icon() {
+            // The window stays hidden (it owns the clipboard and keeps the
+            // state); the person sees only the notification-area icon.
+            TASKBAR_CREATED.with(|id| id.set(RegisterWindowMessageW(w!("TaskbarCreated"))));
+            if let Err(error) = add_icon(window, instance) {
+                let _ = DestroyWindow(window);
+                return Err(error);
+            }
+        } else {
+            let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+        }
         Ok(window)
+    }
+}
+
+/// The text shown while hovering the icon (at most 127 characters).
+const ICON_TIP: &str = "FrankenRemote: text clipboard sharing is on. Click to turn it off.";
+const ICON_TIP_OFF: &str = "FrankenRemote: clipboard sharing is off.";
+
+fn icon_data(window: HWND) -> NOTIFYICONDATAW {
+    NOTIFYICONDATAW {
+        cbSize: u32::try_from(mem::size_of::<NOTIFYICONDATAW>()).unwrap_or(0),
+        hWnd: window,
+        uID: TRAY_ID,
+        ..Default::default()
+    }
+}
+
+fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
+    for (slot, unit) in data
+        .szTip
+        .iter_mut()
+        .zip(tip.encode_utf16().take(127).chain(std::iter::once(0)))
+    {
+        *slot = unit;
+    }
+}
+
+/// Add this window's notification-area icon: the application's own icon
+/// (resource 1) when it has one, else the system's information icon.
+fn add_icon(window: HWND, instance: HINSTANCE) -> io::Result<()> {
+    let mut data = icon_data(window);
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    data.uCallbackMessage = TRAY_CALLBACK;
+    // SAFETY: resource and stock icon loads; an integer name is
+    // MAKEINTRESOURCE(1), never dereferenced as a string.
+    data.hIcon = unsafe {
+        LoadIconW(Some(instance), PCWSTR(std::ptr::without_provenance(1)))
+            .or_else(|_| LoadIconW(None, IDI_INFORMATION))
+            .map_err(io::Error::from)?
+    };
+    set_tip(&mut data, ICON_TIP);
+    // SAFETY: a fully initialized structure naming this thread's own window.
+    unsafe {
+        if !Shell_NotifyIconW(NIM_ADD, &raw const data).as_bool() {
+            return Err(last_error());
+        }
+        data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+        let _ = Shell_NotifyIconW(NIM_SETVERSION, &raw const data);
+    }
+    ICON_SHOWN.with(|shown| shown.set(true));
+    Ok(())
+}
+
+fn remove_icon(window: HWND) {
+    if ICON_SHOWN.with(|shown| shown.replace(false)) {
+        let data = icon_data(window);
+        // SAFETY: deleting this thread's own icon by window and id.
+        let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &raw const data) };
+    }
+}
+
+/// The icon's menu, at the pointer: what is shared, and Turn off.
+fn icon_menu(window: HWND) {
+    // SAFETY: a popup menu owned and destroyed here, shown for this thread's
+    // own window; the menu loop runs on this thread and still answers
+    // messages sent to the window.
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return;
+        };
+        let stopped = ON_STOP.with(|stop| stop.borrow().is_none());
+        let status = if stopped {
+            w!("Clipboard sharing is off")
+        } else {
+            w!("Text clipboard sharing is on")
+        };
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, status);
+        if !stopped {
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                TURN_OFF_ITEM,
+                w!("Turn off clipboard sharing"),
+            );
+        }
+        let mut point = POINT::default();
+        let _ = GetCursorPos(&raw mut point);
+        // Required for a notification-area menu to close when clicked away.
+        let _ = SetForegroundWindow(window);
+        let chosen = TrackPopupMenuEx(
+            menu,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY).0,
+            point.x,
+            point.y,
+            window,
+            None,
+        );
+        let _ = PostMessageW(Some(window), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        if usize::try_from(chosen.0).ok() == Some(TURN_OFF_ITEM) {
+            stop(window);
+        }
     }
 }
 
@@ -500,7 +656,8 @@ fn pump() -> bool {
 fn stop(window: HWND) {
     if let Some(on_stop) = ON_STOP.with(|stop| stop.borrow_mut().take()) {
         on_stop();
-        let (_, _, stopped, _, _) = KIND.with(Cell::get).layout();
+        let kind = KIND.with(Cell::get);
+        let (_, _, stopped, _, _) = kind.layout();
         // SAFETY: a child of this thread's live window; a static string.
         unsafe {
             if let Ok(label) =
@@ -508,6 +665,13 @@ fn stop(window: HWND) {
             {
                 let _ = SetWindowTextW(label, stopped);
             }
+        }
+        if kind.icon() && ICON_SHOWN.with(Cell::get) {
+            let mut data = icon_data(window);
+            data.uFlags = NIF_TIP | NIF_SHOWTIP;
+            set_tip(&mut data, ICON_TIP_OFF);
+            // SAFETY: modifying this thread's own icon by window and id.
+            let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw const data) };
         }
     }
 }
@@ -529,14 +693,40 @@ extern "system" fn window_proc(
             stop(window);
             LRESULT(0)
         }
+        TRAY_CALLBACK => {
+            // Version 4: the event is the low word of lParam.
+            let event = u32::try_from(lparam.0 & 0xffff).unwrap_or(0);
+            if matches!(event, WM_CONTEXTMENU | NIN_SELECT | NIN_KEYSELECT) {
+                icon_menu(window);
+            }
+            LRESULT(0)
+        }
+        QUERY_SHOWN => LRESULT(isize::from(ICON_SHOWN.with(Cell::get))),
         CLOSE => {
+            remove_icon(window);
             // SAFETY: this thread's own window.
             let _ = unsafe { DestroyWindow(window) };
             LRESULT(0)
         }
         WM_DESTROY => {
+            remove_icon(window);
             // SAFETY: ends this thread's message loop.
             unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        // Explorer restarted: its notification area forgot the icon.
+        _ if message != 0
+            && message == TASKBAR_CREATED.with(Cell::get)
+            && ICON_SHOWN.with(|shown| shown.replace(false)) =>
+        {
+            // SAFETY: the module handle of this process.
+            let added = unsafe { GetModuleHandleW(PCWSTR::null()) }
+                .is_ok_and(|module| add_icon(window, module.into()).is_ok());
+            if !added {
+                // Not shown any more: responsive() now says so, and the
+                // owner stops clipboard sharing.
+                ICON_SHOWN.with(|shown| shown.set(false));
+            }
             LRESULT(0)
         }
         // SAFETY: default handling with the arguments Windows passed.

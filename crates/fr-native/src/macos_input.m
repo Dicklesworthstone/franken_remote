@@ -425,9 +425,13 @@ int fr_in_bind_parent(int32_t expected) {
 
 // ---- The control indicator -------------------------------------------------
 //
-// A small always-on-top panel at the top of the controlled display, shown for
-// the whole lease: the local user can see that the Mac is remotely
-// controlled and stop it with one click. Main thread only.
+// One template icon in the menu bar for the whole lease, not a panel over
+// the screen: the local user can see that the Mac is remotely controlled (or
+// that its clipboard is shared) and stop it from the icon's popover. The
+// icon and the popover's Stop control act on mouse-down themselves: an
+// NSButton's or NSMenu's own tracking loop would hold the main thread past
+// its pump turn. A click this executor posted (a remote controller's) never
+// stops anything. Main thread only.
 
 enum { FR_IND_SHOWN = 0, FR_IND_LOCAL_STOP = 1, FR_IND_FAILED = 2 };
 static atomic_int indicator_state = FR_IND_SHOWN;
@@ -440,22 +444,30 @@ static BOOL posted_here(NSEvent *event) {
            CGEventGetIntegerValueField(cg, kCGEventSourceUnixProcessID) == getpid();
 }
 
-@interface FrControlBadge : NSView
+static void indicator_stop(void) {
+    int shown = FR_IND_SHOWN;
+    atomic_compare_exchange_strong(&indicator_state, &shown, FR_IND_LOCAL_STOP);
+}
+
+static NSStatusItem *indicator;
+static NSPopover *indicator_popover;
+static NSView *indicator_target;
+static BOOL clipboard_indicator;
+
+// The popover's one control: Stop remote control, or Turn off clipboard
+// sharing.
+@interface FrIndicatorStop : NSView
 @property(nonatomic) BOOL clipboard;
 @end
 
-@implementation FrControlBadge
+@implementation FrIndicatorStop
 - (BOOL)acceptsFirstMouse:(NSEvent *)event {
     (void)event;
     return YES;
 }
-- (NSView *)hitTest:(NSPoint)point {
-    return NSPointInRect([self convertPoint:point fromView:self.superview], self.bounds) ? self : nil;
-}
 - (void)stopFrom:(NSEvent *)event {
     if (posted_here(event)) return;
-    int shown = FR_IND_SHOWN;
-    atomic_compare_exchange_strong(&indicator_state, &shown, FR_IND_LOCAL_STOP);
+    indicator_stop();
 }
 - (void)mouseDown:(NSEvent *)event {
     [self stopFrom:event];
@@ -466,29 +478,101 @@ static BOOL posted_here(NSEvent *event) {
 - (void)otherMouseDown:(NSEvent *)event {
     [self stopFrom:event];
 }
+- (BOOL)accessibilityPerformPress {
+    indicator_stop();
+    return YES;
+}
+- (BOOL)isOpaque {
+    return NO;
+}
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
-    NSRect frame = NSInsetRect(self.bounds, 0.5, 0.5);
-    NSBezierPath *shape = [NSBezierPath bezierPathWithRoundedRect:frame
-                                                          xRadius:frame.size.height / 2
-                                                          yRadius:frame.size.height / 2];
-    [[NSColor colorWithSRGBRed:0.80 green:0.12 blue:0.10 alpha:0.94] setFill];
-    [shape fill];
+    [NSColor.systemRedColor setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:6 yRadius:6] fill];
     NSDictionary *attributes = @{
         NSFontAttributeName : [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName : NSColor.whiteColor,
     };
-    NSString *text = self.clipboard ? @"Clipboard sharing — click to turn off"
-                                    : @"Remote control active — click to stop";
+    NSString *text = self.clipboard ? @"Turn off clipboard sharing" : @"Stop remote control";
     NSSize size = [text sizeWithAttributes:attributes];
-    [text drawAtPoint:NSMakePoint(NSMidX(self.bounds) - size.width / 2,
-                                  NSMidY(self.bounds) - size.height / 2)
+    [text drawAtPoint:NSMakePoint(round(NSMidX(self.bounds) - size.width / 2),
+                                  round(NSMidY(self.bounds) - size.height / 2))
        withAttributes:attributes];
 }
 @end
 
-static NSPanel *indicator;
-static BOOL clipboard_indicator;
+// Transparent click target over the status item's button: shows or hides the
+// popover on mouse-down.
+@interface FrIndicatorTarget : NSView
+@end
+
+@implementation FrIndicatorTarget
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    (void)event;
+    return YES;
+}
+- (NSView *)hitTest:(NSPoint)point {
+    return NSPointInRect([self convertPoint:point fromView:self.superview], self.bounds) ? self
+                                                                                         : nil;
+}
+- (void)toggleFrom:(NSEvent *)event {
+    if (posted_here(event)) return;
+    NSPopover *popover = indicator_popover;
+    if (!popover) return;
+    if (popover.shown) {
+        [popover performClose:nil];
+    } else {
+        [popover showRelativeToRect:self.bounds ofView:self preferredEdge:NSRectEdgeMinY];
+    }
+}
+- (void)mouseDown:(NSEvent *)event {
+    [self toggleFrom:event];
+}
+- (void)rightMouseDown:(NSEvent *)event {
+    [self toggleFrom:event];
+}
+- (BOOL)accessibilityPerformPress {
+    NSPopover *popover = indicator_popover;
+    if (popover && !popover.shown)
+        [popover showRelativeToRect:self.bounds ofView:self preferredEdge:NSRectEdgeMinY];
+    return YES;
+}
+- (BOOL)isOpaque {
+    return NO;
+}
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+}
+@end
+
+static NSTextField *indicator_label(NSString *text, NSFont *font, NSColor *color, NSRect frame) {
+    NSTextField *field = [NSTextField labelWithString:text];
+    field.font = font;
+    field.textColor = color;
+    field.frame = frame;
+    return field;
+}
+
+static NSViewController *indicator_sheet(BOOL clipboard) {
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 260, 104)];
+    [view addSubview:indicator_label(clipboard ? @"Text clipboard sharing is on"
+                                               : @"Remote control is on",
+                                     [NSFont boldSystemFontOfSize:13], NSColor.labelColor,
+                                     NSMakeRect(14, 74, 232, 18))];
+    [view addSubview:indicator_label(clipboard ? @"Text copied here or on the viewer is shared."
+                                               : @"A FrankenRemote viewer controls this Mac.",
+                                     [NSFont systemFontOfSize:11], NSColor.secondaryLabelColor,
+                                     NSMakeRect(14, 54, 232, 16))];
+    FrIndicatorStop *stop = [[FrIndicatorStop alloc] initWithFrame:NSMakeRect(14, 14, 232, 28)];
+    stop.clipboard = clipboard;
+    stop.accessibilityElement = YES;
+    stop.accessibilityRole = NSAccessibilityButtonRole;
+    stop.accessibilityLabel = clipboard ? @"Turn off clipboard sharing" : @"Stop remote control";
+    [view addSubview:stop];
+    NSViewController *controller = [[NSViewController alloc] init];
+    controller.view = view;
+    return controller;
+}
 
 static NSScreen *screen_for(uint32_t display_id) {
     for (NSScreen *screen in NSScreen.screens) {
@@ -498,70 +582,73 @@ static NSScreen *screen_for(uint32_t display_id) {
     return nil;
 }
 
-static BOOL onscreen(NSInteger window) {
-    if (window <= 0) return NO;
-    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,
-                                                 (CGWindowID)window);
-    if (!list) return NO;
-    BOOL shown = NO;
-    if (CFArrayGetCount(list) == 1) {
-        NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, 0);
-        shown = [info[(__bridge NSString *)kCGWindowIsOnscreen] boolValue];
-    }
-    CFRelease(list);
-    return shown;
+// The original status item is still installed, visible and drawn in the menu
+// bar. When another app is full screen the menu bar slides away; the item
+// then stays installed and counts as shown, like the system's own recording
+// indicator. macOS 26 draws status items in a system process, so AppKit's
+// state is the evidence there too.
+static BOOL indicator_shown(void) {
+    NSStatusItem *item = indicator;
+    NSStatusBarButton *button = item.button;
+    NSView *target = indicator_target;
+    if (!item || !item.isVisible || !button || button.hidden || !target ||
+        target.superview != button)
+        return NO;
+    NSWindow *window = button.window;
+    return window && window.isVisible;
 }
 
-static BOOL clipboard_visible(NSPanel *panel) {
-    return panel.isVisible && !panel.isMiniaturized && panel.isOnActiveSpace &&
-           !NSApp.isHidden && (panel.occlusionState & NSWindowOcclusionStateVisible) &&
-           onscreen(panel.windowNumber);
-}
-
-// Show the indicator on `display_id` and wait (bounded) until the window
-// server has it on screen. FR_IN_OK only then.
+// Show the indicator and wait (bounded) until its menu bar item is up.
+// FR_IN_OK only then. `display_id` must still name a screen: the controlled
+// display (the menu bar shows the item on every display).
 static int indicator_open(uint32_t display_id, uint32_t timeout_ms, BOOL clipboard) {
     if (!pthread_main_np() || indicator) return FR_IN_INVALID;
     @autoreleasepool {
         [NSApplication sharedApplication];
-        // No Dock icon, no menu bar, never the active application.
+        // No Dock icon, no menu bar of its own, never the active application.
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
         [NSApp finishLaunching];
-        NSScreen *screen = screen_for(display_id);
-        if (!screen) return FR_IN_GEOMETRY;
-        NSRect visible = screen.visibleFrame;
-        NSSize size = NSMakeSize(clipboard ? 340 : 300, 28);
-        NSRect frame = NSMakeRect(round(NSMidX(visible) - size.width / 2),
-                                  round(NSMaxY(visible) - size.height - (clipboard ? 40 : 6)),
-                                  size.width, size.height);
-        NSPanel *panel =
-            [[NSPanel alloc] initWithContentRect:frame
-                                       styleMask:NSWindowStyleMaskBorderless |
-                                                 NSWindowStyleMaskNonactivatingPanel
-                                         backing:NSBackingStoreBuffered
-                                           defer:NO];
-        if (!panel) return FR_IN_UNAVAILABLE;
-        panel.level = NSStatusWindowLevel;
-        panel.collectionBehavior =
-            NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary |
-            NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle;
-        panel.opaque = NO;
-        panel.backgroundColor = NSColor.clearColor;
-        panel.hasShadow = YES;
-        panel.hidesOnDeactivate = NO;
-        panel.floatingPanel = YES;
-        panel.becomesKeyOnlyIfNeeded = YES;
-        panel.releasedWhenClosed = NO;
-        FrControlBadge *badge =
-            [[FrControlBadge alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
-        if (!badge) return FR_IN_UNAVAILABLE;
-        badge.clipboard = clipboard;
-        panel.contentView = badge;
+        if (!screen_for(display_id)) return FR_IN_GEOMETRY;
+        NSStatusItem *item =
+            [NSStatusBar.systemStatusBar statusItemWithLength:NSSquareStatusItemLength];
+        NSStatusBarButton *button = item.button;
+        if (!item || !button) return FR_IN_UNAVAILABLE;
+        // Not removable by Command-drag; the autosave name keeps a moved
+        // item's place. An autosaved item also restores a saved hidden state,
+        // so visibility is set after it.
+        item.behavior = 0;
+        item.autosaveName = clipboard ? @"com.frankenremote.clipboard-indicator"
+                                      : @"com.frankenremote.control-indicator";
+        item.visible = YES;
+        NSString *description = clipboard ? @"FrankenRemote: text clipboard sharing is on"
+                                          : @"FrankenRemote: this Mac is remotely controlled";
+        NSImage *icon =
+            [NSImage imageWithSystemSymbolName:(clipboard ? @"doc.on.clipboard" : @"cursorarrow.rays")
+                      accessibilityDescription:description];
+        if (icon) {
+            icon.template = YES;
+            button.image = icon;
+        } else {
+            button.title = clipboard ? @"FR clip" : @"FR";
+        }
+        button.toolTip = description;
+        FrIndicatorTarget *target = [[FrIndicatorTarget alloc] initWithFrame:button.bounds];
+        if (!target) return FR_IN_UNAVAILABLE;
+        target.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        target.accessibilityElement = YES;
+        target.accessibilityRole = NSAccessibilityButtonRole;
+        target.accessibilityLabel = [description stringByAppendingString:@". Show Stop."];
+        [button addSubview:target];
+        NSPopover *popover = [[NSPopover alloc] init];
+        if (!popover) return FR_IN_UNAVAILABLE;
+        popover.behavior = NSPopoverBehaviorTransient;
+        popover.contentViewController = indicator_sheet(clipboard);
+        indicator = item;
+        indicator_target = target;
+        indicator_popover = popover;
         clipboard_indicator = clipboard;
-        indicator = panel;
-        [panel orderFrontRegardless];
         NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeout_ms / 1000.0];
-        while (!(clipboard ? clipboard_visible(panel) : onscreen(panel.windowNumber))) {
+        while (!indicator_shown()) {
             if ([until timeIntervalSinceNow] <= 0) return FR_IN_UNAVAILABLE;
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]
@@ -573,7 +660,7 @@ static int indicator_open(uint32_t display_id, uint32_t timeout_ms, BOOL clipboa
     return FR_IN_OK;
 }
 
-// These roles run in separate children; neither can replace a live panel.
+// These roles run in separate children; neither can replace a live item.
 int fr_in_indicator_open(uint32_t display_id, uint32_t timeout_ms) {
     @try {
         return indicator_open(display_id, timeout_ms, NO);
@@ -585,8 +672,7 @@ int fr_in_indicator_open(uint32_t display_id, uint32_t timeout_ms) {
 
 int fr_in_clipboard_indicator_open(uint32_t timeout_ms) {
     @try {
-        // Clipboard covers the logged-in session; show its independent Off
-        // surface on the local main screen, below the control badge.
+        // Clipboard covers the logged-in session: its own menu bar item.
         return indicator_open(CGMainDisplayID(), timeout_ms, YES);
     } @catch (NSException *exception) {
         (void)exception;
@@ -595,7 +681,8 @@ int fr_in_clipboard_indicator_open(uint32_t timeout_ms) {
 }
 
 // Handle indicator events for up to `timeout_ms`. FR_IND_SHOWN while shown,
-// FR_IND_LOCAL_STOP once the local user clicked it or hid it.
+// FR_IND_LOCAL_STOP once the local user pressed Stop, FR_IND_FAILED once the
+// item is gone (the privacy surface can no longer be seen).
 int fr_in_indicator_pump(uint32_t timeout_ms) {
     if (!pthread_main_np() || !indicator) return FR_IND_FAILED;
     @autoreleasepool {
@@ -611,10 +698,7 @@ int fr_in_indicator_pump(uint32_t timeout_ms) {
                 [NSApp sendEvent:event];
                 until = [NSDate distantPast];
             }
-            if (!indicator.isVisible || NSApp.isHidden) {
-                int shown = FR_IND_SHOWN;
-                atomic_compare_exchange_strong(&indicator_state, &shown, FR_IND_LOCAL_STOP);
-            } else if (clipboard_indicator && !clipboard_visible(indicator)) {
+            if (NSApp.isHidden || !indicator_shown()) {
                 int shown = FR_IND_SHOWN;
                 atomic_compare_exchange_strong(&indicator_state, &shown, FR_IND_FAILED);
             }
@@ -629,10 +713,14 @@ int fr_in_indicator_pump(uint32_t timeout_ms) {
 
 void fr_in_indicator_close(void) {
     if (!pthread_main_np() || !indicator) return;
-    NSPanel *panel = indicator;
+    NSStatusItem *item = indicator;
+    NSPopover *popover = indicator_popover;
     indicator = nil;
+    indicator_popover = nil;
+    indicator_target = nil;
     @try {
-        [panel orderOut:nil];
+        if (popover.shown) [popover close];
+        [NSStatusBar.systemStatusBar removeStatusItem:item];
     } @catch (NSException *exception) {
         // Native cleanup cannot unwind across Rust's Drop boundary.
         (void)exception;
