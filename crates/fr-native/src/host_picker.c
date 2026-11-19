@@ -86,31 +86,16 @@ static void *xkb_reply(struct fr_host_picker *h, uint32_t sequence) {
     if (error || xcb_connection_has_error(h->c)) { free(reply); reply = NULL; }
     free(error); return reply;
 }
-static int keyboard(struct fr_host_picker *h) {
+/* The keycodes of the picker's keys in the core keyboard's current map. Read
+ * at open and again after every keymap notification: switching between
+ * keyboard devices (a second keyboard, a security key, XTest) replaces the
+ * map, and later keys use the new one. */
+static int keymap(struct fr_host_picker *h) {
     static const uint32_t symbols[KEY_COUNT] = {
         0xff1b, 0xff0d, 0xff52, 0xff54, 0xff51, 0xff53,
         0xff55, 0xff56, 0xff50, 0xff57, 0xffbf, 0xffc0, 0xffc1
     };
-    const xcb_query_extension_reply_t *extension = xcb_get_extension_data(h->c, &xkb_extension);
-    if (!extension || !extension->present) return 0;
-    h->xkb = extension->first_event;
-    xkbUseExtensionReq use = {0}; use.wantedMajor = 1;
-    xkbUseExtensionReply *version = xkb_reply(h,
-        xkb_request(h, X_kbUseExtension, 0, &use, sizeof(use)));
-    int ok = version && version->supported && !version->length;
-    free(version); if (!ok) return 0;
-    xkbSelectEventsReq select = {0}; select.deviceSpec = XkbUseCoreKbd;
-    select.affectWhich = select.selectAll = XkbNewKeyboardNotifyMask | XkbMapNotifyMask | XkbNamesNotifyMask;
-    select.affectMap = select.map = XkbAllMapComponentsMask;
-    xcb_void_cookie_t cookie = { xkb_request(h, X_kbSelectEvents, 1, &select, sizeof(select)) };
-    if (!checked(h, cookie)) return 0;
-    xkbPerClientFlagsReq flags = {0}; flags.deviceSpec = XkbUseCoreKbd;
-    flags.change = flags.value = XkbPCF_DetectableAutoRepeatMask;
-    xkbPerClientFlagsReply *repeat = xkb_reply(h,
-        xkb_request(h, X_kbPerClientFlags, 0, &flags, sizeof(flags)));
-    ok = repeat && !repeat->length && (repeat->supported & XkbPCF_DetectableAutoRepeatMask) &&
-        (repeat->value & XkbPCF_DetectableAutoRepeatMask);
-    free(repeat); if (!ok) return 0;
+    memset(h->keycodes, 0, sizeof(h->keycodes));
     const xcb_setup_t *setup = xcb_get_setup(h->c);
     unsigned count = (unsigned)setup->max_keycode - setup->min_keycode + 1;
     if (!count || count > 248) return 0;
@@ -131,6 +116,29 @@ static int keyboard(struct fr_host_picker *h) {
     free(map); free(error);
     for (unsigned key = 0; key < KEY_REQUIRED; ++key) if (!h->keycodes[key]) return 0;
     return 1;
+}
+static int keyboard(struct fr_host_picker *h) {
+    const xcb_query_extension_reply_t *extension = xcb_get_extension_data(h->c, &xkb_extension);
+    if (!extension || !extension->present) return 0;
+    h->xkb = extension->first_event;
+    xkbUseExtensionReq use = {0}; use.wantedMajor = 1;
+    xkbUseExtensionReply *version = xkb_reply(h,
+        xkb_request(h, X_kbUseExtension, 0, &use, sizeof(use)));
+    int ok = version && version->supported && !version->length;
+    free(version); if (!ok) return 0;
+    xkbSelectEventsReq select = {0}; select.deviceSpec = XkbUseCoreKbd;
+    select.affectWhich = select.selectAll = XkbNewKeyboardNotifyMask | XkbMapNotifyMask | XkbNamesNotifyMask;
+    select.affectMap = select.map = XkbAllMapComponentsMask;
+    xcb_void_cookie_t cookie = { xkb_request(h, X_kbSelectEvents, 1, &select, sizeof(select)) };
+    if (!checked(h, cookie)) return 0;
+    xkbPerClientFlagsReq flags = {0}; flags.deviceSpec = XkbUseCoreKbd;
+    flags.change = flags.value = XkbPCF_DetectableAutoRepeatMask;
+    xkbPerClientFlagsReply *repeat = xkb_reply(h,
+        xkb_request(h, X_kbPerClientFlags, 0, &flags, sizeof(flags)));
+    ok = repeat && !repeat->length && (repeat->supported & XkbPCF_DetectableAutoRepeatMask) &&
+        (repeat->value & XkbPCF_DetectableAutoRepeatMask);
+    free(repeat); if (!ok) return 0;
+    return keymap(h);
 }
 
 static void invalidate(struct fr_host_picker *h) {
@@ -395,7 +403,10 @@ static int event(struct fr_host_picker *h, xcb_generic_event_t *event) {
     uint8_t type = event->response_type & 0x7f;
     int synthetic = (event->response_type & 0x80) != 0;
     if (!type) return -1;
-    if (type == XCB_MAPPING_NOTIFY || type == h->xkb) { invalidate(h); return 4; }
+    /* A keymap change drops any gesture in progress, so a press read through
+     * the old map never confirms. Only a map without the picker's keys ends
+     * the picker. */
+    if (type == XCB_MAPPING_NOTIFY || type == h->xkb) { invalidate(h); return keymap(h) ? 0 : 4; }
     if (type == XCB_CLIENT_MESSAGE) {
         const xcb_client_message_event_t *close = (const void *)event;
         if (close->window == h->window && close->type == h->protocols &&

@@ -29,6 +29,19 @@ unsafe extern "C" {
         count: *mut c_uint,
     ) -> c_int;
     fn XFree(data: *mut c_void) -> c_int;
+    fn XGetKeyboardMapping(
+        display: *mut c_void,
+        first: u8,
+        count: c_int,
+        per_code: *mut c_int,
+    ) -> *mut c_ulong;
+    fn XChangeKeyboardMapping(
+        display: *mut c_void,
+        first: c_int,
+        per_code: c_int,
+        symbols: *const c_ulong,
+        count: c_int,
+    ) -> c_int;
 }
 #[link(name = "libXtst.so.6", kind = "dylib", modifiers = "+verbatim")]
 unsafe extern "C" {
@@ -42,6 +55,17 @@ struct Screen {
 }
 impl Screen {
     fn start() -> Self {
+        let screen = Self::unprimed();
+        // Xvfb's first XTest use creates its device and changes the keymap.
+        // Establish that device before the production picker pins its map.
+        screen.key(0xffe1, true);
+        screen.key(0xffe1, false);
+        screen
+    }
+    // A display whose first XTest key still switches the core keyboard to
+    // the XTest device, which XKB announces as a new keyboard, as it does
+    // when input moves to a second physical keyboard.
+    fn unprimed() -> Self {
         let mut child = Command::new("Xvfb")
             .args([
                 "-displayfd",
@@ -64,16 +88,11 @@ impl Screen {
         let c_name = CString::new(name.clone()).unwrap();
         // SAFETY: the name is a live NUL-terminated local display string.
         let display = NonNull::new(unsafe { XOpenDisplay(c_name.as_ptr()) }).unwrap();
-        let screen = Self {
+        Self {
             child,
             name,
             display,
-        };
-        // Xvfb's first XTest use creates its device and changes the keymap.
-        // Establish that device before the production picker pins its map.
-        screen.key(0xffe1, true);
-        screen.key(0xffe1, false);
-        screen
+        }
     }
     fn key(&self, symbol: c_ulong, down: bool) {
         // SAFETY: this fixture owns the live display on this thread; scalar
@@ -85,6 +104,29 @@ impl Screen {
                 XTestFakeKeyEvent(self.display.as_ptr(), u32::from(key), i32::from(down), 0),
                 0
             );
+            XSync(self.display.as_ptr(), 0);
+        }
+    }
+    // Writes one key's keysyms back unchanged. The server still announces a
+    // keymap change (core MappingNotify and XKB MapNotify).
+    fn replace_keymap(&self, symbol: c_ulong) {
+        // SAFETY: this fixture owns the live display on this thread. Xlib
+        // allocates per_code keysyms for the one keycode; they are passed
+        // back for that same keycode and freed once.
+        unsafe {
+            let key = XKeysymToKeycode(self.display.as_ptr(), symbol);
+            assert_ne!(key, 0);
+            let mut per_code = 0;
+            let symbols = XGetKeyboardMapping(self.display.as_ptr(), key, 1, &raw mut per_code);
+            assert!(!symbols.is_null() && per_code > 0);
+            XChangeKeyboardMapping(
+                self.display.as_ptr(),
+                c_int::from(key),
+                per_code,
+                symbols,
+                1,
+            );
+            XFree(symbols.cast());
             XSync(self.display.as_ptr(), 0);
         }
     }
@@ -154,6 +196,21 @@ fn mapped(picker: &mut HostPicker) -> u32 {
         assert!(Instant::now() < deadline, "picker did not map");
         thread::sleep(Duration::from_millis(2));
     }
+}
+fn chosen(picker: &mut HostPicker) -> usize {
+    let deadline = Instant::now().checked_add(Duration::from_secs(2)).unwrap();
+    loop {
+        if let Some(ordinal) = picker.poll().unwrap() {
+            return ordinal;
+        }
+        assert!(Instant::now() < deadline, "fresh Enter did not choose");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+fn enter(screen: &Screen) {
+    screen.key(0xff0d, true);
+    thread::sleep(Duration::from_millis(15));
+    screen.key(0xff0d, false);
 }
 fn complete(control: &Control) {
     let deadline = Instant::now().checked_add(Duration::from_secs(2)).unwrap();
@@ -294,4 +351,46 @@ fn dropping_actual_picker_requests_local_cleanup_without_releasing_selection() {
     complete(&control);
     assert_eq!(control.status(), Status::Cancelled);
     assert_eq!(control.window(), None);
+}
+
+#[test]
+fn actual_keymap_change_drops_the_enter_it_interrupts_and_keeps_the_picker() {
+    let screen = Screen::start();
+    let mut picker = HostPicker::start(&screen.name, &rows(12)).unwrap();
+    let window = mapped(&mut picker);
+    screen.focus(window);
+    screen.key(0xff54, true); // Down: the second row.
+    screen.key(0xff54, false);
+    thread::sleep(Duration::from_millis(25));
+    screen.key(0xff0d, true);
+    screen.replace_keymap(0xffe1);
+    thread::sleep(Duration::from_millis(15));
+    screen.key(0xff0d, false);
+    // The Enter pressed through the old map never confirms.
+    let quiet = Instant::now()
+        .checked_add(Duration::from_millis(300))
+        .unwrap();
+    while Instant::now() < quiet {
+        assert_eq!(picker.poll().unwrap(), None);
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(picker.status(), Status::Mapped);
+    screen.key(0xff54, true); // Down through the new map: the third row.
+    screen.key(0xff54, false);
+    thread::sleep(Duration::from_millis(25));
+    enter(&screen);
+    assert_eq!(chosen(&mut picker), 2);
+}
+
+#[test]
+fn actual_first_key_from_a_new_keyboard_device_still_navigates() {
+    let screen = Screen::unprimed();
+    let mut picker = HostPicker::start(&screen.name, &rows(12)).unwrap();
+    let window = mapped(&mut picker);
+    screen.focus(window);
+    screen.key(0xff54, true); // Down, from the device XKB announces as new.
+    screen.key(0xff54, false);
+    thread::sleep(Duration::from_millis(25));
+    enter(&screen);
+    assert_eq!(chosen(&mut picker), 1);
 }

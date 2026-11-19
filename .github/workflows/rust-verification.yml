@@ -443,6 +443,12 @@ jobs:
         id: viewer_input
         continue-on-error: true
         run: FR_NATIVE_INPUT_CAPTURE_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' cargo test -p fr-native --features linux-viewer-input --lib --locked
+      # The test starts its own Xvfb per case: the first XTest key on a fresh
+      # server is the keyboard-device switch fr-bzc7 is about.
+      - name: Exercise the X11 machine picker
+        id: host_picker
+        continue-on-error: true
+        run: cargo test -p fr-native --features linux-media --test host_picker_x11 --locked
       - name: Exercise native transfer progress and local cancellation controls
         id: file_progress
         continue-on-error: true
@@ -489,6 +495,7 @@ jobs:
             examples=${{ steps.examples.outcome }}
             indicator=${{ steps.indicator.outcome }}
             viewer_input=${{ steps.viewer_input.outcome }}
+            host_picker=${{ steps.host_picker.outcome }}
             file_progress=${{ steps.file_progress.outcome }}
             clipboard=${{ steps.clipboard.outcome }}
             hevc=${{ steps.hevc.outcome }}
