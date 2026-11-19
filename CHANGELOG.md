@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-18 — the Windows viewer runs above normal priority and names each reconnect
+
+- On 11-18 another agent's three-job Rust build ran on the owner's 4-core
+  laptop over SSH (it is an `rch` build worker). The UI thread stalled for
+  up to 1.7 s, and the viewer reconnected about every 20 s
+  (host: `PeerClosed(Client(Failure))`, `RecoveryLimitExceeded`).
+  Putting that build at idle priority cut the drops from every ~20 s to
+  minutes apart.
+- The viewer now sets its process to above-normal priority at start. It
+  uses little CPU itself (decode is on the GPU), so builds or a browser can
+  no longer starve its input, renewal and clock deadlines.
+- Each reconnect line now names how the replaced session ended (end code
+  and detail). The completion document names only the window's last session.
+
 ## 2026-11-18 — the session log is written while a window is open
 
 - The Windows app wrote each window's status lines to `sessions.log` only

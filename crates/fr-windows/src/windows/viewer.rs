@@ -277,6 +277,17 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
     // SAFETY: process-wide DPI awareness, set before any window exists, so
     // client-area sizes and mouse points are physical pixels.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    // A viewer must keep its deadlines (input freshness, the host's renewal
+    // challenges, clock probes) while builds or a browser load this PC: on
+    // 11-18 three remote rustc jobs on a 4-core laptop starved it into a
+    // reconnect every ~20 s. It uses little CPU itself (decode is on the GPU).
+    // SAFETY: changing this process's own priority class.
+    let _ = unsafe {
+        windows::Win32::System::Threading::SetPriorityClass(
+            windows::Win32::System::Threading::GetCurrentProcess(),
+            windows::Win32::System::Threading::ABOVE_NORMAL_PRIORITY_CLASS,
+        )
+    };
     let Some(gpu) = video::gpu() else {
         return refuse("no_d3d11_device");
     };
@@ -1840,8 +1851,20 @@ impl Viewer {
         let delay = change_display::reconnect_delay(self.failures);
         self.failures = self.failures.saturating_add(1);
         let at = std::panic::Location::caller();
+        // Name how the replaced session ended: the completion document
+        // describes only the window's last session.
+        let shared = self.session.shared();
+        let ended = if shared.finished() {
+            format!(
+                "end {} {}",
+                shared.end_code(),
+                shared.detail().unwrap_or_default()
+            )
+        } else {
+            "still running".to_owned()
+        };
         eprintln!(
-            "fr-windows: reconnecting in {delay} ms: {why} (from {}:{})",
+            "fr-windows: reconnecting in {delay} ms: {why} [{ended}] (from {}:{})",
             at.file(),
             at.line()
         );
