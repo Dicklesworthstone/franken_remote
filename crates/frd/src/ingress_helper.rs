@@ -56,6 +56,9 @@ fn print(json: bool, event: &Event) {
             Event::CleanupFailed { table } => {
                 serde_json::json!({"event": "cleanup_failed", "table": table})
             }
+            Event::OrphanCleared { table } => {
+                serde_json::json!({"event": "orphan_cleared", "table": table})
+            }
             Event::Stopping => serde_json::json!({"event": "stopping"}),
         };
         println!("{value}");
@@ -94,8 +97,11 @@ fn print(json: bool, event: &Event) {
                 "requested"
             }
         ),
-        Event::CleanupFailed { table } => {
-            println!("frd ingress-helper: cleanup failed for {table}; reclaimed at next start");
+        Event::CleanupFailed { table } => println!(
+            "frd ingress-helper: cleanup failed for {table}; retried when another connection ends"
+        ),
+        Event::OrphanCleared { table } => {
+            println!("frd ingress-helper: {table} cleared after its failed cleanup");
         }
         Event::Stopping => println!("frd ingress-helper: stopping"),
     }

@@ -3,7 +3,9 @@
 //! before any tool runs. Kernel/nftables enforcement is qualified separately in
 //! a private network namespace (`examples/qualify_ingress_helper.rs`).
 use super::{
-    server::{Lifecycle, Observed, Shared, check_assigned, check_request, connection},
+    server::{
+        Lifecycle, MAX_CONNECTIONS, Observed, Shared, check_assigned, check_request, connection,
+    },
     *,
 };
 use crate::local::ingress::Protocols;
@@ -437,4 +439,116 @@ fn a_stalled_partial_frame_is_closed_without_holding_the_connection() {
         Vec::new()
     });
     assert_eq!(events, Vec::new());
+}
+
+#[test]
+fn the_orphan_list_is_bounded_and_holds_each_table_once() {
+    let settings = settings();
+    let record = |_: Event| {};
+    RuntimeBuilder::new()
+        .worker_threads(1)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let cx = Cx::current().unwrap();
+            let shared = Shared::new(&cx, &settings, &record);
+            shared.orphan(TABLE.into());
+            shared.orphan(TABLE.into());
+            assert_eq!(shared.take_orphans(), [TABLE]);
+            assert_eq!(shared.take_orphans(), Vec::<String>::new());
+            for n in 0..100 {
+                shared.orphan(format!("frdh_{n:032x}"));
+            }
+            assert_eq!(shared.take_orphans().len(), 4 * MAX_CONNECTIONS);
+        });
+}
+
+/// A root-owned stand-in for `nft` in the namespace's private /run: its table
+/// inventory is tables.json, and its first `fail` scripts exit 1.
+const FAKE_NFT: &str = r"#!/usr/bin/python3
+import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+assert pathlib.Path('/run/fr-synthetic-ingress').read_text() == 'synthetic-only\n'
+tables = json.loads((root / 'tables.json').read_text())
+fail = root / 'fail'
+args = sys.argv[1:]
+if args == ['-j', 'list', 'tables', 'inet']:
+    rows = [{'table': {'family': 'inet', 'name': t, 'handle': i + 1}} for i, t in enumerate(tables)]
+    print(json.dumps({'nftables': [{'metainfo': {'json_schema_version': 1}}] + rows}))
+elif args == ['-f', '-']:
+    script = sys.stdin.read(4096)
+    if int(fail.read_text()) > 0:
+        fail.write_text(str(int(fail.read_text()) - 1))
+        raise SystemExit(1)
+    for line in script.splitlines():
+        assert line.startswith('delete table inet '), line
+        tables.remove(line.removeprefix('delete table inet '))
+    (root / 'tables.json').write_text(json.dumps(tables))
+else:
+    raise SystemExit(2)
+";
+
+#[test]
+#[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
+fn a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends() {
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+    const OTHER: &str = "frdh_fedcba9876543210fedcba9876543210";
+    assert_eq!(
+        fs::read_to_string("/run/fr-synthetic-ingress").unwrap(),
+        "synthetic-only\n"
+    );
+    let dir = PathBuf::from(format!("/run/fr-helper-orphans-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.join("tables.json"), json!([TABLE, OTHER]).to_string()).unwrap();
+    // The first delete fails, as a stalled nft past its bound would.
+    fs::write(dir.join("fail"), "1").unwrap();
+    let nft = dir.join("nft");
+    fs::write(&nft, FAKE_NFT).unwrap();
+    fs::set_permissions(&nft, fs::Permissions::from_mode(0o700)).unwrap();
+    let tables = || -> Vec<String> {
+        serde_json::from_slice(&fs::read(dir.join("tables.json")).unwrap()).unwrap()
+    };
+    let settings = Settings::parse(
+        json!({"interface": "fr-fixture", "allowed_uids": [1000], "nft": nft})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let events = Mutex::new(Vec::new());
+    let record = |event: Event| events.lock().unwrap().push(event);
+    RuntimeBuilder::new()
+        .worker_threads(1)
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let cx = Cx::current().unwrap();
+            let shared = Shared::new(&cx, &settings, &record);
+            let mut first = Lifecycle::default();
+            first.installed(1, TABLE);
+            first.release(&shared).await;
+            assert_eq!(tables(), [TABLE, OTHER], "the failed delete left it");
+            // A later connection ends: its own table goes, then the first's.
+            let mut second = Lifecycle::default();
+            second.installed(2, OTHER);
+            second.release(&shared).await;
+        });
+    assert_eq!(tables(), Vec::<String>::new());
+    assert_eq!(
+        events.into_inner().unwrap(),
+        [
+            Event::CleanupFailed {
+                table: TABLE.into()
+            },
+            Event::Removed {
+                generation: 2,
+                table: OTHER.into(),
+                disconnect: true
+            },
+            Event::OrphanCleared {
+                table: TABLE.into()
+            },
+        ]
+    );
 }

@@ -275,6 +275,35 @@ jobs:
               'env', 'FR_DIAL_TEST_NAMESPACE=isolated', 'bash', 'scripts/verify-native-dial.sh',
               '--inside', binaries[0]], check=True, timeout=120)
           PYTHON
+      - name: Exercise ingress helper cleanup retries
+        id: helper_cleanup
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          # The fr-tailnet lib test binary the dial fallback step built.
+          for line in Path(os.environ['RUNNER_TEMP'], 'dual-stack-dial-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'fr_tailnet'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact fr-tailnet lib test binary required'
+          test = 'local::ingress::helper::tests::a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends'
+          listed = subprocess.check_output(
+              [binaries[0], '--list', '--ignored', '--exact', test], text=True)
+          assert listed.splitlines().count(f'{test}: test') == 1, 'helper cleanup regression must be present'
+          result = subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+              '--exact', test], env=dict(os.environ, FR_NS_SUDO='1'), timeout=120,
+              capture_output=True, text=True)
+          print(result.stdout, result.stderr)
+          assert result.returncode == 0, 'helper cleanup regression failed'
+          assert 'test result: ok. 1 passed' in result.stdout, 'helper cleanup regression must run once'
+          PYTHON
       - name: Exercise native clipboard recovery, expiry, and impaired copies
         id: clipboard_capture_stall
         continue-on-error: true
@@ -449,6 +478,7 @@ jobs:
             system_shortcuts=${{ steps.system_shortcuts.outcome }}
             native_dual_stack=${{ steps.native_dual_stack.outcome }}
             native_dial_fallback=${{ steps.native_dial_fallback.outcome }}
+            helper_cleanup=${{ steps.helper_cleanup.outcome }}
             clipboard_capture_stall=${{ steps.clipboard_capture_stall.outcome }}
             pipewire_microphone=${{ steps.pipewire_microphone.outcome }}
             examples=${{ steps.examples.outcome }}

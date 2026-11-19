@@ -31,6 +31,10 @@ use std::{
 
 /// Concurrent broker connections (each holds at most one rule).
 pub const MAX_CONNECTIONS: usize = 8;
+/// Tables a connection could not remove when it ended. They are kept
+/// helper-wide and retried when a later connection ends. Past this many, the
+/// rest wait for the next start's reclaim.
+const MAX_ORPHANS: usize = 4 * MAX_CONNECTIONS;
 const MAX_SETTINGS: usize = 4096;
 const MAX_ALLOWED_UIDS: usize = 16;
 /// Once a frame starts, all of it must arrive within this deadline.
@@ -183,7 +187,13 @@ pub enum Event {
         table: String,
         disconnect: bool,
     },
+    /// Kept and retried when a later connection ends (`OrphanCleared`).
     CleanupFailed {
+        table: String,
+    },
+    /// A table an earlier cleanup failed to remove no longer exists: a later
+    /// connection's end removed it, or the failed delete had in fact run.
+    OrphanCleared {
         table: String,
     },
     Stopping,
@@ -259,6 +269,7 @@ pub(super) struct Shared<'a> {
     generation: AtomicU64,
     report: &'a (dyn Fn(Event) + Sync),
     log: std::sync::Mutex<(Bucket, u64)>,
+    orphans: std::sync::Mutex<Vec<String>>,
 }
 impl<'a> Shared<'a> {
     pub(super) fn new(cx: &Cx, settings: &'a Settings, report: &'a (dyn Fn(Event) + Sync)) -> Self {
@@ -271,12 +282,28 @@ impl<'a> Shared<'a> {
                 Bucket::new(LOG_BURST, LOG_REFILL_US, now(cx).unwrap_or(0)),
                 0,
             )),
+            orphans: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
 impl Shared<'_> {
     fn now(&self) -> u64 {
         now(&self.cx).unwrap_or(0)
+    }
+    /// Keep a table no connection could remove, for the next one that ends.
+    pub(super) fn orphan(&self, table: String) {
+        if let Ok(mut orphans) = self.orphans.lock()
+            && orphans.len() < MAX_ORPHANS
+            && !orphans.contains(&table)
+        {
+            orphans.push(table);
+        }
+    }
+    pub(super) fn take_orphans(&self) -> Vec<String> {
+        self.orphans
+            .lock()
+            .map(|mut orphans| std::mem::take(&mut *orphans))
+            .unwrap_or_default()
     }
     fn refused(&self, uid: u32, reason: Refusal) {
         let now_us = self.now();
@@ -535,8 +562,13 @@ impl Lifecycle {
         }
         Ok(())
     }
-    /// The connection ended (close, crash, violation): remove what it owned.
-    async fn release(&mut self, shared: &Shared<'_>) {
+    /// The connection ended (close, crash, violation): remove what it owned,
+    /// then retry the tables earlier connections failed to remove. No broker
+    /// waits on this path, so a slow nft here costs nobody a deadline. A table
+    /// that stays behind keeps its interface index; after tailscaled restarts,
+    /// its `iif != index` drop would refuse that port's tailnet traffic.
+    pub(super) async fn release(&mut self, shared: &Shared<'_>) {
+        let orphans = shared.take_orphans();
         let active = self.active.take();
         let generation = active.as_ref().map_or(0, |owned| owned.generation);
         let tables = active.map(|owned| owned.table).into_iter();
@@ -544,13 +576,35 @@ impl Lifecycle {
             if owned_table(&table).is_err() {
                 continue;
             }
-            match delete_table(&shared.cx, &shared.settings.nft, &table).await {
-                Ok(()) => (shared.report)(Event::Removed {
+            if delete_table(&shared.cx, &shared.settings.nft, &table)
+                .await
+                .is_ok()
+            {
+                (shared.report)(Event::Removed {
                     generation,
                     table,
                     disconnect: true,
-                }),
-                Err(_) => (shared.report)(Event::CleanupFailed { table }),
+                });
+            } else {
+                (shared.report)(Event::CleanupFailed {
+                    table: table.clone(),
+                });
+                shared.orphan(table);
+            }
+        }
+        if orphans.is_empty() {
+            return;
+        }
+        if delete_tables(&shared.cx, &shared.settings.nft, &orphans)
+            .await
+            .is_ok()
+        {
+            for table in orphans {
+                (shared.report)(Event::OrphanCleared { table });
+            }
+        } else {
+            for table in orphans {
+                shared.orphan(table);
             }
         }
     }
@@ -639,6 +693,23 @@ fn refuse_now(stream: &UnixStream, reason: Refusal) {
     use std::io::Write as _;
     let mut socket = stream.as_std();
     let _ = socket.write(&encode_response(&Response::Refused(reason)));
+}
+
+/// Delete whichever of `tables` still exist, in one nftables transaction.
+async fn delete_tables(cx: &Cx, nft: &Path, tables: &[String]) -> Result<(), super::super::Error> {
+    let bytes = command(cx, nft, &["-j", "list", "tables", "inet"], b"").await?;
+    let mut script = String::new();
+    for table in tables {
+        if table_exists(&bytes, table)? {
+            script.push_str("delete table inet ");
+            script.push_str(table);
+            script.push('\n');
+        }
+    }
+    if !script.is_empty() {
+        command(cx, nft, &["-f", "-"], script.as_bytes()).await?;
+    }
+    Ok(())
 }
 
 /// Remove every helper-owned table (a dead helper's residue). Foreign tables,
