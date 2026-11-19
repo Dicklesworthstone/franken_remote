@@ -21,9 +21,12 @@ permissions:
 
 concurrency:
   group: ios-client-${{ github.ref }}
-  # The latest main contains the complete core and app; superseded snapshots
-  # must not hold an Apple runner ahead of current integration validation.
-  cancel-in-progress: true
+  # A run takes longer than main's push interval, so cancelling in progress
+  # left no verdict (11-19: of the last 22 runs, 12 were cancelled and 10 failed
+  # before finding cargo). Let the running one finish. GitHub keeps at most one
+  # run pending and cancels older pending ones, so one Apple runner validates
+  # the newest main.
+  cancel-in-progress: false
 
 env:
   CARGO_BUILD_JOBS: '1'
