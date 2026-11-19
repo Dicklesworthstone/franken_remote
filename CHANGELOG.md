@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-18 — Mac hosts send 30 fps at 8 Mbit/s again
+
+- Both Mac installers (`install.sh` and `scripts/macos/install-host.sh`)
+  asked frd for 60 fps at 30 Mbit/s. Nothing adapts that bitrate to the
+  path, and video that outruns the viewer's link ends the session. On 11-18
+  the owner's laptop on hotel guest Wi-Fi measured 12 Mbit/s from mac-studio.
+  Its sessions reconnected every 20-40 s, ending with
+  `Media(Send(RecoveryLimitExceeded))`, `Renewal(Transport(Expired))` and
+  client deadline expiry.
+- Both installers now use frd's own caps, 30 fps and 8 Mbit/s. On a fast
+  link, pass `-- --fps 60 --bitrate 30000000` to install-host.sh.
+- mac-studio was reinstalled with these caps. Real bitrate adaptation, so
+  that one setting is both sharp at home and stable on hotel Wi-Fi, is not
+  built yet.
+
 ## 2026-11-18 — the Windows viewer runs above normal priority and names each reconnect
 
 - On 11-18 another agent's three-job Rust build ran on the owner's 4-core

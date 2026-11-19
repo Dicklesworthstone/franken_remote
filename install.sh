@@ -1307,7 +1307,9 @@ setup_macos_host() {
     HOST_STATUS="skipped: another FrankenRemote host agent is installed"
     return 0
   fi
-  args=(--encoder videotoolbox --fps 60 --bitrate 30000000)
+  # frd's own caps (30 fps, 8 Mbit/s). The bitrate is fixed, and video that
+  # outruns the viewer's link ends the session; 30 Mbit/s did on hotel Wi-Fi.
+  args=(--encoder videotoolbox --fps 30 --bitrate 8000000)
   if [ "$HOST_CONTROL" -eq 1 ]; then args+=(--input-agent "$BIN_DIR/fr-input-agent"); fi
   if [ "$HOST_CLIPBOARD" -eq 0 ]; then args+=(--no-clipboard); fi
   if [ "$AUDIO" -eq 1 ]; then args+=(--audio); fi

@@ -82,10 +82,12 @@ for name in frd fr-media-worker fr-input-agent fr-session-monitor fr-observation
 done
 
 bin='Library/Application Support/FrankenRemote/bin'
-# frd's built-in default is 30 fps at 8 Mbit/s; a desktop host on a tailnet
-# should be smooth and sharp, so ask for 60 fps at 30 Mbit/s (both are caps:
-# capture follows screen changes). Override after `--`.
-run_args=(--encoder videotoolbox --fps 60 --bitrate 30000000)
+# frd's built-in caps, 30 fps at 8 Mbit/s. The bitrate is fixed (nothing
+# adapts it to the path), and a session dies once video outruns the link: at
+# 60 fps / 30 Mbit/s a viewer on a ~12 Mbit/s guest network reconnected every
+# 20-40 s (RecoveryLimitExceeded, delivery deadlines expired). On a fast link,
+# override after `--`, e.g. -- --fps 60 --bitrate 30000000.
+run_args=(--encoder videotoolbox --fps 30 --bitrate 8000000)
 if (( ! view_only )); then
   run_args+=(--input-agent "__BIN__/fr-input-agent")
 fi
