@@ -433,9 +433,16 @@ fn rearm(
     } else {
         IDLE_PULSE
     };
-    *pulse = Box::pin(asupersync::time::sleep(clock.now(), period));
-    let _ = pulse.as_mut().poll(task);
-    Ok(())
+    // The registration poll finds the new pulse already due when this task was
+    // descheduled for a whole period after arming it (10 ms under heavy load).
+    // A completed Sleep must never be polled again (it panics), so keep arming
+    // until the stored pulse is pending. Each pass needs another real period.
+    loop {
+        *pulse = Box::pin(asupersync::time::sleep(clock.now(), period));
+        if pulse.as_mut().poll(task).is_pending() {
+            return Ok(());
+        }
+    }
 }
 impl<T, F: Future<Output = Result<T, Error>>> Future for Scoped<F> {
     type Output = Result<T, Error>;
