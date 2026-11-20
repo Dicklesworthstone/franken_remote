@@ -5,18 +5,42 @@
 //! Replay re-executes recorded `QualityController` decisions in software only;
 //! it never claims to reproduce GPU drivers, capture hardware, or live networks.
 use crate::Failure;
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use fr_client::diagnostics::{
-    CodecPathKind, DiagnosticBundle, DiagnosticError, DiagnosticEventKind, DiagnosticLimits,
-    DiagnosticRing, MAX_IMPORT_JSON_BYTES, NetworkPathKind, NoteCategory, RecoveryEventKind,
-    SlownessCause, SlownessReport, SlownessVerdict, SurfaceCopyMode, TransportKind,
+    CodecPathKind, DiagnosticEventKind, DiagnosticLimits, DiagnosticRing, NetworkPathKind,
+    NoteCategory, RecoveryEventKind, SurfaceCopyMode, TransportKind,
 };
+use fr_client::diagnostics::{
+    DiagnosticBundle, DiagnosticError, MAX_IMPORT_JSON_BYTES, SlownessCause, SlownessReport,
+    SlownessVerdict,
+};
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use fr_core::limits::ProtocolLimits;
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use fr_media::quality::QualityPolicy;
 use serde::Serialize;
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
+use std::io::Write;
 use std::{
     fmt::Write as _,
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::{Component, Path},
 };
 
@@ -154,7 +178,14 @@ fn open_regular_readonly(path: &Path) -> Result<File, Failure> {
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    )
+))]
 fn write_private_regular_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
     use rustix::fs::{self, FileType, Mode, OFlags};
     let fd = fs::open(
@@ -203,7 +234,14 @@ fn write_private_regular_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> 
         })
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    not(any(target_os = "linux", target_os = "macos")),
+    any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    )
+))]
 fn write_private_regular_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() || !meta.file_type().is_file() {

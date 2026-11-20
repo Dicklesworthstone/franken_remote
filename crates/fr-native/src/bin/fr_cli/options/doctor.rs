@@ -15,6 +15,7 @@ pub struct NativeDoctorOptions {
     pub input_agent: Option<PathBuf>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn parse(args: &[String]) -> Result<Options, Failure> {
     let mut index = 1;
     let mut seen = BTreeSet::new();
