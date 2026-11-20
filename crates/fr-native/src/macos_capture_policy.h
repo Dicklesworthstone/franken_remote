@@ -16,6 +16,24 @@ typedef struct {
     bool force_idr;
 } FrCapEncodePlan;
 
+enum FrCapEncodeCompletion {
+    FR_CAP_ENCODE_FAILED,
+    FR_CAP_ENCODE_OUTPUT,
+    FR_CAP_ENCODE_RETRY,
+    FR_CAP_ENCODE_SKIPPED,
+};
+
+// Only an actual successful FrameDropped callback completes without output.
+// An established owner yields its credit; bootstrap spends the remainder of
+// its original deadline because there is no previous picture to preserve.
+static inline enum FrCapEncodeCompletion fr_cap_encode_completion(bool succeeded, bool dropped,
+                                                                  bool usable_sample,
+                                                                  bool has_output) {
+    if (!succeeded) return FR_CAP_ENCODE_FAILED;
+    if (dropped) return has_output ? FR_CAP_ENCODE_SKIPPED : FR_CAP_ENCODE_RETRY;
+    return usable_sample ? FR_CAP_ENCODE_OUTPUT : FR_CAP_ENCODE_FAILED;
+}
+
 static inline FrCapEncodePlan fr_cap_encode_plan(bool verification, bool only_if_changed,
                                                 bool force_idr, bool same_picture,
                                                 uint32_t applied, uint32_t target) {

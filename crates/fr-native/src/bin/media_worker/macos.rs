@@ -2,7 +2,8 @@
 //! `ScreenCaptureKit` into `VideoToolbox` HEVC, behind the same FRW0 records
 //! as the Linux worker. The host discovers monitors, configures one, then
 //! requests units. Encodes are synchronous, so a capture request is answered
-//! with its unit (or unchanged evidence) and never with `NeedInput`.
+//! with a unit, unchanged evidence or a completed rate-limited skip, never
+//! with `NeedInput`.
 use fr_core::{ids::DisplayGeometryGeneration, limits::ProtocolLimits};
 use fr_media::worker::{
     self, Backend, Configuration, Error, Kind, Record, Role, Sequence, cursor::Observation,
@@ -114,6 +115,10 @@ impl Share {
                 match self.capture(frame, observed, force_idr, only_if_changed)? {
                     Captured::Unit(unit) => Ok((Kind::Unit, worker::unit_payload(&unit)?)),
                     Captured::Unchanged(proof) => Ok((Kind::Unchanged, proof.encode()?)),
+                    Captured::RateLimited => Ok((
+                        Kind::CaptureSkipped,
+                        worker::SkippedCapture { candidate: frame }.encode(),
+                    )),
                 }
             }
             Kind::CaptureAtRate => {
@@ -136,6 +141,10 @@ impl Share {
                     Captured::Unchanged(proof) => Ok((
                         Kind::RateUnchanged,
                         worker::rate::unchanged_payload(proof, bitrate)?,
+                    )),
+                    Captured::RateLimited => Ok((
+                        Kind::CaptureSkipped,
+                        worker::SkippedCapture { candidate: c.frame }.encode(),
                     )),
                 }
             }
@@ -285,7 +294,7 @@ fn probe_encoder(
             unit.bytes().len(),
             capture.statistics().map_err(native)?,
         )),
-        Captured::Unchanged(_) => Err(Error::WrongState),
+        Captured::Unchanged(_) | Captured::RateLimited => Err(Error::WrongState),
     }
 }
 

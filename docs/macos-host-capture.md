@@ -170,6 +170,37 @@ worker termination/reaping rules are unchanged. A native call or codec drain
 can still block inside Apple's frameworks; the supervising worker process,
 not a claimed thread cancellation, supplies the outer containment boundary.
 
+### A completed native rate drop preserves the stream
+
+After its first successful encoded picture, the worker returns a typed
+`CaptureSkipped` when VideoToolbox positively completes a request with
+`kVTEncodeInfo_FrameDropped` and no native error. Missing/invalid samples
+without that flag remain codec failures. The retained input surface is
+released after callback completion, followed by the original permission,
+source-generation and deadline checks. A drop cannot advance the native
+encoded-picture marker or the successful-verification count.
+
+This private FRW0 reply is kind 283 with exactly nine body bytes: the original
+eight-byte big-endian candidate ID and one reason byte (1, native rate
+limited). Unknown reasons and mismatched candidates are refused. There is no
+source timestamp or rate acknowledgement. The host admits it only for an
+established VideoToolbox source, preserves the last encoded reference, and
+releases unused capture capacity. No media record, source-progress update,
+adaptive unchanged observation or input freshness is generated.
+
+The ordinary source service returns to its existing cadence after a skip.
+When the caller requires a picture or recovery IDR, it retries new candidate
+IDs one configured interval apart within the same original two-second host
+operation/recovery deadline and with the same conservative request timestamp.
+There is no `NeedInput`/`Poll` continuation. Native bootstrap still needs its
+first picture and resubmits within its original 1,500 ms deadline; all native
+presentation times remain bounded against the current clock.
+
+If the native bitrate property changed before the drop, that setting is not
+yet advertised. The next successful output must be an admitted IDR before
+the rate is confirmed. That obligation survives more drops and cancellation
+back to the previously advertised rate; no dropped output starts a dwell.
+
 The 50 ms verification wait bounds sustained verification demand to at most
 20 requests per second under an eager caller, before accounting for capture
 and encoding time. This is an explicit idle-work cost, not a claim of zero idle

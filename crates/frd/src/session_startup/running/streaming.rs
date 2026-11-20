@@ -952,6 +952,19 @@ impl<S> VideoServices<'_, S> {
         update: &CaptureUpdate,
         collected: u64,
     ) -> Result<(), Error> {
+        if update.is_skipped() {
+            return match (
+                &mut self.bitrate,
+                self.rate_in_flight.take(),
+                update.applied_bitrate(),
+            ) {
+                (Some(policy), Some(capture), None) => policy
+                    .skip_capture(capture, collected)
+                    .map_err(bitrate_error),
+                (None, None, None) => Ok(()),
+                _ => Err(Error::Order),
+            };
+        }
         match (
             &mut self.bitrate,
             self.rate_in_flight.take(),
@@ -977,6 +990,7 @@ impl<S> VideoServices<'_, S> {
             match self.results.try_recv() {
                 Ok(update) => {
                     let unchanged = update.is_unchanged();
+                    let skipped = update.is_skipped();
                     let observed = update.observed_micros();
                     let collected = now(cx)?;
                     // Account for the actual native effect before enqueue can
@@ -997,11 +1011,13 @@ impl<S> VideoServices<'_, S> {
                         collected,
                         collected.checked_sub(started).ok_or(Error::Clock)?,
                     ));
-                    observation = Some(Observation {
-                        at_us: observed,
+                    observation = observed.map(|at_us| Observation {
+                        at_us,
                         changed: !unchanged,
                     });
-                    let count = if unchanged {
+                    let count = if skipped {
+                        &mut self.statistics.skipped_capture_updates
+                    } else if unchanged {
                         &mut self.statistics.unchanged_observations
                     } else {
                         &mut self.statistics.encoded_updates

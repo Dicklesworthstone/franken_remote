@@ -28,6 +28,7 @@
 
 #define FR_CAP_OK 0
 #define FR_CAP_UNCHANGED 1
+#define FR_CAP_RATE_LIMITED 2
 #define FR_CAP_INVALID -1
 #define FR_CAP_UNAVAILABLE -2
 #define FR_CAP_PERMISSION -3
@@ -259,6 +260,7 @@ int fr_cap_bind_parent(int32_t expected) {
     CVPixelBufferRef latest;   // newest complete frame, retained
     FrCapSource source;        // positive source evidence, protected by lock
     uint64_t encoded;          // source.picture at the last successful encode
+    BOOL has_output;           // verification output uses encoded == 0 too
     FrCapLive live;            // native permission/display answers (CLOCK_MONOTONIC_RAW), under lock
     dispatch_source_t live_refresh; // keeps `live` fresh off the request path; cancelled at free
     SCContentFilter *filter;
@@ -278,7 +280,7 @@ int fr_cap_bind_parent(int32_t expected) {
     dispatch_semaphore_t output;
     NSMutableData *unit;
     BOOL keyframe;
-    BOOL dropped;              // rate control skipped the picture
+    enum FrCapEncodeCompletion completion;
     OSStatus result;
     // Presentation times, microseconds: never closer than one frame interval,
     // so rate control budgets requests that arrive early at the stream rate.
@@ -494,9 +496,11 @@ static void encoded(void *refcon, void *frame, OSStatus status, VTEncodeInfoFlag
         FrCapture *c = (__bridge FrCapture *)refcon;
         c->unit = nil;
         c->result = status;
-        c->dropped = status == noErr && (flags & kVTEncodeInfo_FrameDropped);
-        if (status == noErr && (!sample || !CMSampleBufferIsValid(sample) ||
-                              !CMSampleBufferDataIsReady(sample) || c->dropped))
+        c->completion = fr_cap_encode_completion(
+            status == noErr, (flags & kVTEncodeInfo_FrameDropped) != 0,
+            sample && CMSampleBufferIsValid(sample) && CMSampleBufferDataIsReady(sample),
+            c->has_output);
+        if (status == noErr && c->completion != FR_CAP_ENCODE_OUTPUT)
             c->result = -1;
         if (c->result == noErr) {
             BOOL sync = YES;
@@ -1072,10 +1076,11 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
                           ? now
                           : c->last_pts + c->interval;
         c->unit_limit = capacity;
-        // Low-latency rate control skips a picture that would overrun its
-        // budget, typically the first after a large IDR. Each resubmission is
-        // one interval later and waits for the clock (fr_cap_pts_wait_us), so
-        // the budget it spends has accrued; the deadline bounds resubmissions.
+        // Low-latency rate control can complete without a picture, typically
+        // after a large IDR. An established stream reports that completed drop
+        // and lets the original host cadence admit another request. Bootstrap
+        // alone retries within this SAME deadline, one clock-paced interval
+        // later, because no previous reference exists to preserve yet.
         for (;;) {
             // The source is checked after any wait, just before submission.
             int paced = wait_for_pts(pts, deadline_ns);
@@ -1085,7 +1090,7 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
                 return paced;
             }
             c->unit = nil;
-            c->dropped = NO;
+            c->completion = FR_CAP_ENCODE_FAILED;
             OSStatus submitted =
                 VTCompressionSessionEncodeFrame(c->session, picture, CMTimeMake(pts, 1000000),
                                                 kCMTimeInvalid, (__bridge CFDictionaryRef)options,
@@ -1103,7 +1108,22 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
                 return FR_CAP_TIMEOUT;
             }
             c->last_pts = pts;
-            if (!c->dropped) break;
+            if (c->completion == FR_CAP_ENCODE_SKIPPED) {
+                // The callback has positively completed, so the input surface
+                // is no longer borrowed. A dropped picture never advances the
+                // encoded reference, source observation, or verification count.
+                CVPixelBufferRelease(picture);
+                live = capture_live(c);
+                if (live) return live;
+                os_unfair_lock_lock(&c->lock);
+                BOOL current = !c->stopped && fr_cap_source_current(&c->source, source_epoch);
+                BOOL timely = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline_ns;
+                if (current && timely) *actual_bitrate = c->bitrate;
+                os_unfair_lock_unlock(&c->lock);
+                if (!current) return FR_CAP_UNAVAILABLE;
+                return timely ? FR_CAP_RATE_LIMITED : FR_CAP_TIMEOUT;
+            }
+            if (c->completion != FR_CAP_ENCODE_RETRY) break;
             if (pts > INT64_MAX - c->interval) {
                 CVPixelBufferRelease(picture);
                 return FR_CAP_CODEC;
@@ -1133,6 +1153,7 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
             *idr = c->keyframe ? 1 : 0;
             *actual_bitrate = c->bitrate;
             c->encoded = selected;
+            c->has_output = YES;
             if (verification) c->verification_encoded++;
         }
         os_unfair_lock_unlock(&c->lock);

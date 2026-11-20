@@ -189,3 +189,41 @@ fn cadence_only_callers_keep_legacy_replies_without_a_bitrate_transaction() {
     assert_eq!(pacing.enable_bitrate(INITIAL), Ok(()));
     assert_eq!(pacing.enable_bitrate(INITIAL), Err(Error::InvalidBudget));
 }
+
+#[test]
+fn dropped_picture_releases_exact_work_credit_without_rate_or_idle_confirmation() {
+    let mut pacing = enabled();
+    pressure(&mut pacing);
+    let decision = policy(&pacing).pending();
+    pacing.observation = Some(Observation {
+        at_us: 100_000,
+        changed: false,
+    });
+    pacing.start(110_000).unwrap();
+    assert_eq!(pacing.finish_skipped(111_000), Err(Error::InvalidBudget));
+    pacing.skip_bitrate(111_000).unwrap();
+    pacing.finish_skipped(111_000).unwrap();
+    assert_eq!(policy(&pacing).applied_bitrate(), INITIAL);
+    assert_eq!(policy(&pacing).pending(), decision);
+    assert_eq!(pacing.in_flight, None);
+    assert_eq!(pacing.last_work, Some((111_000, 1000)));
+    assert!(pacing.observation.is_none());
+    assert_eq!(pacing.finish_skipped(111_001), Err(Error::InvalidBudget));
+    pacing.start(120_000).unwrap();
+    assert_eq!(pacing.capture_bitrate(), Some(INITIAL / 2));
+    completed(&mut pacing, 120_000, INITIAL / 2, true);
+    assert_eq!(policy(&pacing).applied_bitrate(), INITIAL / 2);
+}
+
+#[test]
+fn cadence_only_drop_has_work_cost_and_no_source_observation() {
+    let mut pacing = pacing();
+    pacing.start(10).unwrap();
+    pacing.skip_bitrate(20).unwrap();
+    assert!(pacing.finish_skipped(9).is_err());
+    assert_eq!(pacing.in_flight, Some(10));
+    pacing.finish_skipped(20).unwrap();
+    assert_eq!(pacing.last_work, Some((20, 10)));
+    assert!(pacing.observation.is_none());
+    pacing.start(21).unwrap();
+}

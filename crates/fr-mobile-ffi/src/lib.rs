@@ -28,6 +28,15 @@
 ))]
 mod upload_selection;
 
+#[cfg(any(
+    test,
+    all(
+        feature = "session",
+        any(target_os = "ios", all(target_os = "macos", feature = "macos-session"))
+    )
+))]
+mod download_selection;
+
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod events;
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]

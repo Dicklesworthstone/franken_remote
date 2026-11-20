@@ -21,6 +21,8 @@ use fr_media::{
     worker::UnchangedCapture,
 };
 use std::time::Instant;
+mod output;
+use output::Output;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -70,6 +72,7 @@ unsafe extern "C" {
 }
 
 const UNCHANGED: c_int = 1;
+const RATE_LIMITED: c_int = 2;
 fn status(code: c_int) -> Result<(), NativeError> {
     match code {
         0 => Ok(()),
@@ -150,6 +153,9 @@ pub fn displays() -> Result<Vec<MacDisplay>, NativeError> {
 pub enum Captured {
     Unit(EncodedAccessUnit),
     Unchanged(UnchangedCapture),
+    /// `VideoToolbox` completed this request by dropping its picture. This is
+    /// neither a source observation nor confirmation of an encoder rate.
+    RateLimited,
 }
 
 /// Content-free work counters for the original capture owner. These are API
@@ -172,10 +178,9 @@ pub struct MacCapture {
     limits: ProtocolLimits,
     admission: HevcGuard,
     buffer: Vec<u8>,
-    last_output: Option<FrameId>,
+    output: Output,
     last_request: Option<FrameId>,
     last_observed: Option<u64>,
-    bitrate: u32,
     ceiling_bitrate: u32,
     rate: Rate,
     closed: bool,
@@ -231,10 +236,9 @@ impl MacCapture {
             limits,
             admission,
             buffer,
-            last_output: None,
+            output: Output::new(bitrate),
             last_request: None,
             last_observed: None,
-            bitrate,
             ceiling_bitrate: bitrate,
             rate: Rate::new(bitrate),
             closed: false,
@@ -243,13 +247,15 @@ impl MacCapture {
 
     #[must_use]
     pub const fn bitrate(&self) -> u32 {
-        self.bitrate
+        self.output.bitrate()
     }
 
     /// Captures source evidence after this request and encodes it as `frame`.
     /// `observed_micros` is the parent's pre-request lower bound, never reply
     /// arrival time. Only a fresh OS Idle observation of the encoded picture
     /// may return `Unchanged`; silence causes real verification capture.
+    /// A successful native rate-control drop returns `RateLimited` without
+    /// pixels or source evidence and preserves the last encoded reference.
     /// A failure closes the capture: no later request can splice a broken chain.
     pub fn capture(
         &mut self,
@@ -264,7 +270,7 @@ impl MacCapture {
             observed_micros,
             force_idr,
             only_if_changed,
-            self.bitrate,
+            self.output.bitrate(),
         )
     }
 
@@ -310,8 +316,12 @@ impl MacCapture {
         self.rate.request(bitrate);
         let target = self
             .rate
-            .due(observed_micros, Instant::now(), self.last_output.is_some())
-            .unwrap_or(self.bitrate);
+            .due(
+                observed_micros,
+                Instant::now(),
+                self.output.reference().is_some(),
+            )
+            .unwrap_or(self.output.bitrate());
         let result = self.capture_inner(frame, observed_micros, force_idr, only_if_changed, target);
         if result.is_err() {
             self.closed = true;
@@ -328,7 +338,7 @@ impl MacCapture {
         target_bitrate: u32,
     ) -> Result<Captured, NativeError> {
         // A P picture needs a previous unit; the first is always an IDR.
-        let force_idr = force_idr || self.last_output.is_none();
+        let force_idr = self.output.force_idr(force_idr);
         let (mut length, mut idr) = (0, 0);
         let mut actual_bitrate = 0;
         // SAFETY: unique live handle; the buffer is writable for its length.
@@ -346,9 +356,17 @@ impl MacCapture {
                 &raw mut actual_bitrate,
             )
         };
+        if code == RATE_LIMITED {
+            // There must already be an encoded reference to preserve. Native
+            // bootstrap retries remain bounded by the original encode deadline.
+            self.output
+                .skipped(target_bitrate, actual_bitrate, length, idr != 0)
+                .map_err(|()| NativeError::UnsupportedBitstream)?;
+            return Ok(Captured::RateLimited);
+        }
         if code == UNCHANGED {
-            let reference = self.last_output.ok_or(NativeError::Codec)?;
-            if force_idr || !only_if_changed || actual_bitrate != self.bitrate {
+            let reference = self.output.reference().ok_or(NativeError::Codec)?;
+            if force_idr || !only_if_changed || actual_bitrate != self.output.bitrate() {
                 return Err(NativeError::UnsupportedBitstream);
             }
             return Ok(Captured::Unchanged(UnchangedCapture {
@@ -377,7 +395,10 @@ impl MacCapture {
             }
         } else {
             FrameKind::Predicted {
-                references: self.last_output.ok_or(NativeError::UnsupportedBitstream)?,
+                references: self
+                    .output
+                    .reference()
+                    .ok_or(NativeError::UnsupportedBitstream)?,
             }
         };
         let unit = EncodedAccessUnit::new(
@@ -398,8 +419,7 @@ impl MacCapture {
                 Instant::now(),
             )
             .map_err(|()| NativeError::UnsupportedBitstream)?;
-        self.bitrate = actual_bitrate;
-        self.last_output = Some(frame);
+        self.output.encoded(frame, actual_bitrate);
         Ok(Captured::Unit(unit))
     }
 

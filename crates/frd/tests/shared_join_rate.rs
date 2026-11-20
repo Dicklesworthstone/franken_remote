@@ -34,7 +34,7 @@ fn late_join_idrs_are_throttled_without_stalling_healthy_dependent_output() {
             .await
             .unwrap();
         assert!(first.encoded().unwrap().kind().is_idr());
-        let issued = first.observed_micros();
+        let issued = first.observed_micros().unwrap();
         let mut previous = first.frame();
         drop(first);
         // Repeated requests have no extra encoder allowance. Actual dependent
@@ -46,7 +46,7 @@ fn late_join_idrs_are_throttled_without_stalling_healthy_dependent_output() {
                 .capture_for_join(until)
                 .await
                 .unwrap();
-            assert!(next.observed_micros() < issued + 500_000);
+            assert!(next.observed_micros().unwrap() < issued + 500_000);
             assert_eq!(
                 next.encoded().unwrap().kind(),
                 fr_media::access_unit::FrameKind::Predicted {

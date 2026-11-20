@@ -207,11 +207,30 @@ impl CapturePacing {
         let completed = crate::media::host_now(&owner.context())
             .map_err(Error::Media)?
             .as_micros();
+        if update.is_skipped() {
+            if update.applied_bitrate().is_some() {
+                return Err(Error::Media(MediaError::InvalidFrame));
+            }
+            return self.skip_bitrate(completed);
+        }
         self.complete_bitrate(
             completed,
             update.applied_bitrate(),
             update.encoded().is_some_and(|frame| frame.kind().is_idr()),
         )
+    }
+    fn skip_bitrate(&mut self, completed: u64) -> Result<(), Error> {
+        match (&mut self.bitrate, self.bitrate_capture) {
+            (Some(policy), Some(capture)) => {
+                policy
+                    .skip_capture(capture, completed)
+                    .map_err(bitrate_error)?;
+            }
+            (None, None) => {}
+            _ => return Err(Error::Media(MediaError::InvalidFrame)),
+        }
+        self.bitrate_capture = None;
+        Ok(())
     }
     pub(super) fn finish(
         &mut self,
@@ -232,6 +251,18 @@ impl CapturePacing {
             at_us: observed,
             changed,
         });
+        Ok(())
+    }
+    /// A completed native drop releases the original work credit without
+    /// asserting that the source is fresh or unchanged.
+    pub(super) fn finish_skipped(&mut self, completed: u64) -> Result<(), Error> {
+        if self.bitrate_capture.is_some() {
+            return Err(Error::InvalidBudget);
+        }
+        let started = self.in_flight.ok_or(Error::InvalidBudget)?;
+        self.last_work = Some((completed, elapsed(completed, started)?));
+        self.in_flight = None;
+        self.observation = None;
         Ok(())
     }
     pub(super) fn sample(

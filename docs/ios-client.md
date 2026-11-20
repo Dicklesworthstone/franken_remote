@@ -379,6 +379,70 @@ Apple API contracts:
 [coordinated reads](https://developer.apple.com/documentation/foundation/nsfilecoordinator/coordinate(readingitemat:options:error:byaccessor:)),
 and [upload snapshots and descriptor lifetime](https://developer.apple.com/documentation/foundation/nsfilecoordinator/readingoptions/foruploading).
 
+## Receive selected host files
+
+The machine list's **Connect and receive files…** action asks for local
+permission for that one control-capable connection. It prepares a private
+per-session directory beneath the app's Documents/Received folder, with a
+256 MiB file limit and a 1 GiB cumulative session limit. Repeated names use
+the existing native keep-both conflict policy. A normal connection has no
+receive permission. Read-only viewing cannot receive files, and a configured
+receiver still waits for the current input grant and the host's positive
+`file-download` negotiation. The host chooses what to send; the phone cannot
+browse arbitrary host paths. Nothing received is opened or executed.
+
+Filesystem preparation runs on one bounded Swift background worker.
+`fr_download_destination_prepare` reserves one of four native preparation
+slots **before** validating and pinning the directory. Its local token is
+one-use and never reused. The foreground app checks that its original choice
+is still current, then calls `fr_session_start_with_files`; every attempted
+start consumes the token, including invalid arguments or a failed start.
+That entry point performs no filesystem I/O and uses the existing
+`Config.download`/`Download` owner, ATP framing and bounded disk worker.
+The C registry admits the session before spawning its native thread, so a
+capacity refusal cannot leave a running receiver with no retainable handle.
+The existing `FrConfig` layout and start functions are unchanged. A cancelled
+preparation, background transition, reconnect, control-to-view transition
+or display replacement never replays receive consent into another session.
+
+The session shows separate staged-byte progress, original atomic-publication
+receipts, directory durability and cleanup. Reaching 100% staged is not a
+saved-file receipt. **Stop receiving** cancels only the original download
+direction; viewing and control continue, and prior publication receipts stay
+visible. A missing host capability, size limit, integrity failure and uncertain
+publication have distinct states. Status documents contain no names, paths or
+file contents and are bounded to 32 KiB and 64 results.
+
+The local **Received files** sheet opens from the machine list, or from the
+finished session once its receive cleanup is confirmed. Files from active or
+uncollected original receivers remain excluded. The app retains the native
+session handle and destination through actual disk cleanup, even after its
+screen is dismissed. A failed cleanup is not converted into a clean close by
+a later cancel or UI dismissal; subsequent connection attempts wait for the
+original receiver's positive cleanup witness. Old committed receipts remain
+available separately from that result.
+
+The file list is local, bounded and explicit about truncation. It excludes
+staging names, symlinks, directories and packages. Selecting a row rechecks
+its app-owned parent, file type, device/inode identity, modification metadata
+and size before opening the native system share sheet. That is a check at
+handoff; later URL access belongs to the OS share sheet, not an immutable
+export snapshot. The user chooses where to copy or share it; the app does not
+automatically preview it. After process restart, no previous native disk
+worker survives, so completed regular names from an interrupted session can
+also appear; private staging still does not. That filesystem listing is not
+substituted for an earlier transfer receipt or a durability claim.
+
+Source verification covers one-use destination ownership, reservation and
+descriptor bounds, cancellation and stale-token rejection, staged versus
+published results, preserved receipts after cleanup failure, and bounded
+status projection. The iOS test target additionally exercises status parsing,
+malformed receipt rejection, export policy and an actual replaced-path/symlink
+case. Actual Apple C ABI compilation, XCTest, native share-sheet interaction,
+device lock/data-protection behavior and a live host-to-iPhone transfer still
+require the Apple SDK and device qualification; Linux policy tests do not
+establish those results.
+
 ## Input
 
 The app requests keys, absolute pointer, buttons, line scroll and optional

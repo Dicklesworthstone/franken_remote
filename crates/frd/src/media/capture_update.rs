@@ -19,9 +19,10 @@ pub use prepared::PreparedSharedCapture;
 mod shared;
 pub use shared::{FanoutReport, SharedCaptureUpdate};
 
-/// A complete worker result. Only `CaptureSource` can construct this proof. It
-/// owns either one encoded buffer or fixed metadata; no raw capture escapes the
-/// worker. Taking encoded bytes out deliberately loses source provenance.
+/// A complete worker result. Only `CaptureSource` can construct it. Encoded and
+/// unchanged results carry source evidence; a skipped capture explicitly does
+/// not. No raw capture escapes the worker. Taking encoded bytes out deliberately
+/// loses source provenance.
 pub struct CaptureUpdate {
     source: Arc<()>,
     configuration: CodecConfigurationGeneration,
@@ -53,6 +54,7 @@ impl fmt::Debug for CaptureUpdate {
         f.debug_struct("CaptureUpdate")
             .field("frame", &self.frame())
             .field("unchanged", &self.is_unchanged())
+            .field("skipped", &self.is_skipped())
             .finish_non_exhaustive()
     }
 }
@@ -67,21 +69,28 @@ impl CaptureUpdate {
         match &self.content {
             Content::Encoded(unit) => unit.frame(),
             Content::Unchanged(proof) => proof.reference,
+            Content::Skipped { reference } => *reference,
         }
     }
-    pub fn observed_micros(&self) -> u64 {
+    /// No timestamp is available for a skipped picture. Its completion cannot
+    /// refresh source progress, adaptive idle evidence, or input readiness.
+    pub fn observed_micros(&self) -> Option<u64> {
         match &self.content {
-            Content::Encoded(unit) => unit.capture_micros(),
-            Content::Unchanged(proof) => proof.observed_micros,
+            Content::Encoded(unit) => Some(unit.capture_micros()),
+            Content::Unchanged(proof) => Some(proof.observed_micros),
+            Content::Skipped { .. } => None,
         }
     }
     pub fn is_unchanged(&self) -> bool {
         matches!(self.content, Content::Unchanged(_))
     }
+    pub fn is_skipped(&self) -> bool {
+        matches!(self.content, Content::Skipped { .. })
+    }
     pub fn encoded(&self) -> Option<&EncodedAccessUnit> {
         match &self.content {
             Content::Encoded(unit) => Some(unit),
-            Content::Unchanged(_) => None,
+            Content::Unchanged(_) | Content::Skipped { .. } => None,
         }
     }
 }
@@ -99,7 +108,7 @@ impl CaptureSource {
             .content
         {
             Content::Encoded(unit) => Ok(unit),
-            Content::Unchanged(_) => Err(Error::InvalidFrame),
+            Content::Unchanged(_) | Content::Skipped { .. } => Err(Error::InvalidFrame),
         }
     }
     /// Full native comparison on each caller-scheduled observation. Static
@@ -162,7 +171,7 @@ impl CaptureSource {
         // Retire before possible external work. Failed/cancelled exchanges poison
         // the worker; neither candidate identity nor original timestamp is retried.
         self.next = frame.next();
-        let request = protocol::Request {
+        let mut request = protocol::Request {
             configuration: self.configuration,
             frame,
             observed_micros: issued.as_micros(),
@@ -201,6 +210,36 @@ impl CaptureSource {
                 .response(reply.header.kind, reply.into_body())
                 .map_err(response_error)?
             {
+                if matches!(content, Content::Skipped { .. })
+                    && (request.force_idr || !request.conditional)
+                {
+                    // Required IDRs/unconditional capture keep their ORIGINAL
+                    // operation bound. Each completed drop retires its candidate
+                    // and a new request waits one configured source interval;
+                    // neither polling nor rate limiting renews the deadline or
+                    // the conservative original observation timestamp.
+                    let interval = Duration::from_micros(
+                        1_000_000_u64.div_ceil(u64::from(self.configuration.fps)),
+                    );
+                    wait_skipped(control, deadline, interval).await?;
+                    let frame = self.next.ok_or(Error::InvalidFrame)?;
+                    self.next = frame.next();
+                    request.frame = frame;
+                    let (kind, payload) = request.payload()?;
+                    reply = operation
+                        .worker
+                        .request_checked(
+                            &control.cx,
+                            kind,
+                            payload,
+                            maximum_capacity,
+                            deadline,
+                            || control.live_deadline(),
+                        )
+                        .await
+                        .map_err(|error| control.capture_failure(error))?;
+                    continue;
+                }
                 if let Content::Encoded(unit) = &content {
                     self.last_capture = Some(unit.frame());
                 }
@@ -236,6 +275,31 @@ impl CaptureSource {
         })
     }
 }
+async fn wait_skipped(
+    control: &ObservationControl,
+    deadline: worker::Deadline,
+    interval: Duration,
+) -> Result<(), Error> {
+    let timer = control
+        .cx
+        .timer_driver()
+        .ok_or(worker::Error::MissingRuntime)?;
+    let retry_at = timer.now() + interval;
+    loop {
+        control.check()?;
+        let now = timer.now();
+        if now >= deadline.time() {
+            return Err(worker::Error::Deadline.into());
+        }
+        if now >= retry_at {
+            return Ok(());
+        }
+        // A timely authority renewal may extend that proof, but cannot issue
+        // this retry early or extend the original native operation deadline.
+        let until = retry_at.min(deadline.time()).min(control.live_deadline()?);
+        sleep(now, Duration::from_nanos(until.duration_since(now))).await;
+    }
+}
 fn response_error(error: protocol::Error) -> Error {
     match error {
         protocol::Error::Protocol(error) => error.into(),
@@ -268,6 +332,11 @@ impl Subscription {
                     return Err(Error::InvalidFrame);
                 }
                 self.admit_unchanged(&proof, now.as_micros())?;
+            }
+            Content::Skipped { .. } => {
+                if self.capture_source.is_none() {
+                    return Err(Error::InvalidFrame);
+                }
             }
         }
         Ok(())

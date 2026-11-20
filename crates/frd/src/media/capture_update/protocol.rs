@@ -9,6 +9,11 @@ use fr_media::{
 pub(super) enum Content {
     Encoded(EncodedAccessUnit),
     Unchanged(UnchangedCapture),
+    /// No picture or source observation. Keep the last actually encoded
+    /// reference; the skipped candidate never joins the codec chain.
+    Skipped {
+        reference: FrameId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,9 +93,25 @@ impl Request {
             Kind::Unchanged | Kind::RateUnchanged if self.conditional && !self.force_idr => {
                 self.unchanged(kind, &body).map(Some)
             }
+            Kind::CaptureSkipped => self.skipped(&body).map(Some),
             Kind::NeedInput => Ok(None),
             _ => Err(Error::Backpressure),
         }
+    }
+
+    fn skipped(&self, body: &[u8]) -> Result<(Content, Option<u32>), Error> {
+        let skipped = worker::SkippedCapture::decode(body)?;
+        // Only the qualified native transaction can finish without a picture.
+        // Bootstrap still needs its first IDR; no skipped result can invent a
+        // reference or claim that a requested bitrate took effect.
+        let reference = self.reference.ok_or(Error::InvalidFrame)?;
+        if self.configuration.backend != worker::Backend::VideoToolbox
+            || skipped.candidate != self.frame
+            || reference >= self.frame
+        {
+            return Err(Error::InvalidFrame);
+        }
+        Ok((Content::Skipped { reference }, None))
     }
 
     fn unit(&self, kind: Kind, body: Vec<u8>) -> Result<(Content, Option<u32>), Error> {

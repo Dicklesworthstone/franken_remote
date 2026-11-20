@@ -54,6 +54,7 @@ extern "C" {
 #define FR_DISPLAY_CHOOSE 1   /* one display: open; several: ask the user */
 #define FR_MAX_DISPLAYS 8
 #define FR_UPLOAD_STATUS_MAX_BYTES 16384
+#define FR_DOWNLOAD_STATUS_MAX_BYTES 32768
 
 /* Event kinds. */
 #define FR_EVENT_STATE 1      /* value: FR_STATE_* */
@@ -215,6 +216,37 @@ bool fr_session_upload_sources_released(FrHandle session);
  * copy_pin; use FR_UPLOAD_STATUS_MAX_BYTES bytes including termination.
  * 0 means stale/unavailable, never successful transfer. */
 size_t fr_session_copy_upload_status(FrHandle session, char *_Nullable buffer, size_t capacity);
+
+/* Explicit receive consent. Preparation does filesystem work on a bounded
+ * background worker, pins an absolute private directory, and returns a one-use
+ * token. At most four destinations may be preparing/prepared at once. Limits
+ * must be positive with max_session_bytes >= max_file_bytes. Conflicts keep
+ * both files. No network, control grant, receive or automatic opening occurs.
+ * On failure out is untouched. Discard a token if its foreground choice ends. */
+int32_t fr_download_destination_prepare(const char *_Nullable path,
+                                        uint64_t max_file_bytes,
+                                        uint64_t max_session_bytes,
+                                        uint64_t *_Nullable out);
+int32_t fr_download_destination_discard(uint64_t destination);
+/* Start on the foreground thread after rechecking the original user choice.
+ * Consumes destination on EVERY attempt, even invalid arguments/start failure.
+ * No filesystem I/O occurs here. Control-capable config required; control is
+ * still requested separately. upload negotiates the existing empty send lane.
+ * Reconnect/display replacement never reuses this receive permission. */
+int32_t fr_session_start_with_files(const FrConfig *_Nullable config,
+                                   uint32_t mode, bool upload,
+                                   uint64_t destination, FrHandle *_Nullable out);
+/* Stop receiving only; leave viewing/control alive and retain original
+ * publication receipts. Cannot resume or redirect the original destination. */
+int32_t fr_session_cancel_download(FrHandle session);
+/* Terminal original session AND positive receive disk cleanup; false for
+ * stale handles or failed/pending cleanup. Retain the
+ * handle/private destination until true; free does not join disk workers. */
+bool fr_session_download_cleanup_complete(FrHandle session);
+/* Bounded version-1 JSON. Staged progress, atomic publication, durability,
+ * omission and cleanup are separate fields. No names, paths or contents.
+ * Required bytes exclude NUL; zero is unavailable, never success. */
+size_t fr_session_copy_download_status(FrHandle session, char *_Nullable buffer, size_t capacity);
 
 /* Poll before the first frame, while startup/approval expiry still runs.
  * false leaves out untouched. Copy every row with this same token; if any

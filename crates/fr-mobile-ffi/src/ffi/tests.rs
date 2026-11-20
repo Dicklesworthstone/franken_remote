@@ -72,6 +72,10 @@ fn every_header_constant_matches_the_rust_value() {
         "FR_UPLOAD_STATUS_MAX_BYTES".into(),
         i64::try_from(FR_UPLOAD_STATUS_MAX_BYTES).unwrap(),
     ));
+    expected.push((
+        "FR_DOWNLOAD_STATUS_MAX_BYTES".into(),
+        i64::try_from(FR_DOWNLOAD_STATUS_MAX_BYTES).unwrap(),
+    ));
     let mut found = defines();
     found.sort();
     expected.sort();
@@ -79,6 +83,97 @@ fn every_header_constant_matches_the_rust_value() {
     // Planted negative: the parser sees a changed value.
     let changed = HEADER.replace("#define FR_END_INTERNAL 10", "#define FR_END_INTERNAL 11");
     assert!(changed != HEADER && changed.contains("FR_END_INTERNAL 11"));
+}
+
+#[test]
+fn receive_bridge_refuses_stale_handles_and_invalid_destinations_without_writes() {
+    let relative = CString::new("relative").unwrap();
+    let mut token = 91;
+    let mut output = [7_i8; 8];
+    // SAFETY: all pointers name the live local values or are explicitly NULL.
+    unsafe {
+        assert_eq!(
+            fr_download_destination_prepare(core::ptr::null(), 8, 8, &raw mut token),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_download_destination_prepare(relative.as_ptr(), 8, 8, &raw mut token),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_download_destination_prepare(relative.as_ptr(), 8, 4, &raw mut token),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_download_destination_prepare(relative.as_ptr(), 8, 8, core::ptr::null_mut()),
+            FR_INVALID
+        );
+        assert_eq!(token, 91);
+        assert_eq!(
+            fr_session_copy_download_status(0, output.as_mut_ptr(), output.len()),
+            0
+        );
+        assert_eq!(output[0], 0);
+        assert_eq!(&output[1..], &[7; 7]);
+    }
+    assert_eq!(fr_download_destination_discard(0), FR_STALE);
+    assert_eq!(fr_session_cancel_download(0), FR_STALE);
+    assert!(!fr_session_download_cleanup_complete(0));
+}
+
+#[test]
+fn a_receive_destination_is_spent_even_when_start_refuses_the_role_or_mode() {
+    let _serial = REGISTRY_TESTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "fr-ffi-receive-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = CString::new(root.to_str().unwrap()).unwrap();
+    let host = CString::new("mac.tailtest.ts.net").unwrap();
+    let view_only = config(&host, 18443, None);
+    for mode in [FR_DISPLAY_CHOOSE, u32::MAX] {
+        let mut token = 0;
+        let mut handle = 91;
+        // SAFETY: all strings and output pointers remain valid for each call.
+        unsafe {
+            assert_eq!(
+                fr_download_destination_prepare(path.as_ptr(), 8, 16, &raw mut token),
+                FR_OK
+            );
+            assert_ne!(token, 0);
+            assert_eq!(
+                fr_session_start_with_files(
+                    &raw const view_only,
+                    mode,
+                    false,
+                    token,
+                    &raw mut handle
+                ),
+                FR_INVALID
+            );
+            assert_eq!(handle, 91);
+            assert_eq!(
+                fr_session_start_with_files(
+                    &raw const view_only,
+                    mode,
+                    false,
+                    token,
+                    &raw mut handle
+                ),
+                FR_STALE
+            );
+        }
+        assert_eq!(fr_download_destination_discard(token), FR_STALE);
+    }
 }
 
 #[test]
@@ -556,6 +651,8 @@ fn at_most_max_sessions_are_alive_at_once() {
     let _serial = REGISTRY_TESTS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    // A failed native start never occupies a slot or exposes a handle.
+    assert!(super::register(|| Err(std::io::Error::other("thread unavailable"))).is_none());
     let host = CString::new("fr-ios-bound.tail00000.ts.net").unwrap();
     let handles: Vec<FrHandle> = (0..MAX_SESSIONS)
         .map(|_| {
@@ -565,6 +662,9 @@ fn at_most_max_sessions_are_alive_at_once() {
         })
         .collect();
     assert_eq!(start(&host), (FR_BUSY, 0));
+    // Admission must precede native start. Otherwise a lost last-slot race
+    // could leave a receive worker alive with no handle the shell can retain.
+    assert!(super::register(|| panic!("full registry started a native owner")).is_none());
     assert_eq!(fr_session_free(handles[0]), FR_OK);
     let (status, replacement) = start(&host);
     assert_eq!(status, FR_OK);

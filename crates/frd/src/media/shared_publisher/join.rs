@@ -224,7 +224,7 @@ impl Entry {
     pub(super) fn publish(&mut self, update: &SharedCaptureUpdate) -> Result<bool, Error> {
         // An already-issued source capture may complete after this viewer failed.
         // Healthy subscribers still consume it; a failed sender never does.
-        if self.fenced() {
+        if self.fenced() || update.is_skipped() {
             return Ok(false);
         }
         if self.waiting() {

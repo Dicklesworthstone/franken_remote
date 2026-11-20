@@ -16,6 +16,7 @@ pub const MAX_FANOUT_RECIPIENTS: usize = 8;
 enum SharedContent {
     Encoded(SharedFrame),
     Unchanged(UnchangedCapture),
+    Skipped { reference: FrameId },
 }
 /// Only an actual `CaptureUpdate` can create this source-bound result. Cloning
 /// retains one physical compressed allocation or copies fixed unchanged metadata;
@@ -32,6 +33,7 @@ impl std::fmt::Debug for SharedCaptureUpdate {
         f.debug_struct("SharedCaptureUpdate")
             .field("frame", &self.frame())
             .field("unchanged", &self.is_unchanged())
+            .field("skipped", &self.is_skipped())
             .finish_non_exhaustive()
     }
 }
@@ -46,6 +48,7 @@ impl CaptureUpdate {
                 SharedContent::Encoded(pool.share(unit).map_err(Error::Receiver)?)
             }
             Content::Unchanged(proof) => SharedContent::Unchanged(proof),
+            Content::Skipped { reference } => SharedContent::Skipped { reference },
         };
         Ok(SharedCaptureUpdate {
             source: self.source,
@@ -69,6 +72,10 @@ impl CaptureUpdate {
             Content::Unchanged(proof) => {
                 drop(reservation);
                 SharedContent::Unchanged(proof)
+            }
+            Content::Skipped { reference } => {
+                drop(reservation);
+                SharedContent::Skipped { reference }
             }
         };
         Ok(SharedCaptureUpdate {
@@ -104,21 +111,27 @@ impl SharedCaptureUpdate {
         match &self.content {
             SharedContent::Encoded(frame) => frame.frame(),
             SharedContent::Unchanged(proof) => proof.reference,
+            SharedContent::Skipped { reference } => *reference,
         }
     }
-    pub fn observed_micros(&self) -> u64 {
+    /// A skipped native request has no source-observation timestamp.
+    pub fn observed_micros(&self) -> Option<u64> {
         match &self.content {
-            SharedContent::Encoded(frame) => frame.capture_micros(),
-            SharedContent::Unchanged(proof) => proof.observed_micros,
+            SharedContent::Encoded(frame) => Some(frame.capture_micros()),
+            SharedContent::Unchanged(proof) => Some(proof.observed_micros),
+            SharedContent::Skipped { .. } => None,
         }
     }
     pub fn is_unchanged(&self) -> bool {
         matches!(self.content, SharedContent::Unchanged(_))
     }
+    pub fn is_skipped(&self) -> bool {
+        matches!(self.content, SharedContent::Skipped { .. })
+    }
     pub fn encoded(&self) -> Option<&SharedFrame> {
         match &self.content {
             SharedContent::Encoded(frame) => Some(frame),
-            SharedContent::Unchanged(_) => None,
+            SharedContent::Unchanged(_) | SharedContent::Skipped { .. } => None,
         }
     }
     /// Service every already-admitted egress independently, even when an earlier
@@ -166,7 +179,7 @@ impl Subscription {
                 .capture_source
                 .as_ref()
                 .is_some_and(|source| !Arc::ptr_eq(source, &update.source))
-            || (self.capture_source.is_none() && update.is_unchanged())
+            || (self.capture_source.is_none() && update.encoded().is_none())
         {
             return Err(Error::InvalidFrame);
         }
@@ -187,6 +200,7 @@ impl Subscription {
                     self.capture_source = Some(update.source.clone());
                 }
                 SharedContent::Unchanged(proof) => self.admit_unchanged(proof, now)?,
+                SharedContent::Skipped { .. } => {}
             }
             Ok(())
         })();

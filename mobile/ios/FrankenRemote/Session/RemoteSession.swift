@@ -131,6 +131,13 @@ final class RemoteSession: ObservableObject, InputSink {
     /// Accepted resources stay scoped until ALL original native readers retire.
     private var uploadResources: [FileUploadResource] = []
     private var lastUploadPoll: ContinuousClock.Instant?
+    /// Receive consent and the private destination belong to this owner only.
+    private let downloadResource: FileDownloadResource?
+    @Published private(set) var downloadStatus: FileDownloadStatus?
+    @Published private(set) var downloadStatusCurrent = false
+    @Published private(set) var downloadCleanupComplete = false
+    private var lastDownloadPoll: ContinuousClock.Instant?
+    var receivesFiles: Bool { downloadResource != nil }
 
     private var wantsControl: Bool
     private(set) var everViewed = false
@@ -142,10 +149,12 @@ final class RemoteSession: ObservableObject, InputSink {
     /// `screen`: this device's pixels, longer side first (the largest picture
     /// it shows 1:1), or 0, 0 for the host's native pixels.
     init(host: SavedHost, control: Bool, requestControl: Bool,
-         screen: (width: UInt32, height: UInt32) = (0, 0)) throws {
+         screen: (width: UInt32, height: UInt32) = (0, 0),
+         download: FileDownloadResource? = nil) throws {
         self.host = host
         self.controlCapable = control
         self.wantsControl = control && requestControl
+        self.downloadResource = download
         var out: FrHandle = 0
         let status: Int32 = host.name.withCString { name in
             func start(_ pin: UnsafePointer<CChar>?) -> Int32 {
@@ -153,6 +162,10 @@ final class RemoteSession: ObservableObject, InputSink {
                                       direct: host.dialsDirectly, pin: pin,
                                       picture_width: screen.width,
                                       picture_height: screen.height)
+                if let download {
+                    return fr_session_start_with_files(&config, UInt32(FR_DISPLAY_CHOOSE), control,
+                                                       download.token, &out)
+                }
                 return control
                     ? fr_session_start_with_upload(&config, UInt32(FR_DISPLAY_CHOOSE), &out)
                     : fr_session_start_with_display(&config, UInt32(FR_DISPLAY_CHOOSE), &out)
@@ -179,7 +192,7 @@ final class RemoteSession: ObservableObject, InputSink {
         }
         // Preparation strongly retains this object until its native call has
         // returned. Any prepared-but-unsent descriptor was discarded above.
-        FileUploadResource.retire(handle: handle, resources: uploadResources)
+        FileUploadResource.retire(handle: handle, resources: uploadResources, download: downloadResource)
     }
 
     /// Drain pending events. Call on the main thread, once per refresh.
@@ -191,6 +204,7 @@ final class RemoteSession: ObservableObject, InputSink {
         }
         pollDisplays()
         pollUploads()
+        pollDownloads()
     }
 
     private func pollDisplays() {
@@ -540,6 +554,41 @@ final class RemoteSession: ObservableObject, InputSink {
         if uploadStatus != status { uploadStatus = status }
         uploadStatusCurrent = true
         if fr_session_upload_sources_released(handle) { uploadResources.removeAll() }
+    }
+
+    // MARK: Explicit file receiving
+
+    @MainActor
+    func stopReceivingFiles() {
+        guard receivesFiles, downloadStatusCurrent, downloadStatus?.canCancel == true else { return }
+        if fr_session_cancel_download(handle) != FR_OK {
+            notice = "Receiving could not be cancelled. The original file results are retained."
+        }
+        pollDownloads(force: true)
+    }
+
+    @MainActor
+    private func pollDownloads(force: Bool = false) {
+        guard let downloadResource else { return }
+        let now = ContinuousClock.now
+        guard force || (lastDownloadPoll.map({ $0.duration(to: now) >= .milliseconds(100) }) ?? true) else { return }
+        lastDownloadPoll = now
+        // A JSON `not_started` cleanup value is not a terminal-session proof:
+        // that same original session could still obtain control. This native
+        // witness also requires the original session's terminal state.
+        if !downloadCleanupComplete && fr_session_download_cleanup_complete(handle) {
+            downloadCleanupComplete = true
+            downloadResource.allowExportAfterCleanup()
+        }
+        var buffer = [CChar](repeating: 0, count: 32 * 1024 + 1)
+        let length = fr_session_copy_download_status(handle, &buffer, buffer.count)
+        guard length > 0, length < buffer.count,
+              let status = FileDownloadStatus.decode(Data(buffer.prefix(length).map { UInt8(bitPattern: $0) })) else {
+            downloadStatusCurrent = false
+            return // Keep earlier committed receipts; disable new UI commands.
+        }
+        if downloadStatus != status { downloadStatus = status }
+        downloadStatusCurrent = true
     }
 
     // MARK: InputSink

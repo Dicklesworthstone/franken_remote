@@ -152,6 +152,7 @@ impl Members {
         CaptureReport {
             frame: update.frame().as_raw(),
             unchanged: update.is_unchanged(),
+            skipped: update.is_skipped(),
             delivered,
             refused,
         }
@@ -560,11 +561,11 @@ impl Publisher {
         members.tick()?;
         if let Some(adaptive) = &mut self.adaptive {
             adaptive.observe_receivers(&members)?;
-            adaptive.finish(
-                members.last,
-                update.observed_micros(),
-                !update.is_unchanged(),
-            )?;
+            if let Some(observed) = update.observed_micros() {
+                adaptive.finish(members.last, observed, !update.is_unchanged())?;
+            } else {
+                adaptive.finish_skipped(members.last)?;
+            }
             members.quality = adaptive.quality_point();
         }
         let result = members.publish_capture(&update, refused);
@@ -622,8 +623,10 @@ impl Drop for CaptureGuard {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureReport {
+    /// Last actually encoded reference; a skipped candidate is never a frame.
     pub frame: u64,
     pub unchanged: bool,
+    pub skipped: bool,
     pub delivered: usize,
     pub refused: usize,
 }

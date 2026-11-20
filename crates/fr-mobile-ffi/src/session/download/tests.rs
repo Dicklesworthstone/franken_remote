@@ -362,3 +362,53 @@ fn reports_bound_receipts_and_never_hide_omissions() {
     assert!(result.results_truncated());
     assert!(!result.is_success());
 }
+
+#[test]
+fn ui_document_keeps_progress_publication_and_cleanup_separate() {
+    let mut original = report(vec![published(1, 19, Publication::DurabilityUnknown)]);
+    let status = original.status.as_mut().unwrap();
+    status.phase = ReceivePhase::Receiving;
+    status.cleanup = None;
+    status.progress = Some(session::Progress {
+        id: 2,
+        staged_bytes: 11,
+        total_bytes: 11,
+    });
+    let document = original.document();
+    assert_eq!(document["version"], 1);
+    assert_eq!(document["progress"]["staged_bytes"], 11);
+    assert_eq!(document["receipts"].as_array().unwrap().len(), 1);
+    assert_eq!(document["receipts"][0]["bytes"], 19);
+    assert_eq!(document["receipts"][0]["durable"], false);
+    assert_eq!(document["cleanup"], "pending");
+    assert_eq!(document["cleanup_complete"], false);
+    assert_eq!(document["success"], false);
+    assert!(document.get("path").is_none());
+    assert!(document.get("name").is_none());
+    original.cleanup = Some(Err(FileSendError::Expired));
+    original.cancel_requested = true;
+    let stopped = original.document();
+    assert_eq!(stopped["receipts"], document["receipts"]);
+    assert_eq!(stopped["cancel_requested"], true);
+    assert_eq!(stopped["cleanup"], "failed");
+    assert_eq!(stopped["cleanup_complete"], false);
+}
+
+#[test]
+fn ui_document_stays_bounded_and_retains_a_typed_absence() {
+    let mut original = report(
+        (1..=70)
+            .map(|id| published(id, 19, Publication::Durable))
+            .collect(),
+    );
+    original.absence = Some(Absence::NotNegotiated);
+    let document = original.document();
+    assert_eq!(document["absence"], "host_download_unavailable");
+    assert_eq!(
+        document["receipts"].as_array().unwrap().len(),
+        MAX_RECEIVE_RESULTS
+    );
+    assert_eq!(document["receipts_truncated"], true);
+    assert_eq!(document["success"], false);
+    assert!(document.to_string().len() < 32_768);
+}

@@ -282,6 +282,42 @@ fn decoder_startup_bounds_are_checked_before_reading_configuration_bytes() {
 }
 
 #[test]
+fn skipped_capture_has_one_exact_candidate_and_no_observation_or_rate_fields() {
+    let skipped = SkippedCapture {
+        candidate: FrameId::from_raw(9),
+    };
+    let bytes = [0, 0, 0, 0, 0, 0, 0, 9, 1];
+    assert_eq!(skipped.encode(), bytes);
+    assert_eq!(SkippedCapture::decode(&bytes), Ok(skipped));
+    for end in 0..bytes.len() {
+        assert_eq!(SkippedCapture::decode(&bytes[..end]), Err(Error::Malformed));
+    }
+    for reason in [0, 2, 255] {
+        let mut invalid = bytes;
+        invalid[8] = reason;
+        assert_eq!(SkippedCapture::decode(&invalid), Err(Error::Malformed));
+    }
+    let mut extended = bytes.to_vec();
+    extended.push(0);
+    assert_eq!(SkippedCapture::decode(&extended), Err(Error::Malformed));
+    let header = Header {
+        kind: Kind::CaptureSkipped,
+        identity: id(),
+        length: bytes.len(),
+    };
+    let wire = header.encode(&ProtocolLimits::ABSOLUTE).unwrap();
+    assert_eq!(&wire[6..8], &283_u16.to_be_bytes());
+    assert_eq!(Header::decode(&wire, &ProtocolLimits::ABSOLUTE), Ok(header));
+    for length in [0, 1, 8, 10, 17, 24, 28, 40, usize::MAX] {
+        assert!(
+            Header { length, ..header }
+                .encode(&ProtocolLimits::ABSOLUTE)
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn ui_destination_is_private_bounded_and_geometry_bound() {
     use fr_media::worker::presentation::{TARGET_BYTES, X11Target};
     let limits = ProtocolLimits::ABSOLUTE;

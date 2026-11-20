@@ -22,6 +22,7 @@ final class AppModel: ObservableObject {
     struct SessionStart: Equatable {
         var host: SavedHost
         var control: Bool
+        var receiveFiles = false
     }
     /// A start waiting for this app's directory fetch to the same machine to
     /// finish (`connect`), shown on the home screen while it waits.
@@ -33,6 +34,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var displaySwitchError: String?
 
     @Published private(set) var session: RemoteSession?
+    /// A closed receive owner stays here until its original disk cleanup is
+    /// confirmed. Closing the screen never silently permits a replacement.
+    private var retiredReceiver: RemoteSession?
+    private var receiverCleanupTask: Task<Void, Never>?
     /// A session the app closed when it went to the background (or a start
     /// it dropped), to offer again as it was (view-only stays view-only).
     @Published var reconnectOffer: SessionStart?
@@ -93,31 +98,71 @@ final class AppModel: ObservableObject {
     /// session's handshake timed out on the host). Such a start waits for
     /// the fetch (one short exchange, at most three seconds) and the host's
     /// cooldown first.
-    func connect(_ host: SavedHost, control: Bool) {
+    func connect(_ host: SavedHost, control: Bool, receiveFiles: Bool = false) {
         cancelDisplaySwitch()
         reconnectOffer = nil
         startError = nil
         session?.close()
+        if let original = session { retireReceiver(original) }
         session = nil
         subscriptions.removeAll()
         cancelStart()
-        guard listingFrom == host.name else {
+        guard !receiveFiles || control else {
+            startError = "Receiving files requires a control-capable connection."
+            return
+        }
+        guard listingFrom == host.name || receiveFiles || retiredReceiver != nil else {
             start(host, control: control)
             return
         }
-        starting = SessionStart(host: host, control: control)
+        starting = SessionStart(host: host, control: control, receiveFiles: receiveFiles)
         connectTask = Task { @MainActor [weak self] in
-            let deadline = ContinuousClock.now + .seconds(3)
-            while self?.listingFrom == host.name, ContinuousClock.now < deadline {
-                try? await Task.sleep(for: .milliseconds(50))
-                if Task.isCancelled { return }
+            if let previous = self?.retiredReceiver {
+                let deadline = ContinuousClock.now + .seconds(5)
+                while !previous.downloadCleanupComplete, ContinuousClock.now < deadline {
+                    previous.pump()
+                    if previous.downloadCleanupComplete { break }
+                    try? await Task.sleep(for: .milliseconds(50))
+                    if Task.isCancelled { return }
+                }
+                guard let self, !Task.isCancelled else { return }
+                guard previous.downloadCleanupComplete else {
+                    self.starting = nil
+                    self.connectTask = nil
+                    self.startError = "The previous file receiver has not confirmed cleanup. No new connection was opened."
+                    return
+                }
+                self.retiredReceiver = nil
             }
-            // frd's cooldown before it listens again (250 ms).
-            try? await Task.sleep(for: .milliseconds(400))
+            if self?.listingFrom == host.name {
+                let deadline = ContinuousClock.now + .seconds(3)
+                while self?.listingFrom == host.name, ContinuousClock.now < deadline {
+                    try? await Task.sleep(for: .milliseconds(50))
+                    if Task.isCancelled { return }
+                }
+                // frd's cooldown before it listens again (250 ms).
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+            var download: FileDownloadResource?
+            if receiveFiles {
+                let prepared = await Task.detached(priority: .userInitiated) {
+                    Result { try FileDownloadResource.prepare() }
+                }.value
+                guard !Task.isCancelled else { return } // token drops, with no session started
+                switch prepared {
+                case .success(let owner): download = owner
+                case .failure:
+                    guard let self else { return }
+                    self.starting = nil
+                    self.connectTask = nil
+                    self.startError = "A private receive folder could not be prepared. No connection was opened."
+                    return
+                }
+            }
             guard let self, !Task.isCancelled else { return }
             self.connectTask = nil
             self.starting = nil
-            self.start(host, control: control)
+            self.start(host, control: control, download: download)
         }
     }
 
@@ -126,6 +171,26 @@ final class AppModel: ObservableObject {
         connectTask?.cancel()
         connectTask = nil
         starting = nil
+    }
+
+    /// The closed screen is no longer pumping. Continue collecting that exact
+    /// original receiver so completed files become available without requiring
+    /// another connection attempt. Failed cleanup retains custody indefinitely.
+    private func retireReceiver(_ original: RemoteSession) {
+        guard original.receivesFiles, retiredReceiver !== original else { return }
+        retiredReceiver = original
+        receiverCleanupTask?.cancel()
+        receiverCleanupTask = Task { @MainActor [weak self, original] in
+            while !Task.isCancelled, self?.retiredReceiver === original {
+                original.pump()
+                if original.downloadCleanupComplete {
+                    self?.retiredReceiver = nil
+                    self?.receiverCleanupTask = nil
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
     }
 
     /// This device's screen in its own pixels, longer side first (a desktop
@@ -141,11 +206,12 @@ final class AppModel: ObservableObject {
                 UInt32(min(bounds.width, bounds.height)))
     }
 
-    private func start(_ host: SavedHost, control: Bool, requestControl: Bool? = nil) {
+    private func start(_ host: SavedHost, control: Bool, requestControl: Bool? = nil,
+                       download: FileDownloadResource? = nil) {
         do {
             let next = try RemoteSession(host: host, control: control,
                                          requestControl: control && (requestControl ?? settings.controlOnConnect),
-                                         screen: Self.screenPixels())
+                                         screen: Self.screenPixels(), download: download)
             next.$observedPin
                 .compactMap { $0 }
                 .sink { [weak self] pin in self?.store.recordPin(pin, for: host.id) }
@@ -278,9 +344,9 @@ final class AppModel: ObservableObject {
     /// Open a session to a machine a host listed. A machine the user saved
     /// opens exactly as saved (its port, its pin, resolved by name); any
     /// other at its listed addresses on the app's default frd port.
-    func connect(_ machine: DirectoryMachine, control: Bool) {
+    func connect(_ machine: DirectoryMachine, control: Bool, receiveFiles: Bool = false) {
         if let saved = Self.savedMatch(for: machine, in: store.hosts) {
-            connect(saved, control: control)
+            connect(saved, control: control, receiveFiles: receiveFiles)
             return
         }
         let port = UInt16(exactly: settings.defaultPort).flatMap { $0 == 0 ? nil : $0 }
@@ -289,7 +355,7 @@ final class AppModel: ObservableObject {
             startError = "FrankenRemote can't open \(machine.machine): its name isn't a MagicDNS machine name."
             return
         }
-        connect(host, control: control)
+        connect(host, control: control, receiveFiles: receiveFiles)
     }
 
     /// A session is starting or open.
@@ -306,6 +372,7 @@ final class AppModel: ObservableObject {
         cancelDisplaySwitch()
         cancelStart()
         session?.close()
+        if let original = session { retireReceiver(original) }
         session = nil
         subscriptions.removeAll()
     }
@@ -318,18 +385,22 @@ final class AppModel: ObservableObject {
             // Never keep control (or a view) running unseen: close, and offer
             // to reconnect when the user comes back.
             // A start still waiting would open the session unseen: drop it too.
-            if let starting { reconnectOffer = starting }
+            if let starting { reconnectOffer = SessionStart(host: starting.host, control: starting.control) }
             cancelStart()
             if let session, !session.phase.isEnded {
                 reconnectOffer = SessionStart(host: session.host, control: session.controlCapable)
                 session.close()
             }
+            if let original = session { retireReceiver(original) }
             session = nil
             subscriptions.removeAll()
         case .inactive:
             // A scheduled replacement must not open behind Control Center,
             // a notification, or another app, even if the scene stays loaded.
             cancelDisplaySwitch()
+            // A prepared receive destination never starts a session behind a
+            // permission sheet, Control Center or another foreground owner.
+            if starting?.receiveFiles == true { cancelStart() }
         case .active:
             break
         @unknown default:

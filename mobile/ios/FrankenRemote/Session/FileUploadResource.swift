@@ -81,17 +81,20 @@ final class FileUploadResource: @unchecked Sendable {
     /// Hold the original registry handle and scopes until its separate positive
     /// source-release witness. MAX_SESSIONS bounds unresolved owners; failed
     /// cleanup cannot recycle their permissions.
-    static func retire(handle: FrHandle, resources: [FileUploadResource]) {
+    static func retire(handle: FrHandle, resources: [FileUploadResource],
+                       download: FileDownloadResource? = nil) {
         _ = fr_session_close(handle)
-        if resources.isEmpty {
+        if resources.isEmpty && download == nil {
             _ = fr_session_free(handle)
             return
         }
         Task.detached(priority: .utility) {
-            while !fr_session_upload_sources_released(handle) {
+            while !fr_session_upload_sources_released(handle)
+                || (download != nil && !fr_session_download_cleanup_complete(handle)) {
                 try? await Task.sleep(for: .milliseconds(250))
             }
-            withExtendedLifetime(resources) {
+            download?.allowExportAfterCleanup()
+            withExtendedLifetime((resources, download)) {
                 _ = fr_session_free(handle)
             }
         }

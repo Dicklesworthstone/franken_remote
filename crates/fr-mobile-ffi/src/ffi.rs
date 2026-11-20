@@ -25,6 +25,7 @@ use std::{
 };
 
 mod display;
+mod download;
 mod upload;
 pub use display::{
     FR_DISPLAY_CHOOSE, FR_DISPLAY_PRIMARY, FR_MAX_DISPLAYS, FrDisplayInfo, FrDisplayRequest,
@@ -40,6 +41,11 @@ pub use upload::{
 };
 
 pub const FR_OK: i32 = 0;
+pub use download::{
+    FR_DOWNLOAD_STATUS_MAX_BYTES, fr_download_destination_discard, fr_download_destination_prepare,
+    fr_session_cancel_download, fr_session_copy_download_status,
+    fr_session_download_cleanup_complete, fr_session_start_with_files,
+};
 pub const FR_PENDING: i32 = 1;
 pub const FR_INVALID: i32 = -1;
 pub const FR_NOT_CONTROLLED: i32 = -2;
@@ -64,7 +70,10 @@ struct Slot {
 }
 static REGISTRY: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
 
-fn register(session: Session) -> Option<FrHandle> {
+/// Admit before spawning: a successful native start must always have a
+/// registry owner the shell can retain through its original file cleanup.
+/// The short admission lock covers thread creation, never network/disk work.
+fn register(start: impl FnOnce() -> std::io::Result<Session>) -> Option<FrHandle> {
     let mut slots = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
     let index = match slots.iter().position(|slot| slot.session.is_none()) {
         Some(index) => index,
@@ -78,10 +87,14 @@ fn register(session: Session) -> Option<FrHandle> {
         None => return None,
     };
     let slot = &mut slots[index];
+    let low = u64::try_from(index).ok()? + 1;
+    // Refusal above has not called `start`; a failed thread creation has no
+    // native owner. After success nothing fallible precedes publication.
+    let session = start().ok()?;
     // A slot's generation never repeats until 2^32 reuses of that slot.
     slot.generation = slot.generation.wrapping_add(1).max(1);
     slot.session = Some(Arc::new(session));
-    Some((u64::from(slot.generation) << 32) | (u64::try_from(index).ok()? + 1))
+    Some((u64::from(slot.generation) << 32) | low)
 }
 fn split(handle: FrHandle) -> Option<(usize, u32)> {
     let index = usize::try_from(handle & 0xffff_ffff).ok()?.checked_sub(1)?;
@@ -246,7 +259,15 @@ pub unsafe extern "C" fn fr_host_name_valid(name: *const c_char) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrHandle) -> i32 {
     // SAFETY: forwarded contract; preserve the original ABI's display policy.
-    unsafe { start(config, crate::session::DisplayChoice::Primary, false, out) }
+    unsafe {
+        start(
+            config,
+            crate::session::DisplayChoice::Primary,
+            false,
+            None,
+            out,
+        )
+    }
 }
 
 /// Start with the given display policy, without changing `FrConfig`'s ABI.
@@ -268,7 +289,7 @@ pub unsafe extern "C" fn fr_session_start_with_display(
         _ => return FR_INVALID,
     };
     // SAFETY: forwarded contract.
-    unsafe { start(config, choice, false, out) }
+    unsafe { start(config, choice, false, None, out) }
 }
 
 /// # Safety
@@ -277,13 +298,14 @@ unsafe fn start(
     config: *const FrConfig,
     display: crate::session::DisplayChoice,
     upload: bool,
+    download: Option<Arc<crate::session::Download>>,
     out: *mut FrHandle,
 ) -> i32 {
     // SAFETY: NULL or valid per contract.
     let (Some(config), false) = (unsafe { config.as_ref() }, out.is_null()) else {
         return FR_INVALID;
     };
-    if upload && !config.control {
+    if (upload || download.is_some()) && !config.control {
         return FR_INVALID;
     }
     // SAFETY: forwarded contract.
@@ -300,25 +322,18 @@ unsafe fn start(
         }
         _ => return FR_INVALID,
     };
-    // Refuse early when every slot is taken (registering the started
-    // session below still refuses if another start won the last slot).
-    if lookup_free_slots() == 0 {
-        return FR_BUSY;
-    }
-    let Ok(started) = Session::start(Config {
-        target,
-        port: config.port,
-        control: config.control,
-        clipboard: false,
-        upload: upload.then(crate::session::Upload::interactive),
-        download: None,
-        picture,
-        display,
+    let Some(handle) = register(|| {
+        Session::start(Config {
+            target,
+            port: config.port,
+            control: config.control,
+            clipboard: false,
+            upload: upload.then(crate::session::Upload::interactive),
+            download,
+            picture,
+            display,
+        })
     }) else {
-        return FR_BUSY;
-    };
-    let Some(handle) = register(started) else {
-        // Lost a race for the last slot: the dropped session closes itself.
         return FR_BUSY;
     };
     // SAFETY: `out` is non-null and writable per contract.
@@ -437,11 +452,6 @@ pub unsafe extern "C" fn fr_directory_fetch(
         return FR_BUSY;
     }
     FR_OK
-}
-
-fn lookup_free_slots() -> usize {
-    let slots = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
-    MAX_SESSIONS - slots.iter().filter(|slot| slot.session.is_some()).count()
 }
 
 /// Take the oldest pending event. Returns false when none is pending or the

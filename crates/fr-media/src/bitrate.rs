@@ -424,6 +424,20 @@ impl Controller {
         Ok(capture)
     }
 
+    /// Release the original capture credit when native work produced no picture.
+    /// No output confirms the requested rate or an IDR, so the applied rate,
+    /// pending decision and native-held target remain unchanged. A later capture
+    /// must still report any actual change through [`Self::complete_capture`].
+    pub fn skip_capture(&mut self, capture: Capture, now_us: u64) -> Result<(), Error> {
+        self.check_open()?;
+        if self.in_flight != Some(capture) || self.applied != capture.previous {
+            return Err(Error::UnexpectedCapture);
+        }
+        self.clock(now_us)?;
+        self.in_flight = None;
+        Ok(())
+    }
+
     /// Confirm only after the original worker reply and output have been fully
     /// validated. An actual change requires an IDR. Unchanged/old-rate replies
     /// retain the same pending decision and do not restart its dwell.

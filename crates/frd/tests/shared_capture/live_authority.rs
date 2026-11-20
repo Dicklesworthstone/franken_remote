@@ -176,8 +176,8 @@ fn renewed_observation_keeps_the_original_capture_and_poll_alive_past_the_old_ca
             assert_eq!(source.worker_id(), original_pid);
             assert_eq!(update.frame(), FrameId::FIRST);
             assert!(update.encoded().is_some());
-            assert!(update.observed_micros() >= before.as_micros());
-            assert!(update.observed_micros() < original_until.as_micros());
+            assert!(update.observed_micros().unwrap() >= before.as_micros());
+            assert!(update.observed_micros().unwrap() < original_until.as_micros());
             control.check().unwrap();
             stop(&mut source, &clock).await;
         }

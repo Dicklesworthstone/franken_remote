@@ -449,6 +449,21 @@ static void dropped_pictures_wait_for_the_budget_they_spend(void) {
     assert(waited == (uint64_t)(40 * interval - FR_CAP_PTS_LEAD_US));
 }
 
+static void only_successful_native_drops_are_skippable(void) {
+    for (int has_output = 0; has_output <= 1; has_output++) {
+        for (int sample = 0; sample <= 1; sample++) {
+            assert(fr_cap_encode_completion(false, false, sample, has_output) ==
+                   FR_CAP_ENCODE_FAILED);
+            assert(fr_cap_encode_completion(false, true, sample, has_output) ==
+                   FR_CAP_ENCODE_FAILED);
+            assert(fr_cap_encode_completion(true, true, sample, has_output) ==
+                   (has_output ? FR_CAP_ENCODE_SKIPPED : FR_CAP_ENCODE_RETRY));
+        }
+        assert(fr_cap_encode_completion(true, false, false, has_output) == FR_CAP_ENCODE_FAILED);
+        assert(fr_cap_encode_completion(true, false, true, has_output) == FR_CAP_ENCODE_OUTPUT);
+    }
+}
+
 int main(void) {
     rate_targets_do_not_encode_an_unchanged_source();
     rate_changes_require_existing_work_and_an_independent_picture();
@@ -477,6 +492,7 @@ int main(void) {
     a_refusal_outranks_every_answer_that_began_before_it();
     a_presentation_time_may_lead_the_clock_only_by_its_bound();
     dropped_pictures_wait_for_the_budget_they_spend();
-    puts("27 macOS capture policy tests passed");
+    only_successful_native_drops_are_skippable();
+    puts("28 macOS capture policy tests passed");
     return 0;
 }
