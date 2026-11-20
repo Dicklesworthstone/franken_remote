@@ -927,11 +927,6 @@ int fr_cap_open(const FrCapDisplay *expected, uint32_t width, uint32_t height, u
     return open_capture(expected, width, height, fps, bitrate, &deadline, lease, out);
 }
 
-// Low-latency rate control skips a picture that would overrun its budget,
-// typically the first after a large IDR. Each resubmission is one interval
-// later and waits for the clock (fr_cap_pts_wait_us), so the budget it spends
-// has accrued; the request's deadline bounds the resubmissions.
-
 // Asks for Screen Recording on behalf of this process's responsible process
 // (frd when launchd runs it). macOS shows its prompt only while no decision
 // is recorded; otherwise this only reports. Called by the startup probe only.
@@ -1077,12 +1072,14 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
                           ? now
                           : c->last_pts + c->interval;
         c->unit_limit = capacity;
+        // Low-latency rate control skips a picture that would overrun its
+        // budget, typically the first after a large IDR. Each resubmission is
+        // one interval later and waits for the clock (fr_cap_pts_wait_us), so
+        // the budget it spends has accrued; the deadline bounds resubmissions.
         for (;;) {
-            if (!source_current(c, source_epoch)) {
-                CVPixelBufferRelease(picture);
-                return FR_CAP_UNAVAILABLE;
-            }
+            // The source is checked after any wait, just before submission.
             int paced = wait_for_pts(pts, deadline_ns);
+            if (!source_current(c, source_epoch)) paced = FR_CAP_UNAVAILABLE;
             if (paced) {
                 CVPixelBufferRelease(picture);
                 return paced;
