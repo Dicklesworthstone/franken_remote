@@ -20,6 +20,8 @@
 #     Apps & features entry and a user PATH entry
 #   - installs an agent skill for Claude Code / Codex when they are present
 #   - opens the app, which lists your Tailscale machines
+#   - with -Host, also installs the interactive Windows host as a per-user
+#     sign-in task, with local approval and a visible Stop sharing window
 #
 # Options:
 #   -Version vX.Y.Z   Install this release (default: latest)
@@ -29,12 +31,15 @@
 #   -ArtifactUrl URL  Download this release zip instead of the default
 #   -Checksum HEX     Expected SHA-256 of the zip
 #   -NoVerify         Skip checksum and signature checks (testing only)
-#   -NoLaunch         Do not open the app afterwards
+#   -NoLaunch         Do not open the app or start hosting now
 #   -NoTailscale      Do not offer to install Tailscale
 #   -NoConfigure      Skip the agent skill
 #   -Yes              Answer yes to every prompt
 #   -Force            Reinstall even when the same build is installed
 #   -Uninstall        Remove FrankenRemote (the app's own uninstall)
+#   -Host             Also install hosting for this signed-in user
+#   -HostControl      Include remote control and clipboard (implies -Host)
+#   -Host -Uninstall  Stop and remove hosting only; keep the desktop client
 #   -Quiet            Errors, warnings and the result only
 #   -Help             Show this help
 
@@ -52,6 +57,10 @@ Param(
   [switch]$Yes,
   [switch]$Force,
   [switch]$Uninstall,
+  # $Host is a read-only PowerShell automatic variable; keep the public flag
+  # as an alias instead of declaring a parameter with that variable's name.
+  [Alias("Host")][switch]$InstallHost,
+  [switch]$HostControl,
   [switch]$Quiet,
   [switch]$Help,
   [string]$Owner = "Dicklesworthstone",
@@ -73,6 +82,9 @@ if (Test-EnvFlag "FR_INSTALL_NO_CONFIGURE") { $NoConfigure = $true }
 if (Test-EnvFlag "FR_INSTALL_YES") { $Yes = $true }
 if (Test-EnvFlag "FR_INSTALL_FORCE") { $Force = $true }
 if (Test-EnvFlag "FR_INSTALL_UNINSTALL") { $Uninstall = $true }
+if (Test-EnvFlag "FR_INSTALL_HOST") { $InstallHost = $true }
+if (Test-EnvFlag "FR_INSTALL_HOST_CONTROL") { $HostControl = $true }
+if ($HostControl) { $InstallHost = $true }
 if (Test-EnvFlag "FR_INSTALL_QUIET") { $Quiet = $true }
 if ($Ref) { $FromSource = $true }
 
@@ -151,12 +163,16 @@ Installs the FrankenRemote desktop app (FrankenRemote.exe) and command line
   -ArtifactUrl URL  Download this release zip instead of the default
   -Checksum HEX     Expected SHA-256 of the zip
   -NoVerify         Skip checksum and signature checks (testing only)
-  -NoLaunch         Do not open the app afterwards
+  -NoLaunch         Do not open the app or start hosting now
   -NoTailscale      Do not offer to install Tailscale
   -NoConfigure      Skip the agent skill for Claude Code / Codex
   -Yes              Answer yes to every prompt
   -Force            Reinstall even when the same build is already installed
   -Uninstall        Remove FrankenRemote (shortcut, Apps & features, PATH, files)
+  -Host             Also install a per-user interactive host at sign-in, with
+                    local approval and the visible Stop sharing window
+  -HostControl      Allow control and clipboard after approval (implies -Host)
+  -Host -Uninstall  Stop and remove hosting only; keep the desktop client
   -Quiet            Print errors, warnings and the result only
   -Help             Show this help
 
@@ -164,6 +180,7 @@ Environment: FR_INSTALL_VERSION, FR_INSTALL_REF, FR_INSTALL_OFFLINE,
 FR_INSTALL_ARTIFACT_URL, FR_INSTALL_CHECKSUM, and FR_INSTALL_FROM_SOURCE,
 FR_INSTALL_NO_LAUNCH, FR_INSTALL_NO_TAILSCALE, FR_INSTALL_NO_CONFIGURE,
 FR_INSTALL_YES, FR_INSTALL_FORCE, FR_INSTALL_UNINSTALL, FR_INSTALL_QUIET (=1).
+Hosting: FR_INSTALL_HOST or FR_INSTALL_HOST_CONTROL (=1).
 HTTPS_PROXY is honoured; otherwise the Windows proxy settings apply.
 '@
   Write-Host $text
@@ -423,6 +440,7 @@ function Expand-Release([string]$ZipPath, [string]$TempDir) {
   foreach ($name in @("FrankenRemote.exe", "fr-windows.exe")) {
     if (-not (Test-Path -LiteralPath (Join-Path $payload $name) -PathType Leaf)) { throw "The release zip has no $name" }
   }
+  if ($InstallHost) { Assert-HostPayload $payload }
   Get-ChildItem -LiteralPath $payload -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
   $commitFile = Join-Path $payload "COMMIT"
   if (Test-Path -LiteralPath $commitFile) { $script:Commit = (Get-Content -LiteralPath $commitFile -TotalCount 1).Trim() }
@@ -656,6 +674,14 @@ function Build-FromSource([string]$TempDir) {
     Write-Info "Building FrankenRemote (release profile; later updates reuse $($env:CARGO_TARGET_DIR))"
     & cargo.exe "+$toolchain" build --release --locked -p fr-windows --bin FrankenRemote --bin fr-windows | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
+    if ($InstallHost) {
+      Write-Info "Building the interactive Windows host and hardware HEVC capture worker"
+      & cargo.exe "+$toolchain" build --release --locked -p frd --features windows-host --bin frd | Out-Host
+      if ($LASTEXITCODE -ne 0) { throw "Windows host build failed (exit $LASTEXITCODE)" }
+      & cargo.exe "+$toolchain" build --release --locked -p fr-native --no-default-features --features windows-host-media --bin fr-media-worker | Out-Host
+      if ($LASTEXITCODE -ne 0) { throw "Windows capture worker build failed (exit $LASTEXITCODE)" }
+      Copy-Item -LiteralPath (Join-Path $src "scripts\windows\host.ps1") -Destination (Join-Path $env:CARGO_TARGET_DIR "release\host.ps1") -Force
+    }
   } finally { Pop-Location }
   $script:InstalledVersion = "source:$sourceRef@$($sha.Substring(0, 10))"
   $script:InstalledSource = "source"
@@ -673,6 +699,48 @@ function Test-SameBuild([string]$Payload) {
     if ((Get-Sha256 $installed) -ne (Get-Sha256 (Join-Path $Payload $name))) { return $false }
   }
   return $true
+}
+
+function Assert-HostPayload([string]$Payload) {
+  foreach ($name in @("frd.exe", "fr-media-worker.exe", "host.ps1")) {
+    $path = Join-Path $Payload $name
+    Assert-HostInstallerPath $path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "This payload has no Windows host component $name. Use a host-enabled release or -Host -FromSource. The existing host was not changed."
+    }
+  }
+}
+
+function Assert-HostInstallerPath([string]$Path) {
+  $cursor = [IO.Path]::GetFullPath($Path)
+  while ($cursor) {
+    if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      throw "A host executable or installer path is a link: $cursor"
+    }
+    $parent = [IO.Path]::GetDirectoryName($cursor)
+    if ($parent -eq $cursor) { break }
+    $cursor = $parent
+  }
+}
+
+function Invoke-HostInstaller([string]$Payload, [switch]$Remove) {
+  $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+  Assert-HostInstallerPath $powershell
+  if ($Remove) {
+    $helper = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\FrankenRemoteHost\current\host.ps1"
+    Assert-HostInstallerPath $helper
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw "FrankenRemote hosting is not installed for this user." }
+    $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $helper, "-Action", "Uninstall")
+  } else {
+    Assert-HostPayload $Payload
+    $helper = Join-Path $Payload "host.ps1"
+    $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $helper, "-Action", "Install", "-Source", $Payload)
+    if ($HostControl) { $arguments += "-Control" }
+    if ($NoLaunch) { $arguments += "-NoLaunch" }
+  }
+  if ($Quiet) { $arguments += "-Quiet" }
+  & $powershell @arguments | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "The Windows host operation failed (exit $LASTEXITCODE). The helper reported whether previous files or an uncertain stopped owner were retained." }
 }
 
 function Stop-RunningCopies {
@@ -799,6 +867,11 @@ function Show-Summary {
     "missing" { $lines += "HEVC:       not found; the app's status line confirms" }
   }
   if ($script:SkillDirs.Count -gt 0) { $lines += "Agent skill: $($script:SkillDirs.Count) installed" }
+  if ($InstallHost) {
+    $lines += "Host:       installed for this user's sign-in; local approval required"
+    $lines += "            Start/Stop FrankenRemote hosting in the Start menu"
+    $lines += "            The Stop sharing window stays visible, including while idle"
+  }
   $lines += ""
   $lines += "Next: open FrankenRemote from the Start menu, pick a machine, Connect."
   $lines += "      In a new terminal: fr-windows hosts"
@@ -822,7 +895,10 @@ function Invoke-Main {
   $temp = Join-Path ([IO.Path]::GetTempPath()) ("franken_remote-install-" + [Guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Path $temp | Out-Null
   try {
-    if ($Uninstall) { Invoke-Uninstall; return }
+    if ($Uninstall) {
+      if ($InstallHost) { Invoke-HostInstaller -Remove } else { Invoke-Uninstall }
+      return
+    }
 
     if ($Offline -and $FromSource) { throw "-Offline installs a release zip and cannot be combined with -FromSource or -Ref" }
     if ($Version) { $script:Tag = ConvertTo-Tag $Version }
@@ -850,6 +926,7 @@ function Invoke-Main {
     } else {
       Install-Payload $payload
     }
+    if ($InstallHost) { Invoke-HostInstaller $payload }
     Test-InstalledCli
     Install-AgentSkill
     Show-Summary

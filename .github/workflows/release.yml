@@ -12,7 +12,8 @@ name: release
 #   franken_remote-<tag>-<target>.tar.gz                   (macOS)
 #     <same name without .tar.gz>/bin/<programs>, COMMIT, LICENSE, README.md
 #   franken_remote-<tag>-x86_64-pc-windows-gnu.zip
-#     franken_remote-<tag>-x86_64-pc-windows-gnu/FrankenRemote.exe, fr-windows.exe, COMMIT, LICENSE, README.md
+#     franken_remote-<tag>-x86_64-pc-windows-gnu/FrankenRemote.exe, fr-windows.exe,
+#       frd.exe, fr-media-worker.exe, host.ps1, COMMIT, LICENSE, README.md
 #
 # Linux binaries link the distribution's FFmpeg, PipeWire, X11 and Opus
 # libraries through pkg-config (libavcodec60 on 24.04, libavcodec62 on
@@ -197,14 +198,19 @@ jobs:
         # The ISRG roots come from this runner's keychain (fr-mobile-ffi
         # build_support/roots.rs checks their pinned digests).
         run: cargo build --release --locked -p fr-windows --target x86_64-pc-windows-gnu --bin FrankenRemote --bin fr-windows
+      - name: Build the interactive Windows host and capture worker
+        run: |
+          cargo build --release --locked -p frd --features windows-host --target x86_64-pc-windows-gnu --bin frd
+          cargo build --release --locked -p fr-native --no-default-features --features windows-host-media --target x86_64-pc-windows-gnu --bin fr-media-worker
       - name: Package
         run: |
           set -euo pipefail
           name="franken_remote-${RELEASE_TAG}-x86_64-pc-windows-gnu"
           mkdir -p "dist/$name"
-          for exe in FrankenRemote.exe fr-windows.exe; do
+          for exe in FrankenRemote.exe fr-windows.exe frd.exe fr-media-worker.exe; do
             cp "target/x86_64-pc-windows-gnu/release/$exe" "dist/$name/$exe"
           done
+          cp scripts/windows/host.ps1 "dist/$name/host.ps1"
           git rev-parse HEAD > "dist/$name/COMMIT"
           cp LICENSE README.md "dist/$name/"
           (cd dist && zip -qr -X "$name.zip" "$name")
