@@ -21,7 +21,8 @@ pub const VERSION: u16 = 1;
 /// 1 (`sync_direction`) + 1 (`conflict_policy`) + 1 (`phase`) + 2 (`reason`) +
 /// 4 (`entries_total`) + 4 (`entries_completed`) + 4 (`conflicts_kept`) +
 /// 8 (`bytes_total`) + 8 (`bytes_completed`) + 8 (`manifest_revision`) = 121 bytes.
-pub const RECORD_BYTES: usize = HEADER_BYTES + 16 + 16 + 16 + 8 + 1 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 8 + 8;
+pub const RECORD_BYTES: usize =
+    HEADER_BYTES + 16 + 16 + 16 + 8 + 1 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 8 + 8;
 
 /// Direction of a locally configured folder-synchronization job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,21 +91,22 @@ impl SyncPhase {
     }
 
     const fn allows_sender(self, sender: Role) -> bool {
-        match (self, sender) {
+        matches!(
+            (self, sender),
             // Only the host can advertise locally configured jobs; only the
             // controller can accept them. Observers are never permitted.
-            (Self::Advertised, Role::Host) | (Self::Accepted, Role::Controller) => true,
-            (
-                Self::Scanning
-                | Self::Transferring
-                | Self::Settled
-                | Self::ConflictRecorded
-                | Self::Cancelled
-                | Self::Failed,
-                Role::Host | Role::Controller,
-            ) => true,
-            _ => false,
-        }
+            (Self::Advertised, Role::Host)
+                | (Self::Accepted, Role::Controller)
+                | (
+                    Self::Scanning
+                        | Self::Transferring
+                        | Self::Settled
+                        | Self::ConflictRecorded
+                        | Self::Cancelled
+                        | Self::Failed,
+                    Role::Host | Role::Controller,
+                )
+        )
     }
 }
 
@@ -154,9 +156,7 @@ impl SyncJobState {
                     && self.entries_completed == self.entries_total
                     && self.bytes_completed == self.bytes_total
             }
-            SyncPhase::ConflictRecorded => {
-                self.manifest_revision != 0 && self.conflicts_kept > 0
-            }
+            SyncPhase::ConflictRecorded => self.manifest_revision != 0 && self.conflicts_kept > 0,
             SyncPhase::Cancelled | SyncPhase::Failed => self.reason != Reason::None,
         };
         if !phase_ok {

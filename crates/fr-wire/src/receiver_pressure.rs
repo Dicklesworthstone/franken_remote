@@ -115,7 +115,7 @@ impl ReceiverPressure {
             return Err(WireError::InvalidValue);
         }
         if self.queued_bytes > limits.per_viewer_compressed_bytes()
-            || self.queued_items > limits.max_fragments_per_picture()
+            || self.queued_items > limits.max_fragments_per_access_unit()
         {
             return Err(WireError::ResourceLimit);
         }
