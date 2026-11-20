@@ -279,6 +279,133 @@ fn brief_unknown_capture_credit_pauses_but_never_counts_as_headroom() {
 }
 
 #[test]
+fn brief_source_gaps_allow_recovery_from_the_slowest_capture_cadence() {
+    let mut c = controller();
+    for now in (0..=1_000_000).step_by(50_000) {
+        let mut s = active(now);
+        s.send = A::Blocked;
+        c.update(s).unwrap();
+    }
+    assert_eq!(c.interval_us(), 200_000);
+
+    // At a 200 ms interval, a 60 ms capture plus 20 ms of scheduling delay
+    // makes the previous observation briefly stale. Service itself continues:
+    // the 30 ms gap in source evidence is not a 100 ms service interruption,
+    // and the real source work is comfortably below the current interval.
+    let mut first_probe = None;
+    let mut measured_us = 0;
+    let mut previous_ready = false;
+    for tick in 0..=300 {
+        let now = 1_010_000 + tick * 10_000;
+        let mut s = active(now);
+        s.source_work_us = Some(60_000);
+        if tick % 28 != 0 {
+            s.observation = None;
+        }
+        let ready = tick % 28 <= 25;
+        if ready && previous_ready {
+            measured_us += 10_000;
+        }
+        previous_ready = ready;
+        let r = c.update(s).unwrap();
+        if !ready {
+            assert_eq!(r.headroom_us, 0, "stale source is not headroom");
+            assert_ne!(r.reason, Reason::HeadroomProbe);
+        }
+        if r.reason == Reason::HeadroomProbe {
+            assert!(ready);
+            assert_eq!(r.headroom_us, measured_us);
+            assert_eq!(r.interval_us, 175_000);
+            first_probe = Some(now);
+            break;
+        }
+    }
+    assert_eq!(first_probe, Some(3_220_000));
+}
+
+fn headroom_before_a_source_gap() -> Controller {
+    let mut c = controller();
+    for now in (0..=1_950_000).step_by(10_000) {
+        let mut s = active(now);
+        if now > 1_700_000 {
+            s.observation = None;
+        }
+        assert_eq!(c.update(s).unwrap().reason, Reason::Hold);
+    }
+    assert_eq!(c.report().unwrap().headroom_us, 1_950_000);
+    c
+}
+
+#[test]
+fn stale_source_never_spends_headroom_or_counts_either_unknown_edge() {
+    for repeat_stale in [false, true] {
+        let mut c = headroom_before_a_source_gap();
+        for now in (1_960_000..=2_010_000).step_by(10_000) {
+            let mut s = active(now);
+            s.observation = repeat_stale.then_some(Observation {
+                at_us: 1_700_000,
+                changed: true,
+            });
+            let r = c.update(s).unwrap();
+            assert_eq!(r.headroom_us, 0);
+            assert_eq!(r.interval_us, 40_000);
+            assert_eq!(r.reason, Reason::Hold);
+        }
+        // New source evidence resumes the clock, without counting the edge
+        // from a stale sample or retiming any earlier source observation.
+        let resumed = c.update(active(2_020_000)).unwrap();
+        assert_eq!(resumed.headroom_us, 1_950_000);
+        assert_eq!(resumed.reason, Reason::Hold);
+        for now in (2_030_000..2_070_000).step_by(10_000) {
+            assert_eq!(c.update(active(now)).unwrap().reason, Reason::Hold);
+        }
+        let probe = c.update(active(2_070_000)).unwrap();
+        assert_eq!(probe.reason, Reason::HeadroomProbe);
+        assert_eq!(probe.headroom_us, 2_000_000);
+    }
+}
+
+#[test]
+fn source_gap_grace_is_bounded_by_the_last_measured_headroom() {
+    for gap in [100_000, 100_001, 300_000] {
+        let mut c = headroom_before_a_source_gap();
+        let resumed_at = 1_950_000 + gap;
+        for now in (1_960_000..resumed_at).step_by(10_000) {
+            let mut s = active(now);
+            s.observation = Some(Observation {
+                at_us: 1_700_000,
+                changed: true,
+            });
+            let r = c.update(s).unwrap();
+            assert_eq!(r.headroom_us, 0);
+            assert_ne!(r.reason, Reason::HeadroomProbe);
+        }
+        let r = c.update(active(resumed_at)).unwrap();
+        assert_eq!(r.headroom_us, if gap == 100_000 { 1_950_000 } else { 0 });
+        assert_eq!(r.reason, Reason::Hold);
+    }
+}
+
+#[test]
+fn counterevidence_during_a_brief_source_gap_still_discards_probe_history() {
+    for pressure in 0..4 {
+        let mut c = headroom_before_a_source_gap();
+        let mut s = active(1_960_000);
+        s.observation = None;
+        match pressure {
+            0 => s.source_work_us = Some(30_001),
+            1 => s.send = A::Blocked,
+            2 => s.capture_credit = A::Blocked,
+            _ => c.reset_receiver_evidence(),
+        }
+        assert_eq!(c.update(s).unwrap().headroom_us, 0);
+        let r = c.update(active(1_970_000)).unwrap();
+        assert_eq!(r.headroom_us, 0, "counterevidence {pressure}");
+        assert_eq!(r.reason, Reason::Hold);
+    }
+}
+
+#[test]
 fn extended_unknown_or_known_pressure_cannot_bank_headroom_for_a_later_probe() {
     for blocked in [false, true] {
         let mut c = controller();

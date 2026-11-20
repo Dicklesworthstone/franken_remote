@@ -225,6 +225,18 @@ intervals pause the evidence clock; known pressure or more than 100 ms without
 known evidence resets it. Unknown evidence never triggers or contributes time
 to a probe. This preserves the concurrently landed `b82f1e4` correction.
 
+The same grace applies when the previous source observation becomes older than
+250 ms while a new capture is briefly late. The stale sample is unknown: it
+cannot trigger a probe, contribute measured headroom, or renew its own lifetime.
+Only new positive samples resume the clock, and neither edge beside an unknown
+sample counts. More than 100 ms since the last positive sample, known pressure,
+or a changed receiver scope still clears the accumulated headroom. This lets a
+source slowed to a 200 ms interval recover after transient overload without
+requiring every subsequent capture to arrive within the remaining 50 ms of the
+source-evidence window. Source freshness, idle classification, original receiver
+query expiry, presentation readiness and input authority retain their existing
+bounds.
+
 Idle is established only by distinct, recent unchanged observations spanning at
 least one second. It moves to the bounded maximum interval and keeps genuine
 source checks and observation renewal running without dummy encoded frames.
