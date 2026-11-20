@@ -171,11 +171,13 @@ fn healthy_shared_decoder_keeps_progress_when_a_slow_sibling_leaves() {
     let rt = support::runtime();
     let cleanup_cx = rt.request_cx_with_budget(Budget::INFINITE);
     rt.block_on(Box::pin(async {
-        let mut group = Box::pin(group_with_capabilities(
+        let mut group = Box::pin(group_with_source_lifetime(
             &rt,
             2,
             &[fr_wire::receiver_metrics::CAPABILITY],
             true,
+            SendPolicy::default(),
+            HostDuration::from_micros(10_500_000),
         ))
         .await;
         ready(&mut group).await;
@@ -201,7 +203,9 @@ fn healthy_shared_decoder_keeps_progress_when_a_slow_sibling_leaves() {
             let before = healthy.frames.len();
             slow.shared.as_mut().unwrap().close();
             assert!(slow.control.check().is_err());
-            while now(&healthy.h).unwrap() < started + 3_200_000 {
+            // Leave room for one dwell restart under load (2 s PROBE_DWELL_US
+            // after sibling departure) so HeadroomProbe is non-vacuously proven.
+            while now(&healthy.h).unwrap() < started + 6_000_000 {
                 healthy.turn().await.unwrap();
             }
             assert!(healthy.frames.len() > before + 8);
@@ -220,10 +224,12 @@ fn healthy_shared_decoder_keeps_progress_when_a_slow_sibling_leaves() {
                 Reason::DecoderWork | Reason::ReceiverBacklog
             ))
         );
-        assert!(matches!(
-            pacing.report().unwrap().receiver,
-            ReceiverEvidence::Measured(_)
-        ));
+        // The headroom probe rests on a measured receiver sample; a final
+        // instant can legitimately read Unknown while a solicited reply is in flight.
+        assert!(pacing.decisions().any(|report| {
+            report.reason == Reason::HeadroomProbe
+                && matches!(report.receiver, ReceiverEvidence::Measured(_))
+        }));
         assert_eq!(group.publisher.worker_id(), worker);
         cleanup(&mut group, &cleanup_cx).await;
     }));
