@@ -696,12 +696,9 @@ impl Uplink {
             if inflight.iter().all(Option::is_some) {
                 return Ok(false);
             }
-            let permit = match permit.with_packet_deadline(until) {
-                Ok(permit) => permit,
-                Err(_) => {
-                    failure = Some(Error::Clock);
-                    return Err(());
-                }
+            let Ok(permit) = permit.with_packet_deadline(until) else {
+                failure = Some(Error::Clock);
+                return Err(());
             };
             let until = match clock.deadline(until) {
                 Ok(until) => until,

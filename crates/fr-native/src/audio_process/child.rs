@@ -106,10 +106,7 @@ fn initialize(
             || guard.permitted(first.expires_ns),
         )?
     };
-    while !source
-        .poll_ready(|| guard.permitted(first.expires_ns))
-        .map_err(Error::from)?
-    {
+    while !source.poll_ready(|| guard.permitted(first.expires_ns))? {
         std::thread::sleep(Duration::from_millis(1));
     }
     if !guard.permitted(first.expires_ns) {
@@ -171,9 +168,7 @@ fn serve(input: &mut impl Read, output: &mut impl Write, channel: UnixStream) ->
             if Instant::now() >= expires {
                 return Err(Error::Expired);
             }
-            let batch = source
-                .pull(expires, || guard.permitted(request.expires_ns))
-                .map_err(Error::from)?;
+            let batch = source.pull(expires, || guard.permitted(request.expires_ns))?;
             #[cfg(target_os = "linux")]
             let original = crate::clock::stamp_ns(batch.expires()).ok_or(Error::Clock)?;
             // Darwin Instant pauses during suspend: preserve the native
@@ -181,9 +176,7 @@ fn serve(input: &mut impl Read, output: &mut impl Write, channel: UnixStream) ->
             #[cfg(target_os = "macos")]
             let original = batch.expires_ns();
             let counters = batch.counters();
-            let units = batch
-                .consume(|| guard.permitted(request.expires_ns))
-                .map_err(Error::from)?;
+            let units = batch.consume(|| guard.permitted(request.expires_ns))?;
             let body = protocol::packets(&units, counters, &options)?;
             let mut header = request;
             header.expires_ns = original.min(request.expires_ns);
