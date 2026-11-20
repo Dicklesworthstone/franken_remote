@@ -246,29 +246,253 @@ def audit_dependencies(root_dir: Path) -> dict:
     }
 
 
+def _split_cfg_args(text: str) -> list[str]:
+    """Split top-level comma-separated arguments inside a cfg(...) predicate."""
+    args: list[str] = []
+    depth = 0
+    in_quotes = False
+    start = 0
+    for idx, ch in enumerate(text):
+        if ch == '"' and (idx == 0 or text[idx - 1] != "\\"):
+            in_quotes = not in_quotes
+        elif not in_quotes:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                piece = text[start:idx].strip()
+                if piece:
+                    args.append(piece)
+                start = idx + 1
+    tail = text[start:].strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _eval_cfg_predicate(expr: str, info: dict) -> bool:
+    """Evaluate a Rust cfg(...) boolean expression against target properties."""
+    expr = expr.strip()
+    if not expr:
+        return True
+    if expr.startswith("all(") and expr.endswith(")"):
+        return all(_eval_cfg_predicate(arg, info) for arg in _split_cfg_args(expr[4:-1]))
+    if expr.startswith("any(") and expr.endswith(")"):
+        return any(_eval_cfg_predicate(arg, info) for arg in _split_cfg_args(expr[4:-1]))
+    if expr.startswith("not(") and expr.endswith(")"):
+        return not _eval_cfg_predicate(expr[4:-1], info)
+
+    if "=" in expr:
+        key, raw_val = expr.split("=", 1)
+        key = key.strip()
+        val = raw_val.strip().strip('"').strip("'")
+        if key == "target_os":
+            return info["target_os"] == val
+        if key == "target_arch":
+            return info["target_arch"] == val
+        if key == "target_family":
+            return info["target_family"] == val
+        if key == "target_env":
+            return info["target_env"] == val
+        if key == "target_vendor":
+            return info["target_vendor"] == val
+        # Unknown key: fail-closed (assume predicate could match so forbidden deps are not hidden).
+        return True
+
+    if expr == "unix":
+        return info["target_family"] == "unix"
+    if expr == "windows":
+        return info["target_family"] == "windows"
+    # Unknown bare cfg flag (e.g. feature/custom): fail-closed.
+    return True
+
+
+def eval_target_cfg(target_cfg: str, target_triple: str, info: dict) -> bool:
+    """Return True if a Cargo `[target.<target_cfg>]` section applies to `target_triple`."""
+    spec = target_cfg.strip()
+    if spec == target_triple:
+        return True
+    if spec.startswith("cfg(") and spec.endswith(")"):
+        return _eval_cfg_predicate(spec[4:-1], info)
+    # Bare target triple that does not match this target_triple.
+    if "-" in spec and "(" not in spec:
+        return False
+    return True
+
+
+def _resolve_target_crate_deps(
+    manifests: dict[str, dict],
+    target_triple: str,
+    info: dict,
+    include_optional: bool = False,
+) -> dict[str, set[str]]:
+    """Compute direct active dependencies per workspace crate for `target_triple`."""
+    active: dict[str, set[str]] = {}
+    for crate_name, data in manifests.items():
+        deps: set[str] = set()
+        for dep_name, dep_spec in data.get("dependencies", {}).items():
+            if not include_optional and isinstance(dep_spec, dict) and dep_spec.get("optional"):
+                continue
+            deps.add(dep_name)
+        for target_cfg, target_cfg_data in data.get("target", {}).items():
+            if not eval_target_cfg(target_cfg, target_triple, info):
+                continue
+            for dep_name, dep_spec in target_cfg_data.get("dependencies", {}).items():
+                if not include_optional and isinstance(dep_spec, dict) and dep_spec.get("optional"):
+                    continue
+                deps.add(dep_name)
+        active[crate_name] = deps
+    return active
+
+
+def _workspace_closure(start: str, active_deps: dict[str, set[str]]) -> set[str]:
+    """Compute transitive dependencies starting from `start` through workspace manifests."""
+    closure: set[str] = set()
+    queue = list(active_deps.get(start, set()))
+    visited = set(queue)
+    while queue:
+        curr = queue.pop(0)
+        closure.add(curr)
+        if curr in active_deps:
+            for nxt in active_deps[curr]:
+                if nxt not in visited:
+                    visited.add(nxt)
+                    queue.append(nxt)
+    return closure
+
+
 def audit_targets(root_dir: Path) -> dict:
-    """Audit feature-resolved targets: linux, macos, windows, wasm32, ios, android."""
+    """Audit cfg-resolved per-target dependency graphs: linux, macos, windows, wasm32, ios, android."""
     targets = {
-        "x86_64-unknown-linux-gnu": {"os": "linux", "desktop": True},
-        "aarch64-apple-darwin": {"os": "macos", "desktop": True},
-        "x86_64-pc-windows-msvc": {"os": "windows", "desktop": True},
-        "wasm32-unknown-unknown": {"os": "browser", "desktop": False},
-        "aarch64-apple-ios": {"os": "ios", "desktop": False},
-        "aarch64-linux-android": {"os": "android", "desktop": False},
+        "x86_64-unknown-linux-gnu": {
+            "os": "linux",
+            "desktop": True,
+            "target_os": "linux",
+            "target_arch": "x86_64",
+            "target_family": "unix",
+            "target_env": "gnu",
+            "target_vendor": "unknown",
+        },
+        "aarch64-apple-darwin": {
+            "os": "macos",
+            "desktop": True,
+            "target_os": "macos",
+            "target_arch": "aarch64",
+            "target_family": "unix",
+            "target_env": "",
+            "target_vendor": "apple",
+        },
+        "x86_64-pc-windows-msvc": {
+            "os": "windows",
+            "desktop": True,
+            "target_os": "windows",
+            "target_arch": "x86_64",
+            "target_family": "windows",
+            "target_env": "msvc",
+            "target_vendor": "pc",
+        },
+        "wasm32-unknown-unknown": {
+            "os": "browser",
+            "desktop": False,
+            "target_os": "unknown",
+            "target_arch": "wasm32",
+            "target_family": "wasm",
+            "target_env": "",
+            "target_vendor": "unknown",
+        },
+        "aarch64-apple-ios": {
+            "os": "ios",
+            "desktop": False,
+            "target_os": "ios",
+            "target_arch": "aarch64",
+            "target_family": "unix",
+            "target_env": "",
+            "target_vendor": "apple",
+        },
+        "aarch64-linux-android": {
+            "os": "android",
+            "desktop": False,
+            "target_os": "android",
+            "target_arch": "aarch64",
+            "target_family": "unix",
+            "target_env": "",
+            "target_vendor": "linux",
+        },
+    }
+
+    crates_dir = root_dir / "crates"
+    manifests: dict[str, dict] = {}
+    if crates_dir.exists():
+        for cp in sorted(crates_dir.glob("*/Cargo.toml")):
+            try:
+                manifests[cp.parent.name] = tomllib.loads(cp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+    # Non-desktop targets enforce zero desktop-FFI contamination across portable/mobile/web crates.
+    non_desktop_checked_crates = {
+        "fr-core",
+        "fr-wire",
+        "fr-media",
+        "fr-client",
+        "fr-transport",
+        "fr-web",
+        "fr-mobile-ffi",
     }
 
     target_results: dict[str, dict] = {}
     violations: list[str] = []
 
     for target_triple, info in targets.items():
-        is_browser = info["os"] == "browser"
         is_desktop = info["desktop"]
+        active_deps = _resolve_target_crate_deps(manifests, target_triple, info, include_optional=False)
+        target_violations: list[str] = []
+        active_desktop_ffi: set[str] = set()
+        daemon_gui_deps: set[str] = set()
+        crates_checked: list[str] = []
 
+        # 1. Every crate active on this target must never pull a forbidden runtime.
+        for crate_name in sorted(manifests):
+            closure = _workspace_closure(crate_name, active_deps)
+            for forbidden in sorted(FORBIDDEN_DEPENDENCIES & closure):
+                msg = f"{target_triple} ({crate_name}): Forbidden runtime dependency '{forbidden}' active on target"
+                target_violations.append(msg)
+
+        # 2. Daemon (`frd`) must never inherit GUI crates or desktop-client FFI (`fr-native`, `fr-windows`).
+        if "frd" in manifests:
+            crates_checked.append("frd")
+            frd_closure = _workspace_closure("frd", active_deps)
+            for bad_gui in sorted((DAEMON_GUI_CRATES | {"fr-native", "fr-windows"}) & frd_closure):
+                daemon_gui_deps.add(bad_gui)
+                target_violations.append(
+                    f"{target_triple} (frd): Daemon inherits forbidden GUI/FFI dependency '{bad_gui}'"
+                )
+
+        # 3. Non-desktop targets (browser, iOS, Android) must never inherit desktop FFI crates.
+        if not is_desktop:
+            for crate_name in sorted(manifests):
+                if crate_name not in non_desktop_checked_crates and "wasm" not in crate_name:
+                    continue
+                if crate_name not in crates_checked:
+                    crates_checked.append(crate_name)
+                closure = _workspace_closure(crate_name, active_deps)
+                for ffi_crate in sorted(DESKTOP_FFI_CRATES & closure):
+                    active_desktop_ffi.add(f"{crate_name}->{ffi_crate}")
+                    target_violations.append(
+                        f"{target_triple} ({crate_name}): Non-desktop target inherits desktop FFI crate '{ffi_crate}'"
+                    )
+
+        violations.extend(target_violations)
         target_results[target_triple] = {
             "os": info["os"],
             "desktop_ffi_allowed": is_desktop,
             "gui_allowed_in_daemon": False,
-            "compliant": True,
+            "crates_checked": sorted(crates_checked),
+            "active_desktop_ffi_deps": sorted(active_desktop_ffi),
+            "daemon_gui_deps": sorted(daemon_gui_deps),
+            "violation_count": len(target_violations),
+            "compliant": len(target_violations) == 0,
         }
 
     return {

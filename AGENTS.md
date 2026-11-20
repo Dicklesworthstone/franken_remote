@@ -1,6 +1,6 @@
 # AGENTS.md — FrankenRemote Contributor and Coding-Agent Contract
 
-This file is normative for humans and software agents working in this repository. It applies even when a task appears small. FrankenRemote is **spec-first, in early implementation**: the reviewed design now has initial core and media-contract crates, but no working remote workstation. The most dangerous contribution right now is a convenient abstraction, scaffold, or "temporary" shortcut that contradicts the final system.
+This file is normative for humans and software agents working in this repository. It applies even when a task appears small. FrankenRemote is **spec-first, in early implementation**: an early v0.1.0 remote workstation runs on Linux, macOS, and Windows between maintainers' machines, but it is not qualified for general use (`README.md`, `IMPLEMENTATION_STATUS.md`). The most dangerous contribution right now is a convenient abstraction, scaffold, or "temporary" shortcut that contradicts the final system.
 
 ---
 

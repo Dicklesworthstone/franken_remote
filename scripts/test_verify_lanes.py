@@ -26,12 +26,12 @@ def run_cmd(args: list[str]) -> tuple[int, str, str]:
 
 
 def test_baseline() -> None:
-    print("[1/8] Testing baseline count on repo...")
+    print("[1/11] Testing baseline count on repo...")
     rc, stdout, stderr = run_cmd([sys.executable, "scripts/count.py", "--json"])
     assert rc == 0, f"count.py failed on baseline repo: {stderr}"
     print("  ✓ Baseline count passed within budget.")
 
-    print("[2/8] Testing baseline audit on repo...")
+    print("[2/11] Testing baseline audit on repo...")
     rc, stdout, stderr = run_cmd([sys.executable, "scripts/audit.py", "--json"])
     assert rc == 0, f"audit.py failed on baseline repo: {stderr}"
     print("  ✓ Baseline audit passed with zero violations.")
@@ -40,7 +40,7 @@ def test_baseline() -> None:
 def test_planted_over_budget_rust() -> None:
     # The owner lifted the 500k hard stop on 2026-11-08. A tree past the old
     # stop must still be counted exactly and must no longer be refused.
-    print("[3/8] Testing a Rust fixture past the lifted 500,000 stop...")
+    print("[3/11] Testing a Rust fixture past the lifted 500,000 stop...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         crates_dir = tmp_path / "crates" / "fake-crate" / "src"
@@ -64,7 +64,7 @@ def test_planted_over_budget_glue() -> None:
     # The 20k glue allowance was lifted on 2026-11-13 (owner-delegated). A
     # tree past it must still be counted exactly, per extension, and must no
     # longer be refused.
-    print("[4/8] Testing a glue fixture past the lifted 20,000 allowance...")
+    print("[4/11] Testing a glue fixture past the lifted 20,000 allowance...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         web_dir = tmp_path / "web"
@@ -88,7 +88,7 @@ def test_planted_over_budget_glue() -> None:
 
 
 def test_planted_forbidden_unsafe() -> None:
-    print("[5/8] Testing planted unsafe code in safe crate...")
+    print("[5/11] Testing planted unsafe code in safe crate...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         crate_dir = tmp_path / "crates" / "safe-crate"
@@ -106,7 +106,7 @@ def test_planted_forbidden_unsafe() -> None:
 
 
 def test_planted_missing_forbid_unsafe() -> None:
-    print("[6/8] Testing planted missing #![forbid(unsafe_code)]...")
+    print("[6/11] Testing planted missing #![forbid(unsafe_code)]...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         crate_dir = tmp_path / "crates" / "safe-crate"
@@ -124,7 +124,7 @@ def test_planted_missing_forbid_unsafe() -> None:
 
 
 def test_planted_browser_desktop_ffi() -> None:
-    print("[7/8] Testing planted desktop FFI dependency in browser build...")
+    print("[7/11] Testing planted desktop FFI dependency in browser build...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         crate_dir = tmp_path / "crates" / "fr-web"
@@ -144,7 +144,7 @@ def test_planted_browser_desktop_ffi() -> None:
 
 
 def test_planted_forbidden_runtime() -> None:
-    print("[8/8] Testing planted forbidden runtime (tokio)...")
+    print("[8/11] Testing planted forbidden runtime (tokio)...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         crate_dir = tmp_path / "crates" / "some-crate"
@@ -163,6 +163,77 @@ def test_planted_forbidden_runtime() -> None:
         print("  ✓ Forbidden runtime dependency (tokio) correctly caught and refused.")
 
 
+def test_planted_ios_target_desktop_ffi() -> None:
+    print("[9/11] Testing planted cfg(target_os = \"ios\") desktop FFI contamination...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        crate_dir = tmp_path / "crates" / "fr-mobile-ffi"
+        src_dir = crate_dir / "src"
+        src_dir.mkdir(parents=True)
+        (crate_dir / "Cargo.toml").write_text(
+            '[package]\nname = "fr-mobile-ffi"\nversion = "0.1.0"\n'
+            '[target.\'cfg(target_os = "ios")\'.dependencies]\n'
+            'x11 = "2.21"\n'
+        )
+        (src_dir / "lib.rs").write_text("// mobile FFI boundary\n")
+
+        rc, stdout, stderr = run_cmd([
+            sys.executable, "scripts/audit.py", "--fixture", str(tmp_path), "--json"
+        ])
+        assert rc == 1, f"Expected audit.py to refuse x11 on iOS target, got rc={rc}"
+        report = json.loads(stdout)
+        assert report["targets"]["targets"]["aarch64-apple-ios"]["compliant"] is False
+        assert report["targets"]["targets"]["aarch64-linux-android"]["compliant"] is True
+        print("  ✓ cfg-resolved iOS desktop FFI leak caught while leaving Android target clean.")
+
+
+def test_planted_wasm_target_desktop_ffi() -> None:
+    print("[10/11] Testing planted cfg(target_arch = \"wasm32\") desktop FFI contamination...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        crate_dir = tmp_path / "crates" / "fr-client"
+        src_dir = crate_dir / "src"
+        src_dir.mkdir(parents=True)
+        (crate_dir / "Cargo.toml").write_text(
+            '[package]\nname = "fr-client"\nversion = "0.1.0"\n'
+            '[target.\'cfg(target_arch = "wasm32")\'.dependencies]\n'
+            'windows-sys = "0.59"\n'
+        )
+        (src_dir / "lib.rs").write_text("#![forbid(unsafe_code)]\n")
+
+        rc, stdout, stderr = run_cmd([
+            sys.executable, "scripts/audit.py", "--fixture", str(tmp_path), "--json"
+        ])
+        assert rc == 1, f"Expected audit.py to refuse windows-sys on wasm32, got rc={rc}"
+        report = json.loads(stdout)
+        assert report["targets"]["targets"]["wasm32-unknown-unknown"]["compliant"] is False
+        print("  ✓ cfg-resolved wasm32 desktop FFI leak correctly caught and refused.")
+
+
+def test_planted_daemon_target_gui_dep() -> None:
+    print("[11/11] Testing planted cfg(target_os = \"linux\") GUI dep in frd...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        crate_dir = tmp_path / "crates" / "frd"
+        src_dir = crate_dir / "src"
+        src_dir.mkdir(parents=True)
+        (crate_dir / "Cargo.toml").write_text(
+            '[package]\nname = "frd"\nversion = "0.1.0"\n'
+            '[target.\'cfg(target_os = "linux")\'.dependencies]\n'
+            'winit = "0.30"\n'
+        )
+        (src_dir / "lib.rs").write_text("#![forbid(unsafe_code)]\n")
+
+        rc, stdout, stderr = run_cmd([
+            sys.executable, "scripts/audit.py", "--fixture", str(tmp_path), "--json"
+        ])
+        assert rc == 1, f"Expected audit.py to refuse winit in frd, got rc={rc}"
+        report = json.loads(stdout)
+        assert report["targets"]["targets"]["x86_64-unknown-linux-gnu"]["compliant"] is False
+        assert report["targets"]["targets"]["aarch64-apple-darwin"]["compliant"] is True
+        print("  ✓ cfg-resolved Linux GUI dep in frd correctly caught and refused.")
+
+
 def main() -> int:
     print("================================================================================")
     print("           RUNNING VERIFY LANES & PLANTED FIXTURE TEST SUITE")
@@ -174,8 +245,11 @@ def main() -> int:
     test_planted_missing_forbid_unsafe()
     test_planted_browser_desktop_ffi()
     test_planted_forbidden_runtime()
+    test_planted_ios_target_desktop_ffi()
+    test_planted_wasm_target_desktop_ffi()
+    test_planted_daemon_target_gui_dep()
     print("================================================================================")
-    print("ALL 8 VERIFICATION & PLANTED FIXTURE TESTS PASSED CLEANLY!")
+    print("ALL 11 VERIFICATION & PLANTED FIXTURE TESTS PASSED CLEANLY!")
     print("================================================================================")
     return 0
 

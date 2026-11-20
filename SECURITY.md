@@ -1,6 +1,6 @@
 # Security Policy
 
-FrankenRemote is an early implementation with tested Rust core policy and media contracts, not an installable remote desktop release. Security reports may concern current code, design defects in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md), or repository verification/release automation. [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) distinguishes implemented behavior from unqualified platform and transport boundaries.
+FrankenRemote is an early implementation (v0.1.0 builds and installers exist for maintainers' testing, not yet qualified for general use). Security reports may concern current code, design defects in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md), or repository verification/release automation. [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) distinguishes implemented behavior from unqualified platform and transport boundaries.
 
 ## Reporting a vulnerability
 
