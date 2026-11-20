@@ -956,6 +956,11 @@ impl InputSession {
 /// a narrowed downlink delayed the view's evidence ended the session (fr-7al9).
 /// Lease, observation and clock failures, platform refusals and unknown
 /// effects still end the owner, as does any refused ordered action.
+/// `ExpiredAtBoundary` is the exception: the earliest of the ticket, lease,
+/// observation and view bounds passed after the check admitted the pointer
+/// (at the second clock sample, or in an executor's own sample, with no native
+/// call). If that bound was the lease or the observation, the next input that
+/// is checked is refused with that cause, which ends the owner.
 fn stale_pointer(receipt: Receipt) -> bool {
     receipt.submitted_operations == 0
         && matches!(
