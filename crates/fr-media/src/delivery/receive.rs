@@ -861,7 +861,7 @@ impl ReceivePipeline {
         let assembly = self.slots[index].as_mut().expect("inserted");
         let update = assembly.fragment(fragment, now, self.config.policy.repair_delay_micros)?;
         if update == ReceiveUpdate::PictureComplete {
-            assembly.display_from(now, self.config.policy.display_budget_micros)?;
+            self.picture_whole(index, now)?;
             self.discard_superseded();
         }
         Ok(update)
@@ -892,9 +892,33 @@ impl ReceivePipeline {
         let assembly = self.slots[index].as_mut().expect("inserted");
         let update = assembly.recovery(chunk, self.config.limits.max_fragments())?;
         if update == ReceiveUpdate::PictureComplete {
-            assembly.display_from(now, self.config.policy.display_budget_micros)?;
+            self.picture_whole(index, now)?;
         }
         Ok(update)
+    }
+    /// A picture that becomes whole after a later picture already was (a
+    /// reference repaired behind its dependent) is superseded work. It keeps
+    /// the budget from its first fragment, so a late one is decoded and not
+    /// shown before the newer picture.
+    fn picture_whole(&mut self, index: usize, now: u64) -> Result<(), DeliveryError> {
+        let frame = self.slots[index]
+            .as_ref()
+            .expect("inserted")
+            .descriptor
+            .frame;
+        if self
+            .slots
+            .iter()
+            .flatten()
+            .any(|a| a.descriptor.frame > frame && a.complete())
+        {
+            return Ok(());
+        }
+        let budget = self.config.policy.display_budget_micros;
+        self.slots[index]
+            .as_mut()
+            .expect("inserted")
+            .display_from(now, budget)
     }
     fn on_progress(
         &mut self,

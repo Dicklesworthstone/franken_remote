@@ -492,6 +492,11 @@ chunk. The 250 ms reference horizon still runs from the first fragment. The
 source-age bound and the rule that late presentation is never fresh evidence
 are unchanged: "late" now means late after the picture was whole.
 
+One exception: a picture that becomes whole only after a later picture already
+was, such as a reference repaired behind its dependent, keeps the budget from
+its first fragment (`ReceivePipeline::picture_whole`). It is superseded work.
+If it is late, it is decoded to unlock its dependent but not shown before it.
+
 The namespace narrow-link fixture hid this. QUIC sends a picture as one UDP
 GSO batch, which loopback never splits, and netem's `rate` delivered the whole
 batch at once after its transfer time. `Netem::narrow_downlink` now uses a

@@ -328,6 +328,36 @@ fn the_display_budget_runs_from_the_last_fragment_not_the_first() {
 }
 
 #[test]
+fn a_reference_made_whole_after_its_dependent_keeps_its_first_fragment_budget() {
+    let c = config();
+    let (mut receiver, _) = running(c);
+    // Frame 1 loses its middle fragment. Frame 2 arrives whole 65 ms later,
+    // then the repair completes frame 1. It is superseded work: decoded to
+    // unlock frame 2, never shown before it.
+    let reference = fragments(descriptor(1, Some(0)), &payload(), c);
+    receiver.receive(Channel::Video, &reference[0], 10).unwrap();
+    receiver.receive(Channel::Video, &reference[2], 10).unwrap();
+    for packet in &fragments(descriptor(2, Some(1)), &payload(), c) {
+        receiver.receive(Channel::Video, packet, 65_000).unwrap();
+    }
+    assert_eq!(
+        receiver.receive(Channel::Video, &reference[1], 70_000),
+        Ok(ReceiveUpdate::PictureComplete)
+    );
+    let late = receiver.take_decodable(70_000).unwrap().unwrap();
+    assert_eq!(late.descriptor().frame, 1);
+    assert_eq!(late.display_deadline_us(), 50_010);
+    assert!(!late.within_display_queue_budget());
+    assert!(!late.is_newest());
+    receiver.acknowledge_decode(&late, true, 71_000).unwrap();
+    drop(late);
+    let latest = receiver.take_decodable(71_000).unwrap().unwrap();
+    assert_eq!(latest.descriptor().frame, 2);
+    assert!(latest.within_display_queue_budget());
+    assert!(latest.is_newest());
+}
+
+#[test]
 fn a_late_picture_is_newest_only_when_nothing_later_was_announced() {
     let c = config();
     let (mut receiver, _) = running(c);
