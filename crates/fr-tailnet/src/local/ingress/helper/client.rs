@@ -14,8 +14,9 @@ use asupersync::{
 };
 use std::{path::Path, time::Duration};
 
-/// Covers the helper's worst case: an interface report plus two nft commands,
-/// each bounded to one second.
+/// Covers the helper's worst cases: an installation's interface report plus
+/// two nft commands, each bounded to one second, and a renewal's two reads,
+/// which run together for at most 2.5 s.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(4);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -98,6 +99,19 @@ impl Link {
     }
     pub(in crate::local::ingress) fn table(&self) -> &str {
         &self.table
+    }
+    /// An installed generation-1 link over `stream`, for lifetime tests.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::local::ingress) fn fixture(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            generation: 1,
+            table: String::new(),
+            outbox: Vec::new(),
+            inbox: Vec::new(),
+            outstanding: 0,
+            broken: false,
+        }
     }
     /// The helper re-qualifies the interface/address and returns its root
     /// read-back of this generation's table, for the caller to validate.

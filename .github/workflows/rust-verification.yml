@@ -298,6 +298,7 @@ jobs:
               'a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends',
               'a_table_a_failed_disconnect_left_is_cleared_while_no_other_connection_ends',
               'a_renewal_reads_the_interface_and_the_table_together_and_judges_the_interface_first',
+              'a_renewal_whose_table_read_takes_over_a_second_still_renews',
           ]
           listed = subprocess.check_output([binaries[0], '--list', '--ignored'], text=True).splitlines()
           for test in tests:

@@ -3,9 +3,9 @@
 //! request at a time and owns at most one rule, removed when it ends.
 use super::{
     super::{
-        Leaf, SocketAddr, address_assigned, both, command, delete_table, install_script,
-        interface_index, interface_valid, net_admin, new_table, observe, protected,
-        protected_executable, read_back, table_exists, validate_rule,
+        COMMAND_TIMEOUT, Leaf, SocketAddr, address_assigned, both, command, delete_table,
+        install_script, interface_index, interface_valid, net_admin, new_table, observe_within,
+        protected, protected_executable, read_back, read_back_within, table_exists, validate_rule,
     },
     Install, MAX_REQUEST, Refusal, Request, Response, TABLE_PREFIX, decode_request,
     encode_response, owned_table,
@@ -40,6 +40,14 @@ const MAX_ORPHANS: usize = 4 * MAX_CONNECTIONS;
 /// stale `iif != index` drop refuses the port's tailnet traffic (ts2,
 /// 2026-11-19, fr-eny1). Costs nothing while no orphan is listed.
 const ORPHAN_RETRY: Duration = Duration::from_secs(2);
+/// A renewal's interface and table reads may each take this long (they run
+/// together). The broker's snapshot lives 3 s from its lookup and it renews
+/// 500 ms after that, so a slower renewal could not keep its lease anyway.
+/// With one second, a loaded host's renewals were refused: ts2's helper logged
+/// 180 `firewall_failed` and 81 `interface_unqualified` refusals in 19 hours,
+/// and a refused renewal ends the host (fr-eny1). Installation and cleanup
+/// keep their one-second bounds.
+const RENEW_READ_TIMEOUT: Duration = Duration::from_millis(2_500);
 const MAX_SETTINGS: usize = 4096;
 const MAX_ALLOWED_UIDS: usize = 16;
 /// Once a frame starts, all of it must arrive within this deadline.
@@ -432,9 +440,9 @@ impl Lifecycle {
             Response::Refused(reason)
         })
     }
-    async fn observe(shared: &Shared<'_>) -> Result<Observed, Refusal> {
+    async fn observe(shared: &Shared<'_>, limit: Duration) -> Result<Observed, Refusal> {
         let settings = shared.settings;
-        let (index, report) = observe(&shared.cx, &settings.ip, &settings.interface)
+        let (index, report) = observe_within(&shared.cx, &settings.ip, &settings.interface, limit)
             .await
             .map_err(|_| Refusal::InterfaceUnqualified)?;
         Ok(Observed { index, report })
@@ -448,7 +456,7 @@ impl Lifecycle {
         let (cx, settings) = (&shared.cx, shared.settings);
         self.admit_install()?;
         check_request(settings, install)?;
-        let observed = Self::observe(shared).await?;
+        let observed = Self::observe(shared, COMMAND_TIMEOUT).await?;
         let index = check_assigned(settings, install.address, &observed)?;
         self.clear_residue(shared).await?;
         let table = new_table(TABLE_PREFIX).map_err(|_| Refusal::FirewallFailed)?;
@@ -513,8 +521,13 @@ impl Lifecycle {
         // the broker's snapshot validity (fr-eny1). Both finish before either
         // is judged, in the old order, so the refusal reason is unchanged.
         let (observed, readback) = both(
-            Box::pin(Self::observe(shared)),
-            Box::pin(read_back(cx, &settings.nft, &owned.table)),
+            Box::pin(Self::observe(shared, RENEW_READ_TIMEOUT)),
+            Box::pin(read_back_within(
+                cx,
+                &settings.nft,
+                &owned.table,
+                RENEW_READ_TIMEOUT,
+            )),
         )
         .await;
         let index = check_assigned(settings, owned.address.ip(), &observed?)?;
