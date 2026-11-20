@@ -316,10 +316,11 @@ fn connect_selected(
     // Losing a requester cannot undo cleanup or fabricate a reply. The caller
     // independently reports an unknown outcome if this response is lost.
     let _ = runtime.block_on(owner.complete(&local, cleanup));
+    let report = session.report();
     let evidence = files::Summary::capture(&session.files());
     let result = evidence.finish(
         finish(
-            &session.report(),
+            &report,
             result,
             stopped.get(),
             json,
@@ -330,7 +331,20 @@ fn connect_selected(
         json,
     );
     let audio = audio.map(|report| report.borrow());
-    playback::finish(audio.as_deref(), result, json)
+    let outcome = playback::finish(audio.as_deref(), result, json);
+    if let Some(diag_path) = connection.diagnostics_out.as_deref()
+        && let Err(export_err) = crate::diagnostics::export_session(
+            diag_path,
+            report.media.as_ref(),
+            fr_client::diagnostics::CodecPathKind::HardwareVideoToolbox,
+            fr_client::diagnostics::TransportKind::NativeQuic,
+            outcome.as_ref().err().map(|f| f.code),
+        )
+        && outcome.is_ok()
+    {
+        return Err(export_err);
+    }
+    outcome
 }
 
 const fn stop_name(stop: LocalStop) -> &'static str {

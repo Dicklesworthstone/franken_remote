@@ -20,6 +20,8 @@ mod app;
 mod clipboard_reasons;
 #[path = "fr_cli/closure.rs"]
 mod closure;
+#[path = "fr_cli/diagnostics.rs"]
+mod diagnostics;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "fr_cli/discovery.rs"]
 mod discovery;
@@ -234,6 +236,20 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(74)
+        };
+    }
+    if let options::Command::Doctor(doctor) = &parsed.command
+        && let Some(bundle_path) = &doctor.replay_diagnostics
+    {
+        return match diagnostics::replay(bundle_path, parsed.json) {
+            Ok((text, exit)) => {
+                if output::write(&text).is_ok() {
+                    ExitCode::from(exit)
+                } else {
+                    ExitCode::from(74)
+                }
+            }
+            Err(failure) => finish(Err(failure), parsed.json),
         };
     }
     #[cfg(any(

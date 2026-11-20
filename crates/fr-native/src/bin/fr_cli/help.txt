@@ -14,6 +14,7 @@ fr doctor [--port 8443] [--socket PATH] [--trust-roots /absolute/ca-roots.pem] [
 fr doctor --probe-native --worker /absolute/fr-media-worker
     --encoder software|nvenc|vaapi --x-display :N [--xauthority /absolute/cookie]
     [--input-agent /absolute/fr-input-agent] [--json]
+fr doctor --replay-diagnostics /absolute/bundle.json [--json]
 fr inspect NODE_ID [--by-name] [--probe --experimental-native] [--port 8443]
     [--trust-roots /absolute/ca-roots.pem] [--ipv6] [--socket PATH] [--json]
 fr disconnect NODE_ID [--socket PATH] [--json]
@@ -32,7 +33,8 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
      [--audio-volume 0..100] [--audio-muted]]
     [--microphone --microphone-source NAME
-     [--microphone-server /absolute/pulse/native]] [--json]
+     [--microphone-server /absolute/pulse/native]]
+    [--diagnostics-out /absolute/bundle.json] [--json]
 fr connect --choose-host --view-only|--control --experimental-native
     --display HANDLE|only|choose [connect options except --by-name/--saved]
 fr robot session open NODE_ID --foreground --role view|control

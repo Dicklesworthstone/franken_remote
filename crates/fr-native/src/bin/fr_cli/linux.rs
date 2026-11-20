@@ -586,7 +586,20 @@ fn connect(
     // A lost requester cannot undo shutdown or turn confirmed local cleanup
     // into failure. The requester independently reports its missing reply.
     let _ = runtime.block_on(owner.complete(&local, cleanup));
-    completed(&application, result, stopped.get(), &state.borrow(), json)
+    let outcome = completed(&application, result, stopped.get(), &state.borrow(), json);
+    if let Some(diag_path) = connection.diagnostics_out.as_deref()
+        && let Err(export_err) = crate::diagnostics::export_session(
+            diag_path,
+            state.borrow().media.as_ref(),
+            fr_client::diagnostics::CodecPathKind::Unknown,
+            fr_client::diagnostics::TransportKind::NativeQuic,
+            outcome.as_ref().err().map(|f| f.code),
+        )
+        && outcome.is_ok()
+    {
+        return Err(export_err);
+    }
+    outcome
 }
 /// The existing local X11 session: `--x-display`, else DISPLAY.
 #[cfg(feature = "linux-desktop")]
@@ -2446,6 +2459,7 @@ mod tests {
             },
             receive: None,
             pick: None,
+            diagnostics_out: None,
         };
         let runtime = RuntimeBuilder::current_thread()
             .enable_platform_reactor(true)

@@ -172,6 +172,9 @@ pub struct Connection {
     /// with connection choices, report the chosen host and choices, and open
     /// no connection.
     pub pick: Option<PickOnly>,
+    /// `--diagnostics-out /absolute/bundle.json`: optional on-demand local
+    /// export of a sanitized, content-free diagnostic bundle on session end.
+    pub diagnostics_out: Option<PathBuf>,
 }
 /// The desktop application's picker request. Its choices are only initial
 /// preferences for the window; the report carries what the user confirmed.
@@ -813,6 +816,7 @@ fn parse_command(
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
     let (mut pick_only, mut app_notice) = (false, None);
+    let mut diagnostics_out = None;
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
@@ -902,6 +906,7 @@ fn parse_command(
                 receive_keep_both = Some(receive::keep_both(next_arg(args, &mut index)?)?);
             }
             "--pick-only" if connect && choose_host => pick_only = true,
+            "--diagnostics-out" if connect => diagnostics_out = Some(next_path(args, &mut index)?),
             "--app-notice" if connect && choose_host => {
                 let text = next_arg(args, &mut index)?;
                 if text.is_empty()
@@ -917,7 +922,7 @@ fn parse_command(
             _ => return Err(usage()),
         }
     }
-    if app_notice.is_some() && !pick_only {
+    if (app_notice.is_some() && !pick_only) || (pick_only && diagnostics_out.is_some()) {
         return Err(usage());
     }
     let receive = ReceiveOptions::new(
@@ -1093,6 +1098,7 @@ fn parse_command(
                     clipboard: clipboard.unwrap_or(true),
                     notice: app_notice,
                 }),
+                diagnostics_out,
             })
         }
     } else {
@@ -2109,6 +2115,31 @@ mod controlled_audio_tests {
             ),
         ] {
             assert_eq!(parse(&args(text)).err().unwrap().code, code, "{text}");
+        }
+    }
+
+    #[test]
+    fn diagnostics_out_requires_absolute_clean_path_and_rejects_pick_only() {
+        let base = "connect n-host --view-only --experimental-native --display only";
+        let Command::Connect(connection) = parse(&args(&format!(
+            "{base} --diagnostics-out /tmp/session-diag.json"
+        )))
+        .unwrap()
+        .command
+        else {
+            panic!("connect");
+        };
+        assert_eq!(
+            connection.diagnostics_out,
+            Some(PathBuf::from("/tmp/session-diag.json"))
+        );
+        for bad in [
+            format!("{base} --diagnostics-out relative.json"),
+            format!("{base} --diagnostics-out /tmp/../escape.json"),
+            "connect --choose-host --view-only --experimental-native --display only --pick-only --diagnostics-out /tmp/session-diag.json".to_owned(),
+            "displays n-host --experimental-native --diagnostics-out /tmp/session-diag.json".to_owned(),
+        ] {
+            assert!(parse(&args(&bad)).is_err(), "expected refusal for {bad}");
         }
     }
 }

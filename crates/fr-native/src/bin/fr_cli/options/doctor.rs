@@ -5,6 +5,7 @@ pub struct DoctorOptions {
     pub port: u16,
     pub roots: Option<PathBuf>,
     pub native: Option<NativeDoctorOptions>,
+    pub replay_diagnostics: Option<PathBuf>,
 }
 pub struct NativeDoctorOptions {
     pub worker: PathBuf,
@@ -18,8 +19,14 @@ pub(super) fn parse(args: &[String]) -> Result<Options, Failure> {
     let mut index = 1;
     let mut seen = BTreeSet::new();
     let (mut json, mut native) = (false, false);
-    let (mut socket, mut roots, mut worker, mut xauthority, mut input_agent) =
-        (None, None, None, None, None);
+    let (
+        mut socket,
+        mut roots,
+        mut worker,
+        mut xauthority,
+        mut input_agent,
+        mut replay_diagnostics,
+    ) = (None, None, None, None, None, None);
     let (mut encoder, mut display) = (None, None);
     let mut port = 8443;
     while index < args.len() {
@@ -34,6 +41,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, Failure> {
             "--port" => port = next_port(args, &mut index)?,
             "--trust-roots" => roots = Some(next_path(args, &mut index)?),
             "--probe-native" => native = true,
+            "--replay-diagnostics" => replay_diagnostics = Some(next_path(args, &mut index)?),
             "--worker" => worker = Some(next_path(args, &mut index)?),
             "--xauthority" => xauthority = Some(next_path(args, &mut index)?),
             "--input-agent" => input_agent = Some(next_path(args, &mut index)?),
@@ -64,6 +72,23 @@ pub(super) fn parse(args: &[String]) -> Result<Options, Failure> {
             }
             _ => return Err(usage()),
         }
+    }
+    if replay_diagnostics.is_some()
+        && (native
+            || seen.contains("--port")
+            || socket.is_some()
+            || roots.is_some()
+            || worker.is_some()
+            || encoder.is_some()
+            || display.is_some()
+            || xauthority.is_some()
+            || input_agent.is_some())
+    {
+        return Err(Failure::new(
+            "diagnostics_replay_local_only",
+            "Run fr doctor --replay-diagnostics /absolute/bundle.json [--json] alone; replay is local and never opens tailnet or desktop probes.",
+            2,
+        ));
     }
     let native = if native {
         if seen.contains("--port") || socket.is_some() || roots.is_some() {
@@ -107,6 +132,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, Failure> {
             port,
             roots,
             native,
+            replay_diagnostics,
         }),
         json,
         socket,
@@ -181,6 +207,31 @@ mod tests {
                 ))
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn replay_diagnostics_is_local_only_and_rejects_unsafe_or_mixed_flags() {
+        let parsed = options("doctor --replay-diagnostics /tmp/bundle.json --json").unwrap();
+        assert!(parsed.json);
+        let Command::Doctor(doctor) = parsed.command else {
+            panic!("doctor");
+        };
+        assert_eq!(
+            doctor.replay_diagnostics,
+            Some(PathBuf::from("/tmp/bundle.json"))
+        );
+        assert!(doctor.native.is_none());
+
+        for bad in [
+            "doctor --replay-diagnostics relative.json",
+            "doctor --replay-diagnostics /tmp/../bundle.json",
+            "doctor --replay-diagnostics /tmp/bundle.json --port 8443",
+            "doctor --replay-diagnostics /tmp/bundle.json --socket /tmp/tailscaled.sock",
+            "doctor --replay-diagnostics /tmp/bundle.json --trust-roots /tmp/roots.pem",
+            "doctor --replay-diagnostics /tmp/bundle.json --probe-native --worker /worker --encoder software --x-display :1",
+        ] {
+            assert!(options(bad).is_err(), "expected refusal for {bad}");
         }
     }
 }
