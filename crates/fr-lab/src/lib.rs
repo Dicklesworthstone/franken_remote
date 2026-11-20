@@ -37,6 +37,7 @@ use std::fmt;
 use std::mem::size_of;
 
 pub mod latency;
+pub mod simulation;
 
 /// Receiver of a simulated datagram. No network addresses are retained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
