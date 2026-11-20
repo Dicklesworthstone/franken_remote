@@ -128,6 +128,20 @@ pub(in crate::session_startup::running) async fn idle_source_for_controlled(
     .await;
     (stream, channels, receiver)
 }
+pub(in crate::session_startup::running) async fn healthy_source_for_controlled(
+    host: &mut HostSession,
+    viewer: &mut ViewerSession,
+    c: &Cx,
+    h: &Cx,
+) -> (Stream, NegotiatedMedia, ReceivePipeline) {
+    let Media {
+        stream,
+        channels,
+        receiver,
+        presenter: _,
+    } = Box::pin(media(host, viewer, c, h, "healthy", SendPolicy::default())).await;
+    (stream, channels, receiver)
+}
 
 async fn media(
     host: &mut HostSession,

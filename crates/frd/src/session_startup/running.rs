@@ -20,7 +20,7 @@ pub use shared::{SharedHost, SharedStatistics};
 #[cfg(test)]
 pub(in crate::session_startup) use streaming::tests::feedback_pair;
 pub use streaming::{
-    StreamingHost,
+    StreamingDemotion, StreamingHost,
     acquisition::{LocalControl, PendingControl},
 };
 

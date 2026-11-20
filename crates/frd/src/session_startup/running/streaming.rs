@@ -22,7 +22,7 @@ use crate::{
     media_quic::QuicEgress,
 };
 use asupersync::{channel::mpsc, cx::Cx};
-use fr_core::ids::InputTicketId;
+use fr_core::ids::{InputLeaseId, InputTicketId};
 use fr_media::pacing::{self, Availability, Observation, Sample};
 use fr_transport::quic::{Disposition, QuicRecords, Route};
 use std::{
@@ -74,6 +74,16 @@ impl Host {
         }
     }
 }
+/// Result of demoting a controlled [`StreamingHost`] back to view-only
+/// observation on the same live QUIC connection and media stream.
+#[derive(Debug)]
+pub struct StreamingDemotion {
+    pub revoked_lease: InputLeaseId,
+    pub reason: StopReason,
+    /// Validated `0x0014 LeaseRevoked` wire record emitted to fence the peer.
+    pub lease_revoked_record: [u8; fr_wire::lease_revoked::REVOKED_BYTES],
+}
+
 /// Continuous, single-view native video on the SAME already-running session.
 /// The stream is already configured and its bootstrap acknowledged. Control,
 /// when present, must already come from the existing initial-grant broker.
@@ -404,6 +414,49 @@ impl StreamingHost {
             app.close();
         }
         self.stream.close();
+    }
+    /// True while this streaming host still owns an active input-control grant.
+    #[must_use]
+    pub fn is_controlled(&self) -> bool {
+        matches!(self.host, Host::Control(_))
+    }
+    /// Demote a controlled streaming host back to view-only observation on the
+    /// SAME live QUIC connection and video stream without reconnecting.
+    ///
+    /// Enforces the `AGENTS.md §4` fence-first order: input authority and
+    /// lease-scoped lanes (`ControlledHost::demote_to_viewing`) are fenced and
+    /// retired first, then streaming-level control applications (`microphone`,
+    /// `files`, `clipboard`) are closed and dropped, while the observation
+    /// session, capture stream, media channels, and cursor remain alive.
+    pub fn demote_to_viewing(&mut self, requested: StopReason) -> Result<StreamingDemotion, Error> {
+        if self.stream.served || !matches!(self.host, Host::Control(_)) {
+            return Err(Error::Order);
+        }
+        let Host::Control(controlled) = std::mem::replace(&mut self.host, Host::Closed) else {
+            return Err(Error::Order);
+        };
+        let demoted = match controlled.demote_to_viewing(requested) {
+            Ok(demoted) => demoted,
+            Err(error) => {
+                self.close();
+                return Err(error);
+            }
+        };
+        if let Some(mut app) = self.microphone.take() {
+            app.close();
+        }
+        if let Some(mut lane) = self.files.take() {
+            lane.close();
+        }
+        if let Some(mut app) = self.clipboard.take() {
+            app.close();
+        }
+        self.host = Host::Observe(demoted.session);
+        Ok(StreamingDemotion {
+            revoked_lease: demoted.revoked_lease,
+            reason: demoted.reason,
+            lease_revoked_record: demoted.lease_revoked_record,
+        })
     }
     pub async fn reap_media(
         &mut self,

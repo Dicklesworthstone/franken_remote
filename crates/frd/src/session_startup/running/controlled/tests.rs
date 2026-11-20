@@ -1228,6 +1228,126 @@ fn demote_to_viewing_refuses_when_observation_is_already_revoked() {
     });
 }
 
+#[test]
+fn streaming_demote_to_viewing_fences_control_and_continues_live_video_on_same_connection() {
+    crate::session_startup::running::streaming::tests::run(|c, h| async move {
+        let Fixture {
+            mut host,
+            mut viewer,
+            driver,
+            seat,
+            ..
+        } = Box::pin(fixture(&c, &h, None)).await;
+        let binding = fr_wire::authority::Binding {
+            channel: host.session.opened.binding.id,
+            session: host.session.opened.binding.remote_session,
+        };
+        let limits = host.session.opened.selected.limits;
+        let observation = host.session.observation().unwrap();
+        let control = host.control();
+        let (stream, channels, mut receiver) = Box::pin(
+            crate::session_startup::running::streaming::tests::healthy_source_for_controlled(
+                &mut host.session,
+                &mut viewer.session,
+                &c,
+                &h,
+            ),
+        )
+        .await;
+        let mut streaming = host.into_streaming(stream).unwrap();
+        assert!(streaming.is_controlled());
+        assert!(!control.is_stopped());
+
+        let (decoded_after_demotion, shutdown) = Box::pin(support::both(
+            async {
+                let demotion = streaming
+                    .demote_to_viewing(StopReason::LocalRevoke)
+                    .expect("streaming demotion succeeds while observation is healthy");
+                assert!(!streaming.is_controlled());
+                assert!(control.is_stopped());
+                assert!(observation.check().is_ok());
+                assert_eq!(demotion.revoked_lease, credentials().lease);
+                assert_eq!(demotion.reason, StopReason::LocalRevoke);
+                let decoded = fr_wire::lease_revoked::decode(
+                    &demotion.lease_revoked_record,
+                    binding,
+                    credentials().lease,
+                    &limits,
+                    fr_wire::input::InputDirection::HostToViewer,
+                    fr_wire::input::InputDelivery::Reliable,
+                )
+                .expect("streaming demotion LeaseRevoked record must decode");
+                assert_eq!(decoded.lease, credentials().lease);
+                assert_eq!(decoded.reason, fr_wire::lease_revoked::Reason::LocalRevoke);
+                assert_eq!(
+                    decoded.cleanup,
+                    fr_wire::lease_revoked::CleanupStage::Fenced
+                );
+                // A second demotion on an already-viewing stream must refuse with Error::Order.
+                assert!(matches!(
+                    streaming.demote_to_viewing(StopReason::LocalRevoke),
+                    Err(Error::Order)
+                ));
+
+                // Continue streaming live video frames over the SAME QUIC connection!
+                let (mut n, mut t) = (4000, 7000);
+                let mut frames = 0_usize;
+                let until = now(&c).unwrap() + 3_000_000;
+                let (serve_res, ()) = Box::pin(support::both(
+                    streaming.serve(|| nonce(&mut n), || ticket(&mut t), block),
+                    async {
+                        while frames < 2 && now(&c).unwrap() < until {
+                            viewer
+                                .session
+                                .drive(Duration::from_millis(2), block)
+                                .await
+                                .unwrap();
+                            channels
+                                .receive_ready(
+                                    &c,
+                                    viewer.session.io().unwrap().0,
+                                    || true,
+                                    |channel, bytes| {
+                                        receiver.receive(channel, bytes, now(&c).unwrap()).unwrap();
+                                        Ok(Disposition::Consumed)
+                                    },
+                                )
+                                .unwrap();
+                            while let Some(frame) =
+                                receiver.take_decodable(now(&c).unwrap()).unwrap()
+                            {
+                                receiver
+                                    .acknowledge_decode(&frame, true, now(&c).unwrap())
+                                    .unwrap();
+                                frames += 1;
+                            }
+                        }
+                        observation.revoke();
+                    },
+                ))
+                .await;
+                assert!(serve_res.is_err());
+                streaming
+                    .reap_media(
+                        &c,
+                        crate::worker::Deadline::after(&c, Duration::from_secs(1)).unwrap(),
+                    )
+                    .await
+                    .ok();
+                frames
+            },
+            driver,
+        ))
+        .await;
+        assert!(
+            decoded_after_demotion >= 2,
+            "expected >= 2 live video frames after demotion, got {decoded_after_demotion}"
+        );
+        assert!(shutdown.handoff_safe());
+        assert!(!seat.is_occupied());
+    });
+}
+
 mod input_wake;
 
 #[path = "tests/files.rs"]

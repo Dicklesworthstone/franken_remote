@@ -48,7 +48,8 @@ pub use running::publisher::{
 };
 pub use running::{
     ControlledHost, DemotedViewing, HostSession, LocalControl as HostControlState,
-    PendingControl as PendingHostControl, SharedHost, SharedStatistics, StreamingHost,
+    PendingControl as PendingHostControl, SharedHost, SharedStatistics, StreamingDemotion,
+    StreamingHost,
 };
 
 mod viewer;
