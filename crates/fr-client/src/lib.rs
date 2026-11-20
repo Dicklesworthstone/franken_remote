@@ -57,6 +57,9 @@ pub use connection_quality::{
     ConnectionQualityMetrics, QualityTier, QualityWarning, TransportType,
 };
 
+/// Bounded sanitized diagnostic ring, slowness attribution, and replay bundles (Plan §§3.4, 18.4).
+pub mod diagnostics;
+
 /// Desktop client settings and preferences (Plan §§14.1, 16.1).
 pub mod settings;
 pub use settings::{ClientSettings, ColorRangePreference, DisplayFitMode};
