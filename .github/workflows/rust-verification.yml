@@ -71,7 +71,32 @@ jobs:
       - name: Tests
         id: test
         continue-on-error: true
-        run: ./scripts/verify.sh test
+        # frd's lib-test rustc peaks at 26-28 GB (trj, 11-20) on this 16 GB
+        # runner. Three runs on 11-20 lost the runner ~50 min into this step
+        # (21 min when green). Global reclaim also pages out the runner agent.
+        # In a cgroup whose memory.high leaves 2 GB of RAM, the kernel reclaims
+        # from the build first. If the cgroup cannot be set up, the step runs
+        # unprotected, as before.
+        run: |
+          cg=/sys/fs/cgroup/fr-build
+          protect() {
+            sudo mkdir -p "$cg" && [ -e "$cg/memory.high" ] || return 1
+            ram=$(awk '/^MemTotal:/ {printf "%d", $2 * 1024}' /proc/meminfo)
+            echo $(( ram - 2147483648 )) | sudo tee "$cg/memory.high" >/dev/null || return 1
+            echo $$ | sudo tee "$cg/cgroup.procs" >/dev/null || return 1
+          }
+          if protect; then
+            echo "Tests run in $cg, memory.high $(cat "$cg/memory.high")"
+          else
+            echo "::warning::no build cgroup; the runner is not protected from build paging"
+          fi
+          status=0
+          ./scripts/verify.sh test || status=$?
+          if [ -e "$cg/memory.peak" ]; then
+            echo "build cgroup memory.peak $(cat "$cg/memory.peak")"
+            cat "$cg/memory.events"
+          fi
+          exit "$status"
       - name: Exercise serial reconnects and retirement fences
         id: serial_turnover
         continue-on-error: true
