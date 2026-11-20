@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-11-20 — a stale pointer no longer ends control; Mac hosts keep to their bitrate
+
+- Controlled sessions, narrowing link: when pictures slow down, the host's
+  view of what the viewer sees lapses and input is suspended until a fresh
+  picture arrives. A pointer move already on its way was then refused, and
+  both sides treated that refusal as a failure: the host revoked control,
+  and the viewer stopped control for any pointer the host had not applied.
+  Both now drop such a pointer (refused before any native call because its
+  view or ticket was no longer current), and control continues through the
+  suspension (7dc74385).
+- Keys, buttons, wheel turns and text still end control when refused this
+  way, because later input depends on them. Whether they should also wait
+  out the lapse is an open owner decision (bead f7ts).
+- Namespace measurements (narrow-link episodes against a 2 Mbit/s controlled
+  host, 20 interleaved runs of 3 rows): rows that ended before the link
+  widened went from 9 of 60 to 0 of 60, and every fixed row resumed input
+  after widening. Rows that survived on both builds are unchanged.
+- Linux hosts: when the root ingress helper failed to delete a connection's
+  nftables table (a slow `nft` under load), it retried only when another
+  connection ended. A host whose broker stayed connected kept the table, and
+  after tailscaled restarted, its rule for the old interface index dropped
+  every tailnet packet to the port. ts2's installed host stopped answering
+  this way on 11-19. The helper now retries leftovers every 2 s while it
+  serves (958d0aac). ts2's installed host predates this; its leftover tables
+  stay until its helper is restarted or reinstalled (bead fr-eny1).
+- Mac hosts, high-motion content at a capped or path-following bitrate:
+  when VideoToolbox's rate control dropped a picture, the encoder resubmitted
+  it at once with a later timestamp. Each resubmission spent budget for time
+  that had not passed, so the link carried 2 to 2.7 times the target (a
+  full-noise 1280x720 window came out at 18.5 Mbit/s against an 8 Mbit/s
+  cap), and at 2 Mbit/s and below some pictures still failed and ended the
+  capture. Resubmissions now wait until the timestamp is at most 100 ms
+  ahead of the clock. In a synthetic-frame harness the output then matched
+  every target from 8 down to 1 Mbit/s with no failures. Content that cannot
+  fit its target shows fewer pictures per second instead (that window: 13.6
+  per second at 8.3 Mbit/s). Not yet checked on a live Mac host (8db1cf7a,
+  bead fr-8xl4).
+
 ## 2026-11-19 — input keeps working on a link slower than one picture per 50 ms
 
 - Controlled sessions: on a link that takes longer than about 50 ms to carry
