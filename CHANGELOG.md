@@ -25,6 +25,15 @@
   this way on 11-19. The helper now retries leftovers every 2 s while it
   serves (958d0aac). ts2's installed host predates this; its leftover tables
   stay until its helper is restarted or reinstalled (bead fr-eny1).
+- Linux hosts with the root ingress helper, under load: each periodic
+  renewal gave the helper's `ip` and `nft` reads one second, and a slower
+  read was a refusal that ended the host (ts2's helper logged 261 such
+  refusals in 19 hours). Those reads now get 2.5 s, which still fits inside
+  the 3 s snapshot they renew. The broker's own interface read beside them
+  may use what is left of the old snapshot. A renewal that finds the helper
+  gone fences every connection at once instead of waiting for that read
+  (92b2df81). In a namespace test, a 1.6 s table read now renews and a
+  3.2 s one is still refused. Not yet checked on a loaded live host.
 - Mac hosts, high-motion content at a capped or path-following bitrate:
   when VideoToolbox's rate control dropped a picture, the encoder resubmitted
   it at once with a later timestamp. Each resubmission spent budget for time
