@@ -11,6 +11,32 @@ use crate::{
 use fr_core::limits::ProtocolLimits;
 
 pub const REQUEST_BYTES: usize = HEADER_BYTES + 19;
+pub const CONTROL_RELEASE_CAPABILITY: &str = "control-release-demotion";
+pub const CONTROL_RELEASE_VERSION: u16 = 1;
+
+/// Explicit scope of a `CloseRequest` (`PROTOCOL_CLOSURE.md`).
+///
+/// Control-release-only demotion (`0`) and full session teardown (`1`) are
+/// never conflated: legacy `decode_request` rejects `ControlRelease` with
+/// `WireError::UnsupportedKind` rather than silently closing the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CloseScope {
+    /// Fence and release the active input lease while keeping viewing alive.
+    ControlRelease = 0,
+    /// End the entire remote session.
+    SessionClose = 1,
+}
+
+impl CloseScope {
+    fn parse(value: u8) -> Result<Self, WireError> {
+        match value {
+            0 => Ok(Self::ControlRelease),
+            1 => Ok(Self::SessionClose),
+            _ => Err(WireError::InvalidValue),
+        }
+    }
+}
 
 /// Stable content-free v0 reasons, not free-form peer diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,8 +59,16 @@ impl Reason {
     }
 }
 
-/// Ends this entire remote session, not the OS share or another viewer. The
-/// control-release-only scope remains explicitly unsupported by this slice.
+/// Explicit scoped close request (`ControlRelease` or `SessionClose`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedCloseRequest {
+    pub scope: CloseScope,
+    pub reason: Reason,
+}
+
+/// Ends this entire remote session, not the OS share or another viewer.
+/// Callers that support control-to-view demotion without closing the session
+/// use `ScopedCloseRequest` / `encode_scoped_request` / `decode_scoped_request`.
 /// This request carries no claim about committed input or completed cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseRequest {
@@ -56,8 +90,8 @@ fn route(
     }
     Ok(())
 }
-pub fn encode_request(
-    request: CloseRequest,
+pub fn encode_scoped_request(
+    request: ScopedCloseRequest,
     binding: Binding,
     limits: &ProtocolLimits,
     out: &mut [u8],
@@ -65,6 +99,9 @@ pub fn encode_request(
     delivery: InputDelivery,
 ) -> Result<usize, WireError> {
     route(binding, direction, delivery)?;
+    if request.scope == CloseScope::ControlRelease && request.reason == Reason::InspectionComplete {
+        return Err(WireError::InvalidValue);
+    }
     let mut writer = Writer::record_bounded(
         out,
         limits.max_control_message_bytes() as usize,
@@ -73,9 +110,55 @@ pub fn encode_request(
         19,
     )?;
     writer.put(&binding.session.as_raw().to_be_bytes())?;
-    writer.u8(1)?; // Session close. Zero is control-release-only, not implemented.
+    writer.u8(request.scope as u8)?;
     writer.u16(request.reason as u16)?;
     writer.finish()
+}
+pub fn decode_scoped_request(
+    bytes: &[u8],
+    binding: Binding,
+    limits: &ProtocolLimits,
+    direction: InputDirection,
+    delivery: InputDelivery,
+) -> Result<ScopedCloseRequest, WireError> {
+    route(binding, direction, delivery)?;
+    let record = Record::decode_bounded(
+        bytes,
+        limits.max_control_message_bytes() as usize,
+        binding.channel,
+        None,
+    )?;
+    let mut reader = record.reader(Kind::CloseRequest)?;
+    if reader.take(16)? != binding.session.as_raw().to_be_bytes() {
+        return Err(WireError::InvalidBinding);
+    }
+    let scope = CloseScope::parse(reader.u8()?)?;
+    let reason = Reason::parse(reader.u16()?)?;
+    if scope == CloseScope::ControlRelease && reason == Reason::InspectionComplete {
+        return Err(WireError::InvalidValue);
+    }
+    reader.finish()?;
+    Ok(ScopedCloseRequest { scope, reason })
+}
+pub fn encode_request(
+    request: CloseRequest,
+    binding: Binding,
+    limits: &ProtocolLimits,
+    out: &mut [u8],
+    direction: InputDirection,
+    delivery: InputDelivery,
+) -> Result<usize, WireError> {
+    encode_scoped_request(
+        ScopedCloseRequest {
+            scope: CloseScope::SessionClose,
+            reason: request.reason,
+        },
+        binding,
+        limits,
+        out,
+        direction,
+        delivery,
+    )
 }
 pub fn decode_request(
     bytes: &[u8],
@@ -95,10 +178,9 @@ pub fn decode_request(
     if reader.take(16)? != binding.session.as_raw().to_be_bytes() {
         return Err(WireError::InvalidBinding);
     }
-    match reader.u8()? {
-        1 => {}
-        0 => return Err(WireError::UnsupportedKind),
-        _ => return Err(WireError::InvalidValue),
+    match CloseScope::parse(reader.u8()?)? {
+        CloseScope::SessionClose => {}
+        CloseScope::ControlRelease => return Err(WireError::UnsupportedKind),
     }
     let reason = Reason::parse(reader.u16()?)?;
     reader.finish()?;

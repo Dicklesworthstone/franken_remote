@@ -16,8 +16,13 @@ compact binding equality. Zero identities, wrong direction, datagrams, unknown
 reason/scope values, leftovers and invalid extensions refuse. All bytes,
 including extensions, count toward the existing negotiated record ceiling.
 
-Scope 1 closes the entire remote session. Scope 0 reserves control-release-only;
-it currently returns `UnsupportedKind`, never silently becoming session close.
+Scope 1 closes the entire remote session. Scope 0 (`CloseScope::ControlRelease`,
+negotiated by positive capability `control-release-demotion` v1) requests
+fencing and releasing the active input lease while keeping observation/viewing
+alive on the original remote session; `decode_request` (the session-close-only
+decoder) still returns `UnsupportedKind` for scope 0 so legacy paths can never
+silently confuse control release with session close. `ControlRelease` refuses
+reason 4 (`InspectionComplete`).
 Reasons: 1 requested, 2 client stopping, 3 client failure, 4 inspection complete.
 No request includes credentials, free-form text, or an assertion about external
 effects. Repetition cannot resurrect a session, and a fresh session is not

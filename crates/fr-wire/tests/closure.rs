@@ -172,3 +172,103 @@ fn unsupported_control_release_and_malformed_payloads_are_not_session_close() {
         assert_eq!(decode(&bytes), Ok(request));
     }
 }
+
+// Written from PROTOCOL_CLOSURE.md by hand: scope=0 (ControlRelease), reason=1 (Requested),
+// binding=7, remote_session=13.
+const CONTROL_RELEASE_FIXTURE: &[u8] = b"FRD0\x00\x00\x00\x1d\x00\x00\x00\x00\x00\x00\x00\x13\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0d\x00\x00\x01";
+
+#[test]
+fn scoped_control_release_fixture_decodes_cleanly_while_legacy_decoder_refuses() {
+    use closure::{CloseScope, ScopedCloseRequest};
+
+    let expected = ScopedCloseRequest {
+        scope: CloseScope::ControlRelease,
+        reason: Reason::Requested,
+    };
+    assert_eq!(CONTROL_RELEASE_FIXTURE.len(), closure::REQUEST_BYTES);
+    // Legacy session-only decoder must NEVER silently treat ControlRelease as SessionClose.
+    assert_eq!(
+        decode(CONTROL_RELEASE_FIXTURE),
+        Err(WireError::UnsupportedKind)
+    );
+    // Scoped decoder accepts both ControlRelease and SessionClose.
+    let decoded = closure::decode_scoped_request(
+        CONTROL_RELEASE_FIXTURE,
+        binding(),
+        &ProtocolLimits::ABSOLUTE,
+        D::ViewerToHost,
+        T::Reliable,
+    )
+    .unwrap();
+    assert_eq!(decoded, expected);
+
+    let mut out = [0; closure::REQUEST_BYTES];
+    let n = closure::encode_scoped_request(
+        expected,
+        binding(),
+        &ProtocolLimits::ABSOLUTE,
+        &mut out,
+        D::ViewerToHost,
+        T::Reliable,
+    )
+    .unwrap();
+    assert_eq!(n, closure::REQUEST_BYTES);
+    assert_eq!(out, CONTROL_RELEASE_FIXTURE);
+
+    // ControlRelease refuses InspectionComplete (which is a display-inspection close reason).
+    assert_eq!(
+        closure::encode_scoped_request(
+            ScopedCloseRequest {
+                scope: CloseScope::ControlRelease,
+                reason: Reason::InspectionComplete,
+            },
+            binding(),
+            &ProtocolLimits::ABSOLUTE,
+            &mut out,
+            D::ViewerToHost,
+            T::Reliable,
+        ),
+        Err(WireError::InvalidValue)
+    );
+    let mut bad_reason = CONTROL_RELEASE_FIXTURE.to_vec();
+    bad_reason[42] = 4;
+    assert_eq!(
+        closure::decode_scoped_request(
+            &bad_reason,
+            binding(),
+            &ProtocolLimits::ABSOLUTE,
+            D::ViewerToHost,
+            T::Reliable,
+        ),
+        Err(WireError::InvalidValue)
+    );
+
+    // Every truncation of ControlRelease fails cleanly.
+    for cut in 0..CONTROL_RELEASE_FIXTURE.len() {
+        assert!(
+            closure::decode_scoped_request(
+                &CONTROL_RELEASE_FIXTURE[..cut],
+                binding(),
+                &ProtocolLimits::ABSOLUTE,
+                D::ViewerToHost,
+                T::Reliable,
+            )
+            .is_err()
+        );
+    }
+
+    // SessionClose also decodes through decode_scoped_request.
+    assert_eq!(
+        closure::decode_scoped_request(
+            FIXTURE,
+            binding(),
+            &ProtocolLimits::ABSOLUTE,
+            D::ViewerToHost,
+            T::Reliable,
+        ),
+        Ok(ScopedCloseRequest {
+            scope: CloseScope::SessionClose,
+            reason: Reason::InspectionComplete,
+        })
+    );
+}
