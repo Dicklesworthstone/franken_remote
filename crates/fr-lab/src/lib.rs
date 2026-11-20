@@ -36,6 +36,8 @@ use fr_core::time::{HostDuration, HostInstant};
 use std::fmt;
 use std::mem::size_of;
 
+pub mod latency;
+
 /// Receiver of a simulated datagram. No network addresses are retained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Destination {
