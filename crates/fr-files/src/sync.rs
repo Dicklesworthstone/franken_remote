@@ -1,6 +1,6 @@
 //! Bounded, non-destructive ATP folder synchronization (`PROTOCOL.md` §6 `0x0075 SyncJobState`).
 //!
-//! Design invariants (plan §13.7, `AGENTS.md` §4 & §6):
+//! Design invariants (plan §15.6, `AGENTS.md` §4 & §6):
 //! - Both endpoints pin their own local directory by descriptor (`DropDirectory`,
 //!   `ConflictPolicy::KeepBoth`). Wire records never carry filesystem paths,
 //!   filenames, or file contents.
@@ -12,31 +12,30 @@
 //! - Live authority is checked before scanning, before every file, before every
 //!   chunk write, and immediately before each OS atomic rename. Revoking the
 //!   lease mid-transfer cancels staging without leaving partial published files
-//!   and emits a valid `0x0075 SyncJobState` (`Cancelled` / `Reason::Revoked`).
+//!   and emits a valid `0x0075 SyncJobState` (`Cancelled` / `Reason::Permission`).
 
-use crate::receive::{
-    ConflictPolicy, DropDirectory, Error as ReceiveError, MAX_CHUNK_BYTES, Publication,
-    PublishedFile,
-};
-use asupersync::atp::safety::validate_portable_path_component;
-use asupersync::net::atp::transport_common::{
-    EntryDigest, StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
-};
+#[cfg(unix)]
+use crate::receive::ConflictPolicy;
+use crate::receive::{DropDirectory, Error as ReceiveError, MAX_CHUNK_BYTES, Publication};
+#[cfg(unix)]
+mod projection;
+#[cfg(unix)]
+mod source;
+#[cfg(unix)]
 use fr_core::limits::ProtocolLimits;
 use fr_wire::WireError;
-use fr_wire::files::{
-    Context as WireContext, Limits as WireLimits, Reason as WireReason, Role as WireRole,
-};
+use fr_wire::files::{Context as WireContext, Reason as WireReason, Role as WireRole};
 use fr_wire::sync_job_state::{
-    self, ConflictPolicy as WireConflictPolicy, RECORD_BYTES, SyncDirection, SyncJobState,
-    SyncPhase,
+    ConflictPolicy as WireConflictPolicy, RECORD_BYTES, SyncDirection, SyncJobState, SyncPhase,
 };
+#[cfg(unix)]
+use fr_wire::{files::Limits as WireLimits, sync_job_state};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
+#[cfg(unix)]
 const STAGING_PREFIX: &str = ".fr-part-";
 
 /// Resource limits enforced before scanning, staging, or transferring entries.
@@ -99,6 +98,9 @@ pub enum SyncError {
     InvalidRevision,
     InvalidRoot,
     UnsafeRoot,
+    RootChanged,
+    SourceChanged,
+    UnsupportedPlatform,
     InvalidEntryName,
     SymlinkForbidden,
     SubdirectoryUnsupported,
@@ -122,7 +124,7 @@ impl SyncError {
             | Self::FileSizeLimitExceeded
             | Self::TotalBytesLimitExceeded
             | Self::Receive(ReceiveError::Quota) => WireReason::Resource,
-            Self::Receive(ReceiveError::Integrity) => WireReason::Integrity,
+            Self::SourceChanged | Self::Receive(ReceiveError::Integrity) => WireReason::Integrity,
             Self::Receive(ReceiveError::Conflict) => WireReason::Conflict,
             Self::InvalidConfig
             | Self::InvalidRevision
@@ -132,6 +134,8 @@ impl SyncError {
             | Self::UnsupportedEntryKind
             | Self::InvalidRoot
             | Self::UnsafeRoot
+            | Self::RootChanged
+            | Self::UnsupportedPlatform
             | Self::KeepBothRequired
             | Self::Receive(
                 ReceiveError::InvalidName | ReceiveError::InvalidRoot | ReceiveError::UnsafeRoot,
@@ -182,6 +186,8 @@ pub struct ManifestFile {
     size: u64,
     sha256_hex: String,
     merkle_root_hex: String,
+    #[cfg(unix)]
+    original: source::Identity,
 }
 
 impl ManifestFile {
@@ -218,6 +224,8 @@ pub struct FolderManifest {
     entries: BTreeMap<String, ManifestFile>,
     total_bytes: u64,
     root_hash_hex: String,
+    #[cfg(unix)]
+    inspected_entries: u32,
 }
 
 impl FolderManifest {
@@ -252,6 +260,16 @@ impl fmt::Debug for FolderManifest {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct SyncBaseline {
     entries: BTreeMap<String, String>,
+    /// Versions already published under keep-both names. Receipt custody is
+    /// separate from equal-name hashes: the originals deliberately still differ.
+    kept: Vec<KeptVersion>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct KeptVersion {
+    leg: TransferLeg,
+    original_name: String,
+    sha256_hex: String,
 }
 
 impl SyncBaseline {
@@ -265,7 +283,10 @@ impl SyncBaseline {
             .iter()
             .map(|(name, file)| (name.clone(), file.sha256_hex.clone()))
             .collect();
-        Self { entries }
+        Self {
+            entries,
+            kept: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -283,12 +304,33 @@ impl SyncBaseline {
     pub fn record(&mut self, name: String, sha256_hex: String) {
         self.entries.insert(name, sha256_hex);
     }
+
+    fn already_kept(&self, leg: TransferLeg, file: &ManifestFile) -> bool {
+        self.kept.iter().any(|kept| {
+            kept.leg == leg && kept.original_name == file.name && kept.sha256_hex == file.sha256_hex
+        })
+    }
+
+    #[cfg(unix)]
+    fn record_kept(&mut self, transfer: &PlannedTransfer, published_name: &str) {
+        // A conflict copy is a known local-only name. It must not bounce back
+        // to its source as a new file on the next bidirectional round.
+        self.record(published_name.to_owned(), transfer.file.sha256_hex.clone());
+        self.kept
+            .retain(|kept| kept.leg != transfer.leg || kept.original_name != transfer.file.name);
+        self.kept.push(KeptVersion {
+            leg: transfer.leg,
+            original_name: transfer.file.name.clone(),
+            sha256_hex: transfer.file.sha256_hex.clone(),
+        });
+    }
 }
 
 impl fmt::Debug for SyncBaseline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SyncBaseline")
             .field("entry_count", &self.entries.len())
+            .field("kept_version_count", &self.kept.len())
             .finish_non_exhaustive()
     }
 }
@@ -403,6 +445,15 @@ pub struct SyncRoundOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncRoundFailure {
     pub error: SyncError,
+    /// Staging removal or original reservation accounting failed. The cause
+    /// and committed publications remain available, but cleanup is unconfirmed.
+    pub cleanup_failed: bool,
+    /// Publications already committed before failure. They are not rolled back
+    /// and must be retained when reporting cancellation or deciding to retry.
+    pub published: Vec<PublishedSyncEntry>,
+    /// Original baseline advanced only by confirmed publications, for a retry
+    /// under newly checked authority without duplicating committed conflicts.
+    pub baseline: SyncBaseline,
     pub wire_states: Vec<EmittedWireState>,
 }
 
@@ -449,6 +500,13 @@ pub fn plan_sync(
                              expects_conflict_copy: bool,
                              file: &ManifestFile|
      -> Result<(), SyncError> {
+        if baseline.already_kept(leg, file) {
+            // Preserve the receipt even if the user subsequently edits or
+            // deletes the received copy. An unchanged original is not a new
+            // transfer request and must not recreate that copy indefinitely,
+            // including when the destination's original name is later removed.
+            return Ok(());
+        }
         planned_bytes = planned_bytes
             .checked_add(file.size)
             .ok_or(SyncError::TotalBytesLimitExceeded)?;
@@ -531,17 +589,32 @@ pub fn plan_sync(
     })
 }
 
-/// Open and scan a locally pinned directory into a deterministic ATP `FolderManifest`.
+/// Open and scan a local directory through one retained descriptor.
 ///
-/// Rejects relative roots, symlinks, subdirectories, non-regular entries,
-/// non-portable entry names, and quota violations before reading excessive bytes.
-/// Private `.fr-part-*` staging files owned by `DropDirectory` are skipped.
-#[allow(clippy::too_many_lines)]
+/// This convenience form has no session authority. Session callers should use
+/// [`scan_directory_checked`] or [`execute_sync_round`]. Unix roots must be
+/// absolute, owned by this user and not group/other writable. Other platforms
+/// refuse until descriptor-relative directory enumeration is implemented.
 pub fn scan_directory(
     root: &Path,
     revision: u64,
     limits: SyncLimits,
 ) -> Result<FolderManifest, SyncError> {
+    scan_directory_checked(root, revision, limits, || Ok(()))
+}
+
+/// Bound directory enumeration and file hashing with the original authority.
+/// `max_entries` includes inspected private staging entries; each bounded read
+/// is bracketed by `check_authority`. No pathname is reopened during the scan.
+pub fn scan_directory_checked<F>(
+    root: &Path,
+    revision: u64,
+    limits: SyncLimits,
+    mut check_authority: F,
+) -> Result<FolderManifest, SyncError>
+where
+    F: FnMut() -> Result<(), SyncError>,
+{
     limits.validate()?;
     if revision == 0 {
         return Err(SyncError::InvalidRevision);
@@ -549,112 +622,15 @@ pub fn scan_directory(
     if !root.is_absolute() {
         return Err(SyncError::InvalidRoot);
     }
-
+    check_authority()?;
     #[cfg(unix)]
-    let root_fd = open_checked_root_unix(root)?;
-
-    let mut names = Vec::new();
-    for entry_res in std::fs::read_dir(root)? {
-        let entry = entry_res?;
-        let raw_name = entry.file_name();
-        let name = raw_name
-            .to_str()
-            .ok_or(SyncError::InvalidEntryName)?
-            .to_owned();
-        if name.starts_with(STAGING_PREFIX) {
-            continue;
-        }
-        if name.len() > 255 || validate_portable_path_component(&name).is_err() {
-            return Err(SyncError::InvalidEntryName);
-        }
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            return Err(SyncError::SymlinkForbidden);
-        }
-        if ft.is_dir() {
-            return Err(SyncError::SubdirectoryUnsupported);
-        }
-        if !ft.is_file() {
-            return Err(SyncError::UnsupportedEntryKind);
-        }
-        names.push(name);
+    {
+        use crate::rx::fd::AsFd;
+        let root = source::open_root(root)?;
+        source::scan(root.as_fd(), revision, limits, &mut check_authority)
     }
-    names.sort();
-
-    if !u32::try_from(names.len()).is_ok_and(|n| n <= limits.max_entries) {
-        return Err(SyncError::EntryLimitExceeded);
-    }
-
-    let mut entries = BTreeMap::new();
-    let mut digests: Vec<EntryDigest> = Vec::with_capacity(names.len());
-    let mut total_bytes = 0u64;
-    let mut buf = vec![0u8; limits.max_chunk_bytes];
-
-    for name in names {
-        #[cfg(unix)]
-        let mut file = open_regular_no_follow_unix(&root_fd, &name)?;
-        #[cfg(not(unix))]
-        let mut file = open_regular_non_unix(&root.join(&name))?;
-
-        let meta = file.metadata()?;
-        if !meta.file_type().is_file() {
-            return Err(SyncError::UnsupportedEntryKind);
-        }
-        let declared_size = meta.len();
-        if declared_size > limits.max_file_bytes {
-            return Err(SyncError::FileSizeLimitExceeded);
-        }
-        let next_total = total_bytes
-            .checked_add(declared_size)
-            .ok_or(SyncError::TotalBytesLimitExceeded)?;
-        if next_total > limits.max_total_bytes {
-            return Err(SyncError::TotalBytesLimitExceeded);
-        }
-
-        let mut hasher = StagedEntryReceive::new(name.clone().into());
-        hasher.mark_created();
-        let mut read_bytes = 0u64;
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            read_bytes = read_bytes
-                .checked_add(n as u64)
-                .ok_or(SyncError::FileSizeLimitExceeded)?;
-            if read_bytes > limits.max_file_bytes {
-                return Err(SyncError::FileSizeLimitExceeded);
-            }
-            hasher.update_with_chunk(&buf[..n]);
-        }
-        if read_bytes != declared_size {
-            return Err(SyncError::Io(io::ErrorKind::Interrupted));
-        }
-
-        let (digest, _, _) = hasher.finalize(name.clone());
-        let sha256_hex = hex_encode(&digest.content_sha256);
-        let merkle_root_hex = flat_merkle_root_from_digests(std::slice::from_ref(&digest));
-        digests.push(digest);
-        total_bytes = next_total;
-
-        entries.insert(
-            name.clone(),
-            ManifestFile {
-                name,
-                size: read_bytes,
-                sha256_hex,
-                merkle_root_hex,
-            },
-        );
-    }
-
-    let root_hash_hex = flat_merkle_root_from_digests(&digests);
-    Ok(FolderManifest {
-        revision,
-        entries,
-        total_bytes,
-        root_hash_hex,
-    })
+    #[cfg(not(unix))]
+    Err(SyncError::UnsupportedPlatform)
 }
 
 /// Execute one authority-fenced folder-synchronization round between locally
@@ -665,6 +641,7 @@ pub fn scan_directory(
 /// (silent overwrite is structurally impossible). `check_authority` runs before
 /// scanning, before each transfer, before every chunk write, and inside
 /// `PendingFile::publish_named_checked` immediately before each OS rename.
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn execute_sync_round<F>(
     config: &SyncJobConfig,
@@ -682,6 +659,17 @@ where
     F: FnMut() -> Result<(), SyncError>,
 {
     let mut wire_states = Vec::new();
+    let mut published = Vec::new();
+    let mut next_baseline = baseline.clone();
+    let host_drop = host_drop
+        .clone()
+        .with_conflict_policy(ConflictPolicy::KeepBoth)
+        .with_observed_cleanup();
+    let controller_drop = controller_drop
+        .clone()
+        .with_conflict_policy(ConflictPolicy::KeepBoth)
+        .with_observed_cleanup();
+    let cleanup_failed = || host_drop.cleanup_failed() || controller_drop.cleanup_failed();
     if let Err(err) = validate_round_inputs(
         config,
         host_wire_context,
@@ -690,16 +678,12 @@ where
     ) {
         return Err(SyncRoundFailure {
             error: err,
+            cleanup_failed: cleanup_failed(),
+            published,
+            baseline: next_baseline,
             wire_states,
         });
     }
-
-    let host_drop = host_drop
-        .clone()
-        .with_conflict_policy(ConflictPolicy::KeepBoth);
-    let controller_drop = controller_drop
-        .clone()
-        .with_conflict_policy(ConflictPolicy::KeepBoth);
 
     let fail_with = |error: SyncError,
                      entries_total: u32,
@@ -708,9 +692,12 @@ where
                      bytes_total: u64,
                      bytes_completed: u64,
                      revision: u64,
+                     published: Vec<PublishedSyncEntry>,
+                     baseline: SyncBaseline,
                      wire_states: &mut Vec<EmittedWireState>|
      -> SyncRoundFailure {
-        let phase = if error == SyncError::AuthorityRevoked {
+        let cleanup_failed = cleanup_failed();
+        let phase = if error == SyncError::AuthorityRevoked && !cleanup_failed {
             SyncPhase::Cancelled
         } else {
             SyncPhase::Failed
@@ -720,7 +707,11 @@ where
             sync_direction: config.direction,
             conflict_policy: config.conflict_policy,
             phase,
-            reason: error.wire_reason(),
+            reason: if cleanup_failed {
+                WireReason::UnknownEffect
+            } else {
+                error.wire_reason()
+            },
             entries_total,
             entries_completed,
             conflicts_kept,
@@ -731,13 +722,44 @@ where
         let _ = emit_wire_state(host_wire_context, state, wire_states);
         SyncRoundFailure {
             error,
+            cleanup_failed,
+            published,
+            baseline,
             wire_states: std::mem::take(wire_states),
         }
     };
 
+    // An existing supervising owner must never lose an earlier cleanup fault
+    // by creating another local sync round over the same selected directory.
+    if cleanup_failed() {
+        return Err(fail_with(
+            SyncError::Receive(ReceiveError::Retired),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            published,
+            next_baseline,
+            &mut wire_states,
+        ));
+    }
+
     // 1. Authority check prior to advertisement / scanning.
     if let Err(err) = check_authority() {
-        return Err(fail_with(err, 0, 0, 0, 0, 0, 0, &mut wire_states));
+        return Err(fail_with(
+            err,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            published,
+            next_baseline,
+            &mut wire_states,
+        ));
     }
 
     // 2. Host advertises the locally configured job; controller accepts it.
@@ -757,6 +779,9 @@ where
     if let Err(err) = emit_wire_state(host_wire_context, advertised, &mut wire_states) {
         return Err(SyncRoundFailure {
             error: err,
+            cleanup_failed: cleanup_failed(),
+            published,
+            baseline: next_baseline,
             wire_states,
         });
     }
@@ -768,6 +793,9 @@ where
     if let Err(err) = emit_wire_state(controller_wire_context, accepted, &mut wire_states) {
         return Err(SyncRoundFailure {
             error: err,
+            cleanup_failed: cleanup_failed(),
+            published,
+            baseline: next_baseline,
             wire_states,
         });
     }
@@ -781,11 +809,35 @@ where
     if let Err(err) = emit_wire_state(host_wire_context, scanning, &mut wire_states) {
         return Err(SyncRoundFailure {
             error: err,
+            cleanup_failed: cleanup_failed(),
+            published,
+            baseline: next_baseline,
             wire_states,
         });
     }
 
-    let host_manifest = match scan_directory(host_root, manifest_revision, config.limits) {
+    if let Err(error) = source::check_root(host_root, &host_drop)
+        .and_then(|()| source::check_root(controller_root, &controller_drop))
+    {
+        return Err(fail_with(
+            error,
+            0,
+            0,
+            0,
+            0,
+            0,
+            manifest_revision,
+            published,
+            next_baseline,
+            &mut wire_states,
+        ));
+    }
+    let host_manifest = match source::scan(
+        host_drop.root_fd(),
+        manifest_revision,
+        config.limits,
+        &mut check_authority,
+    ) {
         Ok(m) => m,
         Err(err) => {
             return Err(fail_with(
@@ -796,26 +848,34 @@ where
                 0,
                 0,
                 manifest_revision,
+                published,
+                next_baseline,
                 &mut wire_states,
             ));
         }
     };
-    let controller_manifest =
-        match scan_directory(controller_root, manifest_revision, config.limits) {
-            Ok(m) => m,
-            Err(err) => {
-                return Err(fail_with(
-                    err,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    manifest_revision,
-                    &mut wire_states,
-                ));
-            }
-        };
+    let controller_manifest = match source::scan(
+        controller_drop.root_fd(),
+        manifest_revision,
+        config.limits,
+        &mut check_authority,
+    ) {
+        Ok(m) => m,
+        Err(err) => {
+            return Err(fail_with(
+                err,
+                0,
+                0,
+                0,
+                0,
+                0,
+                manifest_revision,
+                published,
+                next_baseline,
+                &mut wire_states,
+            ));
+        }
+    };
 
     let plan = match plan_sync(
         baseline,
@@ -833,6 +893,8 @@ where
                 0,
                 0,
                 manifest_revision,
+                published,
+                next_baseline,
                 &mut wire_states,
             ));
         }
@@ -849,6 +911,8 @@ where
                 0,
                 0,
                 manifest_revision,
+                published,
+                next_baseline,
                 &mut wire_states,
             ));
         }
@@ -863,12 +927,59 @@ where
             0,
             0,
             manifest_revision,
+            published,
+            next_baseline,
             &mut wire_states,
         ));
     }
 
+    // Publication must not make an unchanged next round exceed its own scan
+    // limits. Check both destination projections before committing either leg.
+    if let Err(error) =
+        projection::validate(&plan, &host_manifest, &controller_manifest, config.limits)
+    {
+        return Err(fail_with(
+            error,
+            entries_total,
+            0,
+            0,
+            bytes_total,
+            0,
+            manifest_revision,
+            published,
+            next_baseline,
+            &mut wire_states,
+        ));
+    }
+
+    // Keep the baseline aligned with the scanned, bounded names before any copy.
+    // Retain local-only deletion history while a name exists on either side,
+    // but do not grow the baseline forever as unrelated names disappear.
+    next_baseline.entries.retain(|name, _| {
+        host_manifest.entries.contains_key(name) || controller_manifest.entries.contains_key(name)
+    });
+    next_baseline.kept.retain(|kept| {
+        let source = match kept.leg {
+            TransferLeg::HostToController => &host_manifest,
+            TransferLeg::ControllerToHost => &controller_manifest,
+        };
+        source
+            .entries
+            .get(&kept.original_name)
+            .is_some_and(|file| file.sha256_hex == kept.sha256_hex)
+    });
+    for (name, h) in &host_manifest.entries {
+        if controller_manifest
+            .entries
+            .get(name)
+            .is_some_and(|c| c.sha256_hex == h.sha256_hex)
+        {
+            next_baseline.record(name.clone(), h.sha256_hex.clone());
+        }
+    }
+
     // 4. Transfer each planned entry with chunk-level and publication-time authority gates.
-    let mut published = Vec::with_capacity(plan.transfers.len());
+    published.reserve_exact(plan.transfers.len());
     let mut entries_completed = 0u32;
     let mut conflicts_kept = 0u32;
     let mut bytes_completed = 0u64;
@@ -883,16 +994,24 @@ where
                 bytes_total,
                 bytes_completed,
                 manifest_revision,
+                published,
+                next_baseline,
                 &mut wire_states,
             ));
         }
 
         let (src_root, dst_drop, sender_ctx) = match transfer.leg {
-            TransferLeg::HostToController => (host_root, &controller_drop, host_wire_context),
-            TransferLeg::ControllerToHost => (controller_root, &host_drop, controller_wire_context),
+            TransferLeg::HostToController => {
+                (host_drop.root_fd(), &controller_drop, host_wire_context)
+            }
+            TransferLeg::ControllerToHost => (
+                controller_drop.root_fd(),
+                &host_drop,
+                controller_wire_context,
+            ),
         };
 
-        let pub_file = match transfer_one_file(
+        let pub_file = match source::transfer(
             src_root,
             dst_drop,
             &transfer.file,
@@ -909,12 +1028,21 @@ where
                     bytes_total,
                     bytes_completed,
                     manifest_revision,
+                    published,
+                    next_baseline,
                     &mut wire_states,
                 ));
             }
         };
 
         let conflict_copy = pub_file.was_renamed();
+        // Advance custody at the commit, not only at a successful round's end.
+        // A later cancellation or wire error must return this exact baseline.
+        if conflict_copy {
+            next_baseline.record_kept(transfer, pub_file.name());
+        } else {
+            next_baseline.record(transfer.file.name.clone(), transfer.file.sha256_hex.clone());
+        }
         if conflict_copy {
             conflicts_kept = conflicts_kept.saturating_add(1);
         }
@@ -929,6 +1057,23 @@ where
             publication: pub_file.publication(),
             conflict_copy,
         });
+
+        // Publication is already committed even if its final reservation
+        // accounting failed. Retain it, then report failed cleanup separately.
+        if cleanup_failed() {
+            return Err(fail_with(
+                SyncError::Receive(ReceiveError::Retired),
+                entries_total,
+                entries_completed,
+                conflicts_kept,
+                bytes_total,
+                bytes_completed,
+                manifest_revision,
+                published,
+                next_baseline,
+                &mut wire_states,
+            ));
+        }
 
         let progress = SyncJobState {
             job_id: config.job_id,
@@ -946,25 +1091,11 @@ where
         if let Err(err) = emit_wire_state(sender_ctx, progress, &mut wire_states) {
             return Err(SyncRoundFailure {
                 error: err,
+                cleanup_failed: cleanup_failed(),
+                published,
+                baseline: next_baseline,
                 wire_states,
             });
-        }
-    }
-
-    // 5. Recompute settled baseline for entries that match across both endpoints.
-    let mut next_baseline = baseline.clone();
-    for (name, h) in &host_manifest.entries {
-        if controller_manifest
-            .entries
-            .get(name)
-            .is_some_and(|c| c.sha256_hex == h.sha256_hex)
-        {
-            next_baseline.record(name.clone(), h.sha256_hex.clone());
-        }
-    }
-    for (entry, transfer) in published.iter().zip(plan.transfers.iter()) {
-        if !entry.conflict_copy {
-            next_baseline.record(transfer.file.name.clone(), transfer.file.sha256_hex.clone());
         }
     }
 
@@ -990,6 +1121,9 @@ where
     if let Err(err) = emit_wire_state(host_wire_context, final_state, &mut wire_states) {
         return Err(SyncRoundFailure {
             error: err,
+            cleanup_failed: cleanup_failed(),
+            published,
+            baseline: next_baseline,
             wire_states,
         });
     }
@@ -1005,6 +1139,7 @@ where
     })
 }
 
+#[cfg(unix)]
 fn validate_round_inputs(
     config: &SyncJobConfig,
     host_wire_context: WireContext,
@@ -1025,6 +1160,7 @@ fn validate_round_inputs(
     Ok(())
 }
 
+#[cfg(unix)]
 fn emit_wire_state(
     context: WireContext,
     state: SyncJobState,
@@ -1044,122 +1180,30 @@ fn emit_wire_state(
     Ok(())
 }
 
-fn transfer_one_file<F>(
-    src_root: &Path,
-    dst_drop: &DropDirectory,
-    file_spec: &ManifestFile,
-    chunk_bytes: usize,
-    check_authority: &mut F,
-) -> Result<PublishedFile, SyncError>
+/// Folder synchronization needs a qualified descriptor-relative directory
+/// scanner. Regular-file receive remains available on Windows separately.
+#[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
+pub fn execute_sync_round<F>(
+    _config: &SyncJobConfig,
+    _host_wire_context: WireContext,
+    _controller_wire_context: WireContext,
+    _host_root: &Path,
+    _host_drop: &DropDirectory,
+    _controller_root: &Path,
+    _controller_drop: &DropDirectory,
+    _baseline: &SyncBaseline,
+    _manifest_revision: u64,
+    _check_authority: F,
+) -> Result<SyncRoundOutcome, SyncRoundFailure>
 where
     F: FnMut() -> Result<(), SyncError>,
 {
-    #[cfg(unix)]
-    let mut src_file = {
-        let root_fd = open_checked_root_unix(src_root)?;
-        open_regular_no_follow_unix(&root_fd, &file_spec.name)?
-    };
-    #[cfg(not(unix))]
-    let mut src_file = open_regular_non_unix(&src_root.join(&file_spec.name))?;
-
-    let mut pending = dst_drop.begin_manifest(
-        &file_spec.name,
-        file_spec.size,
-        file_spec.sha256_hex.clone(),
-        file_spec.merkle_root_hex.clone(),
-    )?;
-
-    let mut buf = vec![0u8; chunk_bytes];
-    let mut offset = 0u64;
-    while offset < file_spec.size {
-        check_authority()?;
-        let remaining = file_spec.size - offset;
-        let to_read = usize::try_from(remaining)
-            .unwrap_or(chunk_bytes)
-            .min(chunk_bytes);
-        let n = src_file.read(&mut buf[..to_read])?;
-        if n == 0 {
-            return Err(SyncError::Receive(ReceiveError::Incomplete));
-        }
-        pending.write_chunk(offset, &buf[..n])?;
-        offset = offset
-            .checked_add(n as u64)
-            .ok_or(SyncError::FileSizeLimitExceeded)?;
-    }
-
-    pending.verify()?;
-    pending.publish_named_checked(check_authority)
-}
-
-#[cfg(unix)]
-fn open_checked_root_unix(path: &Path) -> Result<crate::rx::fd::OwnedFd, SyncError> {
-    use crate::rx::fs::{self, Mode, OFlags};
-    use crate::rx::process::geteuid;
-    use std::path::Component;
-
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mut fd = fs::open("/", flags, Mode::empty())?;
-    let mut normal = false;
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                fd = fs::openat(&fd, name, flags, Mode::empty())?;
-                normal = true;
-            }
-            _ => return Err(SyncError::InvalidRoot),
-        }
-    }
-    if !normal {
-        return Err(SyncError::InvalidRoot);
-    }
-    let stat = fs::fstat(&fd)?;
-    if stat.st_uid != geteuid().as_raw() || stat.st_mode & 0o022 != 0 {
-        return Err(SyncError::UnsafeRoot);
-    }
-    Ok(fd)
-}
-
-#[cfg(unix)]
-fn open_regular_no_follow_unix(
-    root_fd: &crate::rx::fd::OwnedFd,
-    name: &str,
-) -> Result<File, SyncError> {
-    use crate::rx::fs::{self, Mode, OFlags};
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let fd = fs::openat(root_fd, name, flags, Mode::empty()).map_err(|errno| {
-        if errno == crate::rx::io::Errno::LOOP {
-            SyncError::SymlinkForbidden
-        } else {
-            SyncError::from(errno)
-        }
-    })?;
-    let file = File::from(fd);
-    let ft = file.metadata()?.file_type();
-    if ft.is_symlink() {
-        return Err(SyncError::SymlinkForbidden);
-    }
-    if ft.is_dir() {
-        return Err(SyncError::SubdirectoryUnsupported);
-    }
-    if !ft.is_file() {
-        return Err(SyncError::UnsupportedEntryKind);
-    }
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_regular_non_unix(path: &Path) -> Result<File, SyncError> {
-    let sym = std::fs::symlink_metadata(path)?;
-    let ft = sym.file_type();
-    if ft.is_symlink() {
-        return Err(SyncError::SymlinkForbidden);
-    }
-    if ft.is_dir() {
-        return Err(SyncError::SubdirectoryUnsupported);
-    }
-    if !ft.is_file() {
-        return Err(SyncError::UnsupportedEntryKind);
-    }
-    Ok(File::open(path)?)
+    Err(SyncRoundFailure {
+        error: SyncError::UnsupportedPlatform,
+        cleanup_failed: false,
+        published: Vec::new(),
+        baseline: _baseline.clone(),
+        wire_states: Vec::new(),
+    })
 }

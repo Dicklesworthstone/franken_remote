@@ -28,6 +28,8 @@ use asupersync::net::atp::transport_common::{
 };
 #[cfg(unix)]
 use std::path::Component;
+#[cfg(unix)]
+use std::sync::OnceLock;
 use std::{
     fmt,
     io::{self, Write},
@@ -106,10 +108,14 @@ struct Root {
     fd: OwnedFd,
     limits: Limits,
     reserved: Mutex<Reserved>,
+    /// Public local sync callers have no supervising worker. Their original
+    /// root still retains one cleanup witness across every clone and round.
+    #[cfg(unix)]
+    sync_cleanup: OnceLock<CleanupStatus>,
 }
 
 #[cfg(unix)]
-fn open_root(path: &Path) -> Result<OwnedFd, Error> {
+pub(crate) fn open_root(path: &Path) -> Result<OwnedFd, Error> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let mut fd = fs::open("/", flags, Mode::empty())?;
     let mut normal = false;
@@ -167,6 +173,13 @@ impl fmt::Debug for DropDirectory {
     }
 }
 impl DropDirectory {
+    /// The original selected Unix directory, shared with local folder scanning.
+    /// A pathname replacement must never redirect a sync read or publication.
+    #[cfg(unix)]
+    pub(crate) fn root_fd(&self) -> crate::rx::fd::BorrowedFd<'_> {
+        self.0.fd.as_fd()
+    }
+
     /// Open an existing absolute directory without following any symlink.
     /// Its final component must be owned by this user and not writable by
     /// another user/group. Parent directories need not be private: they are
@@ -189,6 +202,8 @@ impl DropDirectory {
                 fd,
                 limits,
                 reserved: Mutex::new(Reserved::default()),
+                #[cfg(unix)]
+                sync_cleanup: OnceLock::new(),
             }),
             ConflictPolicy::Reject,
             None,
@@ -198,6 +213,29 @@ impl DropDirectory {
     pub(crate) fn with_cleanup_status(mut self, status: CleanupStatus) -> Self {
         self.2 = Some(status);
         self
+    }
+
+    /// Observe this synchronous owner's final reservations while retaining any
+    /// cleanup witness already attached by its supervising worker.
+    #[cfg(unix)]
+    pub(crate) fn with_observed_cleanup(mut self) -> Self {
+        if self.2.is_none() {
+            self.2 = Some(
+                self.0
+                    .sync_cleanup
+                    .get_or_init(CleanupStatus::default)
+                    .clone(),
+            );
+        }
+        self
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn cleanup_failed(&self) -> bool {
+        self.2
+            .as_ref()
+            .or_else(|| self.0.sync_cleanup.get())
+            .is_some_and(CleanupStatus::failed)
     }
 
     /// Choose conflict handling locally before attaching this directory to a

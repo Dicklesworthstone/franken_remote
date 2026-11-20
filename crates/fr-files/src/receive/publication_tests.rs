@@ -135,3 +135,127 @@ fn first_publication_refusal_has_no_effect_and_success_has_no_post_commit_gate()
     assert_eq!(published.publication(), Publication::Durable);
     assert_eq!(fs::read(scratch.0.join("item")).unwrap(), b"secret");
 }
+
+#[test]
+fn sync_retains_committed_receipts_and_original_cleanup_failure_after_revocation() {
+    sync_cleanup_failure(false);
+    sync_cleanup_failure(true);
+}
+
+fn sync_cleanup_failure(supervised: bool) {
+    use crate::sync::{SyncBaseline, SyncError, SyncJobConfig, SyncLimits, execute_sync_round};
+    use fr_core::ids::{InputLeaseId, RemoteSessionId};
+    use fr_wire::{
+        files::{Context, Direction, Lane, Reason, Role},
+        sync_job_state::{ConflictPolicy as WireConflictPolicy, SyncDirection, SyncPhase},
+    };
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let host_dir = Scratch::new();
+    let controller_dir = Scratch::new();
+    fs::write(host_dir.0.join("a-saved.txt"), b"committed").unwrap();
+    fs::write(host_dir.0.join("b-pending.txt"), b"not yet committed").unwrap();
+    let host = host_dir.open();
+    let controller = controller_dir.open();
+    let controller = if supervised {
+        controller.with_cleanup_status(super::CleanupStatus::default())
+    } else {
+        controller
+    };
+    let context = Context {
+        session: RemoteSessionId::from_raw(11),
+        lease: InputLeaseId::from_raw(12),
+        handle: 13,
+        channel: 42,
+        sender: Role::Host,
+        direction: Direction::ToHost,
+        lane: Lane::Files,
+    };
+    let peer = Context {
+        sender: Role::Controller,
+        ..context
+    };
+    let config = SyncJobConfig {
+        job_id: 19,
+        direction: SyncDirection::HostToController,
+        conflict_policy: WireConflictPolicy::KeepBoth,
+        limits: SyncLimits::default(),
+    };
+    let failure = execute_sync_round(
+        &config,
+        context,
+        peer,
+        &host_dir.0,
+        &host,
+        &controller_dir.0,
+        &controller,
+        &SyncBaseline::new(),
+        1,
+        || {
+            // Plant a real accounting failure only after the first commit and
+            // while the next staging owner holds its reservation. This avoids
+            // depending on Linux's private O_TMPFILE having a visible name.
+            let receiving = controller.0.reserved.lock().unwrap().transfers > 0;
+            if controller_dir.0.join("a-saved.txt").exists() && receiving {
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let _held = controller.0.reserved.lock().unwrap();
+                        panic!("planted original reservation accounting failure");
+                    }))
+                    .is_err()
+                );
+                Err(SyncError::AuthorityRevoked)
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure.error, SyncError::AuthorityRevoked);
+    assert!(failure.cleanup_failed);
+    assert!(controller.cleanup_failed());
+    assert_eq!(failure.published.len(), 1);
+    assert_eq!(failure.published[0].published_name(), "a-saved.txt");
+    assert!(failure.baseline.hash_for("a-saved.txt").is_some());
+    assert_eq!(
+        fs::read(controller_dir.0.join("a-saved.txt")).unwrap(),
+        b"committed"
+    );
+    assert!(!controller_dir.0.join("b-pending.txt").exists());
+    let terminal = &failure.wire_states.last().unwrap().state;
+    assert_eq!(terminal.phase, SyncPhase::Failed);
+    assert_eq!(terminal.reason, Reason::UnknownEffect);
+    assert_eq!(terminal.entries_completed, 1);
+    assert_eq!(terminal.bytes_completed, 9);
+    let held = controller
+        .0
+        .reserved
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(held.transfers, 1, "failed cleanup cannot replenish quota");
+    drop(held);
+
+    // Cloning a new round cannot replace the supervising owner's failed witness.
+    let mut admitted = false;
+    let retry = execute_sync_round(
+        &config,
+        context,
+        peer,
+        &host_dir.0,
+        &host,
+        &controller_dir.0,
+        &controller,
+        &failure.baseline,
+        2,
+        || {
+            admitted = true;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert!(!admitted);
+    assert_eq!(retry.error, SyncError::Receive(Error::Retired));
+    assert!(retry.cleanup_failed);
+    assert!(retry.published.is_empty());
+    assert_eq!(retry.baseline, failure.baseline);
+}

@@ -431,7 +431,12 @@ export snapshot. The user chooses where to copy or share it; the app does not
 automatically preview it. After process restart, no previous native disk
 worker survives, so completed regular names from an interrupted session can
 also appear; private staging still does not. That filesystem listing is not
-substituted for an earlier transfer receipt or a durability claim.
+a substitute for the original transfer receipt or a durability claim.
+
+The privacy manifest declares
+`C617.1` for the receive catalog's metadata reads inside the app container,
+alongside `3B52.1` for explicitly selected upload documents, using
+[Apple's file-timestamp reasons](https://developer.apple.com/documentation/bundleresources/app-privacy-configuration/nsprivacyaccessedapitypes/nsprivacyaccessedapitype).
 
 Source verification covers one-use destination ownership, reservation and
 descriptor bounds, cancellation and stale-token rejection, staged versus
