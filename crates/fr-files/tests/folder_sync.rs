@@ -170,7 +170,7 @@ fn bidirectional_sync_transfers_both_ways_and_emits_valid_wire_records() {
     )
     .expect("second round settles immediately");
     assert_eq!(second.final_phase, SyncPhase::Settled);
-    assert!(second.published.is_empty());
+    assert_eq!(second.published.len(), 0);
     assert_eq!(second.bytes_transferred, 0);
 
     // Non-destructive deletion rule: deleting notes.txt on controller does NOT delete host's copy
@@ -189,7 +189,7 @@ fn bidirectional_sync_transfers_both_ways_and_emits_valid_wire_records() {
         || Ok(()),
     )
     .expect("local deletion stays non-destructive");
-    assert!(third.published.is_empty());
+    assert_eq!(third.published.len(), 0);
     assert_eq!(
         fs::read(host_dir.path().join("notes.txt")).unwrap(),
         b"from host workstation"
@@ -248,7 +248,11 @@ fn concurrent_edits_preserve_both_versions_with_keep_both_and_report_conflict_ph
     for entry in &outcome.published {
         assert!(entry.conflict_copy);
         assert!(entry.published_name().contains(".fr-conflict-"));
-        assert!(entry.published_name().ends_with(".txt"));
+        assert!(
+            Path::new(entry.published_name())
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+        );
         assert_ne!(entry.published_name(), "report.txt");
     }
     let host_conflict_name = outcome

@@ -123,6 +123,7 @@ fn real_monotonic_probe_reflects_actual_injected_stage_delay() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn correlated_clock_exchange_bounds_cross_host_transit_and_rejects_bad_inputs() {
     let boot = HostBootId::from_raw(42);
     // Construct a real ClockCorrelation from fr-media with unrelated host/client clock origins.
