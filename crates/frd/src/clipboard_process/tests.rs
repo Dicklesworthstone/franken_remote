@@ -38,9 +38,13 @@ pub(crate) fn transcript(log: &Path) -> Vec<String> {
         .collect()
 }
 /// A local application's copy on the fixture's stand-in clipboard.
+/// Staged, then renamed: the fixture polls for this file, and under load it
+/// read one between its creation and the write ("READ 0", 2026-11-20).
 pub(crate) fn local_copy(log: &Path, text: &str) {
     let path = PathBuf::from(format!("{}.copy", log.display()));
-    std::fs::write(path, text).unwrap();
+    let staged = PathBuf::from(format!("{}.copy.part", log.display()));
+    std::fs::write(&staged, text).unwrap();
+    std::fs::rename(staged, path).unwrap();
 }
 fn runtime() -> Runtime {
     RuntimeBuilder::new().worker_threads(1).build().unwrap()

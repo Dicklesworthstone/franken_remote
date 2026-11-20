@@ -590,6 +590,21 @@ fn a_clipboard_profile_follows_the_lease_through_its_own_child_both_ways() {
         assert_eq!((report.viewers.admitted, report.viewers.finished), (1, 1));
         drop(client);
         drop(running);
+        // The lease's input executor ran and stopped in its own child (`serve`
+        // reports input cleanup).
+        let input = transcript(&input_log);
+        assert_eq!(input.last().map(String::as_str), Some("STOP"), "{input:?}");
+        // The clipboard owner is reaped here, not by `serve`: its worker thread
+        // stops the child in order during this reap. Reading the transcript
+        // before it raced that thread (1 run in 40 under load, 2026-11-20).
+        let reaped = driver
+            .reap(
+                &cleanup,
+                Deadline::after(&cleanup, Duration::from_secs(2)).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(reaped.is_some());
         // The host's clipboard child: launched only after the grant, published
         // exactly the viewer's item, served the host copy, then stopped in order.
         let lines = clipboard_transcript(&clipboard_log);
@@ -604,17 +619,6 @@ fn a_clipboard_profile_follows_the_lease_through_its_own_child_both_ways() {
             "{lines:?}"
         );
         assert_eq!(lines.last().map(String::as_str), Some("STOP"), "{lines:?}");
-        // The lease's input executor ran and stopped in its own child.
-        let input = transcript(&input_log);
-        assert_eq!(input.last().map(String::as_str), Some("STOP"), "{input:?}");
-        let reaped = driver
-            .reap(
-                &cleanup,
-                Deadline::after(&cleanup, Duration::from_secs(2)).unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(reaped.is_some());
         let pid = lines[0].split(' ').nth(1).unwrap();
         assert!(
             !std::path::Path::new(&format!("/proc/{pid}")).exists(),
