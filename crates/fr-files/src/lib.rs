@@ -35,3 +35,7 @@ pub mod quic;
 /// Bounded native file sender using locally selected descriptors.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub mod sender;
+
+/// Bounded, authority-fenced ATP folder synchronization (`0x0075 SyncJobState`).
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
+pub mod sync;
