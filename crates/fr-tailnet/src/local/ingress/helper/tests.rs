@@ -5,7 +5,7 @@
 use super::{
     server::{
         Lifecycle, MAX_CONNECTIONS, Observed, Shared, accept, check_assigned, check_request,
-        connection,
+        clear_orphans, connection, ownership::Tables,
     },
     *,
 };
@@ -300,25 +300,30 @@ fn validation_refuses_wrong_interface_foreign_address_port_zero_and_foreign_tabl
 
 #[test]
 fn generation_fencing_refuses_stale_renew_and_remove() {
+    let tables = Tables::new(1);
     let mut rule = Lifecycle::default();
     assert_eq!(rule.current(1).err(), Some(Refusal::NotInstalled));
-    rule.installed(1, TABLE);
+    rule.installed(1, tables.reserve(TABLE.into()).unwrap());
     assert_eq!(rule.admit_install(), Err(Refusal::AlreadyInstalled));
     assert!(rule.current(1).is_ok());
     for stale in [0, 2, u64::MAX] {
         assert_eq!(rule.current(stale).err(), Some(Refusal::StaleGeneration));
         assert_eq!(rule.removed(stale).err(), Some(Refusal::StaleGeneration));
     }
-    assert_eq!(rule.removed(1).map(|owned| owned.generation).ok(), Some(1));
+    let removed = rule.removed(1).unwrap();
+    assert_eq!(removed.generation, 1);
+    removed.table.removed();
     assert_eq!(rule.removed(1).err(), Some(Refusal::NotInstalled));
     assert_eq!(rule.admit_install(), Ok(()));
-    rule.installed(2, TABLE);
+    rule.installed(2, tables.reserve(TABLE.into()).unwrap());
     // The previous generation can neither renew nor remove its successor.
     assert_eq!(rule.current(1).err(), Some(Refusal::StaleGeneration));
     assert_eq!(rule.removed(1).err(), Some(Refusal::StaleGeneration));
     assert_eq!(rule.active.as_ref().map(|owned| owned.generation), Some(2));
     assert_eq!(
-        rule.current(2).map(|owned| owned.table.clone()).ok(),
+        rule.current(2)
+            .map(|owned| owned.table.name().to_owned())
+            .ok(),
         Some(TABLE.into())
     );
 }
@@ -443,7 +448,7 @@ fn a_stalled_partial_frame_is_closed_without_holding_the_connection() {
 }
 
 #[test]
-fn the_orphan_list_is_bounded_and_holds_each_table_once() {
+fn full_table_custody_refuses_install_before_running_any_tools() {
     let settings = settings();
     let record = |_: Event| {};
     RuntimeBuilder::new()
@@ -453,14 +458,37 @@ fn the_orphan_list_is_bounded_and_holds_each_table_once() {
         .block_on(async {
             let cx = Cx::current().unwrap();
             let shared = Shared::new(&cx, &settings, &record);
-            shared.orphan(TABLE.into());
-            shared.orphan(TABLE.into());
-            assert_eq!(shared.take_orphans(), [TABLE]);
-            assert_eq!(shared.take_orphans(), Vec::<String>::new());
-            for n in 0..100 {
-                shared.orphan(format!("frdh_{n:032x}"));
+            for n in 0..4 * MAX_CONNECTIONS {
+                let mut rule = Lifecycle::default();
+                rule.installed(
+                    u64::try_from(n).unwrap() + 1,
+                    shared.reserve_table(format!("frdh_{n:032x}")).unwrap(),
+                );
+                // An abandoned handler still retains its possible kernel rule.
+                drop(rule);
             }
-            assert_eq!(shared.take_orphans().len(), 4 * MAX_CONNECTIONS);
+            let original: Vec<_> = (0..4 * MAX_CONNECTIONS)
+                .map(|n| format!("frdh_{n:032x}"))
+                .collect();
+            for n in 4 * MAX_CONNECTIONS..100 {
+                assert_eq!(
+                    shared.reserve_table(format!("frdh_{n:032x}")).unwrap_err(),
+                    Refusal::CapacityExhausted
+                );
+                let failed_cleanup = shared.take_orphans();
+                assert_eq!(failed_cleanup.names(), original);
+                drop(failed_cleanup);
+            }
+            // No TUN, root privileges or tool process is needed to refuse full
+            // custody. Running interface qualification first would fail this.
+            let result = Lifecycle::default()
+                .install(&shared, 1000, &install("100.64.0.1", 8443))
+                .await;
+            assert_eq!(result, Err(Refusal::CapacityExhausted));
+            let deleted = shared.take_orphans();
+            assert_eq!(deleted.names(), original);
+            deleted.removed();
+            assert!(shared.reserve_table(TABLE.into()).is_ok());
         });
 }
 
@@ -488,6 +516,94 @@ elif args == ['-f', '-']:
 else:
     raise SystemExit(2)
 ";
+
+/// Exercise real helper cleanup and install admission against bounded,
+/// explicitly synthetic command failures. No firewall enforcement is claimed.
+#[test]
+#[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
+fn repeated_cleanup_failures_keep_all_rules_and_recover_install_capacity() {
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+    assert_eq!(
+        fs::read_to_string("/run/fr-synthetic-ingress").unwrap(),
+        "synthetic-only\n"
+    );
+    let dir = PathBuf::from(format!("/run/fr-helper-capacity-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let names: Vec<_> = (0..4 * MAX_CONNECTIONS)
+        .map(|n| format!("frdh_{n:032x}"))
+        .collect();
+    fs::write(dir.join("tables.json"), json!(&names).to_string()).unwrap();
+    fs::write(dir.join("fail"), "1000").unwrap();
+    let nft = dir.join("nft");
+    fs::write(&nft, FAKE_NFT).unwrap();
+    fs::set_permissions(&nft, fs::Permissions::from_mode(0o700)).unwrap();
+    let inventory = || -> Vec<String> {
+        serde_json::from_slice(&fs::read(dir.join("tables.json")).unwrap()).unwrap()
+    };
+    let settings = Settings::parse(
+        json!({"interface": "fr-fixture", "allowed_uids": [1000], "nft": nft})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let record = |_: Event| {};
+    RuntimeBuilder::new()
+        .worker_threads(1)
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let cx = Cx::current().unwrap();
+            let shared = Shared::new(&cx, &settings, &record);
+            let mut active = Lifecycle::default();
+            active.installed(1, shared.reserve_table(names[0].clone()).unwrap());
+            for (n, name) in names.iter().enumerate().skip(1) {
+                let mut stopped = Lifecycle::default();
+                stopped.installed(
+                    u64::try_from(n).unwrap() + 1,
+                    shared.reserve_table(name.clone()).unwrap(),
+                );
+                stopped.release(&shared).await;
+            }
+            assert_eq!(inventory(), names);
+            let remaining: u32 = fs::read_to_string(dir.join("fail"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(1000 - remaining > 32, "exercise repeated failed retries");
+            let mut next = Lifecycle::default();
+            assert_eq!(
+                next.install(
+                    &shared,
+                    1000,
+                    &Install {
+                        interface: "fr-fixture".into(),
+                        ..install("100.64.0.1", 8443)
+                    }
+                )
+                .await,
+                Err(Refusal::CapacityExhausted),
+            );
+            let retry = shared.take_orphans();
+            assert_eq!(retry.names(), &names[1..]);
+            assert_eq!(
+                shared.reserve_table(TABLE.into()).unwrap_err(),
+                Refusal::CapacityExhausted,
+                "cleanup in flight still owns the full budget",
+            );
+            // The command starts succeeding. The original active broker's
+            // rule is not in the batch and remains protected throughout.
+            fs::write(dir.join("fail"), "0").unwrap();
+            clear_orphans(&shared, retry).await;
+            assert_eq!(inventory(), [names[0].clone()]);
+            assert!(active.current(1).is_ok());
+            assert_eq!(shared.take_orphans().names(), Vec::<String>::new());
+            assert!(shared.reserve_table(TABLE.into()).is_ok());
+            active.release(&shared).await;
+            assert_eq!(inventory(), Vec::<String>::new());
+        });
+}
 
 #[test]
 #[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
@@ -527,12 +643,12 @@ fn a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends() {
             let cx = Cx::current().unwrap();
             let shared = Shared::new(&cx, &settings, &record);
             let mut first = Lifecycle::default();
-            first.installed(1, TABLE);
+            first.installed(1, shared.reserve_table(TABLE.into()).unwrap());
             first.release(&shared).await;
             assert_eq!(tables(), [TABLE, OTHER], "the failed delete left it");
             // A later connection ends: its own table goes, then the first's.
             let mut second = Lifecycle::default();
-            second.installed(2, OTHER);
+            second.installed(2, shared.reserve_table(OTHER.into()).unwrap());
             second.release(&shared).await;
         });
     assert_eq!(tables(), Vec::<String>::new());
@@ -598,7 +714,7 @@ fn a_table_a_failed_disconnect_left_is_cleared_while_no_other_connection_ends() 
             let cx = Cx::current().unwrap();
             let shared = Shared::new(&cx, &settings, &record);
             let mut first = Lifecycle::default();
-            first.installed(1, TABLE);
+            first.installed(1, shared.reserve_table(TABLE.into()).unwrap());
             first.release(&shared).await;
             assert_eq!(tables(), [TABLE, OTHER], "the failed delete left it");
             // Serve with no connection at all for twice the retry period.
@@ -701,7 +817,7 @@ fn renew_once(dir: &std::path::Path, settings: &Settings, mode: &str) -> Result<
             let cx = Cx::current().unwrap();
             let shared = Shared::new(&cx, settings, &record);
             let mut rule = Lifecycle::default();
-            rule.installed(7, TABLE);
+            rule.installed(7, shared.reserve_table(TABLE.into()).unwrap());
             rule.renew(&shared, 7).await
         })
 }

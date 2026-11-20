@@ -128,6 +128,8 @@ bytes. There is one request in flight per connection; once a frame starts, all
 of it must arrive within 1 s. The other limits:
 
 - at most 8 connections;
+- at most 32 table reservations across preflight, active rules, uncertain
+  installation/removal, orphaned rules and asynchronous cleanup;
 - admitted-uid connections: a burst of 8, then 4 per second;
 - requests per connection: a burst of 4, then 4 per second (renewal uses 2 per
   second);
@@ -145,6 +147,17 @@ SIGKILL). `Boundary::stop` sends `remove(generation)` and requires the
 acknowledgement. A lost connection is reported as `HelperUnavailable`, not as
 verified cleanup. The client persists partial writes and reads, so a cancelled
 renewal is completed and its reply discarded before the next request.
+
+Failed deletion retains the original table reservation. Disconnected tables
+are retried every 2 s and when another connection ends. Cleanup in flight still
+counts against the same 32-table bound; cancellation returns its tables to the
+retry queue. A saturated helper refuses a new install with
+`capacity_exhausted` before interface or firewall commands run. It never
+forgets an older failed cleanup to admit another rule. Only a confirmed delete
+or well-formed inventory proving absence releases an installed reservation;
+preflight cancellation before any install command releases its unused slot.
+Active rules are excluded from orphan cleanup, and no custody lock spans an
+external command.
 
 At start, the helper reclaims every `frdh_` table (the residue of a dead helper)
 and never touches other tables. On SIGTERM it closes every connection, waits

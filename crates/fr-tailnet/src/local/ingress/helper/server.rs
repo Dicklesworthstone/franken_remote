@@ -28,13 +28,15 @@ use std::{
     task::Poll,
     time::Duration,
 };
+#[path = "ownership.rs"]
+pub(super) mod ownership;
+use ownership::{Orphans, Table, Tables};
 
 /// Concurrent broker connections (each holds at most one rule).
 pub const MAX_CONNECTIONS: usize = 8;
-/// Tables a connection could not remove when it ended. They are kept
-/// helper-wide and retried when a later connection ends and every
-/// `ORPHAN_RETRY`. Past this many, the rest wait for the next start's reclaim.
-const MAX_ORPHANS: usize = 4 * MAX_CONNECTIONS;
+/// Total tables reserved, active, uncertain or awaiting confirmed cleanup.
+/// Saturation refuses new installs instead of forgetting failed cleanup.
+const MAX_TABLES: usize = 4 * MAX_CONNECTIONS;
 /// A broker can stay connected for hours, so waiting for a later connection
 /// to end could leave an orphan in place until tailscaled restarts and its
 /// stale `iif != index` drop refuses the port's tailnet traffic (ts2,
@@ -283,7 +285,7 @@ pub(super) struct Shared<'a> {
     generation: AtomicU64,
     report: &'a (dyn Fn(Event) + Sync),
     log: std::sync::Mutex<(Bucket, u64)>,
-    orphans: std::sync::Mutex<Vec<String>>,
+    tables: Tables,
 }
 impl<'a> Shared<'a> {
     pub(super) fn new(cx: &Cx, settings: &'a Settings, report: &'a (dyn Fn(Event) + Sync)) -> Self {
@@ -296,7 +298,7 @@ impl<'a> Shared<'a> {
                 Bucket::new(LOG_BURST, LOG_REFILL_US, now(cx).unwrap_or(0)),
                 0,
             )),
-            orphans: std::sync::Mutex::new(Vec::new()),
+            tables: Tables::new(MAX_TABLES),
         }
     }
 }
@@ -304,20 +306,15 @@ impl Shared<'_> {
     fn now(&self) -> u64 {
         now(&self.cx).unwrap_or(0)
     }
-    /// Keep a table no connection could remove, for the next one that ends.
-    pub(super) fn orphan(&self, table: String) {
-        if let Ok(mut orphans) = self.orphans.lock()
-            && orphans.len() < MAX_ORPHANS
-            && !orphans.contains(&table)
-        {
-            orphans.push(table);
-        }
+    pub(super) fn reserve_table(&self, table: String) -> Result<Table, Refusal> {
+        owned_table(&table)?;
+        self.tables.reserve(table).map_err(|error| match error {
+            ownership::Error::Full => Refusal::CapacityExhausted,
+            ownership::Error::Duplicate | ownership::Error::Poisoned => Refusal::FirewallFailed,
+        })
     }
-    pub(super) fn take_orphans(&self) -> Vec<String> {
-        self.orphans
-            .lock()
-            .map(|mut orphans| std::mem::take(&mut *orphans))
-            .unwrap_or_default()
+    pub(super) fn take_orphans(&self) -> Orphans {
+        self.tables.take_orphans()
     }
     fn refused(&self, uid: u32, reason: Refusal) {
         let now_us = self.now();
@@ -382,7 +379,7 @@ pub(super) fn check_assigned(
 /// One rule owned by one connection.
 pub(super) struct Owned {
     pub(super) generation: u64,
-    pub(super) table: String,
+    pub(super) table: Table,
     index: u32,
     address: SocketAddr,
     protocols: super::Protocols,
@@ -395,7 +392,7 @@ pub(super) struct Lifecycle {
     pub(super) active: Option<Owned>,
     /// A table whose install or removal was uncertain; retried before any
     /// new install and on disconnect, so residue cannot accumulate.
-    residue: Option<String>,
+    residue: Option<Table>,
 }
 impl Lifecycle {
     pub(super) fn current(&mut self, generation: u64) -> Result<&mut Owned, Refusal> {
@@ -413,10 +410,11 @@ impl Lifecycle {
         }
     }
     #[cfg(test)]
-    pub(super) fn installed(&mut self, generation: u64, table: &str) {
+    pub(super) fn installed(&mut self, generation: u64, mut table: Table) {
+        table.begin_install();
         self.active = Some(Owned {
             generation,
-            table: table.to_owned(),
+            table,
             // The namespace harness's synthetic `fr-fixture` interface.
             index: 42,
             address: SocketAddr::from(([100, 64, 0, 1], 1)),
@@ -447,7 +445,7 @@ impl Lifecycle {
             .map_err(|_| Refusal::InterfaceUnqualified)?;
         Ok(Observed { index, report })
     }
-    async fn install(
+    pub(super) async fn install(
         &mut self,
         shared: &Shared<'_>,
         uid: u32,
@@ -456,12 +454,17 @@ impl Lifecycle {
         let (cx, settings) = (&shared.cx, shared.settings);
         self.admit_install()?;
         check_request(settings, install)?;
+        self.clear_residue(shared).await?;
+        let mut table =
+            shared.reserve_table(new_table(TABLE_PREFIX).map_err(|_| Refusal::FirewallFailed)?)?;
         let observed = Self::observe(shared, COMMAND_TIMEOUT).await?;
         let index = check_assigned(settings, install.address, &observed)?;
-        self.clear_residue(shared).await?;
-        let table = new_table(TABLE_PREFIX).map_err(|_| Refusal::FirewallFailed)?;
         let address = SocketAddr::new(install.address, install.port);
-        let script = install_script(&table, address, install.protocols, index);
+        let script = install_script(table.name(), address, install.protocols, index);
+        // From here a cancelled/failed command may still have installed it.
+        // The reservation's drop retains it for cleanup, including when this
+        // entire handler is abandoned during shutdown.
+        table.begin_install();
         if command(cx, &settings.nft, &["-f", "-"], script.as_bytes())
             .await
             .is_err()
@@ -469,13 +472,13 @@ impl Lifecycle {
             self.forget(shared, table).await;
             return Err(Refusal::FirewallFailed);
         }
-        let readback = read_back(cx, &settings.nft, &table)
+        let readback = read_back(cx, &settings.nft, table.name())
             .await
             .ok()
             .filter(|bytes| {
                 validate_rule(
                     bytes,
-                    &table,
+                    table.name(),
                     address,
                     install.protocols,
                     index,
@@ -489,14 +492,15 @@ impl Lifecycle {
             return Err(Refusal::FirewallMismatch);
         };
         let generation = shared.generation.fetch_add(1, Ordering::Relaxed);
+        let name = table.name().to_owned();
         (shared.report)(Event::Installed {
             uid,
             generation,
-            table: table.clone(),
+            table: name.clone(),
         });
         self.active = Some(Owned {
             generation,
-            table: table.clone(),
+            table,
             index,
             address,
             protocols: install.protocols,
@@ -505,7 +509,7 @@ impl Lifecycle {
         Ok(Response::Installed {
             generation,
             index,
-            table,
+            table: name,
             readback,
         })
     }
@@ -525,7 +529,7 @@ impl Lifecycle {
             Box::pin(read_back_within(
                 cx,
                 &settings.nft,
-                &owned.table,
+                owned.table.name(),
                 RENEW_READ_TIMEOUT,
             )),
         )
@@ -537,7 +541,7 @@ impl Lifecycle {
         let readback = readback.map_err(|_| Refusal::FirewallFailed)?;
         validate_rule(
             &readback,
-            &owned.table,
+            owned.table.name(),
             owned.address,
             owned.protocols,
             owned.index,
@@ -548,7 +552,7 @@ impl Lifecycle {
             owned.renewed = true;
             (shared.report)(Event::Renewed {
                 generation,
-                table: owned.table.clone(),
+                table: owned.table.name().to_owned(),
             });
         }
         Ok(Response::Renewed {
@@ -557,13 +561,13 @@ impl Lifecycle {
         })
     }
     async fn remove(&mut self, shared: &Shared<'_>, generation: u64) -> Result<Response, Refusal> {
-        let table = self.current(generation)?.table.clone();
+        let table = self.current(generation)?.table.name().to_owned();
         owned_table(&table)?;
         // On failure the rule stays owned: a retry or the disconnect removes it.
         delete_table(&shared.cx, &shared.settings.nft, &table)
             .await
             .map_err(|_| Refusal::FirewallFailed)?;
-        self.removed(generation)?;
+        self.removed(generation)?.table.removed();
         (shared.report)(Event::Removed {
             generation,
             table,
@@ -571,23 +575,27 @@ impl Lifecycle {
         });
         Ok(Response::Removed { generation })
     }
-    async fn forget(&mut self, shared: &Shared<'_>, table: String) {
-        if delete_table(&shared.cx, &shared.settings.nft, &table)
+    async fn forget(&mut self, shared: &Shared<'_>, table: Table) {
+        if delete_table(&shared.cx, &shared.settings.nft, table.name())
             .await
             .is_err()
         {
             (shared.report)(Event::CleanupFailed {
-                table: table.clone(),
+                table: table.name().to_owned(),
             });
             self.residue = Some(table);
+        } else {
+            table.removed();
         }
     }
     async fn clear_residue(&mut self, shared: &Shared<'_>) -> Result<(), Refusal> {
         if let Some(table) = &self.residue {
-            delete_table(&shared.cx, &shared.settings.nft, table)
+            delete_table(&shared.cx, &shared.settings.nft, table.name())
                 .await
                 .map_err(|_| Refusal::FirewallFailed)?;
-            self.residue = None;
+            if let Some(table) = self.residue.take() {
+                table.removed();
+            }
         }
         Ok(())
     }
@@ -602,23 +610,25 @@ impl Lifecycle {
         let generation = active.as_ref().map_or(0, |owned| owned.generation);
         let tables = active.map(|owned| owned.table).into_iter();
         for table in tables.chain(self.residue.take()) {
-            if owned_table(&table).is_err() {
+            if owned_table(table.name()).is_err() {
                 continue;
             }
-            if delete_table(&shared.cx, &shared.settings.nft, &table)
+            if delete_table(&shared.cx, &shared.settings.nft, table.name())
                 .await
                 .is_ok()
             {
                 (shared.report)(Event::Removed {
                     generation,
-                    table,
+                    table: table.name().to_owned(),
                     disconnect: true,
                 });
+                table.removed();
             } else {
                 (shared.report)(Event::CleanupFailed {
-                    table: table.clone(),
+                    table: table.name().to_owned(),
                 });
-                shared.orphan(table);
+                // Dropping retains its reservation and makes it retryable.
+                drop(table);
             }
         }
         clear_orphans(shared, orphans).await;
@@ -627,21 +637,20 @@ impl Lifecycle {
 
 /// Delete tables earlier connections failed to remove; on failure they stay
 /// listed for the next attempt.
-async fn clear_orphans(shared: &Shared<'_>, orphans: Vec<String>) {
-    if orphans.is_empty() {
+pub(super) async fn clear_orphans(shared: &Shared<'_>, orphans: Orphans) {
+    if orphans.names().is_empty() {
         return;
     }
-    if delete_tables(&shared.cx, &shared.settings.nft, &orphans)
+    if delete_tables(&shared.cx, &shared.settings.nft, orphans.names())
         .await
         .is_ok()
     {
-        for table in orphans {
-            (shared.report)(Event::OrphanCleared { table });
+        for table in orphans.names() {
+            (shared.report)(Event::OrphanCleared {
+                table: table.clone(),
+            });
         }
-    } else {
-        for table in orphans {
-            shared.orphan(table);
-        }
+        orphans.removed();
     }
 }
 
