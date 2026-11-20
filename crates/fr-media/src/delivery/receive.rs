@@ -414,6 +414,15 @@ impl Assembly {
             ReceiveUpdate::Accepted
         })
     }
+    /// The display budget bounds this receiver's own queue, so it runs from the
+    /// moment the picture is whole. Counted from the first fragment it also
+    /// charged the link's time to carry the picture, which the source-age bound
+    /// already includes: on a link that takes 50 ms to carry one picture, no
+    /// picture was ever fresh and input stayed suspended (fr-7al9).
+    fn display_from(&mut self, now: u64, budget: u64) -> Result<(), DeliveryError> {
+        self.display_until = self.display_until.max(deadline(now, budget)?);
+        Ok(())
+    }
     fn has_prefix_hole(&self) -> bool {
         let prefix_bytes = (u64::from(self.received_end) * u64::from(self.descriptor.stride))
             .min(u64::from(self.descriptor.total_bytes));
@@ -849,12 +858,10 @@ impl ReceivePipeline {
         let Some(index) = self.datagram_slot(fragment.descriptor, now)? else {
             return Ok(ReceiveUpdate::Deferred);
         };
-        let update = self.slots[index].as_mut().expect("inserted").fragment(
-            fragment,
-            now,
-            self.config.policy.repair_delay_micros,
-        )?;
+        let assembly = self.slots[index].as_mut().expect("inserted");
+        let update = assembly.fragment(fragment, now, self.config.policy.repair_delay_micros)?;
         if update == ReceiveUpdate::PictureComplete {
+            assembly.display_from(now, self.config.policy.display_budget_micros)?;
             self.discard_superseded();
         }
         Ok(update)
@@ -882,10 +889,12 @@ impl ReceivePipeline {
         };
         let index = self.slot(descriptor, now, true)?;
         self.recovery_frame = Some(chunk.frame);
-        self.slots[index]
-            .as_mut()
-            .expect("inserted")
-            .recovery(chunk, self.config.limits.max_fragments())
+        let assembly = self.slots[index].as_mut().expect("inserted");
+        let update = assembly.recovery(chunk, self.config.limits.max_fragments())?;
+        if update == ReceiveUpdate::PictureComplete {
+            assembly.display_from(now, self.config.policy.display_budget_micros)?;
+        }
+        Ok(update)
     }
     fn on_progress(
         &mut self,

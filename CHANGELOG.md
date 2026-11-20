@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-11-19 — input keeps working on a link slower than one picture per 50 ms
+
+- Controlled sessions: on a link that takes longer than about 50 ms to carry
+  one picture (an 18 KB picture below about 3 Mbit/s), input stayed
+  suspended while the screen kept changing. After 10 s the viewer ended the
+  session with `view_stale`. The receiver's 50 ms display budget counted from
+  a picture's first fragment, so the link's own transfer time made every
+  picture late. It now counts from the fragment that completes the picture.
+  The source-age bound on what input may act on is unchanged.
+- Namespace measurements (PRESENTATION_FRESHNESS.md): 20 s at 1000-1500
+  kbit/s against a 2 Mbit/s host kept the session, with 714-771 pointer
+  motions reaching the host. Before, all 4 runs ended with `view_stale`.
+- The namespace narrow-link fixture now limits the rate with a token bucket,
+  which passes a picture's datagrams one at a time as a real bottleneck does.
+  netem's rate delivered each picture's GSO batch whole, which hid this.
+
+## 2026-11-19 — the host's bitrate follows a narrow viewer path
+
+- The 11-18 entry below says real bitrate adaptation was not built. It now
+  is, by default, on the backends that can change rate while capturing:
+  x265, VideoToolbox and Media Foundation. NVENC and VA-API keep a fixed
+  rate.
+- A host skips captures while the viewer's path holds a queue (011034c7).
+  A queue held for 200 ms cuts the bitrate to three fifths, and 4 s clear
+  probes a quarter back up, capped at the configured rate (cfad68f8,
+  controlled sessions). View-only sessions do the same, but only when every
+  viewer's path is queued, so one slow viewer never lowers the others'
+  picture (8eb44e3b).
+- Namespace measurements, 2 Mbit/s host: 20 s at 1500 or 1000 kbit/s kept
+  11 of 12 controlled sessions, against 0 of 12 with a fixed rate.
+  View-only sessions decoded about twice the pictures, and changes were
+  shown in 104-219 ms instead of 486-919 ms.
+- The installed hosts on mac-studio and ts2 predate this and still send a
+  fixed rate. The installers' 8 Mbit/s cap for Mac hosts is unchanged.
+
 ## 2026-11-18 — sharing indicators live in the menu bar and the notification area
 
 - macOS host, remote control and clipboard: each is now a template icon in

@@ -285,12 +285,12 @@ fn stale_for_display_reference_still_unlocks_fresh_dependent_picture() {
     let (mut receiver, _) = running(c);
     let first = fragments(descriptor(1, Some(0)), &payload(), c);
     let second = fragments(descriptor(2, Some(1)), &payload(), c);
-    receiver.receive(Channel::Video, &first[0], 10).unwrap();
-    for packet in &second {
-        receiver.receive(Channel::Video, packet, 50_000).unwrap();
+    // Frame 1 is whole at 10 us, then waits behind a busy decoder past its
+    // display budget while frame 2 arrives.
+    for packet in &first {
+        receiver.receive(Channel::Video, packet, 10).unwrap();
     }
-    assert!(receiver.take_decodable(50_000).unwrap().is_none());
-    for packet in &first[1..] {
+    for packet in &second {
         receiver.receive(Channel::Video, packet, 60_000).unwrap();
     }
     let reference = receiver.take_decodable(60_000).unwrap().unwrap();
@@ -308,15 +308,35 @@ fn stale_for_display_reference_still_unlocks_fresh_dependent_picture() {
 }
 
 #[test]
-fn a_late_picture_is_newest_only_when_nothing_later_was_announced() {
+fn the_display_budget_runs_from_the_last_fragment_not_the_first() {
     let c = config();
     let (mut receiver, _) = running(c);
-    // Frame 1 completes after its display budget (a repair) and nothing
-    // follows: it is the source's latest known state, worth presenting.
+    // A link that takes 60 ms to carry one picture: longer than the 50 ms
+    // display budget. Counted from the first fragment, no such picture was
+    // ever fresh (fr-7al9).
     let first = fragments(descriptor(1, Some(0)), &payload(), c);
     receiver.receive(Channel::Video, &first[0], 10).unwrap();
     for packet in &first[1..] {
         receiver.receive(Channel::Video, packet, 60_000).unwrap();
+    }
+    let picture = receiver.take_decodable(60_000).unwrap().unwrap();
+    assert!(picture.within_display_queue_budget());
+    assert_eq!(picture.display_deadline_us(), 110_000);
+    // The reference horizon still runs from the first fragment.
+    assert_eq!(picture.reference_deadline_us(), 250_010);
+    assert!(picture.is_newest());
+}
+
+#[test]
+fn a_late_picture_is_newest_only_when_nothing_later_was_announced() {
+    let c = config();
+    let (mut receiver, _) = running(c);
+    // Frame 1 waits in the receiver past its display budget (a busy decoder)
+    // and nothing follows: it is the source's latest known state, worth
+    // presenting.
+    let first = fragments(descriptor(1, Some(0)), &payload(), c);
+    for packet in &first {
+        receiver.receive(Channel::Video, packet, 10).unwrap();
     }
     let late = receiver.take_decodable(60_000).unwrap().unwrap();
     assert!(!late.within_display_queue_budget());
@@ -325,9 +345,9 @@ fn a_late_picture_is_newest_only_when_nothing_later_was_announced() {
     drop(late);
     // Frame 2 is late too, but frame 3 was announced meanwhile: superseded.
     let second = fragments(descriptor(2, Some(1)), &payload(), c);
-    receiver
-        .receive(Channel::Video, &second[0], 61_000)
-        .unwrap();
+    for packet in &second {
+        receiver.receive(Channel::Video, packet, 61_000).unwrap();
+    }
     receiver
         .receive(
             Channel::MediaConfig,
@@ -335,9 +355,6 @@ fn a_late_picture_is_newest_only_when_nothing_later_was_announced() {
             62_000,
         )
         .unwrap();
-    for packet in &second[1..] {
-        receiver.receive(Channel::Video, packet, 120_000).unwrap();
-    }
     let superseded = receiver.take_decodable(120_000).unwrap().unwrap();
     assert_eq!(superseded.descriptor().frame, 2);
     assert!(!superseded.within_display_queue_budget());
