@@ -69,8 +69,8 @@ fn golden_round_trip_and_truncation_matrix() {
     assert_eq!(expected.len(), RECORD_BYTES);
 
     let mut out = [0_u8; RECORD_BYTES];
-    let written = sync_job_state::encode(&transferring(), context(Role::Host), limits(), &mut out)
-        .unwrap();
+    let written =
+        sync_job_state::encode(&transferring(), context(Role::Host), limits(), &mut out).unwrap();
     assert_eq!(written, RECORD_BYTES);
     assert_eq!(out.as_slice(), expected.as_slice());
 
@@ -114,9 +114,7 @@ fn enforces_host_job_ownership_observer_exclusion_and_keep_both_policy() {
         manifest_revision: 0,
         ..transferring()
     };
-    assert!(
-        sync_job_state::encode(&advertised, context(Role::Host), limits(), &mut out).is_ok()
-    );
+    assert!(sync_job_state::encode(&advertised, context(Role::Host), limits(), &mut out).is_ok());
     assert_eq!(
         sync_job_state::encode(&advertised, context(Role::Controller), limits(), &mut out),
         Err(WireError::WrongRole)

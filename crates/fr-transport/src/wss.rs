@@ -118,9 +118,7 @@ pub struct ReleasedCredit {
 impl ReleasedCredit {
     /// Extract cumulative freed resources from a validated `0x0081 ReceiverPressure` record.
     #[must_use]
-    pub const fn from_wire_pressure(
-        report: &fr_wire::receiver_pressure::ReceiverPressure,
-    ) -> Self {
+    pub const fn from_wire_pressure(report: &fr_wire::receiver_pressure::ReceiverPressure) -> Self {
         Self {
             credit_epoch: report.credit_epoch,
             released_bytes: report.released_bytes,

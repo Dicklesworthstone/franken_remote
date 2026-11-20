@@ -91,10 +91,11 @@ impl SyncPhase {
     }
 
     const fn allows_sender(self, sender: Role) -> bool {
+        // Only the host can advertise locally configured jobs; only the
+        // controller can accept them. Either reports the later states.
+        // Observers are never permitted.
         matches!(
             (self, sender),
-            // Only the host can advertise locally configured jobs; only the
-            // controller can accept them. Observers are never permitted.
             (Self::Advertised, Role::Host)
                 | (Self::Accepted, Role::Controller)
                 | (
