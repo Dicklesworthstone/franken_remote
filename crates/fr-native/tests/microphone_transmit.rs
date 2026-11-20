@@ -93,8 +93,10 @@ fn transmitter(server: &Path) -> (InputClient, Transmitter, Instant) {
         sender,
         Path::new(env!("CARGO_BIN_EXE_fr-audio-worker")),
         Source {
-            server: server.into(),
-            name: "fr_test_mic".into(),
+            selection: fr_native::audio_process::Selection::Pulse {
+                server: server.into(),
+                source: "fr_test_mic".into(),
+            },
             bitrate: 64_000,
         },
         || now(origin),

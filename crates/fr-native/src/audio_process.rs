@@ -9,18 +9,26 @@
 //! The optional network coordinator retains the original authenticated attachment.
 //! There is no default source or automatic enable.
 pub mod child;
-#[cfg(feature = "linux-microphone-uplink")]
+#[cfg(feature = "microphone-uplink")]
 pub mod network;
+#[cfg(target_os = "macos")]
+pub mod permission;
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) mod permission_protocol;
 mod protocol;
 mod supervisor;
 pub mod transmit;
 
-use crate::pulse::{Error as PulseError, microphone::MAX_CAPTURE_CUSTODY};
+pub use crate::microphone_selection::Selection;
+#[cfg(target_os = "linux")]
+use crate::pulse::Error as PulseError;
+const MAX_CAPTURE_CUSTODY: Duration = Duration::from_millis(100);
+const MAX_CAPTURE_PACKETS: usize = 4;
 use fr_core::audio::{AudioDirection, AudioStreamConfig, MAX_OPUS_PAYLOAD_BYTES};
 use fr_media::{audio::AudioAccessUnit, worker::audio::CaptureCounters};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
@@ -59,6 +67,7 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+#[cfg(target_os = "linux")]
 impl From<PulseError> for Error {
     fn from(error: PulseError) -> Self {
         match error {
@@ -84,8 +93,7 @@ impl From<PulseError> for Error {
 /// Debug never reveals the server path, device name or captured contents.
 #[derive(Clone)]
 pub struct CaptureOptions {
-    pub server: PathBuf,
-    pub source: String,
+    pub selection: Selection,
     pub configuration: AudioStreamConfig,
     pub bitrate: u32,
     pub max_packet_bytes: u16,
@@ -113,22 +121,15 @@ impl CaptureOptions {
         {
             return Err(Error::Configuration);
         }
-        let server = self.server.to_str().ok_or(Error::Selection)?;
-        if !self.server.is_absolute()
-            || self
-                .server
-                .components()
-                .any(|part| matches!(part, Component::ParentDir))
-            || !(2..=100).contains(&server.len())
-            || server.bytes().any(|b| b <= b' ' || b == 127 || b == b':')
-            || self.source.is_empty()
-            || self.source.len() > 255
-            || !self
-                .source
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
-        {
+        if !self.selection.valid() || !self.selection.platform_available() {
             return Err(Error::Selection);
+        }
+        // The first CoreAudio slice has one exact PCM/Opus profile. Unsupported
+        // formats refuse before a native device or worker can be allocated.
+        if matches!(self.selection, Selection::Mac { .. })
+            && (c.channels().count() != 1 || c.frame_duration_ms() != 10)
+        {
+            return Err(Error::Configuration);
         }
         Ok(())
     }
@@ -155,18 +156,80 @@ struct Packets {
     units: Vec<AudioAccessUnit>,
     counters: CaptureCounters,
     expires: Instant,
+    expires_ns: u64,
 }
-#[derive(Clone, Copy)]
-struct Authorization {
+impl Packets {
+    fn deadline(&self) -> Deadline {
+        Deadline {
+            until: self.expires,
+            ns: self.expires_ns,
+        }
+    }
+}
+/// Both clock bounds belong to the original operation. Darwin's `Instant`
+/// pauses in suspend, so converting it again after enqueue would renew the
+/// child's sleep-inclusive cap. Moving or narrowing this pair never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Deadline {
     until: Instant,
     ns: u64,
 }
+impl Deadline {
+    fn after(duration: Duration) -> Result<Self, Error> {
+        let raw = crate::clock::monotonic_ns().ok_or(Error::Clock)?;
+        Self::after_at(Instant::now(), raw, duration)
+    }
+    fn after_at(now: Instant, raw: u64, duration: Duration) -> Result<Self, Error> {
+        Ok(Self {
+            until: now.checked_add(duration).ok_or(Error::Clock)?,
+            ns: raw
+                .checked_add(u64::try_from(duration.as_nanos()).map_err(|_| Error::Clock)?)
+                .ok_or(Error::Clock)?,
+        })
+    }
+    fn narrow(self, other: Self) -> Self {
+        Self {
+            until: self.until.min(other.until),
+            ns: self.ns.min(other.ns),
+        }
+    }
+    fn remaining(self) -> Result<Duration, Error> {
+        self.remaining_at(
+            Instant::now(),
+            crate::clock::monotonic_ns().ok_or(Error::Clock)?,
+        )
+    }
+    fn remaining_at(self, now: Instant, raw: u64) -> Result<Duration, Error> {
+        let local = self
+            .until
+            .checked_duration_since(now)
+            .ok_or(Error::Expired)?;
+        let native = self.ns.checked_sub(raw).ok_or(Error::Expired)?;
+        let remaining = local.min(Duration::from_nanos(native));
+        (!remaining.is_zero())
+            .then_some(remaining)
+            .ok_or(Error::Expired)
+    }
+    fn live(self) -> bool {
+        self.remaining().is_ok()
+    }
+}
 enum Request {
-    Pull(Instant),
+    Pull(Deadline),
     Renew {
-        authorization: Authorization,
-        expires: Instant,
+        authorization: Deadline,
+        expires: Deadline,
     },
+}
+impl Request {
+    fn deadline(&self) -> Deadline {
+        match self {
+            Self::Pull(deadline)
+            | Self::Renew {
+                expires: deadline, ..
+            } => *deadline,
+        }
+    }
 }
 enum Reply {
     Ready,
@@ -186,7 +249,7 @@ struct Shared {
     stopped: AtomicBool,
     retired: AtomicBool,
     pid: AtomicU32,
-    authorization: Mutex<Authorization>,
+    authorization: Mutex<Deadline>,
     monitor: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 impl Shared {
@@ -210,7 +273,7 @@ impl Shared {
             .and_then(|mail| mail.error)
             .unwrap_or(Error::Stopped)
     }
-    fn authorization(&self) -> Result<Authorization, Error> {
+    fn authorization(&self) -> Result<Deadline, Error> {
         self.authorization
             .lock()
             .map(|authorization| *authorization)
@@ -219,10 +282,10 @@ impl Shared {
     fn install_authorization(
         &self,
         old_ns: u64,
-        next: Authorization,
-        exchange_until: Instant,
+        next: Deadline,
+        exchange: Deadline,
     ) -> Result<(), Error> {
-        self.check()?;
+        self.check_until(Some(exchange))?;
         {
             let mut current = self.authorization.lock().map_err(|_| Error::Stopped)?;
             if current.ns != old_ns || self.stopped.load(Ordering::Acquire) {
@@ -230,27 +293,29 @@ impl Shared {
             }
             // The child acknowledgement, not request enqueue, commits this
             // future cap. A delayed acknowledgement cannot revive the old one.
-            let now = Instant::now();
-            if now >= current.until || now >= next.until || now >= exchange_until {
+            if !current.live() || !next.live() || !exchange.live() {
                 return Err(Error::Expired);
             }
             *current = next;
         }
-        self.check()
+        self.check_until(Some(exchange))
     }
     fn check(&self) -> Result<(), Error> {
+        self.check_until(None)
+    }
+    fn check_until(&self, deadline: Option<Deadline>) -> Result<(), Error> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(self.error());
         }
         // Application callbacks never execute while holding a mailbox lock.
         let before_callback = self.authorization()?;
-        let error = if Instant::now() >= before_callback.until {
+        let error = if !before_callback.live() || deadline.is_some_and(|cap| !cap.live()) {
             Some(Error::Expired)
         } else if !catch_unwind(AssertUnwindSafe(|| (self.monitor)())).unwrap_or(false) {
             Some(Error::Denied)
         } else if self.stopped.load(Ordering::Acquire) {
             Some(self.error())
-        } else if Instant::now() >= self.authorization()?.until {
+        } else if !self.authorization()?.live() || deadline.is_some_and(|cap| !cap.live()) {
             Some(Error::Expired)
         } else {
             None
@@ -262,11 +327,14 @@ impl Shared {
             Ok(())
         }
     }
-    fn reply(&self, reply: Reply) -> Result<(), Error> {
-        self.check()?;
+    fn reply(&self, reply: Reply, deadline: Deadline) -> Result<(), Error> {
+        self.check_until(Some(deadline))?;
         let mut mail = self.mail.lock().map_err(|_| Error::Stopped)?;
         if self.stopped.load(Ordering::Acquire) || mail.reply.is_some() {
             return Err(Error::Stopped);
+        }
+        if !deadline.live() {
+            return Err(Error::Expired);
         }
         mail.reply = Some(reply);
         Ok(())
@@ -282,11 +350,7 @@ impl Control {
         self.0.stop(Error::Stopped);
     }
     pub fn is_stopped(&self) -> bool {
-        self.0.stopped.load(Ordering::Acquire)
-            || !self
-                .0
-                .authorization()
-                .is_ok_and(|authorization| Instant::now() < authorization.until)
+        self.0.stopped.load(Ordering::Acquire) || !self.0.authorization().is_ok_and(Deadline::live)
     }
 }
 impl std::fmt::Debug for Control {
@@ -334,6 +398,10 @@ impl Batch {
     pub const fn expires(&self) -> Instant {
         self.packets.expires
     }
+    /// Original private same-boot deadline, including suspend on Darwin.
+    pub const fn expires_ns(&self) -> u64 {
+        self.packets.expires_ns
+    }
     pub const fn counters(&self) -> CaptureCounters {
         self.packets.counters
     }
@@ -341,11 +409,11 @@ impl Batch {
         self,
         mut permitted: impl FnMut() -> bool,
     ) -> Result<Vec<AudioAccessUnit>, Error> {
-        gate(&self.control.0, &mut permitted)?;
-        if Instant::now() >= self.expires() {
-            self.control.0.stop(Error::Expired);
-            return Err(Error::Expired);
-        }
+        gate_until(
+            &self.control.0,
+            Some(self.packets.deadline()),
+            &mut permitted,
+        )?;
         Ok(self.packets.units)
     }
 }
@@ -372,7 +440,7 @@ pub struct MicrophoneCapture {
     shared: Arc<Shared>,
     config: AudioStreamConfig,
     phase: Phase,
-    until: Option<Instant>,
+    until: Option<Deadline>,
     next: Option<(u64, u64)>,
 }
 impl std::fmt::Debug for MicrophoneCapture {
@@ -394,31 +462,48 @@ impl MicrophoneCapture {
         authorization_until: Instant,
         monitor: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Result<Self, Error> {
-        options.validate()?;
         let authorization_ns = crate::clock::stamp_ns(authorization_until).ok_or(Error::Clock)?;
+        Self::start_with_deadline(
+            image,
+            options,
+            authorization_until,
+            authorization_ns,
+            monitor,
+        )
+    }
+    /// Keep the original native-clock authorization supplied by the same
+    /// controller. The public compatibility entry point stamps only once.
+    pub(crate) fn start_with_deadline(
+        image: &Path,
+        options: CaptureOptions,
+        authorization_until: Instant,
+        authorization_ns: u64,
+        monitor: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Result<Self, Error> {
+        let authorization = Deadline {
+            until: authorization_until,
+            ns: authorization_ns,
+        };
+        // Capture setup before validation, filesystem access or application
+        // callbacks; neither a delayed spawn nor suspend can restart its cap.
+        let until = Deadline::after(SETUP)?.narrow(authorization);
+        options.validate()?;
         let shared = Arc::new(Shared {
             mail: Mutex::new(Mailbox::default()),
             wake: Condvar::new(),
             stopped: AtomicBool::new(false),
             retired: AtomicBool::new(true),
             pid: AtomicU32::new(0),
-            authorization: Mutex::new(Authorization {
-                until: authorization_until,
-                ns: authorization_ns,
-            }),
+            authorization: Mutex::new(authorization),
             monitor: Arc::new(monitor),
         });
-        shared.check()?;
+        shared.check_until(Some(until))?;
         if !image.is_absolute() || !image.is_file() {
             return Err(Error::Unavailable);
         }
         let slot = Slot::take()?;
-        let until = Instant::now()
-            .checked_add(SETUP)
-            .ok_or(Error::Clock)?
-            .min(authorization_until);
         let config = options.configuration;
-        shared.check()?;
+        shared.check_until(Some(until))?;
         shared.retired.store(false, Ordering::Release);
         let (image, worker) = (image.to_owned(), shared.clone());
         if std::thread::Builder::new()
@@ -453,10 +538,7 @@ impl MicrophoneCapture {
         error
     }
     fn collect(&mut self, permitted: &mut impl FnMut() -> bool) -> Result<Option<Reply>, Error> {
-        gate(&self.shared, permitted)?;
-        if self.until.is_some_and(|until| Instant::now() >= until) {
-            return Err(self.fail(Error::Expired));
-        }
+        gate_until(&self.shared, self.until, permitted)?;
         let reply = self
             .shared
             .mail
@@ -464,14 +546,11 @@ impl MicrophoneCapture {
             .map_err(|_| Error::Stopped)?
             .reply
             .take();
-        gate(&self.shared, permitted)?;
-        if self.until.is_some_and(|until| Instant::now() >= until) {
-            return Err(self.fail(Error::Expired));
-        }
+        gate_until(&self.shared, self.until, permitted)?;
         Ok(reply)
     }
     pub fn poll_ready(&mut self, mut permitted: impl FnMut() -> bool) -> Result<bool, Error> {
-        gate(&self.shared, &mut permitted)?;
+        gate_until(&self.shared, self.until, &mut permitted)?;
         if matches!(self.phase, Phase::Idle | Phase::Pulling | Phase::Renewing) {
             return Ok(true);
         }
@@ -493,20 +572,30 @@ impl MicrophoneCapture {
     pub fn request(
         &mut self,
         expires: Instant,
+        permitted: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        let expires_ns = crate::clock::stamp_ns(expires).ok_or(Error::Clock)?;
+        self.request_with_deadline(expires, expires_ns, permitted)
+    }
+    pub(crate) fn request_with_deadline(
+        &mut self,
+        expires: Instant,
+        expires_ns: u64,
         mut permitted: impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        gate(&self.shared, &mut permitted)?;
+        let maximum = Deadline::after(MAX_CAPTURE_CUSTODY)?;
+        let expires = Deadline {
+            until: expires,
+            ns: expires_ns,
+        };
+        gate_until(&self.shared, Some(expires), &mut permitted)?;
         if self.phase != Phase::Idle {
             return Err(Error::Backpressure);
         }
-        let now = Instant::now();
-        if now >= expires {
-            return Err(self.fail(Error::Expired));
-        }
-        if expires > now.checked_add(MAX_CAPTURE_CUSTODY).ok_or(Error::Clock)? {
+        if expires.until > maximum.until || expires.ns > maximum.ns {
             return Err(self.fail(Error::Configuration));
         }
-        let expires = expires.min(self.shared.authorization()?.until);
+        let expires = expires.narrow(self.shared.authorization()?);
         {
             let mut mail = self.shared.mail.lock().map_err(|_| Error::Stopped)?;
             if self.shared.stopped.load(Ordering::Acquire) {
@@ -514,6 +603,10 @@ impl MicrophoneCapture {
             }
             if mail.request.is_some() || mail.reply.is_some() {
                 return Err(Error::Backpressure);
+            }
+            if !expires.live() {
+                drop(mail);
+                return Err(self.fail(Error::Expired));
             }
             mail.request = Some(Request::Pull(expires));
         }
@@ -530,30 +623,31 @@ impl MicrophoneCapture {
     pub fn renew_authority(
         &mut self,
         authorization_until: Instant,
+        permitted: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        let ns = crate::clock::stamp_ns(authorization_until).ok_or(Error::Clock)?;
+        self.renew_authority_with_deadline(authorization_until, ns, permitted)
+    }
+    pub(crate) fn renew_authority_with_deadline(
+        &mut self,
+        authorization_until: Instant,
+        ns: u64,
         mut permitted: impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        gate(&self.shared, &mut permitted)?;
+        let authorization = Deadline {
+            until: authorization_until,
+            ns,
+        };
+        let expires = Deadline::after(RENEWAL_EXCHANGE)?.narrow(authorization);
+        gate_until(&self.shared, Some(expires), &mut permitted)?;
         if self.phase != Phase::Idle {
             return Err(Error::Backpressure);
         }
         let current = self.shared.authorization()?;
-        let now = Instant::now();
-        if now >= authorization_until {
-            return Err(self.fail(Error::Expired));
-        }
-        let ns = crate::clock::stamp_ns(authorization_until).ok_or(Error::Clock)?;
         if ns == current.ns {
             return Err(Error::Configuration);
         }
-        let expires = now
-            .checked_add(RENEWAL_EXCHANGE)
-            .ok_or(Error::Clock)?
-            .min(current.until)
-            .min(authorization_until);
-        let authorization = Authorization {
-            until: authorization_until,
-            ns,
-        };
+        let expires = expires.narrow(current);
         {
             let mut mail = self.shared.mail.lock().map_err(|_| Error::Stopped)?;
             if self.shared.stopped.load(Ordering::Acquire) {
@@ -561,6 +655,10 @@ impl MicrophoneCapture {
             }
             if mail.request.is_some() || mail.reply.is_some() {
                 return Err(Error::Backpressure);
+            }
+            if !expires.live() {
+                drop(mail);
+                return Err(self.fail(Error::Expired));
             }
             mail.request = Some(Request::Renew {
                 authorization,
@@ -575,7 +673,7 @@ impl MicrophoneCapture {
     /// Collect the exact renewal acknowledgement. Unknown, late or mismatched
     /// completion is terminal; it is never transparently replayed.
     pub fn poll_renewed(&mut self, mut permitted: impl FnMut() -> bool) -> Result<bool, Error> {
-        gate(&self.shared, &mut permitted)?;
+        gate_until(&self.shared, self.until, &mut permitted)?;
         if self.phase != Phase::Renewing {
             return Err(Error::Backpressure);
         }
@@ -600,7 +698,7 @@ impl MicrophoneCapture {
         &mut self,
         mut permitted: impl FnMut() -> bool,
     ) -> Result<Option<Batch>, Error> {
-        gate(&self.shared, &mut permitted)?;
+        gate_until(&self.shared, self.until, &mut permitted)?;
         if self.phase != Phase::Pulling {
             return Err(Error::Backpressure);
         }
@@ -608,7 +706,7 @@ impl MicrophoneCapture {
             None => Ok(None),
             Some(Reply::Ready | Reply::Renewed) => Err(self.fail(Error::Protocol)),
             Some(Reply::Packets(packets)) => {
-                if Instant::now() >= packets.expires {
+                if !packets.deadline().live() {
                     return Err(self.fail(Error::Expired));
                 }
                 for packet in &packets.units {
@@ -649,11 +747,187 @@ impl Drop for MicrophoneCapture {
         self.stop();
     }
 }
-fn gate(shared: &Shared, permitted: &mut impl FnMut() -> bool) -> Result<(), Error> {
-    shared.check()?;
+fn gate_until(
+    shared: &Shared,
+    deadline: Option<Deadline>,
+    permitted: &mut impl FnMut() -> bool,
+) -> Result<(), Error> {
+    shared.check_until(deadline)?;
     if !catch_unwind(AssertUnwindSafe(permitted)).unwrap_or(false) {
         shared.stop(Error::Denied);
         return Err(Error::Denied);
     }
-    shared.check()
+    shared.check_until(deadline)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use fr_core::audio::{AudioChannels, AudioGeneration};
+
+    pub(super) fn shared(monitor: impl Fn() -> bool + Send + Sync + 'static) -> Arc<Shared> {
+        Arc::new(Shared {
+            mail: Mutex::default(),
+            wake: Condvar::new(),
+            stopped: AtomicBool::new(false),
+            retired: AtomicBool::new(true),
+            pid: AtomicU32::new(0),
+            authorization: Mutex::new(Deadline::after(Duration::from_secs(3600)).unwrap()),
+            monitor: Arc::new(monitor),
+        })
+    }
+
+    fn options() -> CaptureOptions {
+        CaptureOptions {
+            #[cfg(target_os = "linux")]
+            selection: Selection::Pulse {
+                server: "/test/private-pulse".into(),
+                source: "test".into(),
+            },
+            #[cfg(target_os = "macos")]
+            selection: Selection::Mac {
+                uid: "test-device".into(),
+            },
+            configuration: AudioStreamConfig::new(
+                AudioDirection::Uplink,
+                AudioGeneration::from_raw(1),
+                AudioChannels::Mono,
+                10,
+                20,
+            )
+            .unwrap(),
+            bitrate: 64_000,
+            max_packet_bytes: 512,
+        }
+    }
+
+    fn idle(shared: Arc<Shared>) -> MicrophoneCapture {
+        MicrophoneCapture {
+            shared,
+            config: options().configuration,
+            phase: Phase::Idle,
+            until: None,
+            next: None,
+        }
+    }
+
+    #[test]
+    fn queued_deadlines_survive_suspend_without_reconstruction() {
+        let start = Instant::now();
+        let original = Deadline::after_at(start, 1_000_000_000, MAX_CAPTURE_CUSTODY).unwrap();
+        let request = Request::Pull(original);
+        // Darwin uptime advanced 5 ms while its native clock advanced 200 ms.
+        // A fresh conversion of the stored Instant would incorrectly add 95 ms.
+        let resumed = start + Duration::from_millis(5);
+        assert_eq!(request.deadline(), original);
+        assert_eq!(
+            request.deadline().remaining_at(resumed, 1_200_000_000),
+            Err(Error::Expired)
+        );
+        assert_eq!(
+            original.remaining_at(start, original.ns),
+            Err(Error::Expired)
+        );
+        assert_eq!(
+            original.remaining_at(original.until, 1_000_000_000),
+            Err(Error::Expired)
+        );
+    }
+
+    #[test]
+    fn independent_caps_and_waits_always_use_the_earlier_clock() {
+        let start = Instant::now();
+        let first = Deadline {
+            until: start + Duration::from_millis(80),
+            ns: 1_040_000_000,
+        };
+        let second = Deadline {
+            until: start + Duration::from_millis(20),
+            ns: 1_090_000_000,
+        };
+        let retained = first.narrow(second);
+        assert_eq!(retained.until, second.until);
+        assert_eq!(retained.ns, first.ns);
+        assert_eq!(
+            retained.remaining_at(start, 1_000_000_000),
+            Ok(Duration::from_millis(20))
+        );
+        assert_eq!(
+            retained.remaining_at(start, 1_039_000_000),
+            Ok(Duration::from_millis(1))
+        );
+        assert_eq!(
+            Deadline::after_at(start, u64::MAX, SETUP),
+            Err(Error::Clock)
+        );
+    }
+
+    #[test]
+    fn expired_native_setup_refuses_before_monitor_or_spawn() {
+        let error = MicrophoneCapture::start_with_deadline(
+            Path::new("/no-native-child-can-start"),
+            options(),
+            Instant::now() + Duration::from_secs(3600),
+            1,
+            || panic!("an expired original setup cannot consult permission"),
+        )
+        .unwrap_err();
+        assert_eq!(error, Error::Expired);
+    }
+
+    #[test]
+    fn expired_native_pull_and_renewal_never_enter_the_mailbox() {
+        for renew in [false, true] {
+            let shared = shared(|| panic!("raw expiry precedes every callback"));
+            let original = shared.authorization().unwrap();
+            let mut capture = idle(shared.clone());
+            let local = Instant::now() + Duration::from_millis(80);
+            let result = if renew {
+                capture.renew_authority_with_deadline(local, 1, || true)
+            } else {
+                capture.request_with_deadline(local, 1, || true)
+            };
+            assert_eq!(result, Err(Error::Expired));
+            assert!(shared.mail.lock().unwrap().request.is_none());
+            assert_eq!(shared.authorization().unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn late_native_ack_cannot_install_a_future_authorization() {
+        let shared = shared(|| panic!("expired ACK cannot consult permission"));
+        let original = shared.authorization().unwrap();
+        let next = Deadline {
+            until: original.until + SETUP,
+            ns: original.ns + 2_000_000_000,
+        };
+        let exchange = Deadline {
+            until: original.until,
+            ns: 1,
+        };
+        assert_eq!(
+            shared.install_authorization(original.ns, next, exchange),
+            Err(Error::Expired)
+        );
+        assert_eq!(shared.authorization().unwrap(), original);
+    }
+
+    #[test]
+    fn a_positive_callback_cannot_hide_native_authority_expiry() {
+        let shared = shared(|| true);
+        let deadline = shared.authorization().unwrap();
+        let mut called = false;
+        assert_eq!(
+            gate_until(&shared, Some(deadline), &mut || {
+                called = true;
+                // The local Instant remains live; model the native cap expiring
+                // during an otherwise positive application callback.
+                shared.authorization.lock().unwrap().ns = 1;
+                true
+            }),
+            Err(Error::Expired)
+        );
+        assert!(called);
+        assert!(shared.stopped.load(Ordering::Acquire));
+    }
 }

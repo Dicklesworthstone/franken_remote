@@ -4,6 +4,9 @@ use super::{
     Error,
     protocol::{self, CONFIGURE, Header, RENEW},
 };
+#[cfg(target_os = "macos")]
+use crate::macos_microphone_capture::MicrophoneSource;
+#[cfg(target_os = "linux")]
 use crate::pulse::microphone::MicrophoneSource;
 use std::{
     io::{Read, Write},
@@ -41,7 +44,10 @@ impl Guard {
 /// binding is installed before any native library/device initialization. This
 /// is process isolation, not a kernel sandbox for a same-user audio worker.
 pub fn run(parent: u32) -> Result<(), Error> {
+    #[cfg(target_os = "linux")]
     crate::bind_parent(parent).map_err(|_| Error::Spawn)?;
+    #[cfg(target_os = "macos")]
+    crate::macos_microphone_capture::bind_parent(parent)?;
     let guard = std::io::stderr()
         .as_fd()
         .try_clone_to_owned()
@@ -63,6 +69,55 @@ fn refuse(output: &mut impl Write, mut request: Header, error: Error) -> Result<
     Err(error)
 }
 
+fn initialize(
+    options: &super::CaptureOptions,
+    first: Header,
+    guard: &mut Guard,
+) -> Result<MicrophoneSource, Error> {
+    #[cfg(target_os = "linux")]
+    let mut source = {
+        let super::Selection::Pulse { server, source } = &options.selection else {
+            return Err(Error::Selection);
+        };
+        MicrophoneSource::connect(
+            server,
+            source,
+            options.configuration,
+            options.bitrate,
+            options.max_packet_bytes,
+            || guard.permitted(first.expires_ns),
+        )
+        .map_err(Error::from)?
+    };
+    #[cfg(target_os = "macos")]
+    let mut source = {
+        use std::os::fd::AsRawFd;
+        let super::Selection::Mac { uid } = &options.selection else {
+            return Err(Error::Selection);
+        };
+        MicrophoneSource::connect(
+            uid,
+            guard.channel.as_raw_fd(),
+            first.authorization_ns,
+            first.expires_ns,
+            options.configuration,
+            options.bitrate,
+            options.max_packet_bytes,
+            || guard.permitted(first.expires_ns),
+        )?
+    };
+    while !source
+        .poll_ready(|| guard.permitted(first.expires_ns))
+        .map_err(Error::from)?
+    {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    if !guard.permitted(first.expires_ns) {
+        return Err(Error::Denied);
+    }
+    Ok(source)
+}
+
 fn serve(input: &mut impl Read, output: &mut impl Write, channel: UnixStream) -> Result<(), Error> {
     let first = Header::read(input, false)?;
     let body = protocol::body(input, first)?;
@@ -75,27 +130,7 @@ fn serve(input: &mut impl Read, output: &mut impl Write, channel: UnixStream) ->
     if first.kind != CONFIGURE || !guard.permitted(first.expires_ns) {
         return refuse(output, first, Error::Denied);
     }
-    let initialized = (|| {
-        let mut source = MicrophoneSource::connect(
-            &options.server,
-            &options.source,
-            options.configuration,
-            options.bitrate,
-            options.max_packet_bytes,
-            || guard.permitted(first.expires_ns),
-        )
-        .map_err(Error::from)?;
-        while !source
-            .poll_ready(|| guard.permitted(first.expires_ns))
-            .map_err(Error::from)?
-        {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        if !guard.permitted(first.expires_ns) {
-            return Err(Error::Denied);
-        }
-        Ok(source)
-    })();
+    let initialized = initialize(&options, first, &mut guard);
     let mut source = match initialized {
         Ok(source) => source,
         Err(error) => return refuse(output, first, error),
@@ -117,6 +152,8 @@ fn serve(input: &mut impl Read, output: &mut impl Write, channel: UnixStream) ->
                 source.close();
                 return refuse(output, request, Error::Denied);
             }
+            #[cfg(target_os = "macos")]
+            source.renew(guard.authorization_ns, request.authorization_ns)?;
             guard.authorization_ns = request.authorization_ns;
             if !guard.permitted(request.expires_ns) {
                 source.close();
@@ -137,16 +174,19 @@ fn serve(input: &mut impl Read, output: &mut impl Write, channel: UnixStream) ->
             let batch = source
                 .pull(expires, || guard.permitted(request.expires_ns))
                 .map_err(Error::from)?;
-            let original = batch.expires();
+            #[cfg(target_os = "linux")]
+            let original = crate::clock::stamp_ns(batch.expires()).ok_or(Error::Clock)?;
+            // Darwin Instant pauses during suspend: preserve the native
+            // sample's ORIGINAL sleep-inclusive cap through the private reply.
+            #[cfg(target_os = "macos")]
+            let original = batch.expires_ns();
             let counters = batch.counters();
             let units = batch
                 .consume(|| guard.permitted(request.expires_ns))
                 .map_err(Error::from)?;
             let body = protocol::packets(&units, counters, &options)?;
             let mut header = request;
-            header.expires_ns = crate::clock::stamp_ns(original)
-                .ok_or(Error::Clock)?
-                .min(request.expires_ns);
+            header.expires_ns = original.min(request.expires_ns);
             header.bytes = u32::try_from(body.len()).map_err(|_| Error::Protocol)?;
             if !guard.permitted(header.expires_ns) {
                 return Err(Error::Denied);

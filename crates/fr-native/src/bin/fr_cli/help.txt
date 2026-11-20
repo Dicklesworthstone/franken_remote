@@ -175,7 +175,7 @@ queued sound drains briefly. Host, microphone and system volume stay unchanged.
 
 Microphone:
 --microphone requires --control and an explicit --microphone-source NAME.
-Client build: linux-desktop,linux-microphone with fr-audio-worker beside fr.
+Linux client build: linux-desktop,linux-microphone with fr-audio-worker beside fr.
 The host must independently enable and approve its native microphone endpoint.
 The local Microphone panel starts muted: click Talk to authorize this selected
 source, then wait for the host configuration and actual PulseAudio RECORD access.
@@ -187,6 +187,17 @@ The panel needs visible space outside the viewer; --fit can leave room.
 Server: --microphone-server, else PULSE_SERVER, else XDG_RUNTIME_DIR/pulse/native.
 Only a local Unix socket and named source are accepted, with no default-source
 alias, source creation, implicit device change or downloaded worker.
+macOS client build: macos-desktop,macos-microphone with the matching signed
+fr-audio-worker. --microphone-source default pins the current local input once
+before connecting; an exact CoreAudio device UID selects that device instead.
+It never follows a changed default. --microphone-server is Linux-only.
+The Mac panel starts muted. Choose Allow microphone for the same capture
+helper's macOS permission prompt, then a NEW Talk after access is granted.
+Allow never records. Native capture also requires the host's positive setup
+reply and original control lease. Mute fences speech immediately; wait for the
+old capture child to exit before a new Talk. Hiding, closing, losing visible
+controls, suspend, disconnect or reconnect never resumes recording.
+The installer --audio source-build option includes both Mac audio directions.
 Reports distinguish native capture from host application audibility; physical
 microphone/live-tailnet qualification remains separate. Missing host selection
 is typed absence. Unsafe pending output may end the original connection.

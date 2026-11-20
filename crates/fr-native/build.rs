@@ -4,6 +4,7 @@ fn main() {
     build_opus_process();
     build_macos_opus();
     build_macos_audio();
+    build_macos_microphone();
     build_keyboard();
     build_clipboard();
     build_indicator();
@@ -553,7 +554,9 @@ fn build_macos_opus() {
         library.join("libopus.a").display()
     );
     println!("cargo:rustc-link-search=native={}", library.display());
-    if env::var_os("CARGO_FEATURE_OPUS_PROCESS").is_none() {
+    if env::var_os("CARGO_FEATURE_OPUS_PROCESS").is_none()
+        && env::var_os("CARGO_FEATURE_MACOS_MICROPHONE_PROCESS").is_none()
+    {
         return;
     }
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
@@ -580,6 +583,117 @@ fn build_macos_opus() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=fropusmacos");
+}
+
+/// The actual capture and permission roles are the same signed executable.
+/// Each role links a usage description; TCC never relies on a launcher's plist.
+fn build_macos_microphone() {
+    let sources = [
+        "src/macos_microphone_capture.m",
+        "src/macos_microphone_permission.m",
+        "src/macos_microphone_panel.m",
+        "src/macos_microphone_capture.h",
+    ];
+    for source in sources {
+        println!("cargo:rerun-if-changed={source}");
+    }
+    for file in [
+        "macos-microphone-fr.plist",
+        "macos-microphone-worker.plist",
+        "macos-microphone.entitlements",
+    ] {
+        println!("cargo:rerun-if-changed={file}");
+    }
+    if env::var_os("CARGO_FEATURE_MACOS_MICROPHONE_PROCESS").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS microphone builds require the native Apple SDK"
+    );
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
+    let mut objects = Vec::new();
+    for (source, object) in [
+        ("src/macos_microphone_capture.m", "macosmiccapture.o"),
+        ("src/macos_microphone_permission.m", "macosmicpermission.o"),
+        ("src/macos_microphone_panel.m", "macosmicpanel.o"),
+    ] {
+        if source.ends_with("panel.m") && env::var_os("CARGO_FEATURE_MACOS_MICROPHONE").is_none() {
+            continue;
+        }
+        let object = out.join(object);
+        assert!(
+            Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+                .args([
+                    "-x",
+                    "objective-c",
+                    "-std=gnu11",
+                    "-fobjc-arc",
+                    "-fblocks",
+                    "-O2",
+                    "-fPIC",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror"
+                ])
+                .arg(format!("-mmacosx-version-min={minimum}"))
+                .args(["-c", source, "-o"])
+                .arg(&object)
+                .status()
+                .expect("native Objective-C compiler")
+                .success(),
+            "macOS microphone native boundary compilation failed"
+        );
+        objects.push(object);
+    }
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrmacosmicrophone.a"))
+            .args(objects)
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frmacosmicrophone");
+    println!("cargo:rustc-link-lib=objc");
+    for framework in [
+        "AudioToolbox",
+        "CoreAudio",
+        "CoreFoundation",
+        "AVFoundation",
+        "Foundation",
+        "Security",
+    ] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    if env::var_os("CARGO_FEATURE_MACOS_MICROPHONE").is_some() {
+        for framework in ["AppKit", "CoreGraphics"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+    }
+    embed_macos_microphone_plists();
+}
+
+fn embed_macos_microphone_plists() {
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    for (binary, plist) in [
+        ("fr", "macos-microphone-fr.plist"),
+        ("fr-audio-worker", "macos-microphone-worker.plist"),
+    ] {
+        let path = manifest.join(plist);
+        let path = path.to_str().expect("UTF-8 macOS microphone build path");
+        assert!(
+            !path.contains(','),
+            "macOS linker resource path cannot contain commas"
+        );
+        println!("cargo:rustc-link-arg-bin={binary}=-Wl,-sectcreate,__TEXT,__info_plist,{path}");
+    }
 }
 
 /// Native output only. Opus decoding stays in its separately supervised child.

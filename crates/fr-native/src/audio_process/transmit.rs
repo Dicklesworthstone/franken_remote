@@ -46,8 +46,7 @@ impl std::error::Error for Error {}
 /// Local user-selected source. These values never come from an audio record.
 /// No default source, implicit server or automatic device replacement exists.
 pub struct Source {
-    pub server: PathBuf,
-    pub name: String,
+    pub selection: super::Selection,
     pub bitrate: u32,
 }
 impl std::fmt::Debug for Source {
@@ -80,20 +79,33 @@ pub struct Progress {
 #[derive(Clone, Copy)]
 struct Clock {
     origin: Instant,
+    raw_origin: Option<u64>,
     client: ClientInstant,
 }
 impl Clock {
     fn bind(now: impl FnOnce() -> ClientInstant) -> Self {
         let origin = Instant::now();
+        let raw_origin = crate::clock::monotonic_ns();
         Self {
             origin,
+            raw_origin,
             client: now(),
         }
     }
     fn now(self) -> Result<ClientInstant, Error> {
-        let elapsed = Instant::now()
+        self.now_at(
+            Instant::now(),
+            crate::clock::monotonic_ns().ok_or(Error::Clock)?,
+        )
+    }
+    fn now_at(self, local: Instant, raw: u64) -> Result<ClientInstant, Error> {
+        let elapsed = local
             .checked_duration_since(self.origin)
             .ok_or(Error::Clock)?;
+        let raw_elapsed = raw
+            .checked_sub(self.raw_origin.ok_or(Error::Clock)?)
+            .ok_or(Error::Clock)?;
+        let elapsed = elapsed.max(Duration::from_nanos(raw_elapsed));
         let us = u64::try_from(elapsed.as_nanos().div_ceil(1000)).map_err(|_| Error::Clock)?;
         self.client
             .0
@@ -103,8 +115,34 @@ impl Clock {
     }
     fn deadline(self, until: ClientInstant) -> Result<Instant, Error> {
         let us = until.0.checked_sub(self.client.0).ok_or(Error::Clock)?;
-        self.origin
+        let local = self
+            .origin
             .checked_add(Duration::from_micros(us))
+            .ok_or(Error::Clock)?;
+        Ok(local.min(crate::clock::local_instant(self.raw_deadline(until)?).ok_or(Error::Clock)?))
+    }
+    fn raw_deadline(self, until: ClientInstant) -> Result<u64, Error> {
+        self.raw_origin
+            .ok_or(Error::Clock)?
+            .checked_add(
+                until
+                    .0
+                    .checked_sub(self.client.0)
+                    .ok_or(Error::Clock)?
+                    .checked_mul(1000)
+                    .ok_or(Error::Clock)?,
+            )
+            .ok_or(Error::Clock)
+    }
+    fn lower_raw_deadline(self, until_ns: u64) -> Result<ClientInstant, Error> {
+        let elapsed = until_ns
+            .checked_sub(self.raw_origin.ok_or(Error::Clock)?)
+            .ok_or(Error::Clock)?
+            / 1000;
+        self.client
+            .0
+            .checked_add(elapsed)
+            .map(ClientInstant)
             .ok_or(Error::Clock)
     }
     fn lower_deadline(self, until: Instant) -> Result<ClientInstant, Error> {
@@ -129,6 +167,27 @@ impl Clock {
 struct Packets {
     receipt: CaptureReceipt,
     packets: std::vec::IntoIter<AudioAccessUnit>,
+}
+
+fn captured_packets(
+    clock: Clock,
+    mut receipt: CaptureReceipt,
+    batch: super::Batch,
+    permitted: &mut impl FnMut() -> bool,
+) -> Result<Option<Packets>, Error> {
+    let local_until = clock.lower_deadline(batch.expires())?;
+    let raw_until = clock.lower_raw_deadline(batch.expires_ns())?;
+    receipt
+        .restrict_expiry(ClientInstant(local_until.0.min(raw_until.0)))
+        .map_err(Error::Consent)?;
+    let packets = batch.consume(permitted).map_err(Error::Capture)?;
+    if packets.len() > TURN_PACKETS {
+        return Err(Error::Order);
+    }
+    Ok((!packets.is_empty()).then(|| Packets {
+        receipt,
+        packets: packets.into_iter(),
+    }))
 }
 
 /// Original weak authority for the reliable configuration queue before a
@@ -156,10 +215,27 @@ pub struct Egress {
     permit: Arc<CapturePermit>,
     control: super::Control,
     clock: Clock,
+    packet_until_ns: Option<u64>,
 }
 impl Egress {
     pub fn is_open(&self) -> bool {
-        !self.control.is_stopped() && self.clock.permits(&self.permit)
+        !self.control.is_stopped()
+            && self.clock.permits(&self.permit)
+            && self
+                .packet_until_ns
+                .is_none_or(|until| crate::clock::monotonic_ns().is_some_and(|now| now < until))
+    }
+    /// Preserve a packet's original same-boot custody through native egress.
+    /// This derives from the immutable original anchor, never current time.
+    #[cfg(feature = "microphone-uplink")]
+    pub(crate) fn with_packet_deadline(&self, until: ClientInstant) -> Result<Self, Error> {
+        let mut guarded = self.clone();
+        let until_ns = self.clock.raw_deadline(until)?;
+        guarded.packet_until_ns = Some(
+            self.packet_until_ns
+                .map_or(until_ns, |old| old.min(until_ns)),
+        );
+        Ok(guarded)
     }
 }
 impl std::fmt::Debug for Egress {
@@ -256,6 +332,7 @@ impl Transmitter {
             permit: Arc::clone(self.permit.as_ref()?),
             control: self.capture.as_ref()?.control(),
             clock: self.clock,
+            packet_until_ns: None,
         })
     }
     pub fn set_permission(&mut self, permission: MicPermission) {
@@ -373,17 +450,17 @@ impl Transmitter {
             );
             let clock = self.clock;
             let monitored = permit.monitor();
-            let capture = MicrophoneCapture::start(
+            let capture = MicrophoneCapture::start_with_deadline(
                 &self.image,
                 CaptureOptions {
-                    server: self.source.server.clone(),
-                    source: self.source.name.clone(),
+                    selection: self.source.selection.clone(),
                     configuration: permit.configuration(),
                     bitrate: self.source.bitrate,
                     max_packet_bytes: u16::try_from(offer.max_packet_bytes)
                         .map_err(|_| Error::Order)?,
                 },
                 self.clock.deadline(permit.local_deadline())?,
+                self.clock.raw_deadline(permit.local_deadline())?,
                 move || clock.now().is_ok_and(|now| monitored.valid(now)),
             )
             .map_err(Error::Capture)?;
@@ -463,19 +540,13 @@ impl Transmitter {
                 else {
                     return Ok(progress);
                 };
-                let mut receipt = self.request.take().ok_or(Error::Order)?;
-                receipt
-                    .restrict_expiry(self.clock.lower_deadline(batch.expires())?)
-                    .map_err(Error::Consent)?;
-                let packets = batch.consume(&mut permitted).map_err(Error::Capture)?;
-                if packets.len() > TURN_PACKETS {
-                    return Err(Error::Order);
-                }
-                if !packets.is_empty() {
-                    self.packets = Some(Packets {
-                        receipt,
-                        packets: packets.into_iter(),
-                    });
+                self.packets = captured_packets(
+                    self.clock,
+                    self.request.take().ok_or(Error::Order)?,
+                    batch,
+                    &mut permitted,
+                )?;
+                if self.packets.is_some() {
                     continue;
                 }
             }
@@ -487,9 +558,11 @@ impl Transmitter {
             {
                 let successor = Arc::new(successor);
                 capture
-                    .renew_authority(self.clock.deadline(successor.local_deadline())?, || {
-                        clock.permits(&successor)
-                    })
+                    .renew_authority_with_deadline(
+                        self.clock.deadline(successor.local_deadline())?,
+                        self.clock.raw_deadline(successor.local_deadline())?,
+                        || clock.permits(&successor),
+                    )
                     .map_err(Error::Capture)?;
                 self.pending_permit = Some(successor);
                 return Ok(progress);
@@ -505,7 +578,11 @@ impl Transmitter {
                 .begin_capture(permit, now, until)
                 .map_err(Error::Consent)?;
             capture
-                .request(self.clock.deadline(until)?, &mut permitted)
+                .request_with_deadline(
+                    self.clock.deadline(until)?,
+                    self.clock.raw_deadline(until)?,
+                    &mut permitted,
+                )
                 .map_err(Error::Capture)?;
             self.request = Some(receipt);
             return Ok(progress);
@@ -590,11 +667,36 @@ mod tests {
         for us in [1, 1_000, 100_000, 3_000_000] {
             let until = ClientInstant(clock.client.0 + us);
             let native = clock.deadline(until).unwrap();
-            assert_eq!(clock.lower_deadline(native).unwrap(), until);
+            assert!(clock.lower_deadline(native).unwrap().0 <= until.0);
             let earlier = native.checked_sub(Duration::from_nanos(1)).unwrap();
             assert!(clock.lower_deadline(earlier).unwrap().0 < until.0);
         }
         assert!(clock.now().unwrap().0 >= clock.client.0);
         assert_eq!(clock.deadline(ClientInstant(0)), Err(Error::Clock));
+    }
+    #[test]
+    fn suspend_advances_capture_and_original_packet_custody_even_when_instant_pauses() {
+        let origin = Instant::now();
+        let clock = Clock {
+            origin,
+            raw_origin: Some(1_000_000_000),
+            client: ClientInstant(500),
+        };
+        let packet_until = ClientInstant(10_500);
+        assert_eq!(clock.raw_deadline(packet_until).unwrap(), 1_010_000_000);
+        // One millisecond awake plus twenty asleep exceeds the original 10ms
+        // packet cap. Mapping the old cap again cannot add those twenty ms.
+        assert_eq!(
+            clock
+                .now_at(origin + Duration::from_millis(1), 1_021_000_000)
+                .unwrap(),
+            ClientInstant(21_500)
+        );
+        assert_eq!(clock.raw_deadline(packet_until).unwrap(), 1_010_000_000);
+        assert_eq!(
+            clock.lower_raw_deadline(1_010_000_000).unwrap(),
+            packet_until
+        );
+        assert_eq!(clock.now_at(origin, 999_999_999), Err(Error::Clock));
     }
 }

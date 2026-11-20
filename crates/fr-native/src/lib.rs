@@ -34,8 +34,23 @@ pub mod macos_audio_playout;
 #[cfg(all(target_os = "linux", feature = "linux-pulse-playback"))]
 pub mod pulse;
 
-#[cfg(all(target_os = "linux", feature = "linux-microphone-process"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-microphone-process"),
+    all(target_os = "macos", feature = "macos-microphone-process")
+))]
 pub mod audio_process;
+#[cfg(all(target_os = "macos", feature = "macos-microphone"))]
+pub mod macos_microphone;
+#[cfg(all(target_os = "macos", feature = "macos-microphone-process"))]
+pub mod macos_microphone_capture;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-microphone")))]
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "macos-microphone")),
+    allow(dead_code)
+)]
+mod macos_microphone_policy;
+#[cfg(any(test, feature = "microphone-process"))]
+pub mod microphone_selection;
 
 #[cfg(all(target_os = "linux", feature = "linux-pipewire-mic"))]
 pub mod pipewire_mic;
@@ -245,6 +260,7 @@ pub use parent::{ParentUnbound, bind_parent};
             test,
             feature = "macos-input",
             feature = "macos-host-audio",
+            feature = "macos-microphone-process",
             feature = "macos-clipboard",
             feature = "macos-session-monitor",
             feature = "macos-observation-indicator"

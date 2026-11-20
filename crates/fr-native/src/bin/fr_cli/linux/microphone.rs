@@ -81,8 +81,10 @@ pub(super) fn resolve(
     let options = Options {
         image,
         source: Source {
-            server,
-            name: request.source.clone(),
+            selection: fr_native::audio_process::Selection::Pulse {
+                server,
+                source: request.source.clone(),
+            },
             bitrate: 64_000,
         },
         profile: fr_client::audio::uplink::Profile {

@@ -1,14 +1,22 @@
 //! Exact private framing and original-deadline regressions; no device evidence.
 use super::*;
 fn options() -> CaptureOptions {
-    CaptureOptions {
+    #[cfg(target_os = "linux")]
+    let selection = crate::audio_process::Selection::Pulse {
         server: "/tmp/private-pulse/native".into(),
         source: "explicit_mic".into(),
+    };
+    #[cfg(target_os = "macos")]
+    let selection = crate::audio_process::Selection::Mac {
+        uid: "AppleUSBAudioEngine:Selected:1".into(),
+    };
+    CaptureOptions {
+        selection,
         configuration: AudioStreamConfig::new(
             AudioDirection::Uplink,
             AudioGeneration::from_raw(7),
             AudioChannels::Mono,
-            20,
+            if cfg!(target_os = "macos") { 10 } else { 20 },
             20,
         )
         .unwrap(),
@@ -41,8 +49,7 @@ fn explicit_capture_selection_round_trips_without_an_implicit_alias() {
     let mut input = bytes.as_slice();
     let h = Header::read(&mut input, false).unwrap();
     let decoded = read_configuration(h, &super::body(&mut input, h).unwrap()).unwrap();
-    assert_eq!(decoded.server, options.server);
-    assert_eq!(decoded.source, options.source);
+    assert_eq!(decoded.selection, options.selection);
     assert_eq!(decoded.configuration, options.configuration);
     assert_eq!(decoded.bitrate, options.bitrate);
     assert_eq!(decoded.max_packet_bytes, options.max_packet_bytes);
@@ -51,11 +58,31 @@ fn explicit_capture_selection_round_trips_without_an_implicit_alias() {
         Header::read(&mut bytes.as_slice(), false),
         Err(Error::Protocol)
     );
-    for name in ["", "@DEFAULT_SOURCE@", "source with space", "remote:source"] {
+    #[cfg(target_os = "linux")]
+    let invalid = ["", "@DEFAULT_SOURCE@", "source with space", "remote:source"];
+    #[cfg(target_os = "macos")]
+    let invalid = ["", "default", "system", " device"];
+    for name in invalid {
         let mut options = options.clone();
-        options.source = name.into();
+        match &mut options.selection {
+            crate::audio_process::Selection::Pulse { source, .. } => *source = name.into(),
+            crate::audio_process::Selection::Mac { uid } => *uid = name.into(),
+        }
         assert_eq!(configuration(&options), Err(Error::Selection));
     }
+}
+#[test]
+fn private_source_discriminant_never_falls_back_to_another_platform() {
+    let original = configuration(&options()).unwrap();
+    assert_eq!(original[12], u8::from(cfg!(target_os = "macos")));
+    for kind in [1 - original[12], 2, 255] {
+        let mut changed = original.clone();
+        changed[12] = kind;
+        assert!(read_configuration(header(CONFIGURE), &changed).is_err());
+    }
+    let mut reserved = original;
+    reserved[13] = 1;
+    assert!(read_configuration(header(CONFIGURE), &reserved).is_err());
 }
 #[test]
 fn oversized_or_misdirected_headers_are_refused_before_body_read() {
@@ -125,7 +152,7 @@ fn unit(sequence: u64, timestamp: u64) -> AudioAccessUnit {
         AudioGeneration::from_raw(7),
         sequence,
         timestamp,
-        960,
+        options().configuration.frame_duration_ms() * 48,
         false,
         &[0xf8, 0xff, 0xfe],
     )
@@ -134,13 +161,14 @@ fn unit(sequence: u64, timestamp: u64) -> AudioAccessUnit {
 #[test]
 fn capture_batches_require_exact_timeline_and_bounded_payloads() {
     let options = options();
-    let units = [unit(7, 1000), unit(8, 1960)];
+    let second_timestamp = 1000 + u64::from(options.configuration.frame_duration_ms()) * 48;
+    let units = [unit(7, 1000), unit(8, second_timestamp)];
     let valid = packets(&units, CaptureCounters::default(), &options).unwrap();
     let (decoded, counters) = read_packets(&valid, &options).unwrap();
     assert_eq!(counters, CaptureCounters::default());
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].payload(), units[0].payload());
-    assert_eq!(decoded[1].timestamp_samples(), 1960);
+    assert_eq!(decoded[1].timestamp_samples(), second_timestamp);
     let second = BATCH_BYTES + PACKET_BYTES + 3;
     for (offset, value) in [
         (0, 5),

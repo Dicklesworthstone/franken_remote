@@ -257,8 +257,9 @@ Selection:
   --ref REF           Build this branch, tag or commit from source (default: main)
   --from-source       Build from source even when a release artifact exists
   --client-only       Install only the viewer (fr and its helpers)
-  --audio             Offer host playback audio on --host (macOS source builds
-                      need Homebrew's opus)
+  --audio             Offer host playback audio on --host; macOS source builds
+                      include client playback and explicit microphone support
+                      (needs Homebrew's opus)
 
 Host setup:
   --host              Register this machine as a host: a per-user LaunchAgent on
@@ -429,7 +430,7 @@ select_binaries() {
     else
       BINARIES=(frd fr-media-worker fr-input-agent fr-session-monitor fr-observation-indicator fr)
     fi
-    if [ "$AUDIO" -eq 1 ]; then BINARIES+=(fr-opus-worker); fi
+    if [ "$AUDIO" -eq 1 ]; then BINARIES+=(fr-opus-worker fr-audio-worker); fi
   else
     if [ "$CLIENT_ONLY" -eq 1 ]; then
       BINARIES=(fr fr-media-worker fr-opus-worker)
@@ -950,6 +951,9 @@ unpack_release() {
   if [ "$OS" = "darwin" ] && [ -f "$PAYLOAD_DIR/fr-opus-worker" ]; then
     case " ${BINARIES[*]} " in *" fr-opus-worker "*) ;; *) BINARIES+=(fr-opus-worker) ;; esac
   fi
+  if [ "$OS" = "darwin" ] && [ -f "$PAYLOAD_DIR/fr-audio-worker" ]; then
+    case " ${BINARIES[*]} " in *" fr-audio-worker "*) ;; *) BINARIES+=(fr-audio-worker) ;; esac
+  fi
   INSTALLED_SOURCE="release"
   INSTALLED_VERSION="${VERSION:-$(basename "$archive" .tar.gz)}"
   INSTALLED_COMMIT=$(cat "$into/$top/COMMIT" 2>/dev/null || true)
@@ -1100,7 +1104,7 @@ build_from_source() {
       features="macos-media,macos-input,macos-desktop,macos-session-monitor"
       [ "$AUDIO" -eq 1 ] && features+=",macos-host-audio"
     fi
-    [ "$AUDIO" -eq 1 ] && features+=",macos-audio"
+    [ "$AUDIO" -eq 1 ] && features+=",macos-audio,macos-microphone"
     if [ "$AUDIO" -eq 1 ]; then
       FR_NATIVE_OPUS_LIBRARY_DIR="$(brew --prefix opus)/lib"
       export FR_NATIVE_OPUS_LIBRARY_DIR
@@ -1110,7 +1114,7 @@ build_from_source() {
       bins+=(--bin fr-media-worker --bin fr-input-agent --bin fr-session-monitor)
       run_cargo build --release --locked -p frd --features macos-host --bin frd
     fi
-    [ "$AUDIO" -eq 1 ] && bins+=(--bin fr-opus-worker)
+    [ "$AUDIO" -eq 1 ] && bins+=(--bin fr-opus-worker --bin fr-audio-worker)
     run_cargo build --release --locked -p fr-native --features "$features" "${bins[@]}"
     if [ "$CLIENT_ONLY" -eq 0 ]; then
       run_cargo build --release --locked -p fr-native --no-default-features \
@@ -1162,10 +1166,26 @@ sign_binary() {
     identity="$SIGNING_IDENTITY"
     timestamp="--timestamp"
   fi
+  local entitlements=()
+  if { [ "$name" = "fr" ] || [ "$name" = "fr-audio-worker" ]; } &&
+      [ -f "$PAYLOAD_DIR/fr-audio-worker" ]; then
+    # This installer-owned fixed entitlement accompanies the embedded usage
+    # description in BOTH actual executables. Permission and capture use the
+    # same signed worker identity; no grant is inferred from the launcher.
+    local mic_entitlements="$TMP/microphone-entitlements.plist"
+    cat >"$mic_entitlements" <<'FR_MIC_ENTITLEMENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.device.audio-input</key><true/>
+</dict></plist>
+FR_MIC_ENTITLEMENTS
+    entitlements=(--entitlements "$mic_entitlements")
+  fi
   # Both must succeed: --verify alone also passes on the linker's own ad-hoc
   # signature that a failed signing leaves in place.
   codesign --force --options runtime "$timestamp" --identifier "com.frankenremote.$name" \
-    --sign "$identity" "$file" >/dev/null 2>&1 &&
+    ${entitlements[@]+"${entitlements[@]}"} --sign "$identity" "$file" >/dev/null 2>&1 &&
     codesign --verify --strict "$file" >/dev/null 2>&1
 }
 

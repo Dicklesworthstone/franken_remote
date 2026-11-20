@@ -16,9 +16,9 @@
 //! only this microphone lane. This module does not advertise a public offer.
 
 mod guard;
-#[cfg(feature = "linux-microphone-session")]
+#[cfg(feature = "microphone-session")]
 mod session;
-#[cfg(feature = "linux-microphone-session")]
+#[cfg(feature = "microphone-session")]
 pub use session::CaptureRetirement;
 
 use super::{
@@ -186,7 +186,7 @@ pub struct Uplink {
     retired: bool,
     reason: Option<Error>,
     io: guard::Shared,
-    #[cfg(feature = "linux-microphone-session")]
+    #[cfg(feature = "microphone-session")]
     observer: Option<CaptureRetirement>,
 }
 impl std::fmt::Debug for Uplink {
@@ -339,7 +339,7 @@ impl Uplink {
             retired: false,
             reason: None,
             io,
-            #[cfg(feature = "linux-microphone-session")]
+            #[cfg(feature = "microphone-session")]
             observer: None,
         })
     }
@@ -696,6 +696,13 @@ impl Uplink {
             if inflight.iter().all(Option::is_some) {
                 return Ok(false);
             }
+            let permit = match permit.with_packet_deadline(until) {
+                Ok(permit) => permit,
+                Err(_) => {
+                    failure = Some(Error::Clock);
+                    return Err(());
+                }
+            };
             let until = match clock.deadline(until) {
                 Ok(until) => until,
                 Err(reason) => {
@@ -979,7 +986,7 @@ impl Uplink {
 impl Drop for Uplink {
     fn drop(&mut self) {
         self.transmitter.stop();
-        #[cfg(feature = "linux-microphone-session")]
+        #[cfg(feature = "microphone-session")]
         if let Some(observer) = &self.observer {
             observer.record(self, true);
         }

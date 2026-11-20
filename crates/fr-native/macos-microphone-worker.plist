@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.frankenremote.fr-audio-worker</string>
+<key>CFBundleName</key><string>FrankenRemote microphone</string>
+<key>NSMicrophoneUsageDescription</key><string>Forward your selected microphone to the remote computer only after you choose Talk in this session. Mute stops forwarding.</string>
+</dict></plist>

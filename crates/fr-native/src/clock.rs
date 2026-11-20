@@ -60,7 +60,7 @@ fn clock_ns(clock: c_int) -> Option<u64> {
 /// Translate an original local instant to the same-boot child clock. Sampling
 /// raw time FIRST conservatively places the result no later than `at`; time
 /// spent crossing this boundary never adds custody or authorization lifetime.
-#[cfg(feature = "linux-microphone-process")]
+#[cfg(feature = "microphone-process")]
 pub(crate) fn stamp_ns(at: std::time::Instant) -> Option<u64> {
     let raw = monotonic_ns()?;
     let local = std::time::Instant::now();
@@ -73,10 +73,7 @@ pub(crate) fn stamp_ns(at: std::time::Instant) -> Option<u64> {
 
 /// Translate an original child's absolute instant back without renewing it.
 /// Local time is sampled FIRST, so this conversion can only shorten lifetime.
-#[cfg(any(
-    feature = "linux-microphone-process",
-    feature = "linux-microphone-playout"
-))]
+#[cfg(any(feature = "microphone-process", feature = "linux-microphone-playout"))]
 pub(crate) fn local_instant(at_ns: u64) -> Option<std::time::Instant> {
     let local = std::time::Instant::now();
     let raw = monotonic_ns()?;
@@ -113,7 +110,7 @@ mod tests {
         assert!(input >= monotonic);
     }
 
-    #[cfg(feature = "linux-microphone-process")]
+    #[cfg(feature = "microphone-process")]
     #[test]
     fn process_handoffs_only_shorten_original_instants() {
         let now = std::time::Instant::now();

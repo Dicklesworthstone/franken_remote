@@ -29,8 +29,10 @@ fn image() -> PathBuf {
 }
 fn options(server: PathBuf, generation: u64) -> CaptureOptions {
     CaptureOptions {
-        server,
-        source: "fr_test_mic".into(),
+        selection: fr_native::audio_process::Selection::Pulse {
+            server,
+            source: "fr_test_mic".into(),
+        },
         configuration: AudioStreamConfig::new(
             AudioDirection::Uplink,
             AudioGeneration::from_raw(generation),
@@ -136,7 +138,9 @@ fn absent_consent_expired_authority_and_default_sources_never_start_capture() {
         "source with spaces",
     ] {
         let mut selected = options(absent.clone(), 7);
-        selected.source = name.into();
+        if let fr_native::audio_process::Selection::Pulse { source, .. } = &mut selected.selection {
+            *source = name.into();
+        }
         assert_eq!(
             MicrophoneCapture::start(
                 &image(),

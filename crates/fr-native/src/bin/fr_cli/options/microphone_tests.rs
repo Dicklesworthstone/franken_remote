@@ -42,11 +42,31 @@ fn microphone_requires_control_explicit_source_and_its_own_enable() {
         "--control --microphone-source source",
         "--control --microphone --microphone --microphone-source source",
         "--control --microphone --microphone-source source --microphone-source other",
-        "--control --microphone --microphone-source @DEFAULT_SOURCE@",
-        "--control --microphone --microphone-source remote:source",
         "--control --microphone --microphone-source source --microphone-server relative",
     ] {
         assert!(connection(extra).is_err(), "{extra}");
+    }
+    #[cfg(not(target_os = "macos"))]
+    for source in ["@DEFAULT_SOURCE@", "remote:source"] {
+        assert!(
+            connection(&format!(
+                "--control --microphone --microphone-source {source}"
+            ))
+            .is_err()
+        );
+    }
+    #[cfg(target_os = "macos")]
+    for source in [
+        "default",
+        "AppleUSBAudioEngine:Device:1",
+        "@DEFAULT_SOURCE@",
+        "输入设备:1",
+    ] {
+        let chosen = connection(&format!(
+            "--control --microphone --microphone-source {source}"
+        ))
+        .unwrap();
+        assert_eq!(chosen.microphone.unwrap().source, source);
     }
     let huge = format!(
         "--control --microphone --microphone-source {}",

@@ -156,8 +156,8 @@ jobs:
       - name: Build the client and host helpers
         run: |
           cargo build --release --locked -p fr-native \
-            --features macos-media,macos-input,macos-desktop,macos-session-monitor,macos-host-audio,macos-audio \
-            --bin fr --bin fr-media-worker --bin fr-input-agent --bin fr-session-monitor --bin fr-opus-worker
+            --features macos-media,macos-input,macos-desktop,macos-session-monitor,macos-host-audio,macos-audio,macos-microphone \
+            --bin fr --bin fr-media-worker --bin fr-input-agent --bin fr-session-monitor --bin fr-opus-worker --bin fr-audio-worker
       - name: Build the observation indicator
         run: cargo build --release --locked -p fr-native --no-default-features --features macos-observation-indicator --bin fr-observation-indicator
       - name: Package
@@ -165,8 +165,18 @@ jobs:
           set -euo pipefail
           name="franken_remote-${RELEASE_TAG}-aarch64-apple-darwin"
           mkdir -p "dist/$name/bin"
-          for bin in frd fr fr-media-worker fr-input-agent fr-session-monitor fr-observation-indicator fr-opus-worker; do
+          for bin in frd fr fr-media-worker fr-input-agent fr-session-monitor fr-observation-indicator fr-opus-worker fr-audio-worker; do
             install -m 0755 "target/release/$bin" "dist/$name/bin/$bin"
+          done
+          # Permission and capture run in this same signed worker image. The
+          # launcher also needs its embedded usage text and audio entitlement
+          # when TCC attributes a child request to the responsible application.
+          for bin in fr fr-audio-worker; do
+            codesign --force --options runtime --timestamp=none \
+              --identifier "com.frankenremote.$bin" \
+              --entitlements crates/fr-native/macos-microphone.entitlements \
+              --sign - "dist/$name/bin/$bin"
+            codesign --verify --strict "dist/$name/bin/$bin"
           done
           git rev-parse HEAD > "dist/$name/COMMIT"
           cp LICENSE README.md "dist/$name/"

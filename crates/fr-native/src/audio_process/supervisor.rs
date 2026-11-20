@@ -1,8 +1,8 @@
 //! One bounded supervisor owns native process creation, IPC and actual reaping.
 //! No application callback or OS wait runs with the mailbox mutex held.
 use super::{
-    Arc, CaptureOptions, Error, Instant, MONITOR_TURN, Ordering, Packets, PathBuf, Reply, Request,
-    Shared, Slot,
+    Arc, CaptureOptions, Deadline, Error, MONITOR_TURN, Mailbox, Ordering, Packets, PathBuf, Reply,
+    Request, Shared, Slot,
     protocol::{self, CONFIGURE, Header, PULL, RENEW},
 };
 use std::{
@@ -36,25 +36,23 @@ impl Drop for ChildOwner {
 struct Exchange<'a> {
     socket: UnixStream,
     shared: &'a Shared,
-    until: Instant,
+    deadline: Deadline,
 }
 impl Exchange<'_> {
     fn live(&self) -> std::io::Result<Duration> {
         self.shared
-            .check()
+            .check_until(Some(self.deadline))
             .map_err(|_| std::io::ErrorKind::PermissionDenied)?;
-        self.until
-            .min(
+        self.deadline
+            .narrow(
                 self.shared
                     .authorization()
-                    .map_err(|_| std::io::ErrorKind::PermissionDenied)?
-                    .until,
+                    .map_err(|_| std::io::ErrorKind::PermissionDenied)?,
             )
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
+            .remaining()
             .map(|remaining| remaining.min(MONITOR_TURN))
-            .ok_or_else(|| {
-                self.shared.stop(Error::Expired);
+            .map_err(|error| {
+                self.shared.stop(error);
                 std::io::ErrorKind::TimedOut.into()
             })
     }
@@ -63,7 +61,10 @@ impl Read for Exchange<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         loop {
             self.socket.set_read_timeout(Some(self.live()?))?;
-            match self.socket.read(bytes) {
+            self.live()?;
+            let result = self.socket.read(bytes);
+            self.live()?;
+            match result {
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -78,7 +79,10 @@ impl Write for Exchange<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         loop {
             self.socket.set_write_timeout(Some(self.live()?))?;
-            match self.socket.write(bytes) {
+            self.live()?;
+            let result = self.socket.write(bytes);
+            self.live()?;
+            match result {
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -89,19 +93,19 @@ impl Write for Exchange<'_> {
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        self.live().map(|_| ())
     }
 }
 
 pub(super) fn run(
     image: PathBuf,
     options: &CaptureOptions,
-    until: Instant,
+    deadline: Deadline,
     shared: &Arc<Shared>,
     slot: Slot,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        serve(image, options, until, shared, slot)
+        serve(image, options, deadline, shared, slot)
     }))
     .unwrap_or(Err(Error::Native));
     if let Err(error) = result {
@@ -117,11 +121,11 @@ pub(super) fn run(
 fn serve(
     image: PathBuf,
     options: &CaptureOptions,
-    until: Instant,
+    deadline: Deadline,
     shared: &Arc<Shared>,
     slot: Slot,
 ) -> Result<(), Error> {
-    shared.check()?;
+    shared.check_until(Some(deadline))?;
     let (socket, child_socket) = UnixStream::pair().map_err(|_| Error::Spawn)?;
     let stdout = child_socket.try_clone().map_err(|_| Error::Spawn)?;
     let (revoke, child_guard) = UnixStream::pair().map_err(|_| Error::Spawn)?;
@@ -132,7 +136,7 @@ fn serve(
         }
         mail.revoke = Some(revoke);
     }
-    shared.check()?;
+    shared.check_until(Some(deadline))?;
     let stdin: OwnedFd = child_socket.into();
     let stdout: OwnedFd = stdout.into();
     let guard: OwnedFd = child_guard.into();
@@ -155,7 +159,7 @@ fn serve(
     let mut exchange = Exchange {
         socket,
         shared,
-        until,
+        deadline,
     };
     let result = session(options, &mut exchange, &mut owner.child);
     shared.stop(result.as_ref().err().copied().unwrap_or(Error::Stopped));
@@ -172,11 +176,42 @@ fn reply(exchange: &mut Exchange<'_>, request: Header) -> Result<(Header, Vec<u8
         return Err(error);
     }
     let body = protocol::body(exchange, header)?;
-    exchange.shared.check()?;
-    if Instant::now() >= exchange.until {
-        return Err(Error::Expired);
-    }
+    exchange.shared.check_until(Some(exchange.deadline))?;
     Ok((header, body))
+}
+
+fn pending_deadline(mail: &Mailbox, exchange: Deadline) -> Option<Deadline> {
+    match mail.reply.as_ref() {
+        Some(Reply::Ready | Reply::Renewed) => Some(exchange),
+        Some(Reply::Packets(packets)) => Some(packets.deadline()),
+        None => mail.request.as_ref().map(Request::deadline),
+    }
+}
+
+fn next_request(shared: &Shared, exchange: Deadline) -> Result<Option<Request>, Error> {
+    shared.check()?;
+    let current = shared.authorization()?;
+    let mut mail = shared.mail.lock().map_err(|_| Error::Stopped)?;
+    if shared.stopped.load(Ordering::Acquire) {
+        return Err(mail.error.unwrap_or(Error::Stopped));
+    }
+    let deadline = pending_deadline(&mail, exchange).map_or(current, |cap| current.narrow(cap));
+    let timeout = deadline.remaining()?.min(MONITOR_TURN);
+    if let Some(request) = mail.request.take() {
+        return Ok(Some(request));
+    }
+    let (mail, _) = shared
+        .wake
+        .wait_timeout(mail, timeout)
+        .map_err(|_| Error::Stopped)?;
+    // Reinspect the mailbox after the wait: a result consumed while we slept
+    // no longer owns its slot, whereas a newly enqueued request keeps its cap.
+    pending_deadline(&mail, exchange)
+        .map_or(current, |cap| current.narrow(cap))
+        .remaining()?;
+    drop(mail);
+    shared.check()?;
+    Ok(None)
 }
 
 fn session(
@@ -187,14 +222,14 @@ fn session(
     let body = protocol::configuration(options)?;
     let shared = exchange.shared;
     let original = shared.authorization()?;
+    exchange.deadline = exchange.deadline.narrow(original);
+    shared.check_until(Some(exchange.deadline))?;
     let mut header = Header {
         kind: CONFIGURE,
         serial: 1,
         generation: options.configuration.generation().as_raw(),
         authorization_ns: original.ns,
-        expires_ns: crate::clock::stamp_ns(exchange.until)
-            .ok_or(Error::Clock)?
-            .min(original.ns),
+        expires_ns: exchange.deadline.ns,
         bytes: u32::try_from(body.len()).map_err(|_| Error::Protocol)?,
         error: None,
     };
@@ -203,47 +238,16 @@ fn session(
     if ready.expires_ns != header.expires_ns || echoed != body {
         return Err(Error::Protocol);
     }
-    shared.reply(Reply::Ready)?;
+    shared.reply(Reply::Ready, exchange.deadline)?;
     loop {
         // Observe the original child even without another caller request. A
         // successful try_wait is retained by Child's later final wait.
         if child.try_wait().map_err(|_| Error::Native)?.is_some() {
             return Err(Error::Native);
         }
-        shared.check()?;
-        let current = shared.authorization()?;
-        let request = {
-            let mut mail = shared.mail.lock().map_err(|_| Error::Stopped)?;
-            if shared.stopped.load(Ordering::Acquire) {
-                return Err(mail.error.unwrap_or(Error::Stopped));
-            }
-            let reply_until = match mail.reply.as_ref() {
-                Some(Reply::Ready | Reply::Renewed) => Some(exchange.until),
-                Some(Reply::Packets(packets)) => Some(packets.expires),
-                None => None,
-            };
-            if reply_until.is_some_and(|until| Instant::now() >= until) {
-                return Err(Error::Expired);
-            }
-            if let Some(request) = mail.request.take() {
-                Some(request)
-            } else {
-                let timeout = current
-                    .until
-                    .min(reply_until.unwrap_or(current.until))
-                    .saturating_duration_since(Instant::now())
-                    .min(MONITOR_TURN);
-                drop(
-                    shared
-                        .wake
-                        .wait_timeout(mail, timeout)
-                        .map_err(|_| Error::Stopped)?,
-                );
-                None
-            }
-        };
+        let request = next_request(shared, exchange.deadline)?;
         let Some(request) = request else { continue };
-        shared.check()?;
+        let current = shared.authorization()?;
         let (until, renewed) = match request {
             Request::Pull(until) => (until, None),
             Request::Renew {
@@ -251,14 +255,12 @@ fn session(
                 expires,
             } => (expires, Some(authorization)),
         };
-        exchange.until = until;
+        exchange.deadline = until.narrow(current);
+        shared.check_until(Some(exchange.deadline))?;
         header.kind = if renewed.is_some() { RENEW } else { PULL };
         header.serial = header.serial.checked_add(1).ok_or(Error::Protocol)?;
         header.authorization_ns = renewed.map_or(current.ns, |authorization| authorization.ns);
-        header.expires_ns = crate::clock::stamp_ns(until)
-            .ok_or(Error::Clock)?
-            .min(current.ns)
-            .min(header.authorization_ns);
+        header.expires_ns = exchange.deadline.ns.min(header.authorization_ns);
         header.bytes = 0;
         header.write(exchange, false, &[])?;
         let (received, body) = reply(exchange, header)?;
@@ -266,21 +268,100 @@ fn session(
             if received.expires_ns != header.expires_ns || !body.is_empty() {
                 return Err(Error::Protocol);
             }
-            shared.install_authorization(current.ns, authorization, exchange.until)?;
-            shared.reply(Reply::Renewed)?;
+            shared.install_authorization(current.ns, authorization, exchange.deadline)?;
+            shared.reply(Reply::Renewed, exchange.deadline)?;
             continue;
         }
         let expires = crate::clock::local_instant(received.expires_ns)
             .ok_or(Error::Clock)?
-            .min(until);
-        if Instant::now() >= expires {
-            return Err(Error::Expired);
+            .min(until.until);
+        let deadline = Deadline {
+            until: expires,
+            ns: received.expires_ns,
         }
+        .narrow(exchange.deadline);
+        shared.check_until(Some(deadline))?;
         let (units, counters) = protocol::read_packets(&body, options)?;
-        shared.reply(Reply::Packets(Packets {
-            units,
-            counters,
-            expires,
-        }))?;
+        shared.reply(
+            Reply::Packets(Packets {
+                units,
+                counters,
+                expires: deadline.until,
+                expires_ns: deadline.ns,
+            }),
+            deadline,
+        )?;
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn raw_expired_exchange_never_reads_or_writes_even_with_live_uptime() {
+        for reading in [false, true] {
+            let shared = super::super::deadline_tests::shared(|| {
+                panic!("expired exchange cannot consult the permission monitor")
+            });
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            let mut retained = socket.try_clone().unwrap();
+            let mut exchange = Exchange {
+                socket,
+                shared: &shared,
+                deadline: Deadline {
+                    until: Instant::now() + Duration::from_secs(3600),
+                    ns: 1,
+                },
+            };
+            if reading {
+                peer.write_all(b"x").unwrap();
+                assert!(exchange.read(&mut [0]).is_err());
+                let mut original = [0];
+                retained.read_exact(&mut original).unwrap();
+                assert_eq!(
+                    original, *b"x",
+                    "expired read must leave original bytes untouched"
+                );
+            } else {
+                assert!(exchange.write(b"x").is_err());
+                peer.set_nonblocking(true).unwrap();
+                assert_eq!(
+                    peer.read(&mut [0]).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            }
+            assert_eq!(shared.error(), Error::Expired);
+        }
+    }
+
+    #[test]
+    fn queued_request_and_uncollected_ack_retain_their_original_native_caps() {
+        let shared = super::super::deadline_tests::shared(|| true);
+        let current = shared.authorization().unwrap();
+        let expired = Deadline {
+            until: current.until,
+            ns: 1,
+        };
+        {
+            let mut mail = shared.mail.lock().unwrap();
+            mail.request = Some(Request::Pull(expired));
+            assert_eq!(pending_deadline(&mail, current), Some(expired));
+        }
+        assert!(matches!(
+            next_request(&shared, current),
+            Err(Error::Expired)
+        ));
+        let mut mail = shared.mail.lock().unwrap();
+        mail.request = None;
+        mail.reply = Some(Reply::Renewed);
+        assert_eq!(pending_deadline(&mail, expired), Some(expired));
+        drop(mail);
+        assert!(matches!(
+            next_request(&shared, expired),
+            Err(Error::Expired)
+        ));
+        assert_eq!(shared.authorization().unwrap(), current);
     }
 }

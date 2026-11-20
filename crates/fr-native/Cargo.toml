@@ -76,6 +76,9 @@ macos-desktop = ["cli", "dep:fr-files", "dep:fr-transport", "frd/macos-viewer", 
 # epoch. Does not enable host capture or microphone forwarding.
 macos-audio = ["macos-desktop", "macos-opus-process", "opus-playout"]
 macos-opus-process = ["opus-process"]
+# Mac client capture uses the same private microphone child and AudioUp owner.
+macos-microphone-process = ["microphone-process", "opus"]
+macos-microphone = ["macos-desktop", "macos-microphone-process", "microphone-session"]
 # The per-lease input executor binary `fr-input-agent`; each platform's input
 # feature enables it.
 input-agent = []
@@ -108,11 +111,14 @@ linux-pulse-playback = ["linux-audio-playout"]
 # Explicit named client recording source; permission-gated worker API only.
 linux-microphone-capture = ["linux-pulse-playback"]
 # Per-session, explicitly selected microphone capture in a supervised child.
-linux-microphone-process = ["linux-microphone-capture"]
+microphone-process = ["dep:fr-client"]
+microphone-uplink = ["microphone-process", "dep:fr-transport", "dep:asupersync"]
+microphone-session = ["microphone-uplink", "dep:frd"]
+linux-microphone-process = ["linux-microphone-capture", "microphone-process"]
 # Original authenticated uplink, independent of public CLI capability offers.
-linux-microphone-uplink = ["linux-microphone-process", "dep:fr-transport", "dep:asupersync"]
+linux-microphone-uplink = ["linux-microphone-process", "microphone-uplink"]
 # Original ControlledViewer scheduling and visible local consent API.
-linux-microphone-session = ["linux-microphone-uplink", "dep:frd"]
+linux-microphone-session = ["linux-microphone-uplink", "microphone-session"]
 # Public controlled-client talk/mute UI, separate from the library-only boundary.
 linux-microphone = ["linux-microphone-session", "linux-session-ui"]
 # Explicit native virtual source; no CLI/GUI, capture, runtime or default enable.
@@ -207,7 +213,7 @@ required-features = ["opus-process"]
 [[bin]]
 name = "fr-audio-worker"
 path = "src/bin/audio_worker.rs"
-required-features = ["linux-microphone-process"]
+required-features = ["microphone-process"]
 
 # Host virtual microphone device; its containing supervisor owns the Opus sibling.
 [[bin]]

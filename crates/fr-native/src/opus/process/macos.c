@@ -54,10 +54,10 @@ static void *parent_exited(void *context) {
     _exit(70);
 }
 
-int fr_opus_macos_prepare(uint32_t parent) {
+static int prepare(uint32_t parent, int standard_descriptors) {
     if (parent <= 1 || parent > INT_MAX || getppid() != (pid_t)parent ||
         getuid() != geteuid() || getgid() != getegid()) return 0;
-    for (int descriptor = 0; descriptor < 2; ++descriptor) {
+    for (int descriptor = 0; descriptor < standard_descriptors; ++descriptor) {
         int type = 0;
         socklen_t size = sizeof(type);
         uid_t user;
@@ -98,4 +98,16 @@ int fr_opus_macos_prepare(uint32_t parent) {
         return 0;
     }
     return getppid() == (pid_t)parent;
+}
+
+int fr_opus_macos_prepare(uint32_t parent) {
+    return prepare(parent, 2);
+}
+
+/* The microphone child additionally retains its original parent's dedicated
+ * revoke socket on fd 2. Both capture and permission-only modes use this same
+ * parent/descriptor boundary before starting any Foundation or device work.
+ * Its ABI uses the microphone status values (0 success), unlike legacy Opus. */
+int fr_mic_bind_parent(uint32_t parent) {
+    return prepare(parent, 3) ? 0 : -7;
 }

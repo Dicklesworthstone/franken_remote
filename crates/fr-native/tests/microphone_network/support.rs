@@ -43,8 +43,10 @@ pub fn options(server: &Path) -> Options {
     Options {
         image: Path::new(env!("CARGO_BIN_EXE_fr-audio-worker")).into(),
         source: Source {
-            server: server.into(),
-            name: "fr_test_mic".into(),
+            selection: fr_native::audio_process::Selection::Pulse {
+                server: server.into(),
+                source: "fr_test_mic".into(),
+            },
             bitrate: 64_000,
         },
         profile: Profile {

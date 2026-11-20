@@ -13,8 +13,7 @@ const CONFIG_BYTES: usize = 16;
 const BATCH_BYTES: usize = 12;
 const PACKET_BYTES: usize = 20;
 pub(super) const MAX_BODY_BYTES: usize = BATCH_BYTES
-    + crate::pulse::microphone::MAX_CAPTURE_PACKETS
-        * (PACKET_BYTES + fr_core::audio::MAX_OPUS_PAYLOAD_BYTES);
+    + super::MAX_CAPTURE_PACKETS * (PACKET_BYTES + fr_core::audio::MAX_OPUS_PAYLOAD_BYTES);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Header {
@@ -149,7 +148,12 @@ pub(super) fn body(input: &mut impl Read, header: Header) -> Result<Vec<u8>, Err
 
 pub(super) fn configuration(options: &CaptureOptions) -> Result<Vec<u8>, Error> {
     options.validate()?;
-    let server = options.server.to_str().ok_or(Error::Selection)?;
+    let (kind, server, source) = match &options.selection {
+        super::Selection::Pulse { server, source } => {
+            (0, server.to_str().ok_or(Error::Selection)?, source.as_str())
+        }
+        super::Selection::Mac { uid } => (1, "", uid.as_str()),
+    };
     let mut b = vec![0; CONFIG_BYTES];
     b[0] = options.configuration.channels().count();
     b[1] = u8::try_from(options.configuration.frame_duration_ms())
@@ -158,16 +162,18 @@ pub(super) fn configuration(options: &CaptureOptions) -> Result<Vec<u8>, Error> 
     b[4..8].copy_from_slice(&options.bitrate.to_be_bytes());
     b[8..10].copy_from_slice(&options.max_packet_bytes.to_be_bytes());
     b[10] = u8::try_from(server.len()).map_err(|_| Error::Selection)?;
-    b[11] = u8::try_from(options.source.len()).map_err(|_| Error::Selection)?;
+    b[11] = u8::try_from(source.len()).map_err(|_| Error::Selection)?;
+    b[12] = kind;
     b.extend_from_slice(server.as_bytes());
-    b.extend_from_slice(options.source.as_bytes());
+    b.extend_from_slice(source.as_bytes());
     Ok(b)
 }
 pub(super) fn read_configuration(header: Header, b: &[u8]) -> Result<CaptureOptions, Error> {
     if header.kind != CONFIGURE
         || header.serial != 1
         || b.len() < CONFIG_BYTES
-        || b[12..16] != [0; 4]
+        || b[12] > 1
+        || b[13..16] != [0; 3]
     {
         return Err(Error::Protocol);
     }
@@ -181,8 +187,14 @@ pub(super) fn read_configuration(header: Header, b: &[u8]) -> Result<CaptureOpti
     let source =
         std::str::from_utf8(&b[CONFIG_BYTES + server_len..]).map_err(|_| Error::Selection)?;
     let options = CaptureOptions {
-        server: server.into(),
-        source: source.into(),
+        selection: match b[12] {
+            0 => super::Selection::Pulse {
+                server: server.into(),
+                source: source.into(),
+            },
+            1 if server.is_empty() => super::Selection::Mac { uid: source.into() },
+            _ => return Err(Error::Selection),
+        },
         configuration: AudioStreamConfig::new(
             AudioDirection::Uplink,
             AudioGeneration::from_raw(header.generation),
@@ -203,7 +215,7 @@ pub(super) fn packets(
     counters: CaptureCounters,
     options: &CaptureOptions,
 ) -> Result<Vec<u8>, Error> {
-    if units.len() > crate::pulse::microphone::MAX_CAPTURE_PACKETS {
+    if units.len() > super::MAX_CAPTURE_PACKETS {
         return Err(Error::Protocol);
     }
     let mut bytes = BATCH_BYTES;
@@ -248,7 +260,7 @@ pub(super) fn read_packets(
 ) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
     if !(BATCH_BYTES..=MAX_BODY_BYTES).contains(&b.len())
         || b[1..4] != [0; 3]
-        || usize::from(b[0]) > crate::pulse::microphone::MAX_CAPTURE_PACKETS
+        || usize::from(b[0]) > super::MAX_CAPTURE_PACKETS
     {
         return Err(Error::Protocol);
     }

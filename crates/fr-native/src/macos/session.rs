@@ -127,6 +127,7 @@ pub enum LocalStop {
 #[derive(Debug, Default, Clone)]
 pub struct Report {
     pub clipboard: ClipboardReport,
+    pub microphone: Option<MicrophoneReport>,
     pub attempts: u8,
     pub opened: u32,
     pub presented: u64,
@@ -709,6 +710,43 @@ pub struct AudioView {
 type InstallAudio = Box<dyn FnMut(&mut NativeObserver) -> Box<dyn AudioRetirement>>;
 type AudioSlot = Rc<RefCell<Option<Rc<dyn AudioRetirement>>>>;
 
+/// Original client microphone owner. Native/UI operations remain nonblocking
+/// on the session thread; completion includes actual permission/capture reap.
+pub trait Microphone {
+    fn may_offer(&self) -> bool;
+    fn turn(&mut self, viewer: &mut ControlledViewer) -> Result<(), CallbackError>;
+    fn pump(&mut self, visible: bool, stopped: bool);
+    fn stop(&mut self);
+    fn complete(&mut self) -> bool;
+    fn report(&self) -> MicrophoneReport;
+}
+
+#[derive(Debug, Clone)]
+// Independent observations: request, host selection, TCC grant and source ready.
+#[allow(clippy::struct_excessive_bools)]
+pub struct MicrophoneReport {
+    pub requested: bool,
+    pub selected: bool,
+    pub permission_granted: bool,
+    /// Actual source Ready reply, before any proof of PCM or remote audibility.
+    pub capture_ready: bool,
+    pub state: &'static str,
+    pub reason: Option<&'static str>,
+}
+impl Default for MicrophoneReport {
+    fn default() -> Self {
+        Self {
+            requested: false,
+            selected: false,
+            permission_granted: false,
+            capture_ready: false,
+            state: "not_started",
+            reason: None,
+        }
+    }
+}
+type MicrophoneSlot = Rc<RefCell<Option<Box<dyn Microphone>>>>;
+
 // These facts have independent owners: chooser configuration, actual service
 // completion, startup ownership and positively completed cleanup.
 #[allow(clippy::struct_excessive_bools)]
@@ -738,6 +776,7 @@ pub struct Session {
     clipboard: Rc<RefCell<clipboard::Clipboard>>,
     audio_install: Option<InstallAudio>,
     audio_owner: AudioSlot,
+    microphone: MicrophoneSlot,
     report: Rc<RefCell<Report>>,
     closed: Rc<Cell<bool>>,
     intent: Rc<RefCell<Intent>>,
@@ -760,6 +799,9 @@ impl Drop for Session {
         }
         if let Some(audio) = self.audio_owner.borrow().as_ref() {
             audio.stop();
+        }
+        if let Some(microphone) = self.microphone.borrow_mut().as_mut() {
+            microphone.stop();
         }
         if let Ok(mut input) = self.input.try_borrow_mut() {
             input.take();
@@ -799,6 +841,7 @@ impl Session {
             clipboard: Rc::default(),
             audio_install: None,
             audio_owner: Rc::default(),
+            microphone: Rc::default(),
             report: Rc::default(),
             closed: Rc::default(),
             intent: Rc::new(RefCell::new(Intent::new(control.is_some()))),
@@ -829,6 +872,14 @@ impl Session {
         install: impl FnMut(&mut NativeObserver) -> Box<dyn AudioRetirement> + 'static,
     ) -> Self {
         self.audio_install = Some(Box::new(install));
+        self
+    }
+    /// One explicit microphone choice for this invocation's first controller.
+    /// Recovered viewing and subsequent control grants cannot reuse its intent.
+    #[must_use]
+    pub fn with_microphone(self, microphone: impl Microphone + 'static) -> Self {
+        self.report.borrow_mut().microphone = Some(microphone.report());
+        *self.microphone.borrow_mut() = Some(Box::new(microphone));
         self
     }
     /// An optional logical point bound for the fitted viewer content.
@@ -1157,6 +1208,44 @@ fn service_audio(window: &RefCell<Option<Window>>, audio: &AudioSlot, stopped: b
     })();
     if result.is_err() {
         owner.controls_failed();
+    }
+}
+
+fn service_microphone(
+    window: &WindowSlot,
+    microphone: &MicrophoneSlot,
+    report: &Rc<RefCell<Report>>,
+    stopped: bool,
+) {
+    let mut owner = microphone.borrow_mut();
+    let Some(owner) = owner.as_mut() else { return };
+    let visible = window
+        .borrow()
+        .as_ref()
+        .and_then(|window| window.state().ok())
+        .is_some_and(|state| state.visible);
+    owner.pump(visible, stopped);
+    report.borrow_mut().microphone = Some(owner.report());
+}
+
+async fn reap_microphone(owner: &MicrophoneSlot, cx: &Cx, deadline: Deadline) -> bool {
+    loop {
+        if owner
+            .borrow_mut()
+            .as_mut()
+            .is_none_or(|owner| owner.complete())
+        {
+            return true;
+        }
+        let Some(timer) = cx.timer_driver() else {
+            return false;
+        };
+        let now = timer.now();
+        if cx.checkpoint().is_err() || now >= deadline.time() {
+            return false;
+        }
+        let remaining = Duration::from_nanos(deadline.time().as_nanos() - now.as_nanos());
+        sleep(now, PUMP.min(remaining)).await;
     }
 }
 
@@ -1775,7 +1864,15 @@ impl Application for Session {
             .files
             .borrow()
             .offer(self.clipboard.borrow().available());
+        let microphone = self
+            .microphone
+            .borrow()
+            .as_ref()
+            .is_some_and(|owner| owner.may_offer());
         let keep = |name: &str| {
+            if name == fr_wire::audio_up::CAPABILITY {
+                return microphone;
+            }
             !matches!(
                 name,
                 fr_wire::attachment::FILES_CAPABILITY
@@ -1827,6 +1924,7 @@ impl Application for Session {
         let audio_requested = self.audio_install.is_some();
         let stop_control_requested = self.control.is_some() && self.close_cx.is_some();
         let audio_owner = self.audio_owner.clone();
+        let microphone = self.microphone.clone();
         let file_directions = sharing::flags(&files.borrow()).count_ones();
         let file_selections = files.borrow().file_drop_requested();
         let text_requested = self
@@ -1997,6 +2095,12 @@ impl Application for Session {
                 &audio_owner,
                 stop.is_stopped() || closed.get() || reopen_intent.borrow().pending(),
             );
+            service_microphone(
+                &window,
+                &microphone,
+                &report,
+                stop.is_stopped() || closed.get() || reopen_intent.borrow().pending(),
+            );
         };
         let opened = pumped(opening, &mut pump).await?;
         {
@@ -2085,6 +2189,7 @@ impl Application for Session {
                 let switching = reopen_intent.clone();
                 let results = report.clone();
                 let ui_resize = resize.clone();
+                let ui_microphone = self.microphone.clone();
                 let mut ui = move |state: InteractiveViewerState<'_>, frame| {
                     frames(frame);
                     let eligible = switchable
@@ -2173,6 +2278,10 @@ impl Application for Session {
                             if let Some(input) = ui_input.borrow_mut().as_mut() {
                                 input.refresh_text(viewer)?;
                             }
+                            if let Some(microphone) = ui_microphone.borrow_mut().as_mut() {
+                                microphone.turn(viewer).map_err(|_| ())?;
+                                ui_report.borrow_mut().microphone = Some(microphone.report());
+                            }
                         }
                     }
                     Ok(std::ops::ControlFlow::Continue(()))
@@ -2227,6 +2336,10 @@ impl Application for Session {
         }
         if let Some(audio) = self.audio_owner.borrow().as_ref() {
             audio.stop();
+        }
+        if let Some(microphone) = self.microphone.borrow_mut().as_mut() {
+            microphone.stop();
+            self.report.borrow_mut().microphone = Some(microphone.report());
         }
         self.seal_window_resize();
         let text_retired = retire_text(&self.window, TextRetireMode::Fenced).is_ok();
@@ -2294,7 +2407,15 @@ impl Application for Session {
             let clipboard = reap_clipboard_watchdog(&self.clipboard, cx, deadline).await;
             let audio_owner = self.audio_owner.borrow().clone();
             let audio = reap_audio(audio_owner.as_deref(), cx, deadline).await;
-            if !result || !text_retired || !picker_closed || !commands || !clipboard || !audio {
+            let microphone = reap_microphone(&self.microphone, cx, deadline).await;
+            if !result
+                || !text_retired
+                || !picker_closed
+                || !commands
+                || !clipboard
+                || !audio
+                || !microphone
+            {
                 return Err(CallbackError);
             }
             self.observer = None;

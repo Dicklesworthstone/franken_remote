@@ -3,7 +3,7 @@
 //! from `fr_native::macos::session` in place of the X11 desktop.
 //!
 //! Not implemented on macOS yet, and refused by name rather than ignored:
-//! microphone and system-shortcut capture. Local inspection and disconnect address the same
+//! system-shortcut capture. Local inspection and disconnect address the same
 //! authenticated foreground owner and wait for its actual native cleanup.
 //! Explicit --send/--receive choices, --file-drop native selections and opt-in
 //! local upload commands use the original controlled file lanes.
@@ -19,6 +19,8 @@ mod history;
 mod host_choice;
 #[path = "macos_media.rs"]
 mod media;
+#[path = "macos_microphone.rs"]
+mod microphone;
 use super::{
     Failure, Shutdown, failure, lapse, macos_audio as playback, read_roots, refusal, robot,
     session_control, tailnet,
@@ -39,6 +41,7 @@ fn unsupported(option: &'static str) -> Failure {
 /// Refuse every option this path does not implement, before any network I/O.
 fn check(connection: &Connection) -> Result<(), Failure> {
     playback::check(connection.audio.as_ref(), cfg!(feature = "macos-audio"))?;
+    microphone::check(connection.microphone.as_ref())?;
     if connection.upload.choose_files
         && (!connection.control || !connection.upload.paths.is_empty())
     {
@@ -89,6 +92,12 @@ fn check(connection: &Connection) -> Result<(), Failure> {
         directions,
         connection.audio.is_some(),
     )?;
+    microphone::check_profile(
+        clipboard != 0,
+        directions,
+        connection.audio.is_some(),
+        connection.microphone.is_some(),
+    )?;
     let sharing_width =
         152 + 230 * directions + 184 * clipboard + 144 * u32::from(connection.upload.file_drop);
     let mut minimum_width = if connection.control {
@@ -113,8 +122,6 @@ fn check(connection: &Connection) -> Result<(), Failure> {
     }
     let refused = if connection.capture_system_shortcuts {
         Some("--capture-system-shortcuts is not implemented on macOS yet.")
-    } else if connection.microphone.is_some() {
-        Some("--microphone is not implemented on macOS yet.")
     } else {
         None
     };
@@ -139,6 +146,7 @@ pub(super) fn connect(
     }
     check(connection)?;
     let audio = playback::prepare(connection.audio.as_ref())?;
+    let microphone = microphone::prepare(connection.microphone.as_ref())?;
     // The explicit native choice runs before host lookup or connection startup.
     // It never changes the active viewer's terminal focus-loss policy. Pin its
     // sources through the same original upload owner as --send after the panel
@@ -165,6 +173,7 @@ pub(super) fn connect(
         json,
         selected_files,
         audio.as_ref(),
+        microphone,
     )
     .map_err(|mut error| {
         pending.preserve(&mut error);
@@ -186,6 +195,7 @@ fn connect_selected(
     json: bool,
     selected_files: fr_native::macos::files::Files,
     audio: Option<&playback::Report>,
+    microphone: Option<microphone::Prepared>,
 ) -> Result<String, Failure> {
     fr_native::macos::initialize_application().map_err(|_| {
         failure(
@@ -234,6 +244,7 @@ fn connect_selected(
     .with_files(selected_files)
     .clipboard(connection.control && connection.clipboard);
     session = playback::install(session, audio);
+    session = microphone::install(session, microphone);
     if display == DisplayChoice::Choose {
         session = session.with_display_picker();
     }
@@ -282,6 +293,7 @@ fn connect_selected(
                 2,
             )
         })?;
+        let offer = microphone::offer(offer, connection.microphone.is_some())?;
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
@@ -386,6 +398,7 @@ fn finish(
         if let Some(revocation) = report.lease_revocation {
             error.revocation = crate::terminal::failure(revocation).revocation;
         }
+        microphone::preserve(report.microphone.as_ref(), &mut error);
         error
     });
     media::finish(
@@ -501,11 +514,12 @@ fn finish_result(
         .hardware_decode
         .map_or("unknown", |h| if h { "true" } else { "false" });
     let close = report.close_exchange.map(crate::closure::Report::from);
+    let microphone = microphone::summary(report.microphone.as_ref(), json);
     let mut out = String::new();
     if json {
         let _ = writeln!(
             out,
-            "{{\"outcome\":\"success\",\"platform\":\"macos\",\"attempts\":{},\"viewing_reconnects\":{},\"opened\":{},\"presented\":{},\"hardware_decode\":{},\"approval_requested\":{},\"control\":{{\"requested\":{},\"requests\":{},\"granted\":{},\"keys\":{},\"pointer\":{},\"buttons\":{},\"scrolls\":{},\"results\":{}}},\"ended\":\"{}\",\"local_cleanup_confirmed\":true,\"close_exchange\":{},\"lease_revocation\":{}}}",
+            "{{\"outcome\":\"success\",\"platform\":\"macos\",\"attempts\":{},\"viewing_reconnects\":{},\"opened\":{},\"presented\":{},\"hardware_decode\":{},\"approval_requested\":{},\"control\":{{\"requested\":{},\"requests\":{},\"granted\":{},\"keys\":{},\"pointer\":{},\"buttons\":{},\"scrolls\":{},\"results\":{}}},\"ended\":\"{}\",\"local_cleanup_confirmed\":true,\"close_exchange\":{},\"lease_revocation\":{}{microphone}}}",
             report.attempts,
             report.viewing_reconnects,
             report.opened,
@@ -558,6 +572,9 @@ fn finish_result(
                 "Host input lease: {}.",
                 crate::terminal::lease_text(revocation)
             );
+        }
+        if !microphone.is_empty() {
+            let _ = writeln!(out, "{microphone}");
         }
     }
     Ok(out)

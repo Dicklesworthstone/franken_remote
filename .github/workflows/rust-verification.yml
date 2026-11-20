@@ -608,9 +608,9 @@ jobs:
           cc -std=c11 -O2 -mmacosx-version-min=11.0 -Wall -Wextra -Werror crates/fr-native/src/opus/process/macos.c crates/fr-native/tests/opus_macos_boundary.c -o "$RUNNER_TEMP/fr-opus-macos-boundary"
           "$RUNNER_TEMP/fr-opus-macos-boundary"
       - name: Check native macOS client (including test targets)
-        run: cargo check -p fr-native --all-targets --features macos-desktop,macos-audio --locked
+        run: cargo check -p fr-native --all-targets --features macos-desktop,macos-audio,macos-microphone --locked
       - name: Clippy native macOS client (deny warnings)
-        run: cargo clippy -p fr-native --all-targets --features macos-desktop,macos-audio --locked -- -D warnings
+        run: cargo clippy -p fr-native --all-targets --features macos-desktop,macos-audio,macos-microphone --locked -- -D warnings
       - name: Clippy frd macOS viewer build (deny warnings)
         run: cargo clippy -p frd --lib --bins --features macos-viewer --locked -- -D warnings
       - name: Test macOS control consent, committed text and window sizing
@@ -625,6 +625,11 @@ jobs:
           cargo test -p fr-native --bin fr --features macos-desktop,macos-audio --locked audio::
           cargo test -p fr-native --bin fr --features macos-desktop --locked macos_completion::
           cargo test -p fr-native --bin fr --features macos-desktop --locked session_control:: -- --test-threads=1
+      - name: Test original microphone consent and native process deadlines
+        run: |
+          cargo test -p fr-native --lib --features macos-desktop,macos-audio,macos-microphone --locked macos_microphone_policy::
+          cargo test -p fr-native --lib --features macos-desktop,macos-audio,macos-microphone --locked audio_process::
+          cargo test -p fr-native --bin fr --features macos-desktop,macos-audio,macos-microphone --locked microphone_tests::
 
   # The native macOS host: the ScreenCaptureKit/VideoToolbox capture worker
   # (fr-p1-host-macos-vif), the Quartz input agent with its control indicator

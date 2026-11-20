@@ -619,6 +619,7 @@ fn info_plist() -> String {
 <key>CFBundleVersion</key><string>{version}</string>\n\
 <key>LSMinimumSystemVersion</key><string>13.0</string>\n\
 <key>NSHighResolutionCapable</key><true/>\n\
+<key>NSMicrophoneUsageDescription</key><string>Forward your selected microphone only after you choose Allow microphone and then Talk for this session. Mute stops forwarding.</string>\n\
 </dict>\n</plist>\n",
         version = env!("CARGO_PKG_VERSION")
     )

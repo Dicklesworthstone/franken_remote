@@ -855,15 +855,26 @@ fn parse_command(
             }
             "--microphone-source" if connect => {
                 let source = next_arg(args, &mut index)?;
-                if source.is_empty()
+                #[cfg(target_os = "macos")]
+                let valid = !source.is_empty()
+                    && source.len() <= 255
+                    && source.trim() == source
+                    && !source.chars().any(char::is_control)
+                    && !matches!(source, "system" | "auto");
+                #[cfg(not(target_os = "macos"))]
+                let valid = !(source.is_empty()
                     || source.len() > 255
                     || !source
                         .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte))
-                {
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte)));
+                if !valid {
                     return Err(Failure::new(
                         "microphone_source_invalid",
-                        "Select one explicit PulseAudio source name (1..255 ASCII letters, digits, '_', '-' or '.'); default-source aliases are unavailable.",
+                        if cfg!(target_os = "macos") {
+                            "Select one exact CoreAudio device UID (1..255 UTF-8 bytes), or 'default' to pin the current input once before connecting."
+                        } else {
+                            "Select one explicit PulseAudio source name (1..255 ASCII letters, digits, '_', '-' or '.'); default-source aliases are unavailable."
+                        },
                         2,
                     ));
                 }
