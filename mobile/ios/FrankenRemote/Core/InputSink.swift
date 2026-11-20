@@ -49,6 +49,11 @@ protocol InputSink: AnyObject {
     @discardableResult func button(_ button: PointerButton, pressed: Bool, at point: CGPoint) -> InputStatus
     /// Fractional lines; positive `dy` scrolls toward the end of a document.
     @discardableResult func scroll(dx: Double, dy: Double, at point: CGPoint) -> InputStatus
+    /// Actual current grant only. Choose the gesture's producer before its
+    /// first delta; a refused precise gesture never retries as lines.
+    var supportsPixelScroll: Bool { get }
+    /// Logical scroll distances, independent of picture zoom and screen scale.
+    @discardableResult func scrollPixels(dx: Double, dy: Double, at point: CGPoint) -> InputStatus
     func scrollEnded()
     @discardableResult func key(_ usage: UInt16, pressed: Bool) -> InputStatus
     /// One original ASCII callback; the Rust owner fixes its deadline and view.

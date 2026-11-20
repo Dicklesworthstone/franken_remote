@@ -47,7 +47,8 @@ final class TouchInterpreter {
     var acceleration = PointerAcceleration()
     var scroller = MomentumScroller()
     var mapper = PictureMapper()
-    weak var sink: InputSink?
+    /// Replacement must run original-owner cleanup before a new sink is visible.
+    private(set) weak var sink: InputSink?
 
     // Tuning (points and seconds). A still touch is a tap until the hold
     // (trackpad drag) or long press (direct right click) takes it over: no
@@ -140,6 +141,7 @@ final class TouchInterpreter {
             }
             let distance = Self.distance(first, location)
             let centroid = Self.midpoint(first, location)
+            scroller.begin(precise: controlling && sink?.supportsPixelScroll == true)
             state = .two(Two(ids: (one.id, id), startTime: time, startCentroid: centroid,
                              startDistance: distance, lastCentroid: centroid,
                              lastDistance: distance))
@@ -224,10 +226,19 @@ final class TouchInterpreter {
             case .undecided:
                 break
             case .scroll:
-                let lines = scroller.drag(delta, at: time)
+                let distances = scroller.drag(delta, at: time)
                 if let anchor = scrollPoint(centroid) {
                     scrollAnchor = anchor
-                    sink?.scroll(dx: lines.dx, dy: lines.dy, at: anchor)
+                    guard sendScroll(distances, at: anchor) else {
+                        state = .ignoring
+                        return effects
+                    }
+                } else {
+                    // Crossing a letterbox cannot retain off-picture motion
+                    // and replay it when a later sample returns inside.
+                    stopScroll()
+                    state = .ignoring
+                    return effects
                 }
             case .zoom:
                 if two.lastDistance > 0, distance > 0 {
@@ -290,14 +301,14 @@ final class TouchInterpreter {
     /// Advance timers: hold-to-drag, long-press right click, momentum and
     /// edge auto-pan. Call once per display refresh.
     func tick(time: Double) -> [TouchEffect] {
-        let interval = lastTick.map { min(0.1, max(0, time - $0)) } ?? 0
+        let interval = lastTick.map { max(0, time - $0) } ?? 0
         lastTick = time
         var effects: [TouchEffect] = []
-        if scroller.coasting, let lines = scroller.coast(interval: interval) {
-            if let anchor = scrollAnchor {
-                sink?.scroll(dx: lines.dx, dy: lines.dy, at: anchor)
+        if scroller.coasting {
+            if let distances = scroller.coast(interval: interval), let anchor = scrollAnchor {
+                _ = sendScroll(distances, at: anchor)
             }
-            if !scroller.coasting { sink?.scrollEnded() }
+            if !scroller.coasting, scrollAnchor != nil { stopScroll() }
         }
         switch state {
         case .one(let one) where controlling && !one.moved:
@@ -318,8 +329,8 @@ final class TouchInterpreter {
             let push = edgePush(last)
             if push != .zero {
                 let before = mapper
-                mapper.pan(by: CGVector(dx: push.dx * autoPanSpeed * CGFloat(interval),
-                                        dy: push.dy * autoPanSpeed * CGFloat(interval)))
+                mapper.pan(by: CGVector(dx: push.dx * autoPanSpeed * CGFloat(min(interval, 0.1)),
+                                        dy: push.dy * autoPanSpeed * CGFloat(min(interval, 0.1))))
                 if mapper != before {
                     effects.append(.viewport)
                     if let point = mapper.toPicture(last) {
@@ -385,6 +396,24 @@ final class TouchInterpreter {
     }
 
     // MARK: Internals
+
+    /// A refused gesture is spent. In particular, an unsupported precise
+    /// event does not fall through to the line producer or resume on a new
+    /// grant. Existing original-owner teardown handles held-state cleanup.
+    private func sendScroll(_ distances: (dx: Double, dy: Double), at point: CGPoint) -> Bool {
+        guard controlling, let sink else { stopScroll(); return false }
+        let status = scroller.precise
+            ? sink.scrollPixels(dx: distances.dx, dy: distances.dy, at: point)
+            : sink.scroll(dx: distances.dx, dy: distances.dy, at: point)
+        guard status == .sent || status == .pending else { stopScroll(); return false }
+        return true
+    }
+
+    private func stopScroll() {
+        scroller.stop()
+        scrollAnchor = nil
+        sink?.scrollEnded()
+    }
 
     private func acceptsSample(_ time: Double) -> Bool {
         time.isFinite && presentationStartedAt.map { time > $0 } != false

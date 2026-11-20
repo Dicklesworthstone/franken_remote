@@ -649,6 +649,29 @@ pub extern "C" fn fr_session_scroll(handle: FrHandle, dx: f64, dy: f64, x: f64, 
     input(handle, |s| s.shared().scroll(dx, dy, x, y))
 }
 
+/// Whether the current host grant includes precise logical scrolling. This
+/// never authorizes a future event; the send call rechecks its original owner.
+#[unsafe(no_mangle)]
+pub extern "C" fn fr_session_supports_pixel_scroll(handle: FrHandle) -> bool {
+    lookup(handle).is_some_and(|session| session.shared().supports_pixel_scroll())
+}
+
+/// Scroll by signed logical native distances, with positive y toward the end.
+/// Coordinates are encoded picture pixels; distances are not scaled by that
+/// picture, local zoom or screen density. No implicit pixel-to-line fallback.
+#[unsafe(no_mangle)]
+pub extern "C" fn fr_session_scroll_pixels(
+    handle: FrHandle,
+    dx: f64,
+    dy: f64,
+    x: f64,
+    y: f64,
+) -> i32 {
+    input(handle, |session| {
+        session.shared().scroll_pixels(dx, dy, x, y)
+    })
+}
+
 /// A scroll gesture ended: drop its fractional remainder.
 #[unsafe(no_mangle)]
 pub extern "C" fn fr_session_scroll_end(handle: FrHandle) {

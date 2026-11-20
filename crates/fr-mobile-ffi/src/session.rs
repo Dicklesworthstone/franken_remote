@@ -53,7 +53,7 @@ pub(crate) use upload::Error as UploadError;
 
 use crate::{
     events::{self, Event, Events, kind, state},
-    input::{self, LineScroller},
+    input::{self, ScrollAccumulator},
     local_cursor,
     video::{Cursor, Decoder, FrameSlot},
 };
@@ -85,8 +85,8 @@ use frd::{
         ControlledViewer, ControlledViewerError, InteractiveViewerState, NativeObserver,
         ObserverError, ObserverPolicy, Presentation, StreamingViewerError, Viewer, ViewerControl,
         viewer_events::{
-            ClientInstant, Event as InputEvent, Layout, LocalPoint, Located, NativeCapture,
-            PositionedAction, Source,
+            ClientInstant, Event as InputEvent, InputContext, Layout, LocalPoint, Located,
+            NativeCapture, PositionedAction, Source,
         },
     },
     worker::{Deadline, Launch, LocalPresenter},
@@ -133,6 +133,10 @@ pub struct CapturedInput {
     capture: key_capture::Capture,
     layout: Layout,
     picture: (u32, u32),
+    /// Original readiness epoch, never reacquired when queued scroll submits.
+    /// Optional so held-button release cleanup retains its existing behavior
+    /// while new input is fenced or the view is temporarily suspended.
+    context: Option<InputContext>,
 }
 impl CapturedInput {
     /// Charge time already spent in the native event queue. Call once, after
@@ -235,7 +239,8 @@ struct Granted {
     /// Where the host last saw the pointer: an app switch releases held
     /// buttons here, as no later native point exists.
     last: Option<Located>,
-    scroll: LineScroller,
+    scroll: ScrollAccumulator,
+    scroll_context: Option<InputContext>,
     /// Last checked send bound for this exact text context. The native Send
     /// gesture freezes it; later renewals cannot extend a queued commit.
     text_window: Option<(
@@ -1242,7 +1247,23 @@ impl Shared {
     /// Scroll by `dx`, `dy` lines (fractional; positive y scrolls down) at
     /// encoded picture pixel `(x, y)`; whole lines are sent, the rest kept.
     pub fn scroll(&self, dx: f64, dy: f64, x: f64, y: f64) -> InputResult {
-        self.scroll_inner(None, dx, dy, x, y)
+        self.scroll_inner(None, ScrollUnit::Lines, (dx, dy), (x, y))
+    }
+    /// Precise logical scroll distances. Picture size, display scale and
+    /// local zoom affect only the target coordinate, never these distances.
+    /// An unselected precise mode refuses without emulating line scrolling.
+    pub fn scroll_pixels(&self, dx: f64, dy: f64, x: f64, y: f64) -> InputResult {
+        self.scroll_inner(None, ScrollUnit::Pixels, (dx, dy), (x, y))
+    }
+    /// The current actual grant only; a later event still checks its source,
+    /// view, deadline and selected capability when it enters the queue.
+    pub fn supports_pixel_scroll(&self) -> bool {
+        let mut supported = false;
+        let _ = self.with_granted(|g| {
+            supported = g.source.capabilities().contains(Capability::PixelScroll);
+            InputResult::Pending
+        });
+        supported
     }
     /// Scroll under the original native capture, including its picture mapping.
     /// Stale input never contributes a fractional remainder to a later gesture.
@@ -1254,52 +1275,87 @@ impl Shared {
         x: f64,
         y: f64,
     ) -> InputResult {
-        self.scroll_inner(Some(captured), dx, dy, x, y)
+        self.scroll_inner(Some(captured), ScrollUnit::Lines, (dx, dy), (x, y))
     }
     fn scroll_inner(
         &self,
         captured: Option<CapturedInput>,
-        dx: f64,
-        dy: f64,
-        x: f64,
-        y: f64,
+        unit: ScrollUnit,
+        delta: (f64, f64),
+        (x, y): (f64, f64),
     ) -> InputResult {
+        // Capture the callback's time before the grant lock; a delayed native
+        // callback cannot create a fresh lifetime after waiting for that lock.
+        let started = Instant::now();
         self.with_granted(move |g| {
             // Immediate mobile input and native queued input both retain one
             // original source bound. A later fraction may only shorten it.
-            let Some(captured) = captured.or_else(|| capture_input(g)) else {
-                return InputResult::ControlLost;
+            let captured = if let Some(captured) = captured {
+                captured
+            } else {
+                let Some(captured) = capture_input(g) else {
+                    return InputResult::ControlLost;
+                };
+                let Some(captured) = captured.with_queue_age(started.elapsed()) else {
+                    // A callback begun before this grant or delayed past its
+                    // own bound admits nothing and cannot stop a successor.
+                    g.scroll.reset();
+                    return InputResult::Busy;
+                };
+                captured
             };
             if !captured.current(g) {
                 return InputResult::ControlLost;
             }
-            if !g.source.capabilities().contains(Capability::LineScroll) {
+            let required = match unit {
+                ScrollUnit::Lines => Capability::LineScroll,
+                ScrollUnit::Pixels => Capability::PixelScroll,
+            };
+            if !g.source.capabilities().contains(required) {
+                g.scroll.reset();
                 return InputResult::Unsupported;
             }
+            let Some(context) = captured.context.as_ref() else {
+                g.scroll.reset();
+                g.scroll_context = None;
+                return InputResult::Busy;
+            };
+            if g.scroll_context.as_ref() != Some(context) {
+                g.scroll.reset();
+                g.scroll_context = Some(context.clone());
+            }
             let Some(location) = locate(g, Some(&captured), x, y) else {
+                g.scroll.reset();
                 return InputResult::Outside;
             };
             let Ok(now) = g.source.clock() else {
                 return InputResult::ControlLost;
             };
-            let (sampled, until) = captured.capture.bounds();
-            let (lx, ly, until) = match g.scroll.add_captured(dx, dy, now.0, until) {
-                Ok(Some(lines)) => lines,
+            let delta = match g.scroll.add_captured(
+                unit,
+                delta,
+                captured.capture.bounds(),
+                now.0,
+                g.source.capabilities(),
+            ) {
+                Ok(Some(delta)) => delta,
                 Ok(None) => return InputResult::Pending,
                 Err(_) => return InputResult::ControlLost,
             };
             let event = InputEvent::Positioned {
                 location,
                 action: PositionedAction::Scroll {
-                    x: lx,
-                    y: ly,
-                    unit: ScrollUnit::Lines,
+                    x: delta.x,
+                    y: delta.y,
+                    unit: delta.unit,
                 },
             };
-            match g
-                .source
-                .push_until(event, ClientInstant(sampled), ClientInstant(until))
-            {
+            match g.source.push_in_context_until(
+                context,
+                event,
+                ClientInstant(delta.sampled),
+                ClientInstant(delta.until),
+            ) {
                 Ok(()) => InputResult::Sent,
                 Err(_) => InputResult::ControlLost,
             }
@@ -1537,6 +1593,7 @@ fn release_held(g: &mut Granted) -> InputResult {
 }
 
 fn capture_input(g: &Granted) -> Option<CapturedInput> {
+    let context = g.source.input_context().ok().flatten();
     let sampled = g.source.clock().ok()?;
     let capture = key_capture::Capture::new(
         &g.stop,
@@ -1548,6 +1605,7 @@ fn capture_input(g: &Granted) -> Option<CapturedInput> {
         capture,
         layout: g.layout.clone(),
         picture: g.picture,
+        context,
     })
 }
 
@@ -2177,7 +2235,8 @@ fn attach(
                 keys: [false; 256],
                 buttons: [false; 5],
                 last: None,
-                scroll: LineScroller::default(),
+                scroll: ScrollAccumulator::default(),
+                scroll_context: None,
                 text_window: None,
                 key_window: None,
                 typing: input::typing::Batches::default(),

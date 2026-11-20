@@ -606,6 +606,12 @@ final class RemoteSession: ObservableObject, InputSink {
         InputStatus(code: fr_session_scroll(handle, dx, dy, Double(point.x), Double(point.y)))
     }
 
+    var supportsPixelScroll: Bool { fr_session_supports_pixel_scroll(handle) }
+
+    @discardableResult func scrollPixels(dx: Double, dy: Double, at point: CGPoint) -> InputStatus {
+        InputStatus(code: fr_session_scroll_pixels(handle, dx, dy, Double(point.x), Double(point.y)))
+    }
+
     func scrollEnded() {
         fr_session_scroll_end(handle)
     }

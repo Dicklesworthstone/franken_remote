@@ -445,13 +445,14 @@ establish those results.
 
 ## Input
 
-The app requests keys, absolute pointer, buttons, line scroll and optional
-committed Unicode text. It never synthesizes repeat; a held key stays held
-until released. The original connection offer advertises the optional
-committed-text boundary. The requested operations are then intersected with
-the host's negotiated profile before the control request: a host without text
-support keeps physical-key control, and a text call returns
-`FR_UNSUPPORTED`. Pixel-precise scrolling remains unrequested.
+The app requests keys, absolute pointer, buttons, line scroll, optional
+precise logical scroll and committed Unicode text. It never synthesizes
+repeat; a held key stays held until released. The original connection offer
+advertises precise scroll and committed text independently. The requested
+operations are then intersected with the host's negotiated profile before
+the control request: a host without text support keeps physical-key control,
+and a text call returns `FR_UNSUPPORTED`. Hosts without precise scroll retain
+the separate line-scroll gesture producer described below.
 
 - Positions use the encoded-picture-sized input area. The app undoes its
   local zoom, pan, rotation and safe-area placement (`PictureMapper`) and
@@ -538,6 +539,34 @@ moves with the finger rather than a network round trip later. Otherwise the
 cursor is drawn where the host reports it, and the pointer follows the
 host's cursor (a host-side move is kept by the next drag). Two fingers
 moving together scroll; a pinch, even with one finger still, zooms.
+
+The two-finger gesture now chooses precise logical scrolling when the host
+has actually granted `native-input-pixel-scroll` v1. Finger travel stays in
+UIKit logical points, with the user's scroll-speed setting; picture size,
+Retina density and local zoom never multiply the distance. Hosts without that
+grant use the existing separate line-step gesture producer. The mode is fixed
+before the first delta and stays fixed through momentum: a refused precise
+event is discarded, never retried or converted to lines. Both modes stop the
+gesture on refusal. A display callback delayed more than 100 ms discards old
+momentum instead of resuming it after the stall.
+
+The additive C calls are `fr_session_supports_pixel_scroll` and
+`fr_session_scroll_pixels`; the existing line-scroll call and structure layouts
+are unchanged. Rust quantizes precise distances to signed 16.16 and retains at
+most one sub-quantum fraction per axis. Fractions keep the oldest contributing
+capture time and the earliest exclusive deadline, including time spent waiting
+for the native grant lock. Mode changes, other input, expiry, source retirement
+and view replacement discard this state. Enqueue validates the original
+uninterrupted input context under the same queue lock; a suspend/resume with
+identical numerical view generations cannot rebind the old action. The existing
+host ticket and submission-time authority checks remain in force.
+
+This slice tracks `fr-p3-ios-app-rh8.1`. Portable Rust regressions exercise the
+real quantizer and event queue; Apple session/C ABI and Swift regressions cover
+negotiation, legacy lines, scale independence, momentum, refusal and replacement.
+Simulator execution and real-device scroll feel require the Apple validation
+lane; this source change does not establish native touch or host-injection
+qualification.
 
 ## Lifecycle
 
@@ -646,9 +675,9 @@ own screen.
 - Control from the app in a live session (touch to pointer, keys) and a
   60 fps host; the live session above is view-only, in the simulator.
 - Reaching an IPv6-only host saved by name only, without a listing.
-- Pixel-precise scrolling (the app sends line scrolls; macOS hosts now offer
-  pixel scrolls), a full native text-composition interface, and live device
-  qualification of the committed-Unicode callback path. The callback and
+- Device qualification of negotiated precise scrolling, a full native
+  text-composition interface, and live device qualification of the
+  committed-Unicode callback path. The callback and
   negotiation regressions establish source policy, not native OS insertion.
 - iPad pointer devices as a real mouse (hover, secondary click), clipboard
   and audio. Approved display selection and cleanup-confirmed switching

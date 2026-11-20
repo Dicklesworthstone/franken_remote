@@ -10,9 +10,9 @@ final class TouchInterpreterTests: XCTestCase {
     override func setUp() {
         sink = RecordingSink()
         touch = TouchInterpreter()
+        touch.replaceSink(sink)
         touch.mapper = PictureMapper(viewSize: CGSize(width: 384, height: 800),
                                      picture: CGSize(width: 1920, height: 1080))
-        touch.sink = sink
         touch.screenScale = 3
     }
 
@@ -219,6 +219,123 @@ final class TouchInterpreterTests: XCTestCase {
         _ = touch.ended(2, at: CGPoint(x: 230, y: 380), time: 0.06)
         XCTAssertTrue(touch.scroller.coasting)
         _ = touch.began(3, at: middle, time: 0.1)
+        XCTAssertFalse(touch.scroller.coasting)
+        XCTAssertEqual(sink.calls.last, .scrollEnded)
+    }
+
+    private func beginTwoFingerScroll() {
+        _ = touch.began(1, at: CGPoint(x: 150, y: 500), time: 0)
+        _ = touch.began(2, at: CGPoint(x: 230, y: 500), time: 0.01)
+    }
+
+    private func moveAndLiftScroll() {
+        for (n, y) in [490.0, 470.0, 440.0].enumerated() {
+            let time = 0.02 + Double(n) * 0.016
+            _ = touch.moved(1, to: CGPoint(x: 150, y: y), time: time)
+            _ = touch.moved(2, to: CGPoint(x: 230, y: y), time: time)
+        }
+        _ = touch.ended(1, at: CGPoint(x: 150, y: 440), time: 0.06)
+        _ = touch.ended(2, at: CGPoint(x: 230, y: 440), time: 0.06)
+    }
+
+    func testPreciseGestureAndMomentumKeepLogicalDistanceAndOriginalUnit() {
+        touch.controlling = true
+        sink.supportsPixelScroll = true
+        touch.scroller.pointsPerLine = 1000
+        touch.screenScale = 3
+        touch.mapper.setZoom(2, at: middle)
+        beginTwoFingerScroll()
+        // A later capability observation cannot reinterpret the in-flight
+        // gesture. The real Rust sink rechecks the granted mode on each send.
+        sink.supportsPixelScroll = false
+        moveAndLiftScroll()
+        XCTAssertEqual(sink.pixelScrolls.reduce(0) { $0 + $1.1 }, 60, accuracy: 1e-9)
+        XCTAssertTrue(sink.scrolls.isEmpty)
+        XCTAssertTrue(touch.scroller.coasting)
+        let before = sink.pixelScrolls.count
+        _ = touch.tick(time: 0.06)
+        _ = touch.tick(time: 0.06 + 1.0 / 60)
+        XCTAssertGreaterThan(sink.pixelScrolls.count, before)
+        XCTAssertTrue(sink.scrolls.isEmpty, "precise momentum cannot become line input")
+    }
+
+    func testLegacyLineGestureDoesNotUpgradeAnAlreadyCapturedDelta() {
+        touch.controlling = true
+        touch.scroller.pointsPerLine = 20
+        beginTwoFingerScroll()
+        sink.supportsPixelScroll = true
+        moveAndLiftScroll()
+        XCTAssertEqual(sink.scrolls.reduce(0) { $0 + $1.1 }, 3, accuracy: 1e-9)
+        XCTAssertTrue(sink.pixelScrolls.isEmpty)
+        _ = touch.tick(time: 0.06)
+        _ = touch.tick(time: 0.06 + 1.0 / 60)
+        XCTAssertTrue(sink.pixelScrolls.isEmpty)
+    }
+
+    func testRefusedPreciseGestureStopsWithoutFallbackOrAutomaticReplay() {
+        touch.controlling = true
+        sink.supportsPixelScroll = true
+        sink.scrollResult = .unsupported
+        beginTwoFingerScroll()
+        moveAndLiftScroll()
+        XCTAssertEqual(sink.pixelScrolls.count, 1)
+        XCTAssertTrue(sink.scrolls.isEmpty)
+        XCTAssertFalse(touch.scroller.coasting)
+        XCTAssertTrue(touch.isIdle)
+        XCTAssertEqual(sink.calls.last, .scrollEnded)
+        let before = sink.calls.count
+        sink.scrollResult = .sent
+        sink.supportsPixelScroll = false
+        _ = touch.tick(time: 1)
+        _ = touch.tick(time: 2)
+        XCTAssertEqual(sink.calls.count, before, "a fresh capability cannot retry the refused gesture")
+    }
+
+    func testPresentationRetirementDiscardsPreciseMomentumBeforeAnIdenticalReplacement() {
+        touch.controlling = true
+        sink.supportsPixelScroll = true
+        beginTwoFingerScroll()
+        moveAndLiftScroll()
+        XCTAssertTrue(touch.scroller.coasting)
+        touch.retirePresentation(at: 0.07)
+        let before = sink.calls.count
+        touch.mapper.setPicture(CGSize(width: 1920, height: 1080))
+        touch.controlling = true
+        _ = touch.tick(time: 0.08)
+        _ = touch.tick(time: 0.1)
+        XCTAssertEqual(sink.calls.count, before)
+        XCTAssertFalse(touch.scroller.coasting)
+    }
+
+    func testSessionReplacementEndsPreciseMomentumOnlyOnItsOriginalSink() {
+        touch.controlling = true
+        sink.supportsPixelScroll = true
+        beginTwoFingerScroll()
+        moveAndLiftScroll()
+        XCTAssertTrue(touch.scroller.coasting)
+        let next = RecordingSink()
+        next.supportsPixelScroll = true
+        touch.replaceSink(next)
+        XCTAssertEqual(sink.calls.last, .scrollEnded)
+        XCTAssertTrue(next.calls.isEmpty)
+        touch.mapper.setPicture(CGSize(width: 1920, height: 1080))
+        touch.controlling = true
+        _ = touch.tick(time: 0.08)
+        _ = touch.tick(time: 0.1)
+        XCTAssertTrue(next.calls.isEmpty, "old momentum cannot enter the replacement grant")
+        XCTAssertFalse(touch.scroller.coasting)
+    }
+
+    func testLateDisplayCallbackDiscardsOldPreciseMomentum() {
+        touch.controlling = true
+        sink.supportsPixelScroll = true
+        beginTwoFingerScroll()
+        moveAndLiftScroll()
+        _ = touch.tick(time: 0.06)
+        let before = sink.pixelScrolls.count
+        _ = touch.tick(time: 1)
+        _ = touch.tick(time: 1.02)
+        XCTAssertEqual(sink.pixelScrolls.count, before)
         XCTAssertFalse(touch.scroller.coasting)
         XCTAssertEqual(sink.calls.last, .scrollEnded)
     }

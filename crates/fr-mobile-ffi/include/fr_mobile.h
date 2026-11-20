@@ -290,6 +290,13 @@ int32_t fr_session_pointer(FrHandle session, double x, double y);
 int32_t fr_session_button(FrHandle session, uint32_t button, bool pressed,
                           double x, double y);
 int32_t fr_session_scroll(FrHandle session, double dx, double dy, double x, double y);
+/* Precise scroll is independently negotiated; false is not permission to
+ * convert these distances to lines. The send call still rechecks authority.
+ * dx/dy are logical native scroll units, unaffected by zoom, picture size or
+ * screen density; x/y remain encoded picture coordinates. Signed 16.16 wire
+ * quantization retains only a bounded original-deadline sub-unit fraction. */
+bool fr_session_supports_pixel_scroll(FrHandle session);
+int32_t fr_session_scroll_pixels(FrHandle session, double dx, double dy, double x, double y);
 void fr_session_scroll_end(FrHandle session);
 int32_t fr_session_key(FrHandle session, uint16_t usage, bool pressed);
 /* Capture once BEFORE mapping/queueing a completed ASCII callback. Refusal

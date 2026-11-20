@@ -128,8 +128,8 @@ impl TextState {
 struct Captured {
     event: Event,
     sampled: ClientInstant,
-    /// A Unicode commit or context-bound native key cannot acquire a new view
-    /// while queued. Other positioned events retain their checked Layout.
+    /// A Unicode commit or context-bound native event cannot acquire a new
+    /// view while queued. Positioned events also retain their checked Layout.
     text_context: Option<TextState>,
     /// An original native send bound, never a renewed ticket. Releases remain
     /// eligible for cleanup after this bound if the host already holds them.
@@ -363,6 +363,19 @@ impl Source {
         sampled: ClientInstant,
         until: ClientInstant,
     ) -> Result<(), Error> {
+        self.push_in_context_until(context, Event::Key { key, transition }, sampled, until)
+    }
+    /// Submit an event under its original uninterrupted view and exclusive
+    /// deadline. Context validation and enqueue share the queue lock, so a
+    /// concurrent suspension cannot rebind retained scroll fractions to a
+    /// resumed view. As with ordered keys, a refused event fences this source.
+    pub fn push_in_context_until(
+        &mut self,
+        context: &InputContext,
+        event: Event,
+        sampled: ClientInstant,
+        until: ClientInstant,
+    ) -> Result<(), Error> {
         let result = (|| {
             let current = self.clock()?;
             not_future(sampled, current)?;
@@ -379,13 +392,8 @@ impl Source {
             if !context.0.belongs_to(&self.queue) {
                 return Err(Error::StaleInputContext);
             }
-            self.push_bounded(
-                Event::Key { key, transition },
-                sampled,
-                Some(context.0.state),
-                Some(until),
-            )
-            .map_err(input_context_error)
+            self.push_bounded(event, sampled, Some(context.0.state), Some(until))
+                .map_err(input_context_error)
         })();
         if result.is_err() && !(result == Err(Error::Closed) && self.control.input_fenced()) {
             self.stop();

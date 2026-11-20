@@ -1,12 +1,16 @@
 import CoreGraphics
 import Foundation
 
-/// Two-finger scroll physics: finger travel becomes fractional lines, and a
-/// flick keeps scrolling with exponential deceleration (like UIScrollView's
-/// normal rate) until it is slow or a new touch stops it.
+/// Two-finger scroll physics. The gesture chooses a line-step or precise
+/// logical-distance producer before the first delta, and keeps it through
+/// momentum. A host refusal never converts or retries one mode as the other.
 struct MomentumScroller: Equatable {
     /// View points of finger travel per line.
     var pointsPerLine: CGFloat = 18
+    /// User-selected speed for the precise producer. View zoom, encoded
+    /// picture dimensions and display density never enter this conversion.
+    var preciseScale: CGFloat = 1
+    private(set) var precise = false
     /// Natural scrolling: content follows the finger (finger up = scroll down).
     var natural = true
     /// Velocity decays by e every `timeConstant` seconds.
@@ -21,16 +25,23 @@ struct MomentumScroller: Equatable {
     private var samples: [(time: Double, delta: CGVector)] = []
 
     static func == (a: MomentumScroller, b: MomentumScroller) -> Bool {
-        a.pointsPerLine == b.pointsPerLine && a.natural == b.natural && a.velocity == b.velocity
-            && a.coasting == b.coasting
+        a.pointsPerLine == b.pointsPerLine && a.preciseScale == b.preciseScale
+            && a.precise == b.precise && a.natural == b.natural
+            && a.velocity == b.velocity && a.coasting == b.coasting
     }
 
-    /// Lines to scroll for a finger delta (view points) while touching.
+    mutating func begin(precise: Bool) {
+        stop()
+        self.precise = precise
+    }
+
+    /// Distances in the gesture's original unit for one view-point delta.
     mutating func drag(_ delta: CGVector, at time: Double) -> (dx: Double, dy: Double) {
         coasting = false
         samples.append((time, delta))
         samples.removeAll { time - $0.time > 0.08 }
-        return lines(delta)
+        if samples.count > 32 { samples.removeFirst(samples.count - 32) }
+        return distances(delta)
     }
 
     /// Fingers lifted at `time`: start coasting on a flick.
@@ -49,11 +60,12 @@ struct MomentumScroller: Equatable {
         coasting = speed > flickSpeed
     }
 
-    /// Advance momentum by `interval` seconds; lines to scroll, or nil when
-    /// not coasting (or it just stopped).
+    /// Advance momentum in its original unit. A delayed display callback
+    /// discards old momentum instead of playing it into a later fresh view.
     mutating func coast(interval: Double) -> (dx: Double, dy: Double)? {
         guard coasting, interval > 0 else { return nil }
-        let decay = CGFloat(exp(-min(interval, 0.1) / timeConstant))
+        guard interval.isFinite, interval <= 0.1 else { stop(); return nil }
+        let decay = CGFloat(exp(-interval / timeConstant))
         // Distance travelled over the interval by an exponentially decaying
         // velocity: v * tau * (1 - decay).
         let factor = CGFloat(timeConstant) * (1 - decay)
@@ -62,17 +74,19 @@ struct MomentumScroller: Equatable {
         if (velocity.dx * velocity.dx + velocity.dy * velocity.dy).squareRoot() < stopSpeed {
             coasting = false
         }
-        return lines(delta)
+        return distances(delta)
     }
 
     mutating func stop() {
         coasting = false
         velocity = .zero
         samples.removeAll()
+        precise = false
     }
 
-    private func lines(_ delta: CGVector) -> (dx: Double, dy: Double) {
+    private func distances(_ delta: CGVector) -> (dx: Double, dy: Double) {
         let sign: CGFloat = natural ? -1 : 1
-        return (Double(sign * delta.dx / pointsPerLine), Double(sign * delta.dy / pointsPerLine))
+        let scale = precise ? preciseScale : 1 / pointsPerLine
+        return (Double(sign * delta.dx * scale), Double(sign * delta.dy * scale))
     }
 }

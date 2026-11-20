@@ -39,7 +39,7 @@ mod download_selection;
 
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod events;
-#[cfg(any(target_os = "ios", target_os = "macos", windows))]
+#[cfg(any(test, target_os = "ios", target_os = "macos", windows))]
 pub mod input;
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod roots;

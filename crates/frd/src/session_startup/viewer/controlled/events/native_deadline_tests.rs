@@ -1,9 +1,16 @@
 //! The production queue preserves a native producer's already spent lifetime.
 use super::*;
+use asupersync::{
+    cx::Cx,
+    runtime::RuntimeBuilder,
+    time::{TimerDriverHandle, VirtualClock},
+    types::{Budget, Time},
+};
 use fr_core::ids::{
     CodecConfigurationGeneration, DisplayGeometryGeneration, RecoveryGeneration,
     ViewportMappingGeneration,
 };
+use std::sync::atomic::AtomicBool;
 
 fn view() -> InputView {
     InputView {
@@ -39,6 +46,100 @@ fn capture(receiver: &Receiver, event: Event, until: u64) {
         .unwrap()
         .push_bounded(event, ClientInstant(7), None, Some(ClientInstant(until)))
         .unwrap();
+}
+
+fn source(receiver: &Receiver, cx: Cx) -> Source {
+    Source {
+        queue: Arc::downgrade(&receiver.queue),
+        control: ViewerControl {
+            cx,
+            stopped: Arc::new(AtomicBool::new(false)),
+            input_fenced: Arc::new(AtomicBool::new(false)),
+        },
+        capabilities: Capabilities::default().with(Capability::Keys),
+    }
+}
+
+#[test]
+fn context_bound_event_enqueue_retains_original_time_and_exclusive_deadline() {
+    let clock = Arc::new(VirtualClock::new());
+    clock.advance_to(Time::from_nanos(10_000));
+    let runtime = RuntimeBuilder::current_thread()
+        .with_timer_driver(TimerDriverHandle::with_virtual_clock(clock))
+        .build()
+        .unwrap();
+    let mut receiver = receiver();
+    let mut source = source(&receiver, runtime.request_cx_with_budget(Budget::INFINITE));
+    let original = source.input_context().unwrap().unwrap();
+    source
+        .push_in_context_until(
+            &original,
+            key(4, KeyTransition::Press),
+            ClientInstant(7),
+            ClientInstant(20),
+        )
+        .unwrap();
+    let event = receiver.front(view(), ClientInstant(10)).unwrap().unwrap();
+    assert_eq!(event.sampled, ClientInstant(7));
+    assert_eq!(event.send_until, Some(ClientInstant(20)));
+    assert_eq!(event.text_context, Some(original.0.state));
+    assert_eq!(
+        receiver.expire(ClientInstant(20), &|_| false),
+        Err(Error::Expired)
+    );
+}
+
+#[test]
+fn context_bound_enqueue_atomically_refuses_a_suspended_then_resumed_view() {
+    let clock = Arc::new(VirtualClock::new());
+    clock.advance_to(Time::from_nanos(10_000));
+    let runtime = RuntimeBuilder::current_thread()
+        .with_timer_driver(TimerDriverHandle::with_virtual_clock(clock))
+        .build()
+        .unwrap();
+    let mut receiver = receiver();
+    let mut source = source(&receiver, runtime.request_cx_with_budget(Budget::INFINITE));
+    let original = source.input_context().unwrap().unwrap();
+    // Same numerical generations and live lease; the readiness history alone
+    // changed after capture, before the actual queue insertion.
+    receiver.publish_context(view(), 1, false, true).unwrap();
+    assert_eq!(
+        source.push_in_context_until(
+            &original,
+            key(4, KeyTransition::Press),
+            ClientInstant(7),
+            ClientInstant(20),
+        ),
+        Err(Error::StaleInputContext)
+    );
+    assert!(receiver.queue.lock().unwrap().events.is_empty());
+    assert!(source.control.is_stopped());
+}
+
+#[test]
+fn context_bound_event_rejects_another_source_even_with_identical_view_generations() {
+    let clock = Arc::new(VirtualClock::new());
+    clock.advance_to(Time::from_nanos(10_000));
+    let runtime = RuntimeBuilder::current_thread()
+        .with_timer_driver(TimerDriverHandle::with_virtual_clock(clock))
+        .build()
+        .unwrap();
+    let first = receiver();
+    let second = receiver();
+    let original = source(&first, runtime.request_cx_with_budget(Budget::INFINITE));
+    let context = original.input_context().unwrap().unwrap();
+    let mut replacement = source(&second, runtime.request_cx_with_budget(Budget::INFINITE));
+    assert_eq!(
+        replacement.push_in_context_until(
+            &context,
+            key(4, KeyTransition::Press),
+            ClientInstant(7),
+            ClientInstant(20),
+        ),
+        Err(Error::StaleInputContext)
+    );
+    assert!(second.queue.lock().unwrap().events.is_empty());
+    assert!(!original.control.is_stopped());
 }
 
 #[test]

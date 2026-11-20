@@ -15,7 +15,7 @@ pub(super) fn offer(control: bool, clipboard: bool, files: bool) -> Result<Offer
         // This must be the original reconnect offer. An application callback
         // may remove optional markers later, but cannot add a new one.
         let original = fr_client::native::control_offer_with_auxiliary(clipboard, files, false);
-        fr_wire::control::with_committed_text(original)
+        with_input(original)
     } else {
         Ok(fr_client::native::observation_offer())
     }
@@ -37,19 +37,33 @@ pub(super) fn offer_with_download(
     } else {
         fr_client::native::control_offer_with_download(clipboard, false)
     };
-    fr_wire::control::with_committed_text(original)
+    with_input(original)
+}
+
+fn with_input(original: Offer) -> Result<Offer, Error> {
+    let offered = fr_wire::control::with_committed_text(original)?;
+    if cfg!(any(target_os = "ios", target_os = "macos")) {
+        fr_wire::control::with_pixel_scroll(offered)
+    } else {
+        Ok(offered)
+    }
 }
 
 /// The app produces whole committed text but never synthesizes physical repeat.
 /// `NativeObserver` meets this intent with the negotiated host profile before
 /// sending a control request, so legacy hosts retain physical-key control.
 pub(super) fn requested_capabilities() -> Capabilities {
-    Capabilities::default()
+    let requested = Capabilities::default()
         .with(Capability::Keys)
         .with(Capability::Absolute)
         .with(Capability::Buttons)
         .with(Capability::LineScroll)
-        .with(Capability::Text)
+        .with(Capability::Text);
+    if cfg!(any(target_os = "ios", target_os = "macos")) {
+        requested.with(Capability::PixelScroll)
+    } else {
+        requested
+    }
 }
 
 /// The C string boundary cannot represent an embedded NUL. Reject the whole
@@ -75,6 +89,41 @@ mod tests {
     use super::*;
     use fr_wire::control::{TEXT_CAPABILITY, requestable, with_committed_text};
     use frd::session_startup::{host_offer, host_offer_with, with_line_scroll};
+
+    #[test]
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    fn precise_scroll_is_selected_only_bilaterally_and_keeps_legacy_control() {
+        use fr_wire::control::{PIXEL_SCROLL_CAPABILITY, with_pixel_scroll};
+        let client = offer(true, false, false).unwrap();
+        assert!(
+            client
+                .capabilities
+                .iter()
+                .any(|cap| cap.name == PIXEL_SCROLL_CAPABILITY && !cap.required)
+        );
+        let legacy = with_line_scroll(host_offer(true));
+        let precise = with_pixel_scroll(legacy.clone()).unwrap();
+        let mut wrong_version = precise.clone();
+        wrong_version
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.name == PIXEL_SCROLL_CAPABILITY)
+            .unwrap()
+            .version = 2;
+        for (host, wanted) in [(legacy, false), (precise, true), (wrong_version, false)] {
+            let selected = host.intersect(&client).unwrap();
+            let granted = requested_capabilities().meet(requestable(&selected.capabilities));
+            assert_eq!(granted.contains(Capability::PixelScroll), wanted);
+            assert!(granted.contains(Capability::LineScroll));
+            assert!(granted.contains(Capability::Keys));
+            assert!(!granted.contains(Capability::Repeat));
+        }
+        let precise_only = with_pixel_scroll(host_offer(true)).unwrap();
+        let selected = precise_only.intersect(&client).unwrap();
+        let granted = requested_capabilities().meet(requestable(&selected.capabilities));
+        assert!(granted.contains(Capability::PixelScroll));
+        assert!(!granted.contains(Capability::LineScroll));
+    }
 
     #[test]
     fn selected_download_and_duplex_profiles_keep_text_clipboard_and_input_gates() {
@@ -328,12 +377,22 @@ mod tests {
         let original = offer(true, true, false).unwrap();
         let upload = offer(true, true, true).unwrap();
         assert!(upload.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
-        assert!(
-            original
-                .capabilities
-                .iter()
-                .all(|cap| upload.capabilities.contains(cap))
-        );
+        let omitted: Vec<_> = original
+            .capabilities
+            .iter()
+            .filter(|cap| !upload.capabilities.contains(cap))
+            .map(|cap| (cap.name.as_str(), cap.required))
+            .collect();
+        if cfg!(any(target_os = "ios", target_os = "macos")) {
+            // The full Apple profile fills all 24 slots. Exactly the optional
+            // diagnostic yields; input, clipboard and ATP boundaries stay.
+            assert_eq!(
+                omitted,
+                vec![(fr_wire::quality_decision::CAPABILITY, false)]
+            );
+        } else {
+            assert!(omitted.is_empty());
+        }
         let file_names = [
             fr_wire::attachment::FILES_CAPABILITY,
             fr_wire::files::CAPABILITY,

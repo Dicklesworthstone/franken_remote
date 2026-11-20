@@ -8,6 +8,7 @@ final class RecordingSink: InputSink {
         case pointer(CGPoint)
         case button(PointerButton, Bool, CGPoint)
         case scroll(Double, Double, CGPoint)
+        case scrollPixels(Double, Double, CGPoint)
         case scrollEnded
         case key(UInt16, Bool)
         case stroke(UInt64, UInt32, UInt16, UInt8)
@@ -15,6 +16,8 @@ final class RecordingSink: InputSink {
     }
     var calls: [Call] = []
     var keyResult = InputStatus.sent
+    var supportsPixelScroll = false
+    var scrollResult = InputStatus.sent
     var textResult = InputStatus.unsupported
     var captureRefusal: InputStatus?
     var capturesCreated: UInt64 = 0
@@ -29,7 +32,10 @@ final class RecordingSink: InputSink {
         calls.append(.button(button, pressed, point)); return .sent
     }
     func scroll(dx: Double, dy: Double, at point: CGPoint) -> InputStatus {
-        calls.append(.scroll(dx, dy, point)); return .sent
+        calls.append(.scroll(dx, dy, point)); return scrollResult
+    }
+    func scrollPixels(dx: Double, dy: Double, at point: CGPoint) -> InputStatus {
+        calls.append(.scrollPixels(dx, dy, point)); return scrollResult
     }
     func scrollEnded() { calls.append(.scrollEnded) }
     func key(_ usage: UInt16, pressed: Bool) -> InputStatus {
@@ -54,5 +60,8 @@ final class RecordingSink: InputSink {
     }
     var scrolls: [(Double, Double)] {
         calls.compactMap { if case .scroll(let x, let y, _) = $0 { return (x, y) } else { return nil } }
+    }
+    var pixelScrolls: [(Double, Double)] {
+        calls.compactMap { if case .scrollPixels(let x, let y, _) = $0 { return (x, y) } else { return nil } }
     }
 }

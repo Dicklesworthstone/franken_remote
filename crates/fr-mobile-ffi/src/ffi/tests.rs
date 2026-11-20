@@ -11,6 +11,19 @@ use std::time::{Duration, Instant};
 
 const HEADER: &str = include_str!("../../include/fr_mobile.h");
 
+#[test]
+fn precise_scroll_requires_a_live_handle_and_does_not_imply_line_emulation() {
+    assert!(!fr_session_supports_pixel_scroll(0));
+    assert!(!fr_session_supports_pixel_scroll(u64::MAX));
+    assert_eq!(fr_session_scroll_pixels(0, 0.5, -0.25, 0.0, 0.0), FR_STALE);
+    assert_eq!(
+        fr_session_scroll_pixels(u64::MAX, 0.5, -0.25, 0.0, 0.0),
+        FR_STALE
+    );
+    assert!(HEADER.contains("bool fr_session_supports_pixel_scroll(FrHandle session);"));
+    assert!(HEADER.contains("int32_t fr_session_scroll_pixels(FrHandle session, double dx, double dy, double x, double y);"));
+}
+
 /// `#define NAME value` lines of the header, values parsed as integers.
 fn defines() -> Vec<(String, i64)> {
     HEADER

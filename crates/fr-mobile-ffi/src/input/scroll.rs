@@ -1,6 +1,11 @@
 //! Bounded native wheel fractions and their original exclusive deadline.
 #![forbid(unsafe_code)]
 
+use fr_core::{
+    input::ScrollUnit,
+    input_submission::{Capabilities, Capability},
+};
+
 /// The protocol's signed 16.16 line.
 pub const LINE: i32 = 1 << 16;
 /// Whole lines sent in one scroll event, per axis (frd bounds a scroll action
@@ -22,6 +27,127 @@ pub enum ScrollRefusal {
     Invalid,
     Expired,
     OutOfRange,
+    Unsupported,
+}
+
+/// One original scroll contribution. Distances are private input, so this
+/// type deliberately has no diagnostic formatter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ScrollDelta {
+    pub x: i32,
+    pub y: i32,
+    pub unit: ScrollUnit,
+    pub sampled: u64,
+    pub until: u64,
+}
+
+/// The granted producer retains at most one sub-unit fraction per axis.
+/// Lines use whole native steps; precise scroll uses one 16.16 wire quantum.
+/// Neither mode converts into the other or retains a whole event for retry.
+#[derive(Default)]
+pub struct ScrollAccumulator {
+    remainder: (f64, f64),
+    unit: Option<ScrollUnit>,
+    oldest: Option<(u64, u64)>,
+    last_sample: Option<u64>,
+}
+
+impl ScrollAccumulator {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Add a newly captured delta under its original exclusive deadline.
+    /// The session owns source/view identity and resets this accumulator when
+    /// that identity changes, before submitting through the same context.
+    pub fn add_captured(
+        &mut self,
+        unit: ScrollUnit,
+        delta: (f64, f64),
+        captured: (u64, u64),
+        now: u64,
+        capabilities: Capabilities,
+    ) -> Result<Option<ScrollDelta>, ScrollRefusal> {
+        let result = self.convert(unit, delta, captured, now, capabilities);
+        if result.is_err() {
+            self.reset();
+        }
+        result
+    }
+
+    fn convert(
+        &mut self,
+        unit: ScrollUnit,
+        (dx, dy): (f64, f64),
+        (sampled, until): (u64, u64),
+        now: u64,
+        capabilities: Capabilities,
+    ) -> Result<Option<ScrollDelta>, ScrollRefusal> {
+        if !dx.is_finite() || !dy.is_finite() {
+            return Err(ScrollRefusal::Invalid);
+        }
+        if sampled > now || now >= until || self.last_sample.is_some_and(|last| sampled < last) {
+            return Err(ScrollRefusal::Expired);
+        }
+        let required = match unit {
+            ScrollUnit::Lines => Capability::LineScroll,
+            ScrollUnit::Pixels => Capability::PixelScroll,
+        };
+        if !capabilities.contains(required) {
+            return Err(ScrollRefusal::Unsupported);
+        }
+        if self.unit != Some(unit) || self.oldest.is_some_and(|(_, deadline)| now >= deadline) {
+            self.reset();
+        }
+        self.unit = Some(unit);
+        self.last_sample = Some(sampled);
+        let scale = match unit {
+            ScrollUnit::Lines => 1.0,
+            ScrollUnit::Pixels => f64::from(LINE),
+        };
+        let candidate = (self.remainder.0 + dx * scale, self.remainder.1 + dy * scale);
+        let whole = |value: f64| {
+            if unit == ScrollUnit::Lines && (value - value.round()).abs() < 1e-9 {
+                value.round()
+            } else {
+                value.trunc()
+            }
+        };
+        let (x, y) = (whole(candidate.0), whole(candidate.1));
+        let bound = match unit {
+            ScrollUnit::Lines => f64::from(MAX_LINES_PER_EVENT),
+            // Exclude i32::MIN: native sign conversion must be representable.
+            ScrollUnit::Pixels => f64::from(i32::MAX),
+        };
+        let admitted = if unit == ScrollUnit::Pixels {
+            candidate
+        } else {
+            (x, y)
+        };
+        if !(-bound..=bound).contains(&admitted.0) || !(-bound..=bound).contains(&admitted.1) {
+            return Err(ScrollRefusal::OutOfRange);
+        }
+        let (oldest_sample, oldest_until) =
+            self.oldest.map_or((sampled, until), |(old, deadline)| {
+                (old, deadline.min(until))
+            });
+        self.remainder = (candidate.0 - x, candidate.1 - y);
+        self.oldest = (self.remainder != (0.0, 0.0)).then_some((oldest_sample, oldest_until));
+        if x == 0.0 && y == 0.0 {
+            return Ok(None);
+        }
+        let wire_scale = if unit == ScrollUnit::Lines { LINE } else { 1 };
+        // Finite integral values checked against the symmetric range above.
+        #[allow(clippy::cast_possible_truncation)]
+        let (x, y) = (x as i32 * wire_scale, y as i32 * wire_scale);
+        Ok(Some(ScrollDelta {
+            x,
+            y,
+            unit,
+            sampled: oldest_sample,
+            until: oldest_until,
+        }))
+    }
 }
 
 impl LineScroller {
@@ -116,6 +242,267 @@ impl LineScroller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capabilities() -> Capabilities {
+        Capabilities::default()
+            .with(Capability::LineScroll)
+            .with(Capability::PixelScroll)
+    }
+
+    fn values(delta: ScrollDelta) -> (i32, i32, ScrollUnit, u64, u64) {
+        (delta.x, delta.y, delta.unit, delta.sampled, delta.until)
+    }
+
+    #[test]
+    fn precise_scroll_preserves_signed_logical_distance_without_display_scaling() {
+        let mut scroll = ScrollAccumulator::default();
+        let delta = scroll
+            .add_captured(
+                ScrollUnit::Pixels,
+                (1.5, -2.25),
+                (10, 100),
+                20,
+                capabilities(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            values(delta),
+            (3 * LINE / 2, -9 * LINE / 4, ScrollUnit::Pixels, 10, 100)
+        );
+        assert_eq!(scroll.remainder, (0.0, 0.0));
+        assert!(scroll.oldest.is_none());
+    }
+
+    #[test]
+    fn precise_subquantum_carry_keeps_oldest_sample_and_shortest_deadline() {
+        let mut scroll = ScrollAccumulator::default();
+        let half = 0.5 / f64::from(LINE);
+        assert!(
+            scroll
+                .add_captured(
+                    ScrollUnit::Pixels,
+                    (half, -half),
+                    (10, 100),
+                    20,
+                    capabilities()
+                )
+                .unwrap()
+                .is_none()
+        );
+        let delta = scroll
+            .add_captured(
+                ScrollUnit::Pixels,
+                (half, -half),
+                (30, 80),
+                40,
+                capabilities(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(values(delta), (1, -1, ScrollUnit::Pixels, 10, 80));
+        assert_eq!(scroll.remainder, (0.0, 0.0));
+    }
+
+    #[test]
+    fn expired_fraction_never_acquires_the_next_events_lifetime() {
+        for unit in [ScrollUnit::Lines, ScrollUnit::Pixels] {
+            let half = if unit == ScrollUnit::Lines {
+                0.5
+            } else {
+                0.5 / f64::from(LINE)
+            };
+            let mut scroll = ScrollAccumulator::default();
+            assert!(
+                scroll
+                    .add_captured(unit, (0.0, half), (10, 50), 20, capabilities())
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                scroll
+                    .add_captured(unit, (0.0, half), (50, 90), 50, capabilities())
+                    .unwrap()
+                    .is_none()
+            );
+            let delta = scroll
+                .add_captured(unit, (0.0, half), (60, 100), 70, capabilities())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                values(delta),
+                (
+                    0,
+                    if unit == ScrollUnit::Lines { LINE } else { 1 },
+                    unit,
+                    50,
+                    90
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn unit_changes_and_intervening_actions_discard_retained_fractions() {
+        let mut scroll = ScrollAccumulator::default();
+        assert!(
+            scroll
+                .add_captured(
+                    ScrollUnit::Lines,
+                    (0.0, 0.75),
+                    (10, 100),
+                    20,
+                    capabilities()
+                )
+                .unwrap()
+                .is_none()
+        );
+        let delta = scroll
+            .add_captured(
+                ScrollUnit::Pixels,
+                (0.0, 0.5),
+                (30, 110),
+                40,
+                capabilities(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(values(delta), (0, LINE / 2, ScrollUnit::Pixels, 30, 110));
+        assert!(
+            scroll
+                .add_captured(
+                    ScrollUnit::Lines,
+                    (0.0, 0.75),
+                    (50, 150),
+                    60,
+                    capabilities()
+                )
+                .unwrap()
+                .is_none()
+        );
+        scroll.reset();
+        assert!(
+            scroll
+                .add_captured(ScrollUnit::Lines, (0.0, 0.5), (70, 170), 80, capabilities())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_line_only_host_cannot_authorize_precise_scroll_or_retain_its_remainder() {
+        for (unit, missing) in [
+            (ScrollUnit::Pixels, Capability::LineScroll),
+            (ScrollUnit::Lines, Capability::PixelScroll),
+        ] {
+            let mut scroll = ScrollAccumulator::default();
+            let result = scroll.add_captured(
+                unit,
+                (0.0, 0.5),
+                (10, 100),
+                20,
+                Capabilities::default().with(missing),
+            );
+            assert!(matches!(result, Err(ScrollRefusal::Unsupported)));
+            assert_eq!(scroll.remainder, (0.0, 0.0));
+            assert!(scroll.unit.is_none());
+            assert!(scroll.oldest.is_none());
+        }
+    }
+
+    #[test]
+    fn precise_overflow_nonfinite_and_expired_events_clear_state_without_carrying_whole_work() {
+        for (delta, captured, now, error) in [
+            ((f64::NAN, 0.0), (20, 100), 30, ScrollRefusal::Invalid),
+            ((0.0, f64::INFINITY), (20, 100), 30, ScrollRefusal::Invalid),
+            ((f64::MAX, 0.0), (20, 100), 30, ScrollRefusal::OutOfRange),
+            ((-32768.0, 0.0), (20, 100), 30, ScrollRefusal::OutOfRange),
+            ((0.0, 32768.0), (20, 100), 30, ScrollRefusal::OutOfRange),
+            ((0.0, 0.5), (20, 30), 30, ScrollRefusal::Expired),
+            ((0.0, 0.5), (31, 100), 30, ScrollRefusal::Expired),
+            ((0.0, 0.5), (9, 100), 30, ScrollRefusal::Expired),
+        ] {
+            let mut scroll = ScrollAccumulator::default();
+            assert!(
+                scroll
+                    .add_captured(
+                        ScrollUnit::Pixels,
+                        (0.5 / f64::from(LINE), 0.0),
+                        (10, 100),
+                        10,
+                        capabilities()
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                matches!(scroll.add_captured(ScrollUnit::Pixels, delta, captured, now, capabilities()), Err(found) if found == error)
+            );
+            assert_eq!(scroll.remainder, (0.0, 0.0));
+            assert!(
+                scroll
+                    .add_captured(
+                        ScrollUnit::Pixels,
+                        (0.0, 0.0),
+                        (40, 140),
+                        50,
+                        capabilities()
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn both_units_preserve_their_own_wire_limits_without_large_event_backlog() {
+        let mut scroll = ScrollAccumulator::default();
+        let max = f64::from(i32::MAX) / f64::from(LINE);
+        let precise = scroll
+            .add_captured(
+                ScrollUnit::Pixels,
+                (max, -max),
+                (10, 100),
+                20,
+                capabilities(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            values(precise),
+            (i32::MAX, -i32::MAX, ScrollUnit::Pixels, 10, 100)
+        );
+        let lines = scroll
+            .add_captured(
+                ScrollUnit::Lines,
+                (16.0, -16.0),
+                (30, 110),
+                40,
+                capabilities(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            values(lines),
+            (16 * LINE, -16 * LINE, ScrollUnit::Lines, 30, 110)
+        );
+        assert!(matches!(
+            scroll.add_captured(
+                ScrollUnit::Lines,
+                (17.0, 0.0),
+                (50, 150),
+                60,
+                capabilities()
+            ),
+            Err(ScrollRefusal::OutOfRange)
+        ));
+        assert!(
+            scroll
+                .add_captured(ScrollUnit::Lines, (0.0, 0.0), (70, 170), 80, capabilities())
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn combined_fractions_keep_the_original_deadline() {

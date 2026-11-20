@@ -4,8 +4,8 @@
 //! Coordinates arrive in ENCODED PICTURE pixels: the app has already undone
 //! its own zoom, pan, letterbox, rotation and safe-area placement. A point
 //! outside the picture is refused, never clamped onto an edge. Scrolling
-//! accumulates fractional lines and sends only whole lines (the host's
-//! granted `LineScroll`), keeping the remainder.
+//! keeps line and precise scroll independent: whole native line steps or
+//! signed 16.16 logical distances, only under that host-granted capability.
 
 mod scroll;
 // Typing plans serve only the native session (the same gate as
@@ -23,7 +23,9 @@ mod scroll;
     allow(dead_code)
 )]
 pub(crate) mod typing;
-pub use scroll::{LINE, LineScroller, MAX_LINES_PER_EVENT};
+pub use scroll::{
+    LINE, LineScroller, MAX_LINES_PER_EVENT, ScrollAccumulator, ScrollDelta, ScrollRefusal,
+};
 
 /// `(x, y)` in 1/256 picture pixels for a point inside the `width` x
 /// `height` picture; None outside it or for a non-finite input.

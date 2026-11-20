@@ -78,6 +78,10 @@ fn the_control_request_never_asks_for_client_side_repeat() {
         assert!(caps.contains(capability), "{capability:?}");
     }
     assert!(!caps.contains(Capability::Repeat));
+    assert_eq!(
+        caps.contains(Capability::PixelScroll),
+        cfg!(any(target_os = "ios", target_os = "macos"))
+    );
 }
 
 #[test]
@@ -89,6 +93,11 @@ fn input_is_refused_until_control_is_granted() {
         shared.scroll(0.0, 3.0, 1.0, 1.0),
         InputResult::NotControlled
     );
+    assert_eq!(
+        shared.scroll_pixels(0.0, 0.5, 1.0, 1.0),
+        InputResult::NotControlled
+    );
+    assert!(!shared.supports_pixel_scroll());
     assert_eq!(shared.key(0x04, true), InputResult::NotControlled);
     assert_eq!(shared.begin_typing(), Err(InputResult::NotControlled));
     assert_eq!(

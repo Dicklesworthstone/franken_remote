@@ -99,3 +99,9 @@ _Static_assert(_Generic(&fr_session_end_typing,
 _Static_assert(_Generic(&fr_session_supports_text,
     bool (*_Nonnull)(FrHandle): 1, default: 0),
     "fr_session_supports_text signature");
+_Static_assert(_Generic(&fr_session_supports_pixel_scroll,
+    bool (*_Nonnull)(FrHandle): 1, default: 0),
+    "fr_session_supports_pixel_scroll signature");
+_Static_assert(_Generic(&fr_session_scroll_pixels,
+    int32_t (*_Nonnull)(FrHandle, double, double, double, double): 1, default: 0),
+    "fr_session_scroll_pixels signature");

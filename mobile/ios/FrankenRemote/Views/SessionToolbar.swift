@@ -147,6 +147,7 @@ struct SessionSurface: UIViewRepresentable {
         view.interpreter.acceleration.speed = CGFloat(settings.pointerSpeed)
         view.interpreter.scroller.natural = settings.naturalScrolling
         view.interpreter.scroller.pointsPerLine = 18 / CGFloat(max(0.25, settings.scrollSpeed))
+        view.interpreter.scroller.preciseScale = CGFloat(max(0.25, settings.scrollSpeed))
         view.hapticsEnabled = settings.haptics
         session.setVisible(visible)
         if !visible { view.suspend() }
