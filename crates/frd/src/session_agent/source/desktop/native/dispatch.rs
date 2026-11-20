@@ -632,6 +632,11 @@ impl Driver {
                         .enable_adaptive_bitrate()
                         .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
                 }
+                desktop
+                    .prepared
+                    .publisher
+                    .enable_path_bitrate()
+                    .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
                 let service = desktop.first().into_service().map_err(Error::Viewers)?;
                 let admission = desktop.admissions();
                 let source = desktop

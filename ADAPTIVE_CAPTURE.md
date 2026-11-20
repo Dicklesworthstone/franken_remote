@@ -381,8 +381,37 @@ Two other cut rules behaved alike on the 20 s rows: three fifths of the
 delivery alone, and the lower of that and seven eighths of the rate. The
 second held all six of its rows but needed more changes, each with an IDR.
 
-Not measured: a live narrow link; the shared (view-only) publisher, which
-still has only the gate; and VideoToolbox or Media Foundation hosts.
+Not measured: a live narrow link, and VideoToolbox or Media Foundation hosts.
+
+### View-only sessions
+
+The shared publisher (`media/shared_publisher/path_rate.rs`), which serves
+every view-only session, follows its viewers' paths the same way. One encoder
+serves all of its viewers, so the rate only falls while every eligible
+viewer's path holds a queue, at most to three fifths of the slowest one's
+delivery. While some paths are queued and others are clear, the rate holds and
+an unsent probe is dropped. A probe needs every path clear. With
+`--adaptive-capture`, the same evidence goes to that pacing's rate controller.
+
+On trj, a view-only session with the noise window (test host at 2 Mbit/s,
+both directions shaped, gate on both arms, interleaved) had six root changes
+measured after the link had been narrow for 20 s:
+
+| Narrow link for 20 s | Gate only | Gate and path-following bitrate |
+|---|---|---|
+| 1500 kbit/s: pictures decoded | 131-132 | 268-273 |
+| 1500 kbit/s: median change shown after | 486-501 ms | 175-219 ms |
+| 1000 kbit/s: pictures decoded | 126-138 | 266-278 |
+| 1000 kbit/s: median change shown after | 697-919 ms | 104-173 ms |
+
+Every row showed all six changes on both arms. The rate fell to 720 kbit/s on
+the 1500 kbit/s link, and to 324-432 kbit/s on the 1000 kbit/s link before it
+probed back up.
+
+`view_only_incompressible_content_over_a_narrow_link` held 6/6 on both arms,
+2 runs each. The 1000 and 800 kbit/s rows' median change latency was 407-674 ms
+with the bitrate against 685-940 ms without. The view delay and loss matrix
+applied no rate change and showed all changes in every row on both arms.
 
 A standalone harness on an M5 Ultra (not the capture worker) opened a
 hardware HEVC session with the worker's exact properties and synthetic frames:

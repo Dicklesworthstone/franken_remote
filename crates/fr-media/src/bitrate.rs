@@ -288,6 +288,23 @@ impl Controller {
         Ok(())
     }
 
+    /// One sample of several viewers' paths where some hold a queue and some do
+    /// not, or none can be judged. A slow viewer never lowers a healthy viewer's
+    /// rate, and a probe could only deepen the queue: neither a cut nor a probe,
+    /// and both [`Self::observe_path`] intervals start over.
+    pub fn observe_split_path(&mut self, now_us: u64) -> Result<(), Error> {
+        self.clock(now_us)?;
+        self.path_queued_since = None;
+        self.path_clear_since = None;
+        if self
+            .pending
+            .is_some_and(|change| change.reason == Reason::Headroom)
+        {
+            self.reset_evidence()?;
+        }
+        Ok(())
+    }
+
     /// Carry this command only on the existing single capture credit. Always
     /// send its explicit rate, including a same-rate cancellation command.
     /// No applied rate or cooldown changes merely because work was submitted.

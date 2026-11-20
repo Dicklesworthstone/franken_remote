@@ -698,6 +698,25 @@ fn view_only_session_whose_route_lengthens_keeps_its_pictures() {
     );
 }
 
+/// [`view_only_incompressible_content_over_a_narrow_link`] with the link held
+/// narrow for [`SUSTAINED`] before the six changes, still narrow while they
+/// cross: what a long narrow link costs a view-only session's pictures and
+/// change latency (fr-7al9).
+#[test]
+#[ignore = "measurement: about 2 min of namespace sessions; run by hand"]
+fn view_only_session_across_a_sustained_narrow_link() {
+    for rate_kbit in [1500, 1000] {
+        let (steps, mut times, ended, media) = view_row(3, 0.0, rate_kbit, 0, true, SUSTAINED);
+        times.sort();
+        println!(
+            "VIEW SUSTAINED rate {rate_kbit} kbit/s for {SUSTAINED:?}: changes shown {steps}/6, median {:?}, max {:?}, decoded {:?}, media {media:?}, ended {ended:?}",
+            times.get(times.len() / 2),
+            times.last(),
+            media.as_deref().and_then(decoded_pictures)
+        );
+    }
+}
+
 /// Measures [`narrow_episode`] at three rates, below and above the hosts'
 /// 2 Mbit/s target: a narrow link must cost the session's pictures, not the
 /// session (fr-7al9).

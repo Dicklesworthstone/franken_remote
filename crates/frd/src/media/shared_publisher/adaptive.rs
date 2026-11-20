@@ -42,7 +42,7 @@ fn record_send(
     });
 }
 impl Entry {
-    fn pacing_eligible(&self) -> bool {
+    pub(super) fn pacing_eligible(&self) -> bool {
         self.failure.is_none() && self.join.is_none() && self.starting.is_none() && !self.fenced()
     }
     pub(super) fn note_video_send(
@@ -129,6 +129,9 @@ impl CapturePacing {
     }
     pub(super) fn interval_us(&self) -> u64 {
         self.controller.interval_us()
+    }
+    pub(super) fn bitrate_mut(&mut self) -> Option<&mut bitrate::Controller> {
+        self.bitrate.as_mut()
     }
     fn enable_bitrate(&mut self, initial: u32) -> Result<(), Error> {
         if self.bitrate.is_some() || self.in_flight.is_some() {
@@ -382,7 +385,8 @@ impl Publisher {
         maximum: Duration,
     ) -> Result<(), Error> {
         self.members.lock().map_err(|_| Error::Poisoned)?.tick()?;
-        if self.served || self.adaptive.is_some() {
+        // Path-following rate is enabled after this, into its controller.
+        if self.served || self.adaptive.is_some() || self.path_rate.is_some() {
             return Err(Error::InvalidBudget);
         }
         self.adaptive = Some(Box::new(CapturePacing::new(
@@ -411,6 +415,7 @@ impl Publisher {
         self.adaptive
             .as_ref()
             .and_then(|pacing| pacing.bitrate.as_ref())
+            .or_else(|| self.path_rate.as_ref().map(|rate| rate.controller()))
     }
     pub fn pacing(&self) -> Option<&Controller> {
         self.adaptive.as_ref().map(|pacing| &pacing.controller)

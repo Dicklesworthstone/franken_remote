@@ -256,6 +256,8 @@ pub struct Publisher {
     /// Fixed-size controller/history allocated once, not inflated into every
     /// future that owns a shared publication. Absent for the fixed-rate path.
     adaptive: Option<Box<adaptive::CapturePacing>>,
+    /// The encoder rate following the viewers' paths, without adaptive pacing.
+    path_rate: Option<Box<path_rate::PathRate>>,
     served: bool,
 }
 impl std::fmt::Debug for Publisher {
@@ -294,6 +296,7 @@ impl Publisher {
             source,
             pool,
             adaptive: None,
+            path_rate: None,
             served: false,
             members: Arc::new(Mutex::new(Members {
                 entries: core::array::from_fn(|_| None),
@@ -483,12 +486,17 @@ impl Publisher {
             if let Some(adaptive) = &mut self.adaptive {
                 adaptive.observe_receivers(&members)?;
             }
+            if let Some(rate) = &mut self.path_rate {
+                rate.observe_views(&members)?;
+            }
             admitted
         };
         let bitrate = if let Some(adaptive) = &mut self.adaptive {
             // Only actual pool/member credit may begin a native rate request.
             adaptive.start(owner.check().map_err(Error::Media)?.as_micros())?;
             adaptive.capture_bitrate()
+        } else if let Some(rate) = &mut self.path_rate {
+            Some(rate.begin()?)
         } else {
             None
         };
@@ -545,6 +553,8 @@ impl Publisher {
             // A native rate transition already happened. Subscriber expiry or
             // egress refusal below cannot retroactively undo that effect.
             adaptive.complete_update(&owner, &update)?;
+        } else if let Some(rate) = &mut self.path_rate {
+            rate.complete(&owner, &update)?;
         }
         let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
         members.tick()?;
@@ -907,6 +917,7 @@ mod audio;
 mod cursor;
 mod join;
 pub(crate) mod path_queue;
+mod path_rate;
 mod pending;
 mod service;
 mod session;

@@ -216,6 +216,9 @@ impl Publisher {
                 if let Some(interval) = publisher.capture_interval(now)? {
                     cadence.change_interval(interval)?;
                 }
+                // Skipping captures while every path is queued is not enough
+                // below about half the rate: a held queue lowers it.
+                publisher.observe_paths(now)?;
                 if now < cadence.next {
                     if cursor_cadence.is_some_and(|cursor| now >= cursor.next) {
                         publisher.sample_cursor().await?;
