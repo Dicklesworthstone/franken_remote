@@ -267,6 +267,12 @@ fn oversized_and_nonregular_sources_refuse_on_the_disk_worker() {
 
 #[test]
 fn queued_record_expiry_retires_only_files_and_does_not_refresh_its_deadline() {
+    use asupersync::{
+        runtime::RuntimeBuilder,
+        time::{TimerDriverHandle, VirtualClock},
+        types::{Budget, Time},
+    };
+    use std::sync::Arc;
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut f = Running::new(&cx).await;
@@ -276,24 +282,34 @@ fn queued_record_expiry_retires_only_files_and_does_not_refresh_its_deadline() {
             record_lifetime: Duration::from_millis(10),
             ..Policy::default()
         };
-        let mut sender = Sender::new(cx.clone(), &f.link.c, &mut f.client, policy).unwrap();
+        let vclock = Arc::new(VirtualClock::starting_at(Time::from_nanos(
+            cx.timer_driver().unwrap().now().as_nanos(),
+        )));
+        let vruntime = RuntimeBuilder::current_thread()
+            .with_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&vclock)))
+            .build()
+            .unwrap();
+        let sender_cx = vruntime.request_cx_with_budget(Budget::INFINITE);
+        let tick_cx = sender_cx.clone();
+        let mut sender = Sender::new(sender_cx, &f.link.c, &mut f.client, policy).unwrap();
         sender
             .begin(&f.link.c, File::open(&path).unwrap(), "remote")
             .unwrap();
-        let until = clock(&cx) + 1_000_000;
+        let until = Instant::now() + Duration::from_secs(10);
         while sender.stage() != Stage::AwaitingAcceptance {
-            assert!(clock(&cx) < until);
+            assert!(Instant::now() < until);
             sender.service(&mut f.link.c, || true).unwrap();
             std::thread::yield_now();
         }
         // No native drive: the original queued offer has not reached the peer.
-        std::thread::sleep(Duration::from_millis(20));
+        // Advance Sender's virtual clock deterministically past record_lifetime.
+        vclock.advance(20_000_000);
         assert_eq!(sender.service(&mut f.link.c, || true), Err(Error::Expired));
         assert_eq!(
             cleanup(&mut sender).outcome,
             Outcome::InterruptedBeforePublication(Error::Expired)
         );
-        assert!(f.link.c.tick(&cx, || true).is_ok());
+        assert!(f.link.c.tick(&tick_cx, || true).is_ok());
         assert!(!f.link.c.is_closed());
         drop(sender);
         f.input_live(&cx);

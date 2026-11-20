@@ -223,15 +223,27 @@ fn a_host_conflict_preserves_prior_publication_and_never_starts_later_files() {
 }
 #[test]
 fn deadline_starts_before_first_poll_and_does_not_spawn_a_source() {
+    use asupersync::{
+        runtime::RuntimeBuilder,
+        time::{TimerDriverHandle, VirtualClock},
+        types::{Budget, Time},
+    };
+    use std::sync::Arc;
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut f = Running::new(&cx).await;
+        // Virtual clock owned by Sender: eliminates wall-clock races under heavy
+        // test load while still exercising the real QUIC + FilesChannel owners.
+        let vclock = Arc::new(VirtualClock::starting_at(Time::from_nanos(
+            cx.timer_driver().unwrap().now().as_nanos(),
+        )));
+        let vruntime = RuntimeBuilder::current_thread()
+            .with_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&vclock)))
+            .build()
+            .unwrap();
+        let sender_cx = vruntime.request_cx_with_budget(Budget::INFINITE);
         let mut sender =
-            Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
-        // Admission itself checks identity and authority before accepting the
-        // deadline. Give that work time to finish, then expire the ORIGINAL
-        // budget without servicing the batch; a one-microsecond fixture can
-        // legitimately expire inside begin_batch before anything is accepted.
+            Sender::new(sender_cx, &f.link.c, &mut f.client, Policy::default()).unwrap();
         let lifetime = Duration::from_millis(100);
         sender
             .begin_batch(
@@ -240,7 +252,7 @@ fn deadline_starts_before_first_poll_and_does_not_spawn_a_source() {
                 lifetime,
             )
             .unwrap();
-        std::thread::sleep(lifetime);
+        vclock.advance(u64::try_from(lifetime.as_nanos()).unwrap());
         assert_eq!(sender.service(&mut f.link.c, || true), Err(Error::Expired));
         let report = sender.take_batch_report().unwrap();
         assert_eq!(
@@ -439,37 +451,56 @@ fn lost_second_proof_keeps_first_receipt_and_second_unknown_effect_without_retry
 }
 #[test]
 fn an_earlier_success_does_not_restart_the_batch_deadline_for_queued_files() {
+    use asupersync::{
+        runtime::RuntimeBuilder,
+        time::{TimeSource, TimerDriverHandle, VirtualClock},
+        types::{Budget, Time},
+    };
+    use std::sync::Arc;
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut f = Running::new(&cx).await;
         let path = f.path.join("source");
         fs::write(&path, b"selected").unwrap();
+        // Drive Sender on a virtual clock seeded from the real transport clock:
+        // the first file completes over real UDP/TLS + disk I/O without racing
+        // wall-clock load, then virtual time jumps deterministically to the
+        // exact original batch deadline to prove `"first"` never restarted it.
+        let start_ns = cx.timer_driver().unwrap().now().as_nanos();
+        let vclock = Arc::new(VirtualClock::starting_at(Time::from_nanos(start_ns)));
+        let vruntime = RuntimeBuilder::current_thread()
+            .with_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&vclock)))
+            .build()
+            .unwrap();
+        let sender_cx = vruntime.request_cx_with_budget(Budget::INFINITE);
         let mut sender =
-            Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
-        // The first file must finish inside the batch lifetime, which is a
-        // fixture margin here (200 ms failed under load): the property is
-        // that its success does not restart that lifetime for "never".
+            Sender::new(sender_cx, &f.link.c, &mut f.client, Policy::default()).unwrap();
+        let batch_lifetime = Duration::from_secs(10);
+        let batch_deadline_ns = start_ns + u64::try_from(batch_lifetime.as_nanos()).unwrap();
         sender
             .begin_batch(
                 &f.link.c,
                 selection(&path, &["first", "never"]),
-                Duration::from_secs(1),
+                batch_lifetime,
             )
             .unwrap();
-        // Sampled AFTER begin_batch, so the batch started no later than this
-        // and its deadline has passed by `begun + 1_001_000`. Sampled before,
-        // a loaded begin_batch could start over 1 ms later and the check below
-        // could run just before the real deadline (Ok(Preparing)).
-        let begun = clock(&cx);
+        let hang_guard = Instant::now() + Duration::from_secs(30);
         while sender.batch_report().unwrap().receipts().len() == 0 {
-            assert!(clock(&cx) < begun + 1_000_000);
+            assert!(Instant::now() < hang_guard, "first file stalled");
+            // Keep Sender's virtual clock aligned with transport time for
+            // packet deadlines while strictly below the original batch deadline.
+            let live_ns = cx.timer_driver().unwrap().now().as_nanos();
+            let capped_ns = live_ns.min(batch_deadline_ns.saturating_sub(1_000_000));
+            if capped_ns > vclock.now().as_nanos() {
+                vclock.advance_to(Time::from_nanos(capped_ns));
+            }
             sender.service(&mut f.link.c, || true).unwrap();
             f.host.service(&mut f.link.h, || true).unwrap();
             f.link.drive(&cx).await;
         }
-        std::thread::sleep(Duration::from_micros(
-            (begun + 1_001_000).saturating_sub(clock(&cx)),
-        ));
+        // Deterministically advance Sender's virtual clock to the exact
+        // original batch deadline (zero wall-clock sleep).
+        vclock.advance_to(Time::from_nanos(batch_deadline_ns));
         assert_eq!(sender.service(&mut f.link.c, || true), Err(Error::Expired));
         let report = cleanup(&mut sender);
         assert_eq!((report.started, report.not_started()), (1, 1));
