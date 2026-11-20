@@ -31,8 +31,11 @@ pub struct WorkerSeed {
 /// deadline. A native adapter must check immediately before each OS mutation;
 /// a refusal after an earlier mutation means an unknown external effect.
 ///
-/// Use only on the original native worker. No native work or caller callback
-/// runs inside these checks, and no authority lock is held after they return.
+/// Retain only for the original native worker. A native adapter may share this
+/// read-only guard with a synchronous OS-thread handoff (`UIKit`'s main queue)
+/// while that worker retains the operation and its original deadline. No native
+/// work or caller callback runs inside these checks, and no authority lock is
+/// held after they return.
 pub struct NativeAccess {
     gate: Transport,
     clock: Clock,

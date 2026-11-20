@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreVideo
 import Foundation
+import UIKit
 
 /// Where a session is (FR_STATE_* plus its end).
 enum SessionPhase: Equatable {
@@ -108,6 +109,7 @@ final class RemoteSession: ObservableObject, InputSink {
     let host: SavedHost
     let handle: FrHandle
     let controlCapable: Bool
+    let clipboardRequested: Bool
 
     @Published private(set) var phase: SessionPhase = .connecting(attempt: 1)
     /// Encoded picture size (pixels); zero until the first configuration.
@@ -121,6 +123,7 @@ final class RemoteSession: ObservableObject, InputSink {
     @Published private(set) var observedPin: String?
     /// One original catalog awaiting a choice, published only after approval.
     @Published private(set) var displaySelection: DisplaySelection?
+    @Published private(set) var clipboardStatus: ClipboardStatus
     /// Content-free progress belongs to the original upload owner. A local
     /// filename exists only while its explicit choice is on this screen.
     @Published private(set) var uploadStatus: FileUploadStatus?
@@ -140,6 +143,9 @@ final class RemoteSession: ObservableObject, InputSink {
     var receivesFiles: Bool { downloadResource != nil }
 
     private var wantsControl: Bool
+    /// Direct lifecycle fences do not wait for a SwiftUI render or let a
+    /// sleep-excluding local clock preserve sharing across suspension.
+    private var clipboardLifecycleObservers: [NSObjectProtocol] = []
     private(set) var everViewed = false
 
     enum StartError: Error, Equatable {
@@ -150,9 +156,11 @@ final class RemoteSession: ObservableObject, InputSink {
     /// it shows 1:1), or 0, 0 for the host's native pixels.
     init(host: SavedHost, control: Bool, requestControl: Bool,
          screen: (width: UInt32, height: UInt32) = (0, 0),
-         download: FileDownloadResource? = nil) throws {
+         download: FileDownloadResource? = nil, clipboard: Bool = true) throws {
         self.host = host
         self.controlCapable = control
+        self.clipboardRequested = control && clipboard
+        self.clipboardStatus = ClipboardStatus(requested: control && clipboard)
         self.wantsControl = control && requestControl
         self.downloadResource = download
         var out: FrHandle = 0
@@ -162,6 +170,10 @@ final class RemoteSession: ObservableObject, InputSink {
                                       direct: host.dialsDirectly, pin: pin,
                                       picture_width: screen.width,
                                       picture_height: screen.height)
+                if control && clipboard {
+                    return fr_session_start_with_clipboard(&config, UInt32(FR_DISPLAY_CHOOSE), true,
+                                                           download?.token ?? 0, &out)
+                }
                 if let download {
                     return fr_session_start_with_files(&config, UInt32(FR_DISPLAY_CHOOSE), control,
                                                        download.token, &out)
@@ -181,12 +193,26 @@ final class RemoteSession: ObservableObject, InputSink {
         case FR_BUSY: throw StartError.busy
         default: throw StartError.other(status)
         }
+        if clipboardRequested {
+            let original = handle
+            clipboardLifecycleObservers = [UIApplication.willResignActiveNotification,
+                                           UIScene.willDeactivateNotification].map { name in
+                NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) { _ in
+                    // Synchronous, thread-safe authority fence only. This
+                    // immutable handle can never name a replacement session.
+                    _ = fr_session_stop_clipboard(original)
+                }
+            }
+        }
         if wantsControl {
             _ = fr_session_request_control(handle)
         }
     }
 
     deinit {
+        for observer in clipboardLifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         if let choice = uploadChoice {
             _ = fr_session_discard_upload_selection(handle, choice.token)
         }
@@ -203,8 +229,27 @@ final class RemoteSession: ObservableObject, InputSink {
             apply(event)
         }
         pollDisplays()
+        pollClipboard()
         pollUploads()
         pollDownloads()
+    }
+
+    func pollClipboard() {
+        guard clipboardRequested else { return }
+        var native = FrClipboardStatus()
+        guard fr_session_clipboard_status(handle, &native) else { return }
+        let next = ClipboardStatus(native)
+        if next != clipboardStatus { clipboardStatus = next }
+    }
+
+    func clipboardPresence(_ visible: Bool) {
+        guard clipboardRequested else { return }
+        _ = fr_session_clipboard_presence(handle, visible)
+    }
+
+    func stopClipboard() {
+        _ = fr_session_stop_clipboard(handle)
+        pollClipboard()
     }
 
     private func pollDisplays() {

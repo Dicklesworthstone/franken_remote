@@ -24,9 +24,14 @@ use std::{
     },
 };
 
+mod clipboard;
 mod display;
 mod download;
 mod upload;
+pub use clipboard::{
+    FrClipboardStatus, fr_session_clipboard_presence, fr_session_clipboard_status,
+    fr_session_start_with_clipboard, fr_session_stop_clipboard,
+};
 pub use display::{
     FR_DISPLAY_CHOOSE, FR_DISPLAY_PRIMARY, FR_MAX_DISPLAYS, FrDisplayInfo, FrDisplayRequest,
     fr_session_cancel_display, fr_session_display_info, fr_session_display_request,
@@ -265,6 +270,7 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
             crate::session::DisplayChoice::Primary,
             false,
             None,
+            false,
             out,
         )
     }
@@ -289,7 +295,7 @@ pub unsafe extern "C" fn fr_session_start_with_display(
         _ => return FR_INVALID,
     };
     // SAFETY: forwarded contract.
-    unsafe { start(config, choice, false, None, out) }
+    unsafe { start(config, choice, false, None, false, out) }
 }
 
 /// # Safety
@@ -299,13 +305,14 @@ unsafe fn start(
     display: crate::session::DisplayChoice,
     upload: bool,
     download: Option<Arc<crate::session::Download>>,
+    clipboard: bool,
     out: *mut FrHandle,
 ) -> i32 {
     // SAFETY: NULL or valid per contract.
     let (Some(config), false) = (unsafe { config.as_ref() }, out.is_null()) else {
         return FR_INVALID;
     };
-    if (upload || download.is_some()) && !config.control {
+    if (upload || download.is_some() || clipboard) && !config.control {
         return FR_INVALID;
     }
     // SAFETY: forwarded contract.
@@ -327,7 +334,7 @@ unsafe fn start(
             target,
             port: config.port,
             control: config.control,
-            clipboard: false,
+            clipboard,
             upload: upload.then(crate::session::Upload::interactive),
             download,
             picture,

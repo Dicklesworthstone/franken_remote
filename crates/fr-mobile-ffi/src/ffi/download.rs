@@ -99,12 +99,9 @@ pub unsafe extern "C" fn fr_session_start_with_files(
     destination: u64,
     out: *mut FrHandle,
 ) -> i32 {
-    let owner = match DESTINATIONS.lock() {
-        Ok(mut destinations) => match destinations.take(destination) {
-            Some(owner) => owner,
-            None => return FR_STALE,
-        },
-        Err(_) => return FR_BUSY,
+    let owner = match take_destination(destination) {
+        Ok(owner) => owner,
+        Err(error) => return error,
     };
     let display = match mode {
         FR_DISPLAY_PRIMARY => DisplayChoice::Primary,
@@ -112,7 +109,15 @@ pub unsafe extern "C" fn fr_session_start_with_files(
         _ => return FR_INVALID,
     };
     // SAFETY: forwarded configuration/string/output contract.
-    unsafe { start(config, display, upload, Some(owner), out) }
+    unsafe { start(config, display, upload, Some(owner), false, out) }
+}
+
+pub(super) fn take_destination(destination: u64) -> Result<Arc<crate::session::Download>, i32> {
+    DESTINATIONS
+        .lock()
+        .map_err(|_| FR_BUSY)?
+        .take(destination)
+        .ok_or(FR_STALE)
 }
 
 /// Stop only the original receive direction; already published files and

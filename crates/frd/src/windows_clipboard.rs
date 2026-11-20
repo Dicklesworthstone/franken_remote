@@ -48,7 +48,7 @@ pub enum Failure {
     Changed,
     NoText,
     Limit,
-    /// Not valid UTF-16.
+    /// Native text could not be decoded without loss.
     Invalid,
     /// The caller's check, run while open, refused.
     Refused,
@@ -57,7 +57,9 @@ pub enum Failure {
     Cleanup,
 }
 
-/// What the owner asks of the clipboard; `System` is the real one.
+/// What the owner asks of the clipboard; `System` is the Win32 implementation.
+/// An adapter may check the borrowed guard in a synchronous OS-thread handoff;
+/// no operation, buffer or callback may outlive the native method's return.
 pub trait Native {
     type Text: AsRef<str>;
     /// The change number; no open needed.
@@ -69,16 +71,16 @@ pub trait Native {
         &mut self,
         limit: usize,
         expected: u32,
-        allowed: &dyn Fn() -> bool,
+        allowed: &(dyn Fn() -> bool + Sync),
     ) -> Result<Self::Text, Failure>;
     /// Replace the text if the number is still `expected` once open and
     /// `allowed()` passes there; the number after the write, or the failure
-    /// and whether the clipboard was already emptied.
+    /// and whether the native call may already have changed the clipboard.
     fn write(
         &mut self,
         text: &str,
         expected: u32,
-        allowed: &dyn Fn() -> bool,
+        allowed: &(dyn Fn() -> bool + Sync),
     ) -> Result<u32, (Failure, bool)>;
     /// Request closure of the privacy window once. Never clears the clipboard.
     fn close(&mut self);
@@ -790,7 +792,7 @@ mod system {
             &mut self,
             limit: usize,
             expected: u32,
-            allowed: &dyn Fn() -> bool,
+            allowed: &(dyn Fn() -> bool + Sync),
         ) -> Result<win32::Text, Failure> {
             win32::read_text(limit, expected, OPEN_WAIT, allowed).map_err(failure)
         }
@@ -799,7 +801,7 @@ mod system {
             &mut self,
             text: &str,
             expected: u32,
-            allowed: &dyn Fn() -> bool,
+            allowed: &(dyn Fn() -> bool + Sync),
         ) -> Result<u32, (Failure, bool)> {
             win32::write_text(self.window, text, expected, OPEN_WAIT, allowed)
                 .map_err(|error| (failure(error.error), error.attempted))

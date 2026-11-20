@@ -79,7 +79,7 @@ impl Native for Fake {
         &mut self,
         limit: usize,
         expected: u32,
-        allowed: &dyn Fn() -> bool,
+        allowed: &(dyn Fn() -> bool + Sync),
     ) -> Result<Owned, Failure> {
         let mut board = self.0.borrow_mut();
         board.calls += 1;
@@ -103,7 +103,7 @@ impl Native for Fake {
         &mut self,
         text: &str,
         expected: u32,
-        allowed: &dyn Fn() -> bool,
+        allowed: &(dyn Fn() -> bool + Sync),
     ) -> Result<u32, (Failure, bool)> {
         let race = self.0.borrow_mut().race.take();
         if let Some(race) = race {

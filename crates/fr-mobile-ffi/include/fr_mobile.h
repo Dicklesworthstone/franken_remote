@@ -140,6 +140,29 @@ typedef struct FrStats {
     uint32_t reserved;
 } FrStats;
 
+/* Content-free status of this original native text clipboard. */
+typedef struct FrClipboardStatus {
+    uint32_t requested;
+    uint32_t enabled;
+    uint32_t started;
+    uint32_t reason; /* 0 none, 1 unavailable/declined, 2 Off/privacy, 3 failure */
+    uint64_t received_submitted;
+    uint64_t received_unknown;
+    uint64_t received_refused;
+} FrClipboardStatus;
+
+/* iOS: start a control-capable session with text clipboard sharing. No text
+ * access before the actual grant and bilateral clipboard readiness. Optional
+ * upload and receive consent retain the existing file limits. Zero destination
+ * means no receiving; a nonzero token is consumed even on failed start. */
+int32_t fr_session_start_with_clipboard(const FrConfig *_Nullable config,
+    uint32_t mode, bool upload, uint64_t destination, FrHandle *_Nullable out);
+bool fr_session_clipboard_status(FrHandle handle, FrClipboardStatus *_Nullable out);
+/* Call while the persistent On/Off control is visible in the active app.
+ * A hidden control or over 300 ms without an answer retires its original owner. */
+int32_t fr_session_clipboard_presence(FrHandle handle, bool visible);
+int32_t fr_session_stop_clipboard(FrHandle handle);
+
 typedef struct FrCursor {
     uint64_t generation;
     int32_t x;               /* original selected display pixels */

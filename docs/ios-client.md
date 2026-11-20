@@ -448,6 +448,83 @@ device lock/data-protection behavior and a live host-to-iPhone transfer still
 require the Apple SDK and device qualification; Linux policy tests do not
 establish those results.
 
+## Text clipboard
+
+Opening a control-capable session now requests the existing native text
+clipboard capability by default. It starts only after the host grants control,
+both peers negotiate clipboard support and the original lane completes its
+readiness exchange. A view-only connection never requests it. A host that lacks
+or declines this optional capability leaves ordinary viewing and control
+available; the clipboard bar reports the refusal.
+
+The active SwiftUI app keeps a **Text clipboard sharing on** bar and **Turn off**
+button visible even when its input toolbar fades. The bar services its original
+owner every 50 ms. An actual hide, app deactivation, an expired 300 ms presence
+check, or Turn off retires that owner permanently. A late callback cannot renew
+it. Opening a received-files sheet or the Give back control dialog fences
+sharing before presenting the modal. The native gate also refuses uncertain
+foreground/key-window state. Display switching starts a fresh observing session
+with clipboard sharing off, and an automatic retry cannot recreate a configured
+clipboard owner. Direct application/scene deactivation notifications fence the
+original handle synchronously, without waiting for a SwiftUI render or relying
+on the local elapsed-time clock to include device sleep.
+Opening another controlling session is a new local action. Disabling sharing
+does not clear or restore either device's clipboard.
+
+The native implementation is in `fr-mobile-ffi/src/ios_clipboard.rs` and
+`ios_clipboard.m`. It supplies real UIKit operations to the existing bounded
+native clipboard synchronizer; text does not pass through Swift, the C status
+ABI, logs or diagnostic events. One original clipboard worker owns each
+synchronous main-queue call and all of its borrowed buffers until the call
+actually returns. Closing the session fences authority first and retains that
+worker until its native call and cleanup finish. There is no detached UIKit
+block that can publish after cleanup has been reported complete.
+
+Before each content read or publication, the main-queue adapter checks the
+active application, the visible local privacy control and the original
+session/view/lease/switch generations. Publication checks the same immutable
+host-clock item deadline immediately before `setItems`. Incoming content stays
+under the protocol's 1 MiB validated UTF-8 limit and is published as text only;
+it never invokes an application paste or opens a file or URL. Native reads copy
+at most 1 MiB into a Rust buffer, which is cleared on drop. UIKit owns its
+returned NSString and operating-system clipboard copies; the app does not claim
+to erase those objects.
+
+UIKit metadata, including `hasStrings` and pasteboard types, is sampled without
+requesting text. The actual `string` access remains subject to iOS's cross-app
+paste permission. Denial is a native refusal, never a successful empty copy or
+a bypass of the operating-system prompt. Publications set
+`UIPasteboardOptionLocalOnly`, preventing this app's received text from being
+offered through Universal Clipboard. See Apple's
+[UIPasteboard overview](https://developer.apple.com/documentation/uikit/uipasteboard),
+[hasStrings](https://developer.apple.com/documentation/uikit/uipasteboard/hasstrings)
+and [UIPasteControl permission behavior](https://developer.apple.com/documentation/uikit/uipastecontrol).
+
+Apple documents that
+[`changeCount`](https://developer.apple.com/documentation/uikit/uipasteboard/changecount)
+advances at the end of a run-loop turn. Each publication therefore includes a
+fresh private representation marker owned by that original session. Rust
+records a new publication revision immediately and retains its source stamp
+when the native count advances later with that exact marker still present.
+This prevents the deferred notification from echoing received text back to the
+host. A genuine local copy without the marker gets a new revision even when
+its text happens to match an earlier copy. Counter regression, missing
+publication provenance and revision exhaustion retire the owner. No text hash
+or content comparison is used to guess provenance.
+
+The C ABI adds `fr_session_start_with_clipboard` and content-free
+status/presence/stop functions. Existing start entry points preserve their
+clipboard-free behavior. Status separates native startup from submitted,
+uncertain and refused publication receipts; an uncertain earlier publication
+remains visible after sharing stops. A status read never grants permission.
+
+The portable Rust tests exercise deferred native change counts, repeated
+publications, local revisions, missing markers, counter exhaustion, actual UI
+presence, expiry, clock regression and terminal Off. Swift tests cover the
+content-free state displayed by the bar. UIKit compilation, Swift/XCTest and a
+physical iOS-to-host copy in both directions still require the Apple build and
+two-machine environment; portable policy tests do not qualify those paths.
+
 ## Input
 
 The app requests keys, absolute pointer, buttons, line scroll, optional
@@ -692,7 +769,8 @@ own screen.
   text-composition interface, and live device qualification of the
   committed-Unicode callback path. The callback and
   negotiation regressions establish source policy, not native OS insertion.
-- iPad pointer devices as a real mouse (hover, secondary click), clipboard
-  and audio. Approved display selection and cleanup-confirmed switching
-  are implemented above; native device qualification remains outstanding.
+- iPad pointer devices as a real mouse (hover, secondary click) and audio.
+  Approved display selection, cleanup-confirmed switching and native text
+  clipboard integration are implemented above; Apple-build and native device
+  clipboard qualification remain outstanding.
 - Release signing, App Store entitlements and a device-tested build.

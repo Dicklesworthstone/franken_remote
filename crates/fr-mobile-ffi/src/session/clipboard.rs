@@ -1,4 +1,4 @@
-//! One Windows controller's original optional clipboard owner. Native text
+//! One native controller's original optional clipboard owner. Native text
 //! stays in the existing bounded worker; the app retains only status and
 //! publication receipts, including after stop or failed cleanup.
 #![forbid(unsafe_code)]
@@ -131,17 +131,24 @@ impl State {
     }
 }
 
-pub(super) struct Clipboard(Mutex<State>);
+pub(super) struct Clipboard(
+    Mutex<State>,
+    #[cfg(target_os = "ios")] crate::ios_clipboard_policy::Privacy,
+);
 
 impl Clipboard {
     pub(super) fn new(requested: bool) -> Self {
-        Self(Mutex::new(State {
-            report: Report {
-                requested,
-                ..Report::default()
-            },
-            ..State::default()
-        }))
+        Self(
+            Mutex::new(State {
+                report: Report {
+                    requested,
+                    ..Report::default()
+                },
+                ..State::default()
+            }),
+            #[cfg(target_os = "ios")]
+            crate::ios_clipboard_policy::Privacy::default(),
+        )
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -193,7 +200,7 @@ impl Clipboard {
             return;
         }
         state.spent = true;
-        match configuration(entropy).and_then(|config| observer.configure_clipboard(config)) {
+        match configuration(entropy, self).and_then(|config| observer.configure_clipboard(config)) {
             Ok(source) => {
                 state.report.configured = true;
                 state.source = Some(source);
@@ -212,6 +219,8 @@ impl Clipboard {
     /// A local close/hide fences before any native UI or composition cleanup.
     /// The lock serializes an early stop against installation of the owner.
     pub(super) fn stop(&self) {
+        #[cfg(target_os = "ios")]
+        self.1.stop();
         let mut state = self.lock();
         state.spent = true;
         state.stop();
@@ -230,6 +239,8 @@ impl Clipboard {
                 Some(Cleanup::Pending | Cleanup::Finished(_))
             )
         {
+            #[cfg(target_os = "ios")]
+            self.1.stop();
             state.spent = true;
             state.stop();
         }
@@ -247,6 +258,29 @@ impl Clipboard {
         state.report
     }
 
+    pub(super) fn enabled(&self) -> bool {
+        let state = self.lock();
+        state.report.requested
+            && state
+                .source
+                .as_ref()
+                .map_or(!state.spent, |source| source.status().enabled)
+    }
+
+    /// The iOS app services this only while its persistent On/Off control is
+    /// actually visible. A hidden or late callback cannot revive this owner.
+    pub(super) fn presence(&self, visible: bool) {
+        #[cfg(target_os = "ios")]
+        {
+            self.1.observe(visible);
+            if self.1.stopped() {
+                self.stop();
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        let _ = visible;
+    }
+
     pub(super) fn pending(&self) -> bool {
         self.report().cleanup == Some(Cleanup::Pending)
     }
@@ -259,7 +293,10 @@ impl Drop for Clipboard {
 }
 
 #[cfg(windows)]
-fn configuration(entropy: &Cx) -> Result<frd::native_clipboard::Configuration, Error> {
+fn configuration(
+    entropy: &Cx,
+    _owner: &Clipboard,
+) -> Result<frd::native_clipboard::Configuration, Error> {
     use fr_wire::clipboard::session::synchronize::IdentifierFailure;
     let entropy = entropy.clone();
     frd::native_clipboard::Configuration::new_with_guard_and_cleanup(
@@ -279,9 +316,38 @@ fn configuration(entropy: &Cx) -> Result<frd::native_clipboard::Configuration, E
     )
 }
 
-#[cfg(not(windows))]
-fn configuration(_entropy: &Cx) -> Result<frd::native_clipboard::Configuration, Error> {
-    // The iOS ABI and Mac test build never request this Windows adapter.
+#[cfg(target_os = "ios")]
+fn configuration(
+    entropy: &Cx,
+    owner: &Clipboard,
+) -> Result<frd::native_clipboard::Configuration, Error> {
+    use fr_wire::clipboard::session::synchronize::IdentifierFailure;
+    let native_entropy = entropy.clone();
+    let identifiers = entropy.clone();
+    let privacy = owner.1.clone();
+    frd::native_clipboard::Configuration::new_with_guard_and_cleanup(
+        true,
+        std::time::Duration::from_secs(2),
+        move |source, access| crate::ios_clipboard::open(source, access, privacy, &native_entropy),
+        move || {
+            let mut bytes = [0; 16];
+            identifiers.random_bytes(&mut bytes);
+            let id = u128::from_be_bytes(bytes);
+            if id == 0 {
+                Err(IdentifierFailure)
+            } else {
+                Ok(id)
+            }
+        },
+    )
+}
+
+#[cfg(not(any(windows, target_os = "ios")))]
+fn configuration(
+    _entropy: &Cx,
+    _owner: &Clipboard,
+) -> Result<frd::native_clipboard::Configuration, Error> {
+    // The macOS test build does not install an iOS or Windows native adapter.
     Err(Error::NotNegotiated)
 }
 

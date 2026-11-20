@@ -207,11 +207,11 @@ final class AppModel: ObservableObject {
     }
 
     private func start(_ host: SavedHost, control: Bool, requestControl: Bool? = nil,
-                       download: FileDownloadResource? = nil) {
+                       download: FileDownloadResource? = nil, clipboard: Bool = true) {
         do {
             let next = try RemoteSession(host: host, control: control,
                                          requestControl: control && (requestControl ?? settings.controlOnConnect),
-                                         screen: Self.screenPixels(), download: download)
+                                         screen: Self.screenPixels(), download: download, clipboard: clipboard)
             next.$observedPin
                 .compactMap { $0 }
                 .sink { [weak self] pin in self?.store.recordPin(pin, for: host.id) }
@@ -267,7 +267,7 @@ final class AppModel: ObservableObject {
                     self.releasingControl = false
                     self.subscriptions.removeAll()
                     self.session = nil
-                    self.start(host, control: original.controlCapable, requestControl: false)
+                    self.start(host, control: original.controlCapable, requestControl: false, clipboard: false)
                     return
                 case .refused:
                     self.displaySwitchTask = nil

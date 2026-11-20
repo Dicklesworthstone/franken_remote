@@ -18,6 +18,11 @@
     allow(unused)
 )]
 
+#[cfg(all(target_os = "ios", feature = "session"))]
+mod ios_clipboard;
+#[cfg(any(test, target_os = "ios"))]
+mod ios_clipboard_policy;
+
 // The real bounded file-choice owner is shared with portable policy tests.
 #[cfg(any(
     test,

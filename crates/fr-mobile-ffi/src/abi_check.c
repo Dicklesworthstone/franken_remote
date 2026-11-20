@@ -26,6 +26,20 @@ _Static_assert(offsetof(FrConfig, picture_width) == 24, "FrConfig layout");
 _Static_assert(offsetof(FrConfig, picture_height) == 28, "FrConfig layout");
 _Static_assert(sizeof(bool) == 1, "C bool is Rust bool");
 _Static_assert(sizeof(FrHandle) == 8, "FrHandle is u64");
+_Static_assert(sizeof(FrClipboardStatus) == 40, "FrClipboardStatus size");
+_Static_assert(offsetof(FrClipboardStatus, received_submitted) == 16, "FrClipboardStatus layout");
+_Static_assert(_Generic(&fr_session_start_with_clipboard,
+    int32_t (*_Nonnull)(const FrConfig *_Nullable, uint32_t, bool, uint64_t, FrHandle *_Nullable): 1, default: 0),
+    "fr_session_start_with_clipboard signature");
+_Static_assert(_Generic(&fr_session_clipboard_status,
+    bool (*_Nonnull)(FrHandle, FrClipboardStatus *_Nullable): 1, default: 0),
+    "fr_session_clipboard_status signature");
+_Static_assert(_Generic(&fr_session_clipboard_presence,
+    int32_t (*_Nonnull)(FrHandle, bool): 1, default: 0),
+    "fr_session_clipboard_presence signature");
+_Static_assert(_Generic(&fr_session_stop_clipboard,
+    int32_t (*_Nonnull)(FrHandle): 1, default: 0),
+    "fr_session_stop_clipboard signature");
 _Static_assert(sizeof(FrDisplayRequest) == 16, "FrDisplayRequest size");
 _Static_assert(offsetof(FrDisplayRequest, count) == 8, "FrDisplayRequest layout");
 _Static_assert(sizeof(FrDisplayInfo) == 40, "FrDisplayInfo size");

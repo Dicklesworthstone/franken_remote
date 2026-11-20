@@ -70,6 +70,10 @@ struct SessionScreen: View {
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 8) {
+                ClipboardBar(session: session,
+                             visible: scenePhase == .active && !model.switchingDisplay
+                                 && displayPicker == nil && !displayPickerVisible
+                                 && uploadPicker == nil && !uploadPickerVisible)
                 FileUploadBar(session: session)
                 FileDownloadBar(session: session)
             }

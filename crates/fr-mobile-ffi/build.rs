@@ -4,7 +4,11 @@
 #[path = "build_support/roots.rs"]
 mod roots;
 
-use std::{env, path::PathBuf, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// The app's deployment floor (mobile/ios project: iOS 17).
 const IOS_MINIMUM: &str = "17.0";
@@ -16,6 +20,7 @@ fn main() {
     println!("cargo::rerun-if-changed=build_support/roots.rs");
     println!("cargo::rerun-if-env-changed={}", roots::LOCAL_ROOTS_ENV);
     println!("cargo::rerun-if-changed=src/vt_decode.c");
+    println!("cargo::rerun-if-changed=src/ios_clipboard.m");
     println!("cargo::rerun-if-changed=../fr-native/src/apple_decode_output.h");
     println!("cargo::rerun-if-changed=src/abi_check.c");
     println!("cargo::rerun-if-changed=include/fr_mobile.h");
@@ -90,6 +95,44 @@ fn main() {
     ] {
         println!("cargo::rustc-link-lib=framework={framework}");
     }
+    if os == "ios" {
+        build_clipboard(sdk, &target, &out);
+    }
+}
+
+fn build_clipboard(sdk: &str, target: &str, out: &Path) {
+    let object = out.join("ios_clipboard.o");
+    let status = Command::new("xcrun")
+        .args(["--sdk", sdk, "clang", "-target", target])
+        .args([
+            "-x",
+            "objective-c",
+            "-fobjc-arc",
+            "-fblocks",
+            "-O2",
+            "-fPIC",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-c",
+            "src/ios_clipboard.m",
+            "-o",
+        ])
+        .arg(&object)
+        .status()
+        .expect("xcrun clang (install Xcode and its command line tools)");
+    assert!(status.success(), "src/ios_clipboard.m failed to compile");
+    let status = Command::new("xcrun")
+        .args(["--sdk", sdk, "ar", "crs"])
+        .arg(out.join("libfriospasteboard.a"))
+        .arg(&object)
+        .status()
+        .expect("xcrun ar");
+    assert!(status.success(), "archiving ios_clipboard.o failed");
+    println!("cargo::rustc-link-lib=static=friospasteboard");
+    println!("cargo::rustc-link-lib=framework=UIKit");
+    println!("cargo::rustc-link-lib=framework=Foundation");
+    println!("cargo::rustc-link-lib=dylib=objc");
 }
 
 /// macOS's own trust anchors (part of the OS, not user-editable).

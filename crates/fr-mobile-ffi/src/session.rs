@@ -186,8 +186,8 @@ pub struct Config {
     pub target: connection::Target,
     pub port: u16,
     pub control: bool,
-    /// Optional native clipboard for a controlling Windows client. Observation
-    /// and other platforms never configure or advertise this Windows adapter.
+    /// Optional native text clipboard for a controlling Windows or iOS client.
+    /// Observation never configures or advertises native clipboard access.
     pub clipboard: bool,
     /// One explicit, already selected local file. Clones retain its original
     /// one-use owner; replacement sessions must omit it rather than replay it.
@@ -500,7 +500,9 @@ impl Shared {
             local_cursor: None,
             granted: Mutex::default(),
             focus_owner: Mutex::default(),
-            clipboard: clipboard::Clipboard::new(control_capable && clipboard && cfg!(windows)),
+            clipboard: clipboard::Clipboard::new(
+                control_capable && clipboard && cfg!(any(windows, target_os = "ios")),
+            ),
             upload_sources_released: AtomicBool::new(upload.is_none()),
             upload,
             #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -961,6 +963,18 @@ impl Shared {
     /// local revision, item identifier or input authority.
     pub fn clipboard_report(&self) -> ClipboardReport {
         self.clipboard.report()
+    }
+
+    pub fn clipboard_enabled(&self) -> bool {
+        self.clipboard.enabled()
+    }
+
+    pub fn stop_clipboard(&self) {
+        self.clipboard.stop();
+    }
+
+    pub fn clipboard_presence(&self, visible: bool) {
+        self.clipboard.presence(visible);
     }
     /// Original upload evidence, including its final host receipt after the
     /// view closes. Contains no file path, basename, or contents.

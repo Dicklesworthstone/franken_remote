@@ -49,7 +49,7 @@ pub unsafe extern "C" fn fr_session_start_with_upload(
         _ => return FR_INVALID,
     };
     // SAFETY: forwarded configuration/string/output contract.
-    unsafe { start(config, display, true, None, out) }
+    unsafe { start(config, display, true, None, false, out) }
 }
 
 /// Reserve one choice before opening the native picker while observing.

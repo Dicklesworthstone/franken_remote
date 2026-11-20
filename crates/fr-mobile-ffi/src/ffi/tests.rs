@@ -153,7 +153,22 @@ fn a_receive_destination_is_spent_even_when_start_refuses_the_role_or_mode() {
     let path = CString::new(root.to_str().unwrap()).unwrap();
     let host = CString::new("mac.tailtest.ts.net").unwrap();
     let view_only = config(&host, 18443, None);
-    for mode in [FR_DISPLAY_CHOOSE, u32::MAX] {
+    for (clipboard, mode) in [
+        (false, FR_DISPLAY_CHOOSE),
+        (false, u32::MAX),
+        (true, FR_DISPLAY_CHOOSE),
+        (true, u32::MAX),
+    ] {
+        let start = if clipboard {
+            fr_session_start_with_clipboard
+        } else {
+            fr_session_start_with_files
+        };
+        let refused = if clipboard && !cfg!(target_os = "ios") {
+            FR_UNSUPPORTED
+        } else {
+            FR_INVALID
+        };
         let mut token = 0;
         let mut handle = 91;
         // SAFETY: all strings and output pointers remain valid for each call.
@@ -164,24 +179,12 @@ fn a_receive_destination_is_spent_even_when_start_refuses_the_role_or_mode() {
             );
             assert_ne!(token, 0);
             assert_eq!(
-                fr_session_start_with_files(
-                    &raw const view_only,
-                    mode,
-                    false,
-                    token,
-                    &raw mut handle
-                ),
-                FR_INVALID
+                start(&raw const view_only, mode, false, token, &raw mut handle),
+                refused
             );
             assert_eq!(handle, 91);
             assert_eq!(
-                fr_session_start_with_files(
-                    &raw const view_only,
-                    mode,
-                    false,
-                    token,
-                    &raw mut handle
-                ),
+                start(&raw const view_only, mode, false, token, &raw mut handle),
                 FR_STALE
             );
         }
@@ -190,9 +193,34 @@ fn a_receive_destination_is_spent_even_when_start_refuses_the_role_or_mode() {
 }
 
 #[test]
+fn clipboard_bridge_refuses_stale_handles_without_mutating_the_output() {
+    let mut status = FrClipboardStatus {
+        received_submitted: 7,
+        received_unknown: 2,
+        ..FrClipboardStatus::default()
+    };
+    let original = status;
+    // SAFETY: the output is writable or explicitly NULL; no valid owner exists.
+    unsafe {
+        assert!(!fr_session_clipboard_status(0, &raw mut status));
+        assert!(!fr_session_clipboard_status(
+            u64::MAX,
+            core::ptr::null_mut()
+        ));
+    }
+    assert_eq!(status, original);
+    assert_eq!(fr_session_clipboard_presence(0, true), FR_STALE);
+    assert_eq!(fr_session_clipboard_presence(u64::MAX, false), FR_STALE);
+    assert_eq!(fr_session_stop_clipboard(0), FR_STALE);
+    assert_eq!(fr_session_stop_clipboard(u64::MAX), FR_STALE);
+}
+
+#[test]
 fn struct_layouts_match_the_headers_static_assertions() {
     // The same numbers src/abi_check.c asserts against the header at build.
     assert_eq!(size_of::<FrHandle>(), 8);
+    assert_eq!(size_of::<FrClipboardStatus>(), 40);
+    assert_eq!(offset_of!(FrClipboardStatus, received_submitted), 16);
     assert_eq!(size_of::<Event>(), 32);
     assert_eq!(offset_of!(Event, picture_height), 24);
     assert_eq!(size_of::<FrFrameInfo>(), 32);

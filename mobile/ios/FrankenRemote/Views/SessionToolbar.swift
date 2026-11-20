@@ -81,6 +81,9 @@ struct SessionToolbar: View {
         switch session.phase {
         case .controlled:
             Button {
+                // A system confirmation obscures the persistent Off control.
+                // Fence its original owner before the modal is presented.
+                session.stopClipboard()
                 confirmRelease = true
             } label: {
                 Label("In control", systemImage: "cursorarrow.rays")

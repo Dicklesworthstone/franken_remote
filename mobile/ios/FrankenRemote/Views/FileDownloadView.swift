@@ -47,7 +47,10 @@ struct FileDownloadBar: View {
                     }
                 }
                 if session.downloadCleanupComplete {
-                    Button("Show received files…") { showFiles = true }
+                    Button("Show received files…") {
+                        session.stopClipboard()
+                        showFiles = true
+                    }
                         .font(.caption)
                 } else {
                     Text("Files stay in FrankenRemote. Disconnect and finish cleanup before sharing a saved file.")
