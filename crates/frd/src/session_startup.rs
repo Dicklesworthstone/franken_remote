@@ -47,7 +47,7 @@ pub use running::publisher::{
     ManagedPendingControl, NativePublisher, Policy as PublisherPolicy,
 };
 pub use running::{
-    ControlledHost, HostSession, LocalControl as HostControlState,
+    ControlledHost, DemotedViewing, HostSession, LocalControl as HostControlState,
     PendingControl as PendingHostControl, SharedHost, SharedStatistics, StreamingHost,
 };
 

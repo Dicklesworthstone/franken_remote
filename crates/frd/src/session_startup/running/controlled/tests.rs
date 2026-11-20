@@ -1149,7 +1149,7 @@ fn demote_to_viewing_fences_input_and_keeps_viewing_session_alive_on_same_connec
                     effects.lock().unwrap().held,
                     "expected key press to land before demotion"
                 );
-                let demoted = host
+                let mut demoted = host
                     .demote_to_viewing(StopReason::LocalRevoke)
                     .expect("demotion succeeds while observation is healthy");
 
@@ -1168,6 +1168,7 @@ fn demote_to_viewing_fences_input_and_keeps_viewing_session_alive_on_same_connec
                 let decoded = fr_wire::lease_revoked::decode(
                     &demoted.lease_revoked_record,
                     binding,
+                    credentials().lease,
                     &demoted.session.opened.selected.limits,
                     fr_wire::input::InputDirection::HostToViewer,
                     fr_wire::input::InputDelivery::Reliable,
@@ -1207,7 +1208,7 @@ fn demote_to_viewing_fences_input_and_keeps_viewing_session_alive_on_same_connec
 fn demote_to_viewing_refuses_when_observation_is_already_revoked() {
     run(|c, h| async move {
         let Fixture {
-            host,
+            mut host,
             viewer: _viewer,
             driver,
             seat,
