@@ -84,7 +84,7 @@ impl SimConfig {
         Self {
             seed,
             peer_count: 4,
-            steps: 250,
+            steps: 400,
             faults: FaultProfile::default(),
             planted_bug: PlantedBug::None,
         }
@@ -654,28 +654,29 @@ impl SimHarness {
                     );
                 }
             }
-            // Issue ticket and schedule input action (key down/up).
+            // Issue ticket and schedule input action (key down/up) from the active controller.
             55..=72 => {
+                let target_idx = self.controller_slot.unwrap_or(peer_idx);
                 let ticket = self.alloc_ticket();
                 let (sid, active_lease) = (
-                    self.peers[peer_idx].session_id,
-                    self.peers[peer_idx].active_lease,
+                    self.peers[target_idx].session_id,
+                    self.peers[target_idx].active_lease,
                 );
                 if let Some(lease) = active_lease
-                    && self.peers[peer_idx]
+                    && self.peers[target_idx]
                         .authority
                         .issue_input_ticket(lease, ticket, now)
                         .is_ok()
                 {
-                    self.peers[peer_idx].last_ticket = Some(ticket);
-                    self.record_event(step, peer_idx, SimEventKind::TicketIssued);
+                    self.peers[target_idx].last_ticket = Some(ticket);
+                    self.record_event(step, target_idx, SimEventKind::TicketIssued);
                     let pressed = (self.rng.next_u64() & 1) == 0;
                     let key_code = u16::try_from(4 + (self.rng.next_u64() % 26)).unwrap_or(4);
                     if let Some(key) = PhysicalKey::new(key_code) {
                         self.enqueue_packet(
                             step,
-                            peer_idx,
-                            peer_idx,
+                            target_idx,
+                            target_idx,
                             sid,
                             WirePayload::InputAction {
                                 lease,
@@ -691,7 +692,7 @@ impl SimHarness {
             73..=79 => self.step_view_freshness(step, peer_idx, now),
             // Control -> View demotion (keep viewing alive!).
             80..=84 => {
-                if self.controller_slot == Some(peer_idx) {
+                if self.controller_slot.is_some() {
                     self.release_controller_slot(step, true);
                     self.summary.control_demotions += 1;
                 }
@@ -706,9 +707,9 @@ impl SimHarness {
                 self.record_event(step, peer_idx, SimEventKind::LocalRevoke);
             }
             // Host suspend + resume boundary across ALL peers.
-            90..=93 => self.step_host_suspend(step)?,
+            90..=92 => self.step_host_suspend(step)?,
             // Adversarial cross-peer spoof attempt (must always be refused!).
-            94..=96 => self.step_cross_peer_spoof(step, peer_idx, now)?,
+            93..=97 => self.step_cross_peer_spoof(step, peer_idx, now)?,
             // Close & reconnect peer with a brand new RemoteSessionId.
             _ => {
                 if self.controller_slot == Some(peer_idx) {
@@ -894,15 +895,20 @@ impl SimHarness {
         let Some(victim_idx) = self.controller_slot else {
             return Ok(());
         };
-        if victim_idx == attacker_idx {
+        if self.peers.len() < 2 {
             return Ok(());
         }
+        let attacker_idx = if victim_idx == attacker_idx {
+            (victim_idx + 1) % self.peers.len()
+        } else {
+            attacker_idx
+        };
         let Some(victim_lease) = self.peers[victim_idx].active_lease else {
             return Ok(());
         };
-        let Some(victim_ticket) = self.peers[victim_idx].last_ticket else {
-            return Ok(());
-        };
+        let victim_ticket = self.peers[victim_idx]
+            .last_ticket
+            .unwrap_or_else(|| InputTicketId::from_raw(1));
         // Attacker attempts to submit using victim's lease + ticket against attacker's own authority.
         let res = self.peers[attacker_idx].authority.authorize_submission(
             victim_lease,
