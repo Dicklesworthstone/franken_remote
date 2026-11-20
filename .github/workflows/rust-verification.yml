@@ -630,6 +630,10 @@ jobs:
           cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=13.0 -Wall -Wextra -Werror crates/fr-native/src/macos_audio_capture.m
           cc -std=c11 -Wall -Wextra -Werror -pthread crates/fr-native/tests/macos_audio_capture_policy.c -o "$RUNNER_TEMP/fr-macos-audio-policy"
           "$RUNNER_TEMP/fr-macos-audio-policy"
+      - name: Test the screen capture policy the encoder uses
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic crates/fr-native/tests/macos_capture_policy.c -o "$RUNNER_TEMP/fr-macos-capture-policy"
+          "$RUNNER_TEMP/fr-macos-capture-policy"
       - name: Check the read-only session monitor against the Apple SDK
         run: cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=11.0 -Wall -Wextra -Werror crates/fr-native/src/macos_session.m
       - name: Check the observation indicator against the Apple SDK

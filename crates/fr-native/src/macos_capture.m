@@ -928,9 +928,9 @@ int fr_cap_open(const FrCapDisplay *expected, uint32_t width, uint32_t height, u
 }
 
 // Low-latency rate control skips a picture that would overrun its budget,
-// typically the first after a large IDR. Each resubmission one interval
-// later releases one frame's budget; past this many the request fails.
-#define FR_CAP_RESUBMITS 8
+// typically the first after a large IDR. Each resubmission is one interval
+// later and waits for the clock (fr_cap_pts_wait_us), so the budget it spends
+// has accrued; the request's deadline bounds the resubmissions.
 
 // Asks for Screen Recording on behalf of this process's responsible process
 // (frd when launchd runs it). macOS shows its prompt only while no decision
@@ -957,6 +957,19 @@ static BOOL source_current(FrCapture *c, uint64_t source_epoch) {
     BOOL current = !c->stopped && fr_cap_source_current(&c->source, source_epoch);
     os_unfair_lock_unlock(&c->lock);
     return current;
+}
+
+// Waits until `pts` (microseconds of CLOCK_UPTIME_RAW) leads the clock by at
+// most FR_CAP_PTS_LEAD_US. A wait that would pass the deadline fails at once.
+static int wait_for_pts(int64_t pts, uint64_t deadline_ns) {
+    for (;;) {
+        uint64_t now_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if (now_ns >= deadline_ns) return FR_CAP_TIMEOUT;
+        uint64_t wait_us = fr_cap_pts_wait_us(pts, (int64_t)(now_ns / 1000));
+        if (wait_us == 0) return FR_CAP_OK;
+        if (wait_us >= (deadline_ns - now_ns) / 1000) return FR_CAP_TIMEOUT;
+        usleep((useconds_t)(wait_us < 500000 ? wait_us : 500000));
+    }
 }
 
 // A reply may use the broker's pre-request timestamp only after positive
@@ -1064,14 +1077,15 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
                           ? now
                           : c->last_pts + c->interval;
         c->unit_limit = capacity;
-        for (int attempt = 0;; attempt++) {
+        for (;;) {
             if (!source_current(c, source_epoch)) {
                 CVPixelBufferRelease(picture);
                 return FR_CAP_UNAVAILABLE;
             }
-            if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= deadline_ns) {
+            int paced = wait_for_pts(pts, deadline_ns);
+            if (paced) {
                 CVPixelBufferRelease(picture);
-                return FR_CAP_TIMEOUT;
+                return paced;
             }
             c->unit = nil;
             c->dropped = NO;
@@ -1092,12 +1106,15 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
                 return FR_CAP_TIMEOUT;
             }
             c->last_pts = pts;
-            if (!c->dropped || attempt == FR_CAP_RESUBMITS) break;
+            if (!c->dropped) break;
             if (pts > INT64_MAX - c->interval) {
                 CVPixelBufferRelease(picture);
                 return FR_CAP_CODEC;
             }
-            pts += c->interval;
+            // An encode slower than one interval must not leave the budget
+            // behind the clock either.
+            int64_t now_us = (int64_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000);
+            pts = pts + c->interval > now_us ? pts + c->interval : now_us;
         }
         CVPixelBufferRelease(picture);
         if (c->result != noErr || !c->unit) return FR_CAP_CODEC;

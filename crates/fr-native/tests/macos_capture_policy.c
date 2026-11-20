@@ -422,6 +422,33 @@ static void a_refusal_outranks_every_answer_that_began_before_it(void) {
     assert(FR_CAP_LIVE_REFRESH_NS < FR_CAP_LIVE_REUSE_NS);
 }
 
+static void a_presentation_time_may_lead_the_clock_only_by_its_bound(void) {
+    assert(fr_cap_pts_wait_us(1000, 2000) == 0);
+    assert(fr_cap_pts_wait_us(2000, 2000) == 0);
+    assert(fr_cap_pts_wait_us(2000 + FR_CAP_PTS_LEAD_US, 2000) == 0);
+    assert(fr_cap_pts_wait_us(2001 + FR_CAP_PTS_LEAD_US, 2000) == 1);
+    assert(fr_cap_pts_wait_us(INT64_MAX, INT64_MIN) == UINT64_MAX - FR_CAP_PTS_LEAD_US);
+    assert(fr_cap_pts_wait_us(INT64_MIN, INT64_MAX) == 0);
+}
+
+// The capture loop's resubmission schedule with instant encodes: every drop
+// moves the picture one interval later and waits for the clock first. The
+// budget it spends never runs more than the bound ahead of the clock, so a
+// picture dropped many times waits for nearly that many intervals.
+static void dropped_pictures_wait_for_the_budget_they_spend(void) {
+    const int64_t interval = 1000000 / 30;
+    int64_t clock = 5000000, pts = clock;
+    uint64_t waited = 0;
+    for (int drop = 0; drop < 40; drop++) {
+        pts += interval;
+        uint64_t wait = fr_cap_pts_wait_us(pts, clock);
+        clock += (int64_t)wait;
+        waited += wait;
+        assert(pts - clock <= FR_CAP_PTS_LEAD_US);
+    }
+    assert(waited == (uint64_t)(40 * interval - FR_CAP_PTS_LEAD_US));
+}
+
 int main(void) {
     rate_targets_do_not_encode_an_unchanged_source();
     rate_changes_require_existing_work_and_an_independent_picture();
@@ -448,6 +475,8 @@ int main(void) {
     encoded_allocation_is_bounded_before_append();
     a_positive_live_check_stands_for_at_most_its_bound();
     a_refusal_outranks_every_answer_that_began_before_it();
-    puts("25 macOS capture policy tests passed");
+    a_presentation_time_may_lead_the_clock_only_by_its_bound();
+    dropped_pictures_wait_for_the_budget_they_spend();
+    puts("27 macOS capture policy tests passed");
     return 0;
 }

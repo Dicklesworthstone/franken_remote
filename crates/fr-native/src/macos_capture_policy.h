@@ -256,4 +256,20 @@ static inline void fr_cap_live_record(FrCapLive *live, uint64_t stamp, bool posi
 // then checks for itself, as before.
 #define FR_CAP_LIVE_REFRESH_NS 50000000ull
 
+// Low-latency rate control budgets bits by presentation time and drops a
+// picture that would overrun the budget accrued so far. A presentation time
+// ahead of the clock spends budget the link has not delivered yet. When drops
+// were resubmitted one interval later without waiting, a full-noise 1280x720
+// window came out at 15-19 Mbit/s for 2 and 8 Mbit/s targets (fr-8xl4). A
+// presentation time may lead the clock by this much; beyond that the
+// submission waits.
+#define FR_CAP_PTS_LEAD_US 100000
+
+// Microseconds to wait before submitting at `pts`; both are on one clock.
+static inline uint64_t fr_cap_pts_wait_us(int64_t pts, int64_t now) {
+    if (pts <= now) return 0;
+    uint64_t ahead = (uint64_t)pts - (uint64_t)now;
+    return ahead > FR_CAP_PTS_LEAD_US ? ahead - FR_CAP_PTS_LEAD_US : 0;
+}
+
 #endif
