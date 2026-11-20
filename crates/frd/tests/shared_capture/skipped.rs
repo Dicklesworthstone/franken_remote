@@ -2,7 +2,7 @@
 use super::*;
 use fr_media::access_unit::{FrameId, FrameKind};
 
-async fn skipping_source(
+pub(super) async fn skipping_source(
     owner: &ObservationControl,
     skips: i32,
     same_original: bool,

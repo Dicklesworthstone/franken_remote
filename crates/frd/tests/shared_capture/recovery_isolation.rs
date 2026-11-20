@@ -238,6 +238,44 @@ fn private_capture_keeps_the_original_recovery_timeout_and_requires_independent_
 }
 
 #[test]
+fn completed_drops_cannot_replace_the_original_private_recovery_cap_with_a_native_budget() {
+    run_shared!(rt, cx, {
+        let (owner, _) = gate(&rt, 1);
+        let (viewer, input) = gate(&rt, 2);
+        let mut source = super::skipped::skipping_source(&owner, -1, true).await;
+        let pid = source.worker_id();
+        let mut sender = egress(&viewer, limits(1150), bindings(1), failed_policy());
+        let mut received = receiver(&cx, limits(1150), bindings(1));
+        let initial = source.capture_if_changed(&owner, true).await.unwrap();
+        sender.enqueue_capture(initial).unwrap();
+        pump(&cx, &mut sender, &mut received);
+        assert_eq!(decoded(&cx, &mut received).descriptor().frame, 0);
+
+        let failed_until = request(&mut sender, &mut source);
+        let started = host_now(&cx).unwrap();
+        let result = {
+            // The demand, not this caller, requests the recovery IDR. The
+            // synthetic worker completes each attempt as a rate-limited drop
+            // and checks that retries preserve the original timestamp.
+            let mut capture = pin!(source.capture_if_changed(&owner, false));
+            pending(capture.as_mut()).await;
+            assert!(host_now(&cx).unwrap() < failed_until);
+            capture.await
+        };
+        assert_eq!(result.unwrap_err(), Error::Worker(WorkerError::Deadline));
+        let completed = host_now(&cx).unwrap();
+        assert!(completed >= failed_until);
+        assert!(completed.as_micros() - started.as_micros() < 600_000);
+        assert_eq!(source.next_recovery_deadline(), None);
+        assert_eq!(sender.next_deadline(), Some(failed_until));
+        assert_eq!(source.worker_id(), pid);
+        assert!(!input_live(&cx, &input));
+        owner.check().unwrap();
+        reap_poisoned(&rt, &mut source).await;
+    });
+}
+
+#[test]
 fn shared_capture_still_fences_source_observation_expiry_and_revoke_while_pending() {
     run_shared!(rt, cx, {
         for (id, revoke) in [(401, false), (402, true)] {

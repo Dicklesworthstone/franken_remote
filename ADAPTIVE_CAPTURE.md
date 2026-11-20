@@ -631,6 +631,10 @@ encoded reference. They send no media/progress and create no idle/freshness
 observation. The next scheduled capture uses a new candidate on the same
 worker and the existing cadence. A dropped picture therefore cannot refresh
 input readiness or appear in a later picture's dependency chain.
+The shared service also spends that capture turn without restarting the
+previous picture's viewer-credit grace. A skip publishes nothing, including
+when returned credit admitted the attempt early; it neither extends a slow
+viewer's grace nor leaves an immediate retry permit behind.
 
 A property change followed by a dropped picture remains unconfirmed as output.
 Native readback records the installed setting and starts the original two-clock

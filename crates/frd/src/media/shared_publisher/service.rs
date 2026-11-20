@@ -17,7 +17,7 @@ struct Cadence {
     last: u64,
     /// The turn at `last` found no capture credit; see `may_start_early`.
     retrying: bool,
-    /// When the last capture completed; see `waits_for_all`.
+    /// When the last non-skipped capture completed; see `waits_for_all`.
     shared: Option<u64>,
 }
 impl Cadence {
@@ -70,9 +70,13 @@ impl Cadence {
         self.retrying = false;
         Ok(())
     }
-    fn after_capture(&mut self, started: u64, completed: u64) -> Result<(), Error> {
+    fn after_capture(&mut self, started: u64, completed: u64, skipped: bool) -> Result<(), Error> {
         self.after_turn(started, completed)?;
-        self.shared = Some(completed);
+        // A completed native drop consumed this turn, but published nothing.
+        // It cannot give viewers more time to take the previous picture.
+        if !skipped {
+            self.shared = Some(completed);
+        }
         Ok(())
     }
     /// A turn at `next` that found no capture credit schedules the next turn
@@ -95,12 +99,17 @@ impl Cadence {
     fn may_start_early(&self, now: u64) -> bool {
         self.retrying && self.last <= now && now < self.next
     }
-    fn after_early_capture(&mut self, started: u64, completed: u64) -> Result<(), Error> {
+    fn after_early_capture(
+        &mut self,
+        started: u64,
+        completed: u64,
+        skipped: bool,
+    ) -> Result<(), Error> {
         if !self.may_start_early(started) {
             return Err(Error::Closed);
         }
         self.next = started;
-        self.after_capture(started, completed)
+        self.after_capture(started, completed, skipped)
     }
     /// Whether a capture at `now` waits for every viewer's credit instead of
     /// refusing those without it as slow. A viewer is slow only if it still
@@ -243,33 +252,36 @@ impl Publisher {
                     let started = owner.check().map_err(Error::Media)?.as_micros();
                     if cadence.may_start_early(started) {
                         let wait_for_all = cadence.waits_for_all(started);
-                        match publisher.capture_inner(wait_for_all).await {
-                            Ok(update) => report(update),
+                        let skipped = match publisher.capture_inner(wait_for_all).await {
+                            Ok(update) => {
+                                report(update);
+                                update.skipped
+                            }
                             Err(Error::Media(MediaError::Backpressure)) => continue,
                             Err(error) => return Err(error),
-                        }
+                        };
                         publisher
                             .sample_cursor_after(&owner, &mut cursor_cadence)
                             .await?;
                         let completed = owner.check().map_err(Error::Media)?.as_micros();
-                        cadence.after_early_capture(started, completed)?;
+                        cadence.after_early_capture(started, completed, skipped)?;
                     }
                     continue;
                 }
                 let captured = match publisher.capture_inner(cadence.waits_for_all(now)).await {
                     Ok(update) => {
                         report(update);
-                        true
+                        Some(update.skipped)
                     }
-                    Err(Error::Media(MediaError::Backpressure)) => false,
+                    Err(Error::Media(MediaError::Backpressure)) => None,
                     Err(error) => return Err(error),
                 };
                 publisher
                     .sample_cursor_after(&owner, &mut cursor_cadence)
                     .await?;
                 let completed = owner.check().map_err(Error::Media)?.as_micros();
-                if captured {
-                    cadence.after_capture(now, completed)?;
+                if let Some(skipped) = captured {
+                    cadence.after_capture(now, completed, skipped)?;
                 } else {
                     cadence.after_backpressure(now, completed)?;
                 }
@@ -372,7 +384,7 @@ mod tests {
         // After a capture, the next one waits a whole interval from its start.
         assert!(!cadence.may_start_early(30_000));
         assert_eq!(
-            cadence.after_early_capture(30_000, 31_000),
+            cadence.after_early_capture(30_000, 31_000, false),
             Err(Error::Closed)
         );
         // The turn at 33_334 finds no credit. Its successor is still a whole
@@ -383,17 +395,17 @@ mod tests {
         assert!(cadence.may_start_early(36_000));
         assert!(!cadence.may_start_early(50_001));
         // A 34 ms 5K capture: the next turn follows its completion.
-        cadence.after_early_capture(36_000, 70_000).unwrap();
+        cadence.after_early_capture(36_000, 70_000, false).unwrap();
         assert_eq!((cadence.next, cadence.last), (70_000, 36_000));
         assert!(!cadence.may_start_early(60_000));
         assert_eq!(
-            cadence.after_early_capture(60_000, 61_000),
+            cadence.after_early_capture(60_000, 61_000, false),
             Err(Error::Closed)
         );
         // Each early start follows a turn without credit, which itself ran
         // at least one interval after the previous capture started.
         cadence.after_backpressure(70_000, 70_100).unwrap();
-        cadence.after_early_capture(70_001, 80_000).unwrap();
+        cadence.after_early_capture(70_001, 80_000, false).unwrap();
         assert!(70_001 - 36_000 >= cadence.interval);
         assert_eq!(cadence.next, 86_668);
     }
@@ -403,7 +415,7 @@ mod tests {
         // completes, before any viewer can have taken the picture.
         let mut cadence = Cadence::new(Duration::from_micros(16_667), 60, 0).unwrap();
         assert!(!cadence.waits_for_all(16_667));
-        cadence.after_capture(16_667, 53_667).unwrap();
+        cadence.after_capture(16_667, 53_667, false).unwrap();
         assert_eq!(cadence.next, 53_667);
         assert!(cadence.waits_for_all(53_667));
         assert!(cadence.waits_for_all(70_333));
@@ -414,9 +426,42 @@ mod tests {
         assert_eq!(cadence.next, 70_367);
         assert!(!cadence.waits_for_all(cadence.next));
         // An early capture starts a new interval for its own picture.
-        cadence.after_early_capture(60_000, 97_000).unwrap();
+        cadence.after_early_capture(60_000, 97_000, false).unwrap();
         assert!(cadence.waits_for_all(113_666));
         assert!(!cadence.waits_for_all(113_667));
+    }
+    #[test]
+    fn skipped_capture_spends_its_turn_without_renewing_the_previous_picture_grace() {
+        let mut cadence = Cadence::new(Duration::from_millis(50), 30, 0).unwrap();
+        cadence.after_capture(50_000, 60_000, false).unwrap();
+        assert!(cadence.waits_for_all(109_999));
+        cadence.after_capture(100_000, 100_001, true).unwrap();
+        assert_eq!(cadence.shared, Some(60_000));
+        assert_eq!(cadence.next, 150_000);
+        assert!(!cadence.may_start_early(100_002));
+        assert!(!cadence.waits_for_all(110_000));
+
+        // Returned credit may still admit one early attempt. A skipped result
+        // spends it and cannot retain the retry permit or restart viewer grace.
+        cadence.after_backpressure(150_000, 150_001).unwrap();
+        cadence.after_early_capture(160_000, 160_001, true).unwrap();
+        assert_eq!(cadence.shared, Some(60_000));
+        assert_eq!(cadence.next, 210_000);
+        assert!(!cadence.may_start_early(160_002));
+        assert!(!cadence.waits_for_all(160_002));
+        // A later actual publication still starts its own full grace period.
+        cadence.after_capture(210_000, 250_000, false).unwrap();
+        assert!(cadence.waits_for_all(299_999));
+        assert!(!cadence.waits_for_all(300_000));
+    }
+    #[test]
+    fn a_skipped_turn_cannot_create_publication_grace_before_the_first_picture() {
+        let mut cadence = Cadence::new(Duration::from_millis(50), 30, 0).unwrap();
+        cadence.after_capture(50_000, 70_000, true).unwrap();
+        assert_eq!(cadence.shared, None);
+        assert_eq!(cadence.next, 100_000);
+        assert!(!cadence.waits_for_all(70_000));
+        assert!(!cadence.may_start_early(70_000));
     }
     #[test]
     fn a_backpressure_turn_keeps_the_schedule_and_refuses_one_before_its_time() {
@@ -437,7 +482,7 @@ mod tests {
         cadence.after_turn(100_000, 101_000).unwrap();
         assert!(!cadence.retrying);
         assert_eq!(
-            cadence.after_early_capture(100_500, 101_000),
+            cadence.after_early_capture(100_500, 101_000, false),
             Err(Error::Closed)
         );
     }
