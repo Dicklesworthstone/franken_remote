@@ -16,7 +16,10 @@ pub const MAX_FANOUT_RECIPIENTS: usize = 8;
 enum SharedContent {
     Encoded(SharedFrame),
     Unchanged(UnchangedCapture),
-    Skipped { reference: FrameId },
+    Skipped {
+        reference: FrameId,
+        installed_bitrate: u32,
+    },
 }
 /// Only an actual `CaptureUpdate` can create this source-bound result. Cloning
 /// retains one physical compressed allocation or copies fixed unchanged metadata;
@@ -48,7 +51,13 @@ impl CaptureUpdate {
                 SharedContent::Encoded(pool.share(unit).map_err(Error::Receiver)?)
             }
             Content::Unchanged(proof) => SharedContent::Unchanged(proof),
-            Content::Skipped { reference } => SharedContent::Skipped { reference },
+            Content::Skipped {
+                reference,
+                installed_bitrate,
+            } => SharedContent::Skipped {
+                reference,
+                installed_bitrate,
+            },
         };
         Ok(SharedCaptureUpdate {
             source: self.source,
@@ -73,9 +82,15 @@ impl CaptureUpdate {
                 drop(reservation);
                 SharedContent::Unchanged(proof)
             }
-            Content::Skipped { reference } => {
+            Content::Skipped {
+                reference,
+                installed_bitrate,
+            } => {
                 drop(reservation);
-                SharedContent::Skipped { reference }
+                SharedContent::Skipped {
+                    reference,
+                    installed_bitrate,
+                }
             }
         };
         Ok(SharedCaptureUpdate {
@@ -89,6 +104,14 @@ impl CaptureUpdate {
 impl SharedCaptureUpdate {
     pub(crate) const fn applied_bitrate(&self) -> Option<u32> {
         self.applied_bitrate
+    }
+    pub(crate) fn skipped_bitrate(&self) -> Option<u32> {
+        match self.content {
+            SharedContent::Skipped {
+                installed_bitrate, ..
+            } => Some(installed_bitrate),
+            _ => None,
+        }
     }
     pub(crate) fn check_publisher_source(
         &self,
@@ -111,7 +134,7 @@ impl SharedCaptureUpdate {
         match &self.content {
             SharedContent::Encoded(frame) => frame.frame(),
             SharedContent::Unchanged(proof) => proof.reference,
-            SharedContent::Skipped { reference } => *reference,
+            SharedContent::Skipped { reference, .. } => *reference,
         }
     }
     /// A skipped native request has no source-observation timestamp.

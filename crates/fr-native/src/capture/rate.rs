@@ -1,6 +1,7 @@
 //! A requested rate is not evidence of an applied encoder change.
 //! The capture owner applies only on useful native work, after a real bootstrap.
-//! Both clocks must witness two seconds after the last validated transition.
+//! Both clocks must witness two seconds after the last confirmed native setting
+//! transition, including one whose first encoded picture was dropped.
 use std::time::{Duration, Instant};
 
 const DWELL: Duration = Duration::from_secs(2);
@@ -8,6 +9,7 @@ const DWELL: Duration = Duration::from_secs(2);
 pub(crate) struct Rate {
     requested: u32,
     applied: u32,
+    installed: u32,
     last: Option<(u64, Instant)>,
 }
 impl Rate {
@@ -15,6 +17,7 @@ impl Rate {
         Self {
             requested: initial,
             applied: initial,
+            installed: initial,
             last: None,
         }
     }
@@ -37,8 +40,12 @@ impl Rate {
     pub(crate) const fn applied_bitrate(&self) -> u32 {
         self.applied
     }
+    #[cfg(any(test, all(target_os = "macos", feature = "macos-media")))]
+    pub(crate) const fn installed_bitrate(&self) -> u32 {
+        self.installed
+    }
     pub(crate) fn due(&self, host: u64, worker: Instant, bootstrapped: bool) -> Option<u32> {
-        if !bootstrapped || self.requested == self.applied {
+        if !bootstrapped || self.requested == self.installed {
             return None;
         }
         if let Some((last_host, last_worker)) = self.last
@@ -57,7 +64,27 @@ impl Rate {
     /// Only after the new IDR and original display/source have both validated.
     pub(crate) const fn applied(&mut self, bitrate: u32, host: u64, worker: Instant) {
         self.applied = bitrate;
+        self.installed = bitrate;
         self.last = Some((host, worker));
+    }
+    /// A completed drop can prove a property change, never an emitted picture.
+    /// Charge physical mutation dwell once without advancing qualified output.
+    #[cfg(any(test, all(target_os = "macos", feature = "macos-media")))]
+    pub(crate) fn dropped(
+        &mut self,
+        target: u32,
+        actual: u32,
+        host: u64,
+        worker: Instant,
+    ) -> Result<(), ()> {
+        if actual != self.installed {
+            if actual != target {
+                return Err(());
+            }
+            self.installed = actual;
+            self.last = Some((host, worker));
+        }
+        Ok(())
     }
     /// Confirm a synchronous native transaction only after source and bitstream
     /// validation. An unchanged/P-picture result can retain the old setting,
@@ -75,11 +102,17 @@ impl Rate {
         host: u64,
         worker: Instant,
     ) -> Result<(), ()> {
-        if actual != self.applied {
-            if actual != target || !idr {
+        if actual != self.applied || actual != self.installed {
+            if (actual != target && actual != self.installed) || !idr {
                 return Err(());
             }
-            self.applied(actual, host, worker);
+            if actual != self.installed {
+                self.applied(actual, host, worker);
+            } else {
+                // Qualifying a setting already installed on a dropped request
+                // cannot restart that physical mutation's original dwell.
+                self.applied = actual;
+            }
         }
         Ok(())
     }

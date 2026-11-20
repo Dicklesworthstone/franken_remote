@@ -282,11 +282,12 @@ fn decoder_startup_bounds_are_checked_before_reading_configuration_bytes() {
 }
 
 #[test]
-fn skipped_capture_has_one_exact_candidate_and_no_observation_or_rate_fields() {
+fn skipped_capture_has_exact_identity_and_installed_setting_without_source_evidence() {
     let skipped = SkippedCapture {
         candidate: FrameId::from_raw(9),
+        installed_bitrate: 4_000_000,
     };
-    let bytes = [0, 0, 0, 0, 0, 0, 0, 9, 1];
+    let bytes = [0, 0, 0, 0, 0, 0, 0, 9, 1, 0, 61, 9, 0];
     assert_eq!(skipped.encode(), bytes);
     assert_eq!(SkippedCapture::decode(&bytes), Ok(skipped));
     for end in 0..bytes.len() {
@@ -300,6 +301,11 @@ fn skipped_capture_has_one_exact_candidate_and_no_observation_or_rate_fields() {
     let mut extended = bytes.to_vec();
     extended.push(0);
     assert_eq!(SkippedCapture::decode(&extended), Err(Error::Malformed));
+    for rate in [0_u32, 9_999, 200_000_001, u32::MAX] {
+        let mut invalid = bytes;
+        invalid[9..].copy_from_slice(&rate.to_be_bytes());
+        assert_eq!(SkippedCapture::decode(&invalid), Err(Error::ResourceLimit));
+    }
     let header = Header {
         kind: Kind::CaptureSkipped,
         identity: id(),
@@ -308,7 +314,7 @@ fn skipped_capture_has_one_exact_candidate_and_no_observation_or_rate_fields() {
     let wire = header.encode(&ProtocolLimits::ABSOLUTE).unwrap();
     assert_eq!(&wire[6..8], &283_u16.to_be_bytes());
     assert_eq!(Header::decode(&wire, &ProtocolLimits::ABSOLUTE), Ok(header));
-    for length in [0, 1, 8, 10, 17, 24, 28, 40, usize::MAX] {
+    for length in [0, 1, 8, 9, 10, 12, 14, 17, 24, 28, 40, usize::MAX] {
         assert!(
             Header { length, ..header }
                 .encode(&ProtocolLimits::ABSOLUTE)

@@ -115,9 +115,13 @@ impl Share {
                 match self.capture(frame, observed, force_idr, only_if_changed)? {
                     Captured::Unit(unit) => Ok((Kind::Unit, worker::unit_payload(&unit)?)),
                     Captured::Unchanged(proof) => Ok((Kind::Unchanged, proof.encode()?)),
-                    Captured::RateLimited => Ok((
+                    Captured::RateLimited { installed_bitrate } => Ok((
                         Kind::CaptureSkipped,
-                        worker::SkippedCapture { candidate: frame }.encode(),
+                        worker::SkippedCapture {
+                            candidate: frame,
+                            installed_bitrate,
+                        }
+                        .encode(),
                     )),
                 }
             }
@@ -142,9 +146,13 @@ impl Share {
                         Kind::RateUnchanged,
                         worker::rate::unchanged_payload(proof, bitrate)?,
                     )),
-                    Captured::RateLimited => Ok((
+                    Captured::RateLimited { installed_bitrate } => Ok((
                         Kind::CaptureSkipped,
-                        worker::SkippedCapture { candidate: c.frame }.encode(),
+                        worker::SkippedCapture {
+                            candidate: c.frame,
+                            installed_bitrate,
+                        }
+                        .encode(),
                     )),
                 }
             }
@@ -294,7 +302,7 @@ fn probe_encoder(
             unit.bytes().len(),
             capture.statistics().map_err(native)?,
         )),
-        Captured::Unchanged(_) | Captured::RateLimited => Err(Error::WrongState),
+        Captured::Unchanged(_) | Captured::RateLimited { .. } => Err(Error::WrongState),
     }
 }
 

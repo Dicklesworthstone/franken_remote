@@ -201,7 +201,7 @@ fn dropped_picture_releases_exact_work_credit_without_rate_or_idle_confirmation(
     });
     pacing.start(110_000).unwrap();
     assert_eq!(pacing.finish_skipped(111_000), Err(Error::InvalidBudget));
-    pacing.skip_bitrate(111_000).unwrap();
+    pacing.skip_bitrate(111_000, INITIAL / 2).unwrap();
     pacing.finish_skipped(111_000).unwrap();
     assert_eq!(policy(&pacing).applied_bitrate(), INITIAL);
     assert_eq!(policy(&pacing).pending(), decision);
@@ -219,7 +219,7 @@ fn dropped_picture_releases_exact_work_credit_without_rate_or_idle_confirmation(
 fn cadence_only_drop_has_work_cost_and_no_source_observation() {
     let mut pacing = pacing();
     pacing.start(10).unwrap();
-    pacing.skip_bitrate(20).unwrap();
+    pacing.skip_bitrate(20, INITIAL).unwrap();
     assert!(pacing.finish_skipped(9).is_err());
     assert_eq!(pacing.in_flight, Some(10));
     pacing.finish_skipped(20).unwrap();

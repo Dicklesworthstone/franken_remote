@@ -211,7 +211,12 @@ impl CapturePacing {
             if update.applied_bitrate().is_some() {
                 return Err(Error::Media(MediaError::InvalidFrame));
             }
-            return self.skip_bitrate(completed);
+            return self.skip_bitrate(
+                completed,
+                update
+                    .skipped_bitrate()
+                    .ok_or(Error::Media(MediaError::InvalidFrame))?,
+            );
         }
         self.complete_bitrate(
             completed,
@@ -219,11 +224,11 @@ impl CapturePacing {
             update.encoded().is_some_and(|frame| frame.kind().is_idr()),
         )
     }
-    fn skip_bitrate(&mut self, completed: u64) -> Result<(), Error> {
+    fn skip_bitrate(&mut self, completed: u64, installed_bitrate: u32) -> Result<(), Error> {
         match (&mut self.bitrate, self.bitrate_capture) {
             (Some(policy), Some(capture)) => {
                 policy
-                    .skip_capture(capture, completed)
+                    .skip_capture(capture, installed_bitrate, completed)
                     .map_err(bitrate_error)?;
             }
             (None, None) => {}

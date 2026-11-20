@@ -596,8 +596,9 @@ result for VideoToolbox.
 
 An established VideoToolbox stream now completes a successful native
 `FrameDropped` callback as private worker `CaptureSkipped` (283). Its exact
-nine-byte body names the original candidate and the rate-limited reason. It
-has no source timestamp, unchanged proof, pixel payload or applied bitrate.
+13-byte body names the original candidate, the rate-limited reason, and the
+installed native bitrate. It has no source timestamp, unchanged proof, pixel
+payload or bitrate qualified by output.
 Native errors, invalid samples, source invalidation and deadlines remain
 failures. The input surface is released only after the native callback has
 completed; a missing callback keeps the original drain/supervisor boundary.
@@ -609,11 +610,15 @@ observation. The next scheduled capture uses a new candidate on the same
 worker and the existing cadence. A dropped picture therefore cannot refresh
 input readiness or appear in a later picture's dependency chain.
 
-A property change followed by a dropped picture remains unconfirmed. Both
-the native owner and the original bitrate controller retain the pending work;
-the native owner forces the next successful output to be an IDR, including
-when a later request cancels the target by restoring the advertised rate.
-Only an admitted output can confirm the rate or start its dwell.
+A property change followed by a dropped picture remains unconfirmed as output.
+Native readback records the installed setting and starts the original two-clock
+physical mutation dwell once. Repeated drops and later IDR admission cannot
+restart it. Both the native owner and original bitrate controller retain the
+pending work and required IDR, including when a later request restores the
+advertised rate. During that restoration's native dwell, a real IDR at the prior
+installed setting is valid output; the host records it without rejecting it as
+an unrequested rate or forgetting the pending restoration. Only admitted output
+updates the advertised rate and the host controller's output-change dwell.
 
 Startup has no reference to retain and keeps clock-paced native resubmissions
 inside its original 1,500 ms native deadline. Required recovery IDRs and the

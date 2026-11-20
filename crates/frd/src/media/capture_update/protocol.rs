@@ -13,6 +13,7 @@ pub(super) enum Content {
     /// reference; the skipped candidate never joins the codec chain.
     Skipped {
         reference: FrameId,
+        installed_bitrate: u32,
     },
 }
 
@@ -108,10 +109,17 @@ impl Request {
         if self.configuration.backend != worker::Backend::VideoToolbox
             || skipped.candidate != self.frame
             || reference >= self.frame
+            || skipped.installed_bitrate > self.configuration.bitrate
         {
             return Err(Error::InvalidFrame);
         }
-        Ok((Content::Skipped { reference }, None))
+        Ok((
+            Content::Skipped {
+                reference,
+                installed_bitrate: skipped.installed_bitrate,
+            },
+            None,
+        ))
     }
 
     fn unit(&self, kind: Kind, body: Vec<u8>) -> Result<(Content, Option<u32>), Error> {

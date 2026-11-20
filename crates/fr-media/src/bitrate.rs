@@ -85,6 +85,7 @@ pub struct Capture {
     sequence: u64,
     bitrate: u32,
     previous: u32,
+    installed: u32,
 }
 impl Capture {
     pub const fn bitrate(self) -> u32 {
@@ -135,6 +136,9 @@ pub struct Controller {
     ceiling: u32,
     floor: u32,
     applied: u32,
+    /// Native readback can precede the first qualified output at this rate.
+    installed: u32,
+    needs_idr: bool,
     pending: Option<Change>,
     in_flight: Option<Capture>,
     native_target: u32,
@@ -162,6 +166,8 @@ impl Controller {
             ceiling: initial_bitrate,
             floor: (initial_bitrate / 8).max(100_000).min(initial_bitrate),
             applied: initial_bitrate,
+            installed: initial_bitrate,
+            needs_idr: false,
             pending: None,
             in_flight: None,
             native_target: initial_bitrate,
@@ -418,24 +424,11 @@ impl Controller {
             sequence,
             bitrate: self.pending.map_or(self.applied, Change::bitrate),
             previous: self.applied,
+            installed: self.installed,
         };
         self.native_target = capture.bitrate;
         self.in_flight = Some(capture);
         Ok(capture)
-    }
-
-    /// Release the original capture credit when native work produced no picture.
-    /// No output confirms the requested rate or an IDR, so the applied rate,
-    /// pending decision and native-held target remain unchanged. A later capture
-    /// must still report any actual change through [`Self::complete_capture`].
-    pub fn skip_capture(&mut self, capture: Capture, now_us: u64) -> Result<(), Error> {
-        self.check_open()?;
-        if self.in_flight != Some(capture) || self.applied != capture.previous {
-            return Err(Error::UnexpectedCapture);
-        }
-        self.clock(now_us)?;
-        self.in_flight = None;
-        Ok(())
     }
 
     /// Confirm only after the original worker reply and output have been fully
@@ -452,27 +445,65 @@ impl Controller {
         now_us: u64,
     ) -> Result<(), Error> {
         self.check_open()?;
-        if self.in_flight != Some(capture) || self.applied != capture.previous {
+        if self.in_flight != Some(capture)
+            || self.applied != capture.previous
+            || self.installed != capture.installed
+        {
             return Err(Error::UnexpectedCapture);
         }
-        if actual_bitrate != capture.previous && actual_bitrate != capture.bitrate {
+        if actual_bitrate != capture.installed && actual_bitrate != capture.bitrate {
             return Err(Error::UnexpectedBitrate);
         }
-        if actual_bitrate != self.applied && !is_idr {
+        if (actual_bitrate != self.applied || self.needs_idr) && !is_idr {
             return Err(Error::MissingIdr);
         }
         self.clock(now_us)?;
         self.in_flight = None;
-        if actual_bitrate != self.applied {
+        if actual_bitrate != self.applied || self.needs_idr {
             self.applied = actual_bitrate;
             self.changed_at = Some(now_us);
             self.clear_measurements();
         }
+        self.installed = actual_bitrate;
+        self.needs_idr = false;
         if self.pending.is_some_and(|change| {
             change.bitrate == actual_bitrate && capture.bitrate == actual_bitrate
         }) {
             self.pending = None;
         }
+        Ok(())
+    }
+
+    /// Retire one completed native attempt that was rate-limited without
+    /// producing a picture. The worker must certify the original request and
+    /// completed codec callback; a timeout or pending callback is not a skip.
+    ///
+    /// The installed rate may already equal the requested target, but no
+    /// output means no validated IDR. Keep the last output's applied rate,
+    /// change dwell and pending decision until a real picture confirms them.
+    /// The native target also remains retained: a scope reset must explicitly
+    /// restore it even when the worker deferred installation before dropping.
+    /// This completion carries no source-observation or presentation evidence.
+    pub fn skip_capture(
+        &mut self,
+        capture: Capture,
+        installed_bitrate: u32,
+        now_us: u64,
+    ) -> Result<(), Error> {
+        self.check_open()?;
+        if self.in_flight != Some(capture)
+            || self.applied != capture.previous
+            || self.installed != capture.installed
+        {
+            return Err(Error::UnexpectedCapture);
+        }
+        if installed_bitrate != capture.installed && installed_bitrate != capture.bitrate {
+            return Err(Error::UnexpectedBitrate);
+        }
+        self.clock(now_us)?;
+        self.in_flight = None;
+        self.needs_idr |= installed_bitrate != self.installed;
+        self.installed = installed_bitrate;
         Ok(())
     }
 

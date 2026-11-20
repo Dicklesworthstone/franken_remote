@@ -64,12 +64,21 @@ impl CaptureUpdate {
     pub(crate) const fn applied_bitrate(&self) -> Option<u32> {
         self.applied_bitrate
     }
+    /// Native setting confirmed on a completed drop; no output or freshness.
+    pub(crate) fn skipped_bitrate(&self) -> Option<u32> {
+        match self.content {
+            Content::Skipped {
+                installed_bitrate, ..
+            } => Some(installed_bitrate),
+            _ => None,
+        }
+    }
     /// Last actually encoded picture, not the skipped capture candidate.
     pub fn frame(&self) -> FrameId {
         match &self.content {
             Content::Encoded(unit) => unit.frame(),
             Content::Unchanged(proof) => proof.reference,
-            Content::Skipped { reference } => *reference,
+            Content::Skipped { reference, .. } => *reference,
         }
     }
     /// No timestamp is available for a skipped picture. Its completion cannot

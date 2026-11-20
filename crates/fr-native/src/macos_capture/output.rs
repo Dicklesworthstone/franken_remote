@@ -5,6 +5,7 @@ use fr_media::access_unit::FrameId;
 pub(super) struct Output {
     reference: Option<FrameId>,
     bitrate: u32,
+    installed: u32,
     pending_idr: bool,
 }
 
@@ -13,6 +14,7 @@ impl Output {
         Self {
             reference: None,
             bitrate,
+            installed: bitrate,
             pending_idr: false,
         }
     }
@@ -37,15 +39,17 @@ impl Output {
         actual: u32,
         length: usize,
         idr: bool,
+        forced: bool,
     ) -> Result<(), ()> {
         if self.reference.is_none()
             || length != 0
             || idr
-            || (actual != self.bitrate && actual != target)
+            || (actual != self.installed && actual != target)
         {
             return Err(());
         }
-        self.pending_idr |= actual != self.bitrate;
+        self.pending_idr |= forced || actual != self.installed;
+        self.installed = actual;
         Ok(())
     }
 
@@ -53,6 +57,7 @@ impl Output {
     pub(super) fn encoded(&mut self, frame: FrameId, actual: u32) {
         self.reference = Some(frame);
         self.bitrate = actual;
+        self.installed = actual;
         self.pending_idr = false;
     }
 }

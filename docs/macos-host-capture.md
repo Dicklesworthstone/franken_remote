@@ -180,10 +180,11 @@ released after callback completion, followed by the original permission,
 source-generation and deadline checks. A drop cannot advance the native
 encoded-picture marker or the successful-verification count.
 
-This private FRW0 reply is kind 283 with exactly nine body bytes: the original
-eight-byte big-endian candidate ID and one reason byte (1, native rate
-limited). Unknown reasons and mismatched candidates are refused. There is no
-source timestamp or rate acknowledgement. The host admits it only for an
+This private FRW0 reply is kind 283 with exactly 13 body bytes: the original
+eight-byte big-endian candidate ID, one reason byte (1, native rate limited),
+and four-byte big-endian installed bitrate. Unknown reasons, out-of-range rates
+and mismatched candidates are refused. There is no source timestamp or rate
+qualified by output. The host admits it only for an
 established VideoToolbox source, preserves the last encoded reference, and
 releases unused capture capacity. No media record, source-progress update,
 adaptive unchanged observation or input freshness is generated.
@@ -198,8 +199,12 @@ presentation times remain bounded against the current clock.
 
 If the native bitrate property changed before the drop, that setting is not
 yet advertised. The next successful output must be an admitted IDR before
-the rate is confirmed. That obligation survives more drops and cancellation
-back to the previously advertised rate; no dropped output starts a dwell.
+the output rate is confirmed. That obligation survives more drops and cancellation
+back to the previously advertised rate. Confirmed installation starts the native
+physical mutation's original host/worker-clock dwell once. Repeated drops and a
+later IDR do not restart it. The host retains installed and output rates separately,
+so an IDR at the prior installed rate remains admissible while restoration waits
+for that dwell. A drop does not advance the advertised rate or its output dwell.
 
 The 50 ms verification wait bounds sustained verification demand to at most
 20 requests per second under an eager caller, before accounting for capture

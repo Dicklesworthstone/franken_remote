@@ -135,7 +135,13 @@ impl PathRate {
             }
             return self
                 .controller
-                .skip_capture(capture, completed)
+                .skip_capture(
+                    capture,
+                    update
+                        .skipped_bitrate()
+                        .ok_or(Error::Media(MediaError::InvalidFrame))?,
+                    completed,
+                )
                 .map_err(bitrate_error);
         }
         let actual = update

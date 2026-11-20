@@ -109,6 +109,7 @@ fn skipped_native_capture_finishes_without_freshness_or_rate_confirmation() {
                     Kind::CaptureSkipped,
                     worker::SkippedCapture {
                         candidate: request.frame,
+                        installed_bitrate: 4_000_000,
                     }
                     .encode(),
                 )
@@ -116,10 +117,46 @@ fn skipped_native_capture_finishes_without_freshness_or_rate_confirmation() {
                 .expect("a drop completes this candidate; it does not need Poll");
             assert_eq!(actual, None);
             assert!(
-                matches!(content, Content::Skipped { reference } if Some(reference) == request.reference)
+                matches!(content, Content::Skipped { reference, .. } if Some(reference) == request.reference)
             );
         }
     }
+}
+
+#[test]
+fn skipped_native_setting_is_bounded_but_not_mistaken_for_qualified_output() {
+    let mut request = request(Some(4_000_000));
+    request.configuration.backend = worker::Backend::VideoToolbox;
+    for installed_bitrate in [4_000_000, 8_000_000] {
+        let (content, applied) = request
+            .response(
+                Kind::CaptureSkipped,
+                worker::SkippedCapture {
+                    candidate: request.frame,
+                    installed_bitrate,
+                }
+                .encode(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied, None);
+        assert!(
+            matches!(content, Content::Skipped { installed_bitrate: actual, .. } if actual == installed_bitrate)
+        );
+    }
+    assert_eq!(
+        request
+            .response(
+                Kind::CaptureSkipped,
+                worker::SkippedCapture {
+                    candidate: request.frame,
+                    installed_bitrate: request.configuration.bitrate + 1,
+                }
+                .encode()
+            )
+            .unwrap_err(),
+        Error::InvalidFrame
+    );
 }
 
 #[test]
@@ -127,6 +164,7 @@ fn skipped_candidate_cannot_bootstrap_cross_backends_or_accept_unknown_reason() 
     let mut request = request(Some(4_000_000));
     let body = worker::SkippedCapture {
         candidate: request.frame,
+        installed_bitrate: 4_000_000,
     }
     .encode();
     for backend in [
@@ -149,7 +187,11 @@ fn skipped_candidate_cannot_bootstrap_cross_backends_or_accept_unknown_reason() 
             request
                 .response(
                     Kind::CaptureSkipped,
-                    worker::SkippedCapture { candidate }.encode()
+                    worker::SkippedCapture {
+                        candidate,
+                        installed_bitrate: 4_000_000
+                    }
+                    .encode()
                 )
                 .unwrap_err(),
             Error::InvalidFrame

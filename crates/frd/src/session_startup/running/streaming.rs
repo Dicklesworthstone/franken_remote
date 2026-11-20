@@ -959,7 +959,11 @@ impl<S> VideoServices<'_, S> {
                 update.applied_bitrate(),
             ) {
                 (Some(policy), Some(capture), None) => policy
-                    .skip_capture(capture, collected)
+                    .skip_capture(
+                        capture,
+                        update.skipped_bitrate().ok_or(Error::Order)?,
+                        collected,
+                    )
                     .map_err(bitrate_error),
                 (None, None, None) => Ok(()),
                 _ => Err(Error::Order),

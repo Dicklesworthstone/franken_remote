@@ -564,20 +564,23 @@ pub struct UnchangedCapture {
 
 /// A native encoder positively completed the original request with a dropped
 /// picture. This is not an unchanged-source proof: it carries neither pixels,
-/// source time, reference progress, nor an acknowledged bitrate. The worker
-/// stays available for the next separately paced capture.
+/// source time, reference progress, nor a rate qualified by output. Native
+/// readback identifies the installed setting so a deferred restoration remains
+/// distinguishable from an unrequested rate. The original worker stays available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkippedCapture {
     pub candidate: FrameId,
+    pub installed_bitrate: u32,
 }
 impl SkippedCapture {
-    pub const BYTES: usize = 9;
+    pub const BYTES: usize = 13;
 
     pub fn encode(self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(Self::BYTES);
         bytes.extend_from_slice(&self.candidate.as_raw().to_be_bytes());
         // The only admitted reason is an actual native rate-control drop.
         bytes.push(1);
+        bytes.extend_from_slice(&self.installed_bitrate.to_be_bytes());
         bytes
     }
 
@@ -586,8 +589,13 @@ impl SkippedCapture {
         if b[8] != 1 {
             return Err(Error::Malformed);
         }
+        let installed_bitrate = u32::from_be_bytes(b[9..].try_into().unwrap());
+        if !(10_000..=200_000_000).contains(&installed_bitrate) {
+            return Err(Error::ResourceLimit);
+        }
         Ok(Self {
             candidate: FrameId::from_raw(u64::from_be_bytes(b[..8].try_into().unwrap())),
+            installed_bitrate,
         })
     }
 }

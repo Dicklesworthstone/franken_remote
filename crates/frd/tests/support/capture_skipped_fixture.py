@@ -23,6 +23,7 @@ def reply(h, kind, body):
 h = read(36)
 config = read(struct.unpack(">I", h[32:])[0])
 generation = struct.unpack(">Q", config[20:28])[0]
+bitrate = struct.unpack(">I", config[12:16])[0]
 reply(h, 257, config)
 last = None
 candidate = None
@@ -48,7 +49,7 @@ while True:
             elif original != observed:
                 raise SystemExit(10)
         skipped += 1
-        reply(h, 283, struct.pack(">QB", frame, 1))
+        reply(h, 283, struct.pack(">QBI", frame, 1, bitrate))
         continue
     if SAME_ORIGINAL and original is not None and original != observed:
         raise SystemExit(11)

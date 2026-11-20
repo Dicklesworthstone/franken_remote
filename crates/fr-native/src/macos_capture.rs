@@ -154,8 +154,10 @@ pub enum Captured {
     Unit(EncodedAccessUnit),
     Unchanged(UnchangedCapture),
     /// `VideoToolbox` completed this request by dropping its picture. This is
-    /// neither a source observation nor confirmation of an encoder rate.
-    RateLimited,
+    /// neither a source observation nor a rate qualified by actual output.
+    RateLimited {
+        installed_bitrate: u32,
+    },
 }
 
 /// Content-free work counters for the original capture owner. These are API
@@ -321,7 +323,7 @@ impl MacCapture {
                 Instant::now(),
                 self.output.reference().is_some(),
             )
-            .unwrap_or(self.output.bitrate());
+            .unwrap_or(self.rate.installed_bitrate());
         let result = self.capture_inner(frame, observed_micros, force_idr, only_if_changed, target);
         if result.is_err() {
             self.closed = true;
@@ -360,9 +362,19 @@ impl MacCapture {
             // There must already be an encoded reference to preserve. Native
             // bootstrap retries remain bounded by the original encode deadline.
             self.output
-                .skipped(target_bitrate, actual_bitrate, length, idr != 0)
+                .skipped(target_bitrate, actual_bitrate, length, idr != 0, force_idr)
                 .map_err(|()| NativeError::UnsupportedBitstream)?;
-            return Ok(Captured::RateLimited);
+            self.rate
+                .dropped(
+                    target_bitrate,
+                    actual_bitrate,
+                    observed_micros,
+                    Instant::now(),
+                )
+                .map_err(|()| NativeError::UnsupportedBitstream)?;
+            return Ok(Captured::RateLimited {
+                installed_bitrate: actual_bitrate,
+            });
         }
         if code == UNCHANGED {
             let reference = self.output.reference().ok_or(NativeError::Codec)?;
