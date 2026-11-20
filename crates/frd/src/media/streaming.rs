@@ -164,6 +164,27 @@ impl Stream {
         );
         Ok(true)
     }
+    /// Let the viewer's path lower the encoder's rate when it holds a queue,
+    /// before service (fr-7al9). Without `--adaptive-capture` the controller
+    /// sees only the path; with it, also send pressure. False when the
+    /// backend cannot change its rate (NVENC, VA-API).
+    pub(crate) fn enable_path_bitrate(&mut self) -> Result<bool, super::Error> {
+        self.control.check()?;
+        if self.served {
+            return Err(super::Error::InvalidFrame);
+        }
+        if self.bitrate.is_some() {
+            return Ok(true);
+        }
+        if !self.source.configuration.backend.accepts_rate_capture() {
+            return Ok(false);
+        }
+        self.bitrate = Some(
+            fr_media::bitrate::Controller::new(self.source.configuration.bitrate)
+                .map_err(super::Error::Bitrate)?,
+        );
+        Ok(true)
+    }
     pub fn bitrate(&self) -> Option<&fr_media::bitrate::Controller> {
         self.bitrate.as_ref()
     }

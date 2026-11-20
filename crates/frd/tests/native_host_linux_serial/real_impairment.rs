@@ -203,8 +203,10 @@ fn row(delay_ms: u32, loss_percent: f32, rate_kbit: u32) -> Row {
     }
 }
 
-/// How long [`narrow_episode`] keeps the link narrow.
+/// How long [`narrow_episode`] keeps the link narrow in an episode.
 const EPISODE: Duration = Duration::from_secs(8);
+/// And on a sustained narrow link, long enough for the rate to settle.
+const SUSTAINED: Duration = Duration::from_secs(20);
 
 /// One controlled session across a narrow-link episode with incompressible
 /// content on the host.
@@ -221,13 +223,15 @@ struct Episode {
     first_motion: Option<Duration>,
     /// `fr`'s completion when it ended on its own, or how the steps stopped.
     ended: Option<String>,
+    /// The completion's content-free `last_attempt_media` counters.
+    media: Option<String>,
 }
 
 /// A fresh controlled session with [`NOISE`] on the host: the link narrows to
-/// `rate_kbit` (host to client, [`Netem::narrow_downlink`]) for [`EPISODE`]
+/// `rate_kbit` (host to client, [`Netem::narrow_downlink`]) for `length`
 /// while the viewer keeps moving, as a person would, then widens again and the
 /// viewer's motion must reach the host.
-fn narrow_episode(rate_kbit: u32) -> Episode {
+fn narrow_episode(rate_kbit: u32, length: Duration) -> Episode {
     let (mut s, _) = start_row();
     // Clear of the 480x148 control indicator at the host's top left: covering
     // any of it is a local revoke.
@@ -242,8 +246,8 @@ fn narrow_episode(rate_kbit: u32) -> Episode {
     let narrowed = Instant::now();
     let mut step = 0;
     let mut during = 0;
-    while narrowed.elapsed() < EPISODE && s.client.try_wait().unwrap().is_none() {
-        if s.pointer_follows(target(step), EPISODE.saturating_sub(narrowed.elapsed())) {
+    while narrowed.elapsed() < length && s.client.try_wait().unwrap().is_none() {
+        if s.pointer_follows(target(step), length.saturating_sub(narrowed.elapsed())) {
             during += 1;
         }
         step += 1;
@@ -286,8 +290,9 @@ fn narrow_episode(rate_kbit: u32) -> Episode {
     let output = wait_for(s.client, Duration::from_secs(30));
     let host = s.daemon.dump();
     s.daemon.finish();
+    let completion = String::from_utf8_lossy(&output.stdout);
+    let counters = media(&completion);
     if ended.is_some() {
-        let completion = String::from_utf8_lossy(&output.stdout);
         let fields: Vec<&str> = [
             "\"code\":",
             "\"input_suspended_ms\":",
@@ -311,6 +316,7 @@ fn narrow_episode(rate_kbit: u32) -> Episode {
         resumed,
         first_motion,
         ended,
+        media: counters,
     }
 }
 
@@ -699,10 +705,25 @@ fn view_only_session_whose_route_lengthens_keeps_its_pictures() {
 #[ignore = "measurement: about 1.5 min of namespace sessions; run by hand"]
 fn controlled_session_across_a_narrow_link_episode() {
     for rate_kbit in [3000, 1000, 800] {
-        let e = narrow_episode(rate_kbit);
+        let e = narrow_episode(rate_kbit, EPISODE);
         println!(
             "EPISODE rate {} kbit/s for {:?}: during {}, alive at widening {}, resumed {}/{STEPS}, first motion after {:?}, ended {:?}",
             e.rate_kbit, EPISODE, e.during, e.alive, e.resumed, e.first_motion, e.ended
+        );
+    }
+}
+
+/// The same with the link narrow for [`SUSTAINED`], at rates the capture gate
+/// alone carries (fr-7al9): how many pictures the viewer decoded, and whether
+/// its motion kept reaching the host, measure what the narrow link cost.
+#[test]
+#[ignore = "measurement: about 1.5 min of namespace sessions; run by hand"]
+fn controlled_session_across_a_sustained_narrow_link() {
+    for rate_kbit in [1500, 1000] {
+        let e = narrow_episode(rate_kbit, SUSTAINED);
+        println!(
+            "SUSTAINED rate {} kbit/s for {:?}: during {}, alive at widening {}, resumed {}/{STEPS}, first motion after {:?}, media {:?}, ended {:?}",
+            e.rate_kbit, SUSTAINED, e.during, e.alive, e.resumed, e.first_motion, e.media, e.ended
         );
     }
 }

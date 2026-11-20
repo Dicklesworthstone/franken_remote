@@ -319,8 +319,84 @@ interleaved), the noise window put about 2.5 Mbit/s on the wire:
 
 With the host's target at 500 kbit/s (0.8 Mbit/s on the wire), both arms held at
 1000 and 800 kbit/s in each of 2 runs per arm. Skipping captures carries a link of about
-half the encoder's rate; below that only a lower bitrate keeps the session,
-and nothing on the default path lowers it yet.
+half the encoder's rate; below that only a lower bitrate keeps the session.
+
+## Path-following bitrate
+
+A one-viewer stream (`running/streaming.rs`, which serves every controlled
+session) now lowers its encoder's rate when the viewer's path keeps a queue,
+without `--adaptive-capture`. Each service turn passes the path sample to
+`fr_media::bitrate::Controller::observe_path`:
+
+- A queue held for 200 ms cuts the rate to three fifths of the current rate,
+  or to three fifths of what the path delivered while busy when that is lower.
+  The delivery counts every acknowledged packet as 1200 bytes, so it reads high
+  (about 1.5 times on the namespace link). It only speeds up a cut from a rate
+  far above its path.
+- A path clear of any queue for 4 s probes a quarter up, toward the configured
+  rate, which stays the ceiling.
+- The existing rules still apply: a 2 s dwell between actual changes, an IDR
+  for each change, a floor of an eighth of the configured rate, and no encode
+  just to apply a target.
+
+Backends that cannot change their rate (NVENC, VA-API) keep a fixed rate and
+the capture gate. A Media Foundation transform that cannot change its rate
+while streaming defers every target. With `--adaptive-capture`, the same
+controller also sees send pressure.
+
+Evidence (trj namespace, test host at 2 Mbit/s with the noise window, the
+capture gate on both arms, interleaved). The bitrate arm combines two
+sources: one build that printed a stderr line per applied change, plus clean
+runs of the committed tree.
+
+| Narrow downlink | Gate only: held | Gate and path-following bitrate: held |
+|---|---|---|
+| 1500 kbit/s for 20 s | 0/6 (`view_stale`) | 6/6, 333-342 pictures decoded |
+| 1000 kbit/s for 20 s | 0/6 (`view_stale`) | 5/6, 303-337 pictures decoded |
+| 1000 kbit/s for 8 s | 6/8 | 3/3 |
+| 800 kbit/s for 8 s | 1/8 | 0/3 |
+| 3000 kbit/s for 8 s | 8/8 | 3/3 |
+
+During the 20 s rows on the gate-only arm, the viewer's view stayed stale, so
+it suspended input: 6 to 8 motions reached the host before the session ended.
+With the lower rate, 489 to 652 motions reached the host. The rate fell to
+about 0.5 to 0.85 Mbit/s on the 1500 kbit/s rows and 0.26 to 0.72 Mbit/s on the
+1000 kbit/s rows, then probed back up. On the 3000 kbit/s row, cuts to 1.2 to
+1.5 Mbit/s shortened the first motion after the link widened from about 480 ms
+to about 25 ms.
+
+Two kinds of end come before any cut can apply:
+
+- The lost 1000 kbit/s session closed on the host (`Session(Closed)`) within
+  about 2 s of the link narrowing. Gate-only lost 2 of 8 episodes that way.
+- The 800 kbit/s sessions end within about 1.5 s of narrowing (152 KB crossed
+  the link).
+
+The delay and loss matrix (`controlled_session_under_namespace_delay_and_loss`)
+applied no change in 2 rounds. A third round on the committed tree had 17 of
+19 rows at 8/8, the same as both arms before; the two short rows are 120 ms RTT
+with 5% loss.
+
+Two other cut rules behaved alike on the 20 s rows: three fifths of the
+delivery alone, and the lower of that and seven eighths of the rate. The
+second held all six of its rows but needed more changes, each with an IDR.
+
+Not measured: a live narrow link; the shared (view-only) publisher, which
+still has only the gate; and VideoToolbox or Media Foundation hosts.
+
+A standalone harness on an M5 Ultra (not the capture worker) opened a
+hardware HEVC session with the worker's exact properties and synthetic frames:
+
+- Runtime `AverageBitRate` changes applied and read back exactly.
+- Output followed the target: 8.09, 3.93, 2.29, 0.86 and 6.70 Mbit/s over
+  3 s phases.
+- The parameter sets stayed byte-identical across the IDRs.
+- Low-latency rate control drops frames that would overrun the budget. With
+  the worker's eight one-interval resubmissions, a full-noise 640x480 window
+  at an eighth of the opening rate or less still dropped 33 to 62% of
+  captures after the eighth. The worker ends the capture on such a drop. No
+  failure occurred at a quarter of the rate, or with a 200x150 noise window
+  down to 500 kbit/s.
 
 Remaining work includes live impaired-path qualification of software bitrate
 changes, native VideoToolbox and Media Foundation rate-change qualification,

@@ -77,6 +77,11 @@ impl PathQueue {
     pub(crate) const fn queued(&self) -> bool {
         self.queued
     }
+    /// What the path delivered while busy, in bits per second (0 unmeasured).
+    /// Only a queued path's delivery measures the path rather than the sender.
+    pub(crate) fn delivered_bits_per_second(&self) -> u64 {
+        self.rate().saturating_mul(8)
+    }
     /// Take one sample of the viewer's connection at host time `now`.
     pub(crate) fn observe(&mut self, load: Option<PathLoad>, now: u64) {
         let Some(load) = load else {

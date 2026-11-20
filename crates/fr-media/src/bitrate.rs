@@ -1,8 +1,9 @@
-//! Bounded encoder bitrate decisions from actual send-admission evidence.
+//! Bounded encoder bitrate decisions from actual send-admission evidence and,
+//! on a viewer's path, from the queue that path holds.
 //!
 //! This policy is not a bandwidth estimator. It keeps the original configured
-//! rate as a ceiling, lowers only after sustained sender pressure, and probes
-//! slowly after measured headroom. A proposal is not an applied codec change.
+//! rate as a ceiling, lowers only after sustained sender pressure or a held path
+//! queue, and probes slowly after measured headroom. A proposal is not an applied codec change.
 //! One capture token joins every request to its actual native result; a deferred
 //! request retains its identity without renewing a deadline or rate allowance.
 
@@ -12,6 +13,12 @@ const PRESSURE_US: u64 = 100_000;
 const CHANGE_DWELL_US: u64 = 2_000_000;
 const HEADROOM_US: u64 = 4_000_000;
 const EVIDENCE_GAP_US: u64 = 100_000;
+/// A viewer's path holding a queue this long lowers the rate (fr-7al9). The
+/// capture gate alone carries a link of about half the encoder's rate; below
+/// that only a lower rate keeps the session.
+const PATH_PRESSURE_US: u64 = 200_000;
+/// A clear path probes a quarter up after this long without a queue.
+const PATH_HEADROOM_US: u64 = 4_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -28,6 +35,8 @@ pub enum Error {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     SendPressure,
+    /// The viewer's path held a queue (`observe_path`).
+    PathQueue,
     Headroom,
     /// Cancel a retained native target after its supporting evidence was invalidated.
     EvidenceReset,
@@ -122,6 +131,9 @@ pub struct Controller {
     changed_at: Option<u64>,
     pressure_since: Option<u64>,
     headroom: Headroom,
+    /// Since when the viewer's path has held a queue, or been clear of one.
+    path_queued_since: Option<u64>,
+    path_clear_since: Option<u64>,
     closed: bool,
 }
 impl Controller {
@@ -143,6 +155,8 @@ impl Controller {
             changed_at: None,
             pressure_since: None,
             headroom: Headroom::default(),
+            path_queued_since: None,
+            path_clear_since: None,
             closed: false,
         })
     }
@@ -209,6 +223,67 @@ impl Controller {
                     .min(self.ceiling),
                 Reason::Headroom,
             )?;
+        }
+        Ok(())
+    }
+
+    /// One sample of the viewer's path: whether it holds a queue, and the bits
+    /// per second it delivered while busy (0 when unmeasured). A queue held for
+    /// [`PATH_PRESSURE_US`] lowers the rate to three fifths of the current one,
+    /// or of that delivery when lower: a rate far above its path reaches it in
+    /// one change. The delivery counts every acknowledged packet as full, so
+    /// it reads high (about 1.5 times on the namespace link) and never limits a
+    /// cut. A path clear of any queue for [`PATH_HEADROOM_US`] probes a
+    /// quarter up. Never past the original ceiling or the floor, and never
+    /// within the change dwell.
+    pub fn observe_path(
+        &mut self,
+        now_us: u64,
+        queued: bool,
+        delivered_bits_per_second: u64,
+    ) -> Result<(), Error> {
+        self.clock(now_us)?;
+        let (held, clear) = if queued {
+            self.path_clear_since = None;
+            (now_us - *self.path_queued_since.get_or_insert(now_us), 0)
+        } else {
+            self.path_queued_since = None;
+            (0, now_us - *self.path_clear_since.get_or_insert(now_us))
+        };
+        if queued
+            && self
+                .pending
+                .is_some_and(|change| change.reason == Reason::Headroom)
+        {
+            // An unsent upward probe cannot apply into a queue.
+            self.reset_evidence()?;
+        }
+        if self.pending.is_some()
+            || self
+                .changed_at
+                .is_some_and(|at| now_us - at < CHANGE_DWELL_US)
+        {
+            return Ok(());
+        }
+        if held >= PATH_PRESSURE_US && self.applied > self.floor {
+            let delivered = u32::try_from(delivered_bits_per_second / 5 * 3).unwrap_or(u32::MAX);
+            let mut target = self.applied / 5 * 3;
+            if delivered_bits_per_second > 0 {
+                target = target.min(delivered);
+            }
+            let target = target.max(self.floor);
+            if target < self.applied {
+                self.propose(target, Reason::PathQueue)?;
+            }
+        } else if clear >= PATH_HEADROOM_US && self.applied < self.ceiling {
+            self.propose(
+                self.applied
+                    .saturating_add(self.applied.div_ceil(4))
+                    .min(self.ceiling),
+                Reason::Headroom,
+            )?;
+            // The next probe needs its own clear interval after this one.
+            self.path_clear_since = Some(now_us);
         }
         Ok(())
     }

@@ -1091,6 +1091,17 @@ impl<S: Services> Services for VideoServices<'_, S> {
         // queue: on a link slower than the encoder, pictures would otherwise
         // queue until the session's own records expire behind them (fr-7al9).
         self.path.observe(q.path_load(), current);
+        // Below about half the encoder's rate skipping is not enough: a queue
+        // the path keeps holding lowers the rate toward what it delivers.
+        if let Some(bitrate) = &mut self.bitrate {
+            bitrate
+                .observe_path(
+                    current,
+                    self.path.queued(),
+                    self.path.delivered_bits_per_second(),
+                )
+                .map_err(bitrate_error)?;
+        }
         let credit = self.sender.stream_credit(self.capacity);
         let interval = self.capture_interval(current, credit, observation)?;
         let wake = self.input_wake.due(
