@@ -97,6 +97,83 @@ fn request_encoding_preserves_candidate_time_and_all_force_conditional_modes() {
 }
 
 #[test]
+fn skipped_native_capture_finishes_without_freshness_or_rate_confirmation() {
+    for rate in [None, Some(4_000_000)] {
+        for (conditional, force_idr) in [(true, false), (false, false), (true, true)] {
+            let mut request = request(rate);
+            request.configuration.backend = worker::Backend::VideoToolbox;
+            request.conditional = conditional;
+            request.force_idr = force_idr;
+            let (content, actual) = request
+                .response(
+                    Kind::CaptureSkipped,
+                    worker::SkippedCapture {
+                        candidate: request.frame,
+                    }
+                    .encode(),
+                )
+                .unwrap()
+                .expect("a drop completes this candidate; it does not need Poll");
+            assert_eq!(actual, None);
+            assert!(
+                matches!(content, Content::Skipped { reference } if Some(reference) == request.reference)
+            );
+        }
+    }
+}
+
+#[test]
+fn skipped_candidate_cannot_bootstrap_cross_backends_or_accept_unknown_reason() {
+    let mut request = request(Some(4_000_000));
+    let body = worker::SkippedCapture {
+        candidate: request.frame,
+    }
+    .encode();
+    for backend in [
+        worker::Backend::SoftwareExplicit,
+        worker::Backend::Nvenc,
+        worker::Backend::Vaapi,
+        worker::Backend::MediaFoundation,
+    ] {
+        request.configuration.backend = backend;
+        assert_eq!(
+            request
+                .response(Kind::CaptureSkipped, body.clone())
+                .unwrap_err(),
+            Error::InvalidFrame
+        );
+    }
+    request.configuration.backend = worker::Backend::VideoToolbox;
+    for candidate in [FrameId::from_raw(1), FrameId::from_raw(3)] {
+        assert_eq!(
+            request
+                .response(
+                    Kind::CaptureSkipped,
+                    worker::SkippedCapture { candidate }.encode()
+                )
+                .unwrap_err(),
+            Error::InvalidFrame
+        );
+    }
+    for reference in [None, Some(request.frame), request.frame.next()] {
+        request.reference = reference;
+        assert_eq!(
+            request
+                .response(Kind::CaptureSkipped, body.clone())
+                .unwrap_err(),
+            Error::InvalidFrame
+        );
+    }
+    request.reference = Some(FrameId::from_raw(1));
+    let mut unknown = body;
+    unknown[8] = 2;
+    assert_eq!(
+        request.response(Kind::CaptureSkipped, unknown).unwrap_err(),
+        Error::Protocol(worker::Error::Malformed)
+    );
+}
+
+#[test]
 fn rate_preflight_preserves_original_cap_for_every_implemented_backend() {
     let mut configuration = request(None).configuration;
     for backend in [

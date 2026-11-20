@@ -333,7 +333,7 @@ fn a_delayed_configured_reply_cannot_renew_the_original_shared_frame_deadline() 
             .capture_if_changed(true)
             .await
             .unwrap();
-        let until = initial.observed_micros() + 100_000;
+        let until = initial.observed_micros().unwrap() + 100_000;
         let mut ah = Host::new_shared(
             a.clone(),
             &al.h,

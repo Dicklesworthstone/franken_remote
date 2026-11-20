@@ -1123,14 +1123,25 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             Kind::ConfigurePresentation => reply == Kind::PresentationReady,
             Kind::ConfigureFittedPresentation => reply == Kind::FittedPresentationReady,
             Kind::ConfigureMappedPresentation => reply == Kind::MappedPresentationReady,
-            Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),
+            Kind::Capture => matches!(
+                reply,
+                Kind::Unit | Kind::CaptureSkipped | Kind::NeedInput | Kind::NeedDrain
+            ),
             Kind::CaptureIfChanged => matches!(
                 reply,
-                Kind::Unit | Kind::Unchanged | Kind::NeedInput | Kind::NeedDrain
+                Kind::Unit
+                    | Kind::Unchanged
+                    | Kind::CaptureSkipped
+                    | Kind::NeedInput
+                    | Kind::NeedDrain
             ),
             Kind::CaptureAtRate => matches!(
                 reply,
-                Kind::RateUnit | Kind::RateUnchanged | Kind::NeedInput | Kind::NeedDrain
+                Kind::RateUnit
+                    | Kind::RateUnchanged
+                    | Kind::CaptureSkipped
+                    | Kind::NeedInput
+                    | Kind::NeedDrain
             ),
             Kind::Present => matches!(reply, Kind::Presented | Kind::NeedInput | Kind::NeedDrain),
             Kind::Decode => matches!(reply, Kind::Decoded | Kind::NeedInput | Kind::NeedDrain),
@@ -1525,6 +1536,23 @@ mod tests {
             Kind::Stop,
         ] {
             assert!(!allowed_reply(request, Kind::Unchanged));
+        }
+    }
+
+    #[test]
+    fn skipped_is_a_completed_capture_reply_and_never_a_poll_reply() {
+        for request in [Kind::Capture, Kind::CaptureIfChanged, Kind::CaptureAtRate] {
+            assert!(allowed_reply(request, Kind::CaptureSkipped));
+        }
+        for request in [
+            Kind::Poll,
+            Kind::Present,
+            Kind::Decode,
+            Kind::Configure,
+            Kind::CheckMonitor,
+            Kind::Stop,
+        ] {
+            assert!(!allowed_reply(request, Kind::CaptureSkipped));
         }
     }
 

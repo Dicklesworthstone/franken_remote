@@ -126,12 +126,21 @@ impl PathRate {
         update: &crate::media::SharedCaptureUpdate,
     ) -> Result<(), Error> {
         let capture = self.capture.take().ok_or(Error::InvalidBudget)?;
-        let actual = update
-            .applied_bitrate()
-            .ok_or(Error::Media(MediaError::InvalidFrame))?;
         let completed = crate::media::host_now(&owner.context())
             .map_err(Error::Media)?
             .as_micros();
+        if update.is_skipped() {
+            if update.applied_bitrate().is_some() {
+                return Err(Error::Media(MediaError::InvalidFrame));
+            }
+            return self
+                .controller
+                .skip_capture(capture, completed)
+                .map_err(bitrate_error);
+        }
+        let actual = update
+            .applied_bitrate()
+            .ok_or(Error::Media(MediaError::InvalidFrame))?;
         self.controller
             .complete_capture(
                 capture,

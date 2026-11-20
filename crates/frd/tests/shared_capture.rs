@@ -589,3 +589,6 @@ mod live_authority;
 
 #[path = "shared_capture/recovery_isolation.rs"]
 mod recovery_isolation;
+
+#[path = "shared_capture/skipped.rs"]
+mod skipped;

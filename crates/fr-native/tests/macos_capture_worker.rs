@@ -146,33 +146,91 @@ fn unit(reply: Record, configuration: Configuration) -> fr_media::access_unit::E
     worker::parse_unit(reply.into_body(), &configuration.limits().unwrap()).unwrap()
 }
 
+fn skipped(reply: &Record, candidate: FrameId) -> bool {
+    if reply.header.kind != Kind::CaptureSkipped {
+        return false;
+    }
+    assert_eq!(
+        worker::SkippedCapture::decode(reply.body())
+            .unwrap()
+            .candidate,
+        candidate
+    );
+    true
+}
+
+fn recovery_unit(
+    worker: &mut Worker,
+    configuration: Configuration,
+) -> fr_media::access_unit::EncodedAccessUnit {
+    let mut candidate = FrameId::from_raw(41);
+    let until = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(
+            Instant::now() < until,
+            "recovery exceeded its original bound"
+        );
+        let reply = worker.transact(
+            Kind::Capture,
+            worker::capture_payload(candidate, 3_000, true),
+        );
+        assert!(
+            Instant::now() < until,
+            "late recovery cannot publish an IDR"
+        );
+        if skipped(&reply, candidate) {
+            candidate = candidate.next().unwrap();
+            std::thread::sleep(Duration::from_micros(
+                1_000_000_u64.div_ceil(u64::from(configuration.fps)),
+            ));
+            continue;
+        }
+        return unit(reply, configuration);
+    }
+}
+
 #[track_caller]
 fn rate_unit(
     worker: &mut Worker,
     configuration: Configuration,
-    frame: u64,
+    next_frame: &mut u64,
     observed_micros: u64,
     bitrate: u32,
 ) -> (u32, fr_media::access_unit::EncodedAccessUnit) {
-    let request = worker::rate::Capture {
-        frame: FrameId::from_raw(frame),
-        observed_micros,
-        force_idr: false,
-        only_if_changed: false,
-        bitrate,
-    };
-    let reply = worker.transact(Kind::CaptureAtRate, request.encode().unwrap());
-    assert_eq!(
-        reply.header.kind,
-        Kind::RateUnit,
-        "{:?}",
-        refused_kind(&reply)
-    );
-    let (actual, unit) =
-        worker::rate::parse_unit(reply.into_body(), &configuration.limits().unwrap()).unwrap();
-    assert_eq!(unit.frame(), request.frame);
-    assert_eq!(unit.capture_micros(), request.observed_micros);
-    (actual, unit)
+    let until = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(
+            Instant::now() < until,
+            "rate-limited captures exceeded the original deadline"
+        );
+        let request = worker::rate::Capture {
+            frame: FrameId::from_raw(*next_frame),
+            observed_micros,
+            force_idr: false,
+            only_if_changed: false,
+            bitrate,
+        };
+        *next_frame += 1;
+        let reply = worker.transact(Kind::CaptureAtRate, request.encode().unwrap());
+        assert!(Instant::now() < until, "late rate output cannot publish");
+        if skipped(&reply, request.frame) {
+            std::thread::sleep(Duration::from_micros(
+                1_000_000_u64.div_ceil(u64::from(configuration.fps)),
+            ));
+            continue;
+        }
+        assert_eq!(
+            reply.header.kind,
+            Kind::RateUnit,
+            "{:?}",
+            refused_kind(&reply)
+        );
+        let (actual, unit) =
+            worker::rate::parse_unit(reply.into_body(), &configuration.limits().unwrap()).unwrap();
+        assert_eq!(unit.frame(), request.frame);
+        assert_eq!(unit.capture_micros(), request.observed_micros);
+        return (actual, unit);
+    }
 }
 
 fn refused_kind(reply: &Record) -> Option<Error> {
@@ -207,29 +265,40 @@ fn live_display_units_are_admitted_idr_then_predicted_and_stop_is_clean() {
     assert!(matches!(idr.kind(), FrameKind::Idr { .. }));
     guard.validate_length_prefixed(idr.bytes(), true).unwrap();
 
-    // `Capture` always encodes: P pictures chained to the previous unit.
+    // A completed native drop preserves the last real reference. Successful
+    // `Capture` outputs remain P pictures chained to that previous unit.
     let mut last = idr.frame();
+    let mut predicted = 0;
     for n in 2..=30u64 {
-        let p = unit(
-            worker.transact(
-                Kind::Capture,
-                worker::capture_payload(FrameId::from_raw(n), 1_000 + n, false),
-            ),
-            configuration,
+        let reply = worker.transact(
+            Kind::Capture,
+            worker::capture_payload(FrameId::from_raw(n), 1_000 + n, false),
         );
+        if skipped(&reply, FrameId::from_raw(n)) {
+            continue;
+        }
+        let p = unit(reply, configuration);
         assert_eq!(p.capture_micros(), 1_000 + n);
         assert_eq!(p.kind(), FrameKind::Predicted { references: last });
         guard.validate_length_prefixed(p.bytes(), false).unwrap();
         last = p.frame();
+        predicted += 1;
     }
+    assert!(
+        predicted > 0,
+        "a stream that only drops pictures is not usable"
+    );
 
-    // `CaptureIfChanged` either encodes a P picture of new content or proves
-    // nothing changed since the last unit; both name that unit.
+    // Conditional capture can skip, encode changed content or prove unchanged.
+    // Only encoded output advances the reference.
     for n in 31..=40u64 {
         let reply = worker.transact(
             Kind::CaptureIfChanged,
             worker::capture_payload(FrameId::from_raw(n), 2_000 + n, false),
         );
+        if skipped(&reply, FrameId::from_raw(n)) {
+            continue;
+        }
         if reply.header.kind == Kind::Unchanged {
             let proof = UnchangedCapture::decode(reply.body()).unwrap();
             assert_eq!(
@@ -249,13 +318,7 @@ fn live_display_units_are_admitted_idr_then_predicted_and_stop_is_clean() {
     }
 
     // A forced IDR mid-stream restarts the chain.
-    let again = unit(
-        worker.transact(
-            Kind::Capture,
-            worker::capture_payload(FrameId::from_raw(41), 3_000, true),
-        ),
-        configuration,
-    );
+    let again = recovery_unit(&mut worker, configuration);
     assert!(matches!(again.kind(), FrameKind::Idr { .. }));
     guard.validate_length_prefixed(again.bytes(), true).unwrap();
 
@@ -285,16 +348,23 @@ fn native_rate_changes_report_only_admitted_idrs_and_keep_the_original_dwell() {
     )
     .unwrap();
     let mut last = FrameId::from_raw(0);
+    let mut next_frame = 1;
     // Bootstrap at the configured rate before changing the original session.
     // The next target is admitted only with a real IDR. Host time alone keeps
     // the subsequent request inside that transition's original dwell, even on
     // a loaded machine where the native calls take more worker time.
-    for (frame, observed, target, expected, idr) in [
-        (1, 1_000, 4_000_000, 8_000_000, true),
-        (2, 2_000, 4_000_000, 4_000_000, true),
-        (3, 3_000, 2_000_000, 4_000_000, false),
+    for (observed, target, expected, idr) in [
+        (1_000, 4_000_000, 8_000_000, true),
+        (2_000, 4_000_000, 4_000_000, true),
+        (3_000, 2_000_000, 4_000_000, false),
     ] {
-        let (actual, unit) = rate_unit(&mut worker, configuration, frame, observed, target);
+        let (actual, unit) = rate_unit(
+            &mut worker,
+            configuration,
+            &mut next_frame,
+            observed,
+            target,
+        );
         assert_eq!(actual, expected);
         if idr {
             assert!(matches!(unit.kind(), FrameKind::Idr { .. }));
@@ -309,7 +379,13 @@ fn native_rate_changes_report_only_admitted_idrs_and_keep_the_original_dwell() {
     // the new desired setting can apply immediately, again only with an IDR
     // that this independent guard admits under the original configuration.
     std::thread::sleep(Duration::from_millis(2_100));
-    let (actual, unit) = rate_unit(&mut worker, configuration, 4, 2_103_000, 8_000_000);
+    let (actual, unit) = rate_unit(
+        &mut worker,
+        configuration,
+        &mut next_frame,
+        2_103_000,
+        8_000_000,
+    );
     assert_eq!(actual, 8_000_000);
     assert!(matches!(unit.kind(), FrameKind::Idr { .. }));
     guard.validate_length_prefixed(unit.bytes(), true).unwrap();

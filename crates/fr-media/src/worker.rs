@@ -95,6 +95,9 @@ pub enum Kind {
     PresentationAbsent = 281,
     /// Exact mapped presentation configuration echo, not visibility evidence.
     MappedPresentationReady = 282,
+    /// The original capture completed without a picture because native rate
+    /// control dropped it. No source observation or applied-rate receipt.
+    CaptureSkipped = 283,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -147,6 +150,7 @@ impl Kind {
             280 => Self::PresentationPixels,
             281 => Self::PresentationAbsent,
             282 => Self::MappedPresentationReady,
+            283 => Self::CaptureSkipped,
             _ => return Err(Error::Malformed),
         })
     }
@@ -207,6 +211,7 @@ impl Kind {
             Self::CaptureAtRate => length == rate::CAPTURE_BYTES,
             Self::RateUnchanged => length == rate::UNCHANGED_BYTES,
             Self::Unchanged => length == 24,
+            Self::CaptureSkipped => length == SkippedCapture::BYTES,
             Self::Poll | Self::Stop | Self::NeedInput | Self::NeedDrain | Self::Stopped => {
                 length == 0
             }
@@ -555,6 +560,36 @@ pub struct UnchangedCapture {
     pub candidate: FrameId,
     pub reference: FrameId,
     pub observed_micros: u64,
+}
+
+/// A native encoder positively completed the original request with a dropped
+/// picture. This is not an unchanged-source proof: it carries neither pixels,
+/// source time, reference progress, nor an acknowledged bitrate. The worker
+/// stays available for the next separately paced capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedCapture {
+    pub candidate: FrameId,
+}
+impl SkippedCapture {
+    pub const BYTES: usize = 9;
+
+    pub fn encode(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::BYTES);
+        bytes.extend_from_slice(&self.candidate.as_raw().to_be_bytes());
+        // The only admitted reason is an actual native rate-control drop.
+        bytes.push(1);
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let b: &[u8; Self::BYTES] = bytes.try_into().map_err(|_| Error::Malformed)?;
+        if b[8] != 1 {
+            return Err(Error::Malformed);
+        }
+        Ok(Self {
+            candidate: FrameId::from_raw(u64::from_be_bytes(b[..8].try_into().unwrap())),
+        })
+    }
 }
 impl UnchangedCapture {
     pub fn encode(self) -> Result<Vec<u8>, Error> {

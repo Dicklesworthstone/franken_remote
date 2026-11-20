@@ -644,6 +644,72 @@ fn actual_output_and_single_capture_identity_are_required_for_application() {
 }
 
 #[test]
+fn no_picture_releases_only_the_original_credit_and_retains_the_native_target() {
+    let (mut c, _) = proposed_cut(8_000_000);
+    let target = c.pending().unwrap();
+    let original = c.begin_capture().unwrap();
+    c.skip_capture(original, 150_000).unwrap();
+    assert_eq!(c.applied_bitrate(), 8_000_000);
+    assert_eq!(c.pending(), Some(target));
+    assert_eq!(
+        c.skip_capture(original, 150_000),
+        Err(Error::UnexpectedCapture)
+    );
+    let next = c.begin_capture().unwrap();
+    assert_ne!(next, original);
+    assert_eq!(next.bitrate(), 4_000_000);
+    assert_eq!(
+        c.skip_capture(original, 150_001),
+        Err(Error::UnexpectedCapture)
+    );
+    assert_eq!(c.begin_capture(), Err(Error::CaptureInFlight));
+    c.skip_capture(next, 160_000).unwrap();
+    // A native encoder can keep its requested target despite producing no
+    // picture. Replacing the view still needs an explicit cancellation.
+    c.reset_evidence().unwrap();
+    let restore = c.pending().unwrap();
+    assert_eq!(restore.reason(), Reason::EvidenceReset);
+    assert_eq!(restore.bitrate(), 8_000_000);
+    let cancellation = c.begin_capture().unwrap();
+    c.skip_capture(cancellation, 170_000).unwrap();
+    assert_eq!(
+        c.pending(),
+        Some(restore),
+        "no output did not acknowledge it"
+    );
+    let cancellation = c.begin_capture().unwrap();
+    c.complete_capture(cancellation, 8_000_000, false, 180_000)
+        .unwrap();
+    assert_eq!(c.pending(), None);
+}
+
+#[test]
+fn no_picture_keeps_measured_pressure_and_dwell_from_the_last_actual_change() {
+    let (mut c, mut p) = reduced();
+    for now in (150_000..2_100_000).step_by(50_000) {
+        observe(&mut c, &mut p, now, A::Blocked);
+        let capture = c.begin_capture().unwrap();
+        c.skip_capture(capture, now).unwrap();
+        assert_eq!(c.applied_bitrate(), 4_000_000);
+        assert_eq!(c.pending(), None);
+    }
+    observe(&mut c, &mut p, 2_100_000, A::Blocked);
+    assert_eq!(c.pending().unwrap().reason(), Reason::SendPressure);
+    assert_eq!(c.pending().unwrap().bitrate(), 2_000_000);
+}
+
+#[test]
+fn no_picture_clock_regression_closes_without_confirming_a_rate_change() {
+    let (mut c, _) = proposed_cut(8_000_000);
+    let capture = c.begin_capture().unwrap();
+    assert_eq!(c.skip_capture(capture, 99_999), Err(Error::ClockRegression));
+    assert_eq!(c.applied_bitrate(), 8_000_000);
+    assert_eq!(c.pending(), None);
+    assert_eq!(c.skip_capture(capture, 200_000), Err(Error::Closed));
+    assert_eq!(c.begin_capture(), Err(Error::Closed));
+}
+
+#[test]
 fn clock_regression_closes_the_policy_without_claiming_a_codec_change() {
     let (mut c, _) = proposed_cut(8_000_000);
     let capture = c.begin_capture().unwrap();

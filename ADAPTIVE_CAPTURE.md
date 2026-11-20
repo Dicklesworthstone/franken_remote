@@ -450,7 +450,8 @@ hardware HEVC session with the worker's exact properties and synthetic frames:
 - Low-latency rate control drops frames that would overrun the budget. With
   the worker's eight one-interval resubmissions, a full-noise 640x480 window
   at an eighth of the opening rate or less still dropped 33 to 62% of
-  captures after the eighth. The worker ends the capture on such a drop. No
+  captures after the eighth. At that measurement the worker ended capture on
+  such a drop; the completed-drop handling below now preserves the stream. No
   failure occurred at a quarter of the rate, or with a 200x150 noise window
   down to 500 kbit/s.
 
@@ -590,6 +591,47 @@ This test has not run in the Linux session. A current macOS build and execution
 remain required before claiming native rate-change qualification or bitrate and
 quality improvements. The software measurements above do not establish either
 result for VideoToolbox.
+
+### Completed rate-limited captures (fr-8xl4)
+
+An established VideoToolbox stream now completes a successful native
+`FrameDropped` callback as private worker `CaptureSkipped` (283). Its exact
+nine-byte body names the original candidate and the rate-limited reason. It
+has no source timestamp, unchanged proof, pixel payload or applied bitrate.
+Native errors, invalid samples, source invalidation and deadlines remain
+failures. The input surface is released only after the native callback has
+completed; a missing callback keeps the original drain/supervisor boundary.
+
+The private and shared capture owners release that request's work credit and
+unused output reservation, account for its real work time, and retain the last
+encoded reference. They send no media/progress and create no idle/freshness
+observation. The next scheduled capture uses a new candidate on the same
+worker and the existing cadence. A dropped picture therefore cannot refresh
+input readiness or appear in a later picture's dependency chain.
+
+A property change followed by a dropped picture remains unconfirmed. Both
+the native owner and the original bitrate controller retain the pending work;
+the native owner forces the next successful output to be an IDR, including
+when a later request cancels the target by restoring the advertised rate.
+Only an admitted output can confirm the rate or start its dwell.
+
+Startup has no reference to retain and keeps clock-paced native resubmissions
+inside its original 1,500 ms native deadline. Required recovery IDRs and the
+unconditional capture API retry fresh candidates at the configured frame
+interval, retaining the original host timestamp and two-second operation
+deadline (or its earlier recovery bound). A skip is a completed request, so
+the Mac worker is never asked to Poll it.
+
+The actual production C policy passes 28 portable tests. The portable Rust
+published-reference/rate owner and exact IPC-admission tests also pass.
+Additional shared-pacing and real-child regressions cover capacity release,
+no progress on skip, and the original retry deadline. Their integrated run
+remains unverified here: the dependency compiler was killed while building
+Asupersync, including a retry with one compiler worker and reduced MIR state.
+The portable tests do not execute VideoToolbox; the real Mac-worker test
+accepts bounded skipped attempts while still requiring independently
+admitted output. Native sustained low-rate and full-noise qualification
+remains outstanding.
 
 ## Windows Media Foundation bitrate transactions
 

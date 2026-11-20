@@ -45,6 +45,8 @@ impl Policy {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Statistics {
     pub encoded_updates: u64,
+    /// Completed native rate-limited requests with no picture or source proof.
+    pub skipped_capture_updates: u64,
     /// Native results discarded because their capture-anchored send time expired.
     pub expired_capture_updates: u64,
     pub unchanged_observations: u64,
