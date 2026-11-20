@@ -26,6 +26,11 @@ pub(super) struct Setup {
     worker: Option<WorkerSeed>,
     reason: Option<Error>,
 }
+impl Drop for Setup {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 struct Pending {
     cx: Cx,
     connection: ConnectionBinding,

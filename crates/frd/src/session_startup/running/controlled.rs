@@ -10,27 +10,82 @@ use crate::{
     input_quic::{self, Progress, QuicInput, Routes, control::ControlRenewal},
     input_watchdog::{Control, StopReason},
 };
-use fr_core::{ids::InputTicketId, time::HostInstant};
+use fr_core::{
+    ids::{InputLeaseId, InputTicketId},
+    time::HostInstant,
+};
 use fr_transport::quic::{ControlRoutes, Disposition, Messages, QuicRecords, Route};
-use fr_wire::{Kind, negotiation::Role};
+use fr_wire::{
+    Kind,
+    authority::Binding,
+    input::{InputDelivery, InputDirection},
+    lease_revoked::{CleanupStage, EffectStage, REVOKED_BYTES, Revoked},
+    negotiation::Role,
+};
 use std::{future::Future, time::Duration};
+
+/// Fence guard placed as the first field of `ControlledHost` so dropping a
+/// controlled host ALWAYS fences input before auxiliary lanes and before
+/// `HostSession::drop` closes the transport (`AGENTS.md` §4), while still
+/// permitting safe destructuring of `session` during `demote_to_viewing`.
+struct InputFence(Control);
+
+impl Drop for InputFence {
+    fn drop(&mut self) {
+        self.0.stop(StopReason::LocalRevoke);
+    }
+}
+
+/// Outcome of demoting a `ControlledHost` back to view-only on the SAME
+/// admitted QUIC session (`PROTOCOL_CLOSURE.md` `CloseScope::ControlRelease`).
+///
+/// The old input lease is permanently fenced and detached from observation;
+/// committed/in-flight input receipts are preserved without silent discard.
+pub struct DemotedViewing {
+    /// The surviving admitted viewing session on the original QUIC connection.
+    pub session: HostSession,
+    /// The permanently fenced input lease ID (cannot be renewed or resurrected).
+    pub revoked_lease: InputLeaseId,
+    /// Effective stop reason recorded by the input fence (first reason wins).
+    pub reason: StopReason,
+    /// Wire-encoded `0x0014 LeaseRevoked` record ready for transmission on the
+    /// live reliable control stream.
+    pub lease_revoked_record: [u8; REVOKED_BYTES],
+    /// Last collected native input reply prior to demotion.
+    pub last_reply: Option<InputReply>,
+    /// Last collected native reconciliation reply prior to demotion.
+    pub last_reconciliation: Option<Reply>,
+}
+
+impl std::fmt::Debug for DemotedViewing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DemotedViewing")
+            .field("revoked_lease", &self.revoked_lease)
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Consumes the existing initialized input owner and running host session. It
 /// never grants control or constructs another native executor. The enclosing
 /// application still supplies fresh presentation/target evidence and drives the
 /// native watchdog; media work stays outside this task.
+///
+/// Field declaration order enforces fixed teardown (`AGENTS.md` §4): input
+/// fence -> control-scoped auxiliary lanes -> renewal -> input -> session.
 pub struct ControlledHost {
-    pub(super) session: HostSession,
-    input: QuicInput,
-    renewal: ControlRenewal,
-    ticket_turn: bool,
-    submitted: super::input_wake::Submitted,
+    fence: InputFence,
+    microphone: microphone::Slot,
+    files: files::Slots,
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
-    files: files::Slots,
-    microphone: microphone::Slot,
+    renewal: ControlRenewal,
+    input: QuicInput,
+    ticket_turn: bool,
+    submitted: super::input_wake::Submitted,
     terminal_report: Option<Result<(), fr_transport::quic::Error>>,
     terminal_registered: bool,
+    pub(super) session: HostSession,
 }
 impl std::fmt::Debug for ControlledHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,18 +119,20 @@ impl HostSession {
             )
             .map_err(Error::ControlRenewal)?;
         let reporting = self.revocation_reporting.take();
+        let fence = InputFence(input.control());
         let mut host = ControlledHost {
-            session: self,
-            input,
-            renewal,
-            ticket_turn: false,
-            submitted: super::input_wake::Submitted::default(),
+            fence,
+            microphone: microphone::Slot::default(),
+            files: files::Slots::default(),
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
-            files: files::Slots::default(),
-            microphone: microphone::Slot::default(),
+            renewal,
+            input,
+            ticket_turn: false,
+            submitted: super::input_wake::Submitted::default(),
             terminal_report: None,
             terminal_registered: false,
+            session: self,
         };
         if let Some(reporting) = reporting {
             host.arm_revocation_reporting(reporting)?;
@@ -237,10 +294,105 @@ impl ControlledHost {
             Ok(())
         }
     }
-}
-impl Drop for ControlledHost {
-    fn drop(&mut self) {
-        self.close();
+    /// Fence input and all control-scoped lanes (`microphone`, `files`,
+    /// `clipboard`, control renewal) immediately, detach the revoked lease
+    /// from `ObservationControl`, and return the surviving viewing-only
+    /// `HostSession` on the SAME QUIC connection without reconnecting.
+    ///
+    /// Fails closed if `terminal_registered` is armed (cannot leave a stale
+    /// lease-revocation transport hook on a surviving viewing session) or if
+    /// observation authority itself is already closed/expired.
+    pub fn demote_to_viewing(self, requested: StopReason) -> Result<DemotedViewing, Error> {
+        let Self {
+            fence,
+            mut microphone,
+            mut files,
+            clipboard,
+            mut clipboard_setup,
+            mut renewal,
+            input,
+            terminal_registered,
+            mut session,
+            ..
+        } = self;
+
+        // 1. Fence input authority FIRST (`AGENTS.md` §4).
+        fence.0.stop(requested);
+        let reason = fence.0.reason().unwrap_or(requested);
+
+        // 2. Stop every control-scoped auxiliary lane and control renewal.
+        microphone.stop();
+        files.stop();
+        if let Some(clipboard) = &clipboard {
+            clipboard.stop();
+        }
+        clipboard_setup.stop();
+        renewal.stop();
+
+        let revoked_lease = renewal.lease_id();
+        let last_reply = input.last_reply();
+        let last_reconciliation = input.last_reconciliation();
+
+        // 3. Detach the permanently revoked lease from observation.
+        session.opened.control.clear_lease(reason);
+
+        // 4. Drop control-plane owners before exposing the surviving session.
+        drop(clipboard);
+        drop(clipboard_setup);
+        drop(files);
+        drop(microphone);
+        drop(renewal);
+        drop(input);
+        drop(fence);
+
+        if terminal_registered {
+            session.close();
+            return Err(Error::Order);
+        }
+
+        // 5. Confirm observation authority and transport are still healthy.
+        if session.check().is_err() {
+            session.close();
+            return Err(Error::Closed);
+        }
+
+        // 6. Build the authoritative `0x0014 LeaseRevoked` record for the live control stream.
+        let binding = Binding {
+            channel: session.opened.binding.id,
+            session: session.opened.binding.remote_session,
+        };
+        let report = Revoked {
+            lease: revoked_lease,
+            reason: revocation::wire_reason(reason),
+            cleanup: CleanupStage::Fenced,
+            effects: EffectStage::Unknown,
+        };
+        let mut lease_revoked_record = [0_u8; REVOKED_BYTES];
+        let written = fr_wire::lease_revoked::encode(
+            report,
+            binding,
+            &session.opened.selected.limits,
+            &mut lease_revoked_record,
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable,
+        )
+        .map_err(|_| {
+            session.close();
+            Error::Order
+        })?;
+        if written != REVOKED_BYTES {
+            session.close();
+            return Err(Error::Order);
+        }
+
+        Ok(DemotedViewing {
+            session,
+            revoked_lease,
+            reason,
+            lease_revoked_record,
+            last_reply,
+            last_reconciliation,
+        })
     }
 }
 struct Operation<'a> {

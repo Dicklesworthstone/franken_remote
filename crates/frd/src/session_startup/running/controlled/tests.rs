@@ -1112,6 +1112,121 @@ fn a_local_revoke_keeps_its_reason_when_the_stream_then_fails() {
     });
 }
 
+#[test]
+fn demote_to_viewing_fences_input_and_keeps_viewing_session_alive_on_same_connection() {
+    run(|c, h| async move {
+        let Fixture {
+            mut host,
+            mut viewer,
+            driver,
+            seat,
+            effects,
+            ..
+        } = Box::pin(fixture(&c, &h, None)).await;
+        viewer.visible(&c);
+        viewer.queue_key(&c, true);
+        let (mut n, mut t) = (3000, 6000);
+        let control = host.control();
+        let (demoted, shutdown) = Box::pin(support::both(
+            async {
+                // Drive until the key press lands and is held on the native executor.
+                let mut steps = 0_u32;
+                while !effects.lock().unwrap().held && steps < 80 {
+                    steps += 1;
+                    let (res, ()) = Box::pin(support::both(
+                        host.drive(
+                            Duration::from_millis(20),
+                            || nonce(&mut n),
+                            || ticket(&mut t),
+                            block,
+                        ),
+                        viewer.drive(&c),
+                    ))
+                    .await;
+                    res.unwrap();
+                }
+                assert!(
+                    effects.lock().unwrap().held,
+                    "expected key press to land before demotion"
+                );
+                let demoted = host
+                    .demote_to_viewing(StopReason::LocalRevoke)
+                    .expect("demotion succeeds while observation is healthy");
+
+                // Input fence must already be stopped immediately.
+                assert!(control.is_stopped());
+                assert_eq!(demoted.reason, StopReason::LocalRevoke);
+                assert_eq!(demoted.revoked_lease, credentials().lease);
+                assert!(!demoted.session.opened.transport.is_closed());
+                assert!(demoted.session.check().is_ok());
+
+                // Verify the emitted 0x0014 LeaseRevoked record decodes with exact binding & reason.
+                let binding = fr_wire::authority::Binding {
+                    channel: demoted.session.opened.binding.id,
+                    session: demoted.session.opened.binding.remote_session,
+                };
+                let decoded = fr_wire::lease_revoked::decode(
+                    &demoted.lease_revoked_record,
+                    binding,
+                    &demoted.session.opened.selected.limits,
+                    fr_wire::input::InputDirection::HostToViewer,
+                    fr_wire::input::InputDelivery::Reliable,
+                )
+                .expect("demoted LeaseRevoked record must decode");
+                assert_eq!(decoded.lease, credentials().lease);
+                assert_eq!(decoded.reason, fr_wire::lease_revoked::Reason::LocalRevoke);
+                assert_eq!(
+                    decoded.cleanup,
+                    fr_wire::lease_revoked::CleanupStage::Fenced
+                );
+
+                // Surviving viewing HostSession must still drive observation renewals on the SAME connection.
+                let mut viewing = demoted.session;
+                let (res, ()) = Box::pin(support::both(
+                    viewing.drive(Duration::from_millis(25), || nonce(&mut n), block),
+                    viewer.drive(&c),
+                ))
+                .await;
+                res.expect("surviving viewing session continues over same QUIC connection");
+                assert!(!viewing.opened.transport.is_closed());
+                viewing.close();
+                demoted.revoked_lease
+            },
+            driver,
+        ))
+        .await;
+        assert_eq!(demoted, credentials().lease);
+        assert!(shutdown.handoff_safe());
+        assert!(!seat.is_occupied());
+        // Held key MUST have been released cleanly when demoted.
+        assert_eq!(effects.lock().unwrap().events, vec![true, false]);
+    });
+}
+
+#[test]
+fn demote_to_viewing_refuses_when_observation_is_already_revoked() {
+    run(|c, h| async move {
+        let Fixture {
+            host,
+            viewer: _viewer,
+            driver,
+            seat,
+            ..
+        } = Box::pin(fixture(&c, &h, None)).await;
+        let control = host.control();
+        let observation = host.session.observation().unwrap();
+        observation.revoke();
+        let err = host
+            .demote_to_viewing(StopReason::LocalRevoke)
+            .expect_err("demotion must fail closed when observation is revoked");
+        assert!(matches!(err, Error::Closed));
+        assert!(control.is_stopped());
+        let shutdown = driver.await;
+        assert!(shutdown.handoff_safe());
+        assert!(!seat.is_occupied());
+    });
+}
+
 mod input_wake;
 
 #[path = "tests/files.rs"]

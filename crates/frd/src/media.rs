@@ -363,6 +363,15 @@ impl ObservationControl {
             *slot = Some(lease);
         }
     }
+    /// Stop and detach the currently registered lease so a viewing session
+    /// surviving control demotion no longer holds the revoked lease fence.
+    pub(crate) fn clear_lease(&self, reason: crate::input_watchdog::StopReason) {
+        if let Ok(mut slot) = self.lease.lock()
+            && let Some(lease) = slot.take()
+        {
+            lease.stop(reason);
+        }
+    }
     /// Stop the granted lease, if any, with `reason` (its first reason wins).
     /// The stop never blocks.
     pub(crate) fn stop_lease(&self, reason: crate::input_watchdog::StopReason) {

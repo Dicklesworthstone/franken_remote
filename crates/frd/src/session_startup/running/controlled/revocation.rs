@@ -9,7 +9,7 @@ use fr_wire::{
 };
 use std::future::Future;
 
-fn wire_reason(reason: StopReason) -> Reason {
+pub(super) fn wire_reason(reason: StopReason) -> Reason {
     match reason {
         StopReason::LocalRevoke => Reason::LocalRevoke,
         StopReason::ViewInvalidated => Reason::ViewInvalidated,

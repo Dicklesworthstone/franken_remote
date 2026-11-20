@@ -54,6 +54,11 @@ pub(super) struct Slot {
     reason: Option<Error>,
     cleanup: Option<Result<(), worker::Error>>,
 }
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 impl Slot {
     pub(super) fn stop(&mut self) {
         self.stopped = true;

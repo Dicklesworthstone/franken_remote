@@ -13,6 +13,11 @@ pub(super) struct Slot {
     host: Option<uplink::Host>,
     reason: Option<uplink::Error>,
 }
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 impl Slot {
     pub(super) fn raw_io_available(&self) -> bool {
         self.pending.is_none()

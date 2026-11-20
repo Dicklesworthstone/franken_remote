@@ -11,7 +11,7 @@ use std::{future::Future, pin::pin, task::Poll, time::Duration};
 
 mod closure;
 pub(super) mod controlled;
-pub use controlled::ControlledHost;
+pub use controlled::{ControlledHost, DemotedViewing};
 pub(super) mod publisher;
 mod shared;
 pub use shared::hub;
