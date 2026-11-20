@@ -115,6 +115,20 @@ pub struct ReleasedCredit {
     pub released_frames: u64,
 }
 
+impl ReleasedCredit {
+    /// Extract cumulative freed resources from a validated `0x0081 ReceiverPressure` record.
+    #[must_use]
+    pub const fn from_wire_pressure(
+        report: &fr_wire::receiver_pressure::ReceiverPressure,
+    ) -> Self {
+        Self {
+            credit_epoch: report.credit_epoch,
+            released_bytes: report.released_bytes,
+            released_frames: report.released_frames,
+        }
+    }
+}
+
 /// Whether a validated release report advanced either cumulative counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreditUpdate {
@@ -232,6 +246,30 @@ impl ReceiverCreditWindow {
         Ok(CreditUpdate::Applied)
     }
 
+    /// Apply a decoded `0x0081 ReceiverPressure` wire record to this credit
+    /// window after verifying that its compact binding ID and channel role match
+    /// the attached WSS channel. Never grants authority or resets consumption.
+    pub fn apply_wire_pressure(
+        &mut self,
+        expected_binding: u32,
+        expected_role: fr_wire::receiver_pressure::ChannelRole,
+        report: &fr_wire::receiver_pressure::ReceiverPressure,
+    ) -> Result<CreditUpdate, WssError> {
+        if expected_binding == 0 || report.channel_binding != expected_binding {
+            return Err(WssError::StaleGeneration(
+                ChannelGeneration(u64::from(expected_binding)),
+                ChannelGeneration(u64::from(report.channel_binding)),
+            ));
+        }
+        if report.channel_role != expected_role {
+            return Err(WssError::RoleMismatch(
+                wss_role_from_wire(expected_role),
+                wss_role_from_wire(report.channel_role),
+            ));
+        }
+        self.return_credit(ReleasedCredit::from_wire_pressure(report))
+    }
+
     #[must_use]
     pub const fn outstanding_bytes(&self) -> u64 {
         self.consumed_bytes - self.released_bytes
@@ -240,6 +278,17 @@ impl ReceiverCreditWindow {
     #[must_use]
     pub const fn outstanding_frames(&self) -> u64 {
         self.consumed_frames - self.released_frames
+    }
+}
+
+const fn wss_role_from_wire(role: fr_wire::receiver_pressure::ChannelRole) -> WssChannelRole {
+    match role {
+        fr_wire::receiver_pressure::ChannelRole::Video => WssChannelRole::Video,
+        fr_wire::receiver_pressure::ChannelRole::AudioDown
+        | fr_wire::receiver_pressure::ChannelRole::AudioUp => WssChannelRole::Audio,
+        fr_wire::receiver_pressure::ChannelRole::Clipboard
+        | fr_wire::receiver_pressure::ChannelRole::Files
+        | fr_wire::receiver_pressure::ChannelRole::FilesDownload => WssChannelRole::Control,
     }
 }
 
@@ -531,5 +580,89 @@ mod tests {
             validate_security_downgrade(true, false),
             Err(WssError::SecurityDowngradeRefused)
         );
+    }
+
+    #[test]
+    fn receiver_pressure_wire_record_unlocks_and_fences_wss_credit() {
+        use fr_core::{
+            ids::{HostBootId, OsSessionId, RemoteSessionId},
+            limits::ProtocolLimits,
+        };
+        use fr_wire::{
+            input::{InputDelivery, InputDirection},
+            negotiation::ControlBinding,
+            receiver_pressure::{self, ChannelRole, QueuePressure, ReceiverPressure},
+        };
+
+        let limits = ProtocolLimits::ABSOLUTE;
+        let control = ControlBinding {
+            id: 7,
+            host_boot: HostBootId::from_raw(11),
+            os_session: OsSessionId::from_raw(22),
+            remote_session: RemoteSessionId::from_raw(33),
+        };
+        let mut window = ReceiverCreditWindow::new(9, 4096, 2).unwrap();
+        window.try_reserve(2048).unwrap();
+        window.try_reserve(2048).unwrap();
+        assert!(matches!(
+            window.try_reserve(1024),
+            Err(WssError::CreditStarvation(4096, 4096, 2, 2))
+        ));
+
+        let report = ReceiverPressure {
+            channel_binding: 55,
+            channel_role: ChannelRole::Video,
+            credit_epoch: 9,
+            released_bytes: 2048,
+            released_frames: 1,
+            pressure: QueuePressure::Moderate,
+            queued_bytes: 2048,
+            queued_items: 1,
+        };
+        let mut buf = [0_u8; receiver_pressure::RECORD_BYTES];
+        let written = receiver_pressure::encode(
+            &report,
+            control,
+            &limits,
+            &mut buf,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        let decoded = receiver_pressure::decode(
+            &buf[..written],
+            control,
+            &limits,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+
+        // Wrong channel binding or role is fenced before crediting.
+        assert_eq!(
+            window.apply_wire_pressure(56, ChannelRole::Video, &decoded),
+            Err(WssError::StaleGeneration(
+                ChannelGeneration(56),
+                ChannelGeneration(55),
+            ))
+        );
+        assert_eq!(
+            window.apply_wire_pressure(55, ChannelRole::AudioDown, &decoded),
+            Err(WssError::RoleMismatch(
+                WssChannelRole::Audio,
+                WssChannelRole::Video,
+            ))
+        );
+        assert_eq!(window.outstanding_bytes(), 4096);
+
+        // Matching wire record unlocks credit and allows the next frame.
+        assert_eq!(
+            window.apply_wire_pressure(55, ChannelRole::Video, &decoded),
+            Ok(CreditUpdate::Applied)
+        );
+        assert_eq!(window.outstanding_bytes(), 2048);
+        assert_eq!(window.outstanding_frames(), 1);
+        window.try_reserve(2048).unwrap();
+        assert_eq!(window.outstanding_bytes(), 4096);
     }
 }
