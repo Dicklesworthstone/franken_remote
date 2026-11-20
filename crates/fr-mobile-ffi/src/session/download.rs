@@ -52,6 +52,51 @@ pub struct Report {
 }
 
 impl Report {
+    /// Bounded content-free UI evidence for the original receive direction.
+    /// Staged bytes never become published bytes, including at 100% progress.
+    pub fn document(&self) -> serde_json::Value {
+        use serde_json::json;
+        let progress = self
+            .status
+            .as_ref()
+            .and_then(|status| status.progress)
+            .map(|progress| {
+                json!({
+                    "id": progress.id,
+                    "staged_bytes": progress.staged_bytes,
+                    "total_bytes": progress.total_bytes,
+                })
+            });
+        let receipts: Vec<_> = self
+            .receipts()
+            .into_iter()
+            .map(|receipt| {
+                json!({
+                    "id": receipt.id,
+                    "index": receipt.index,
+                    "outcome": receipt.outcome,
+                    "receipt": receipt.receipt,
+                    "bytes": receipt.bytes,
+                    "durable": receipt.durable,
+                    "reason": receipt.reason,
+                })
+            })
+            .collect();
+        json!({
+            "version": 1,
+            "configured": self.configured,
+            "phase": self.phase_name(),
+            "cancel_requested": self.cancel_requested,
+            "absence": self.reason_code(),
+            "progress": progress,
+            "receipts": receipts,
+            "receipts_truncated": self.results_truncated(),
+            "cleanup": self.cleanup_name(),
+            "cleanup_complete": self.cleanup_complete(),
+            "success": self.is_success(),
+        })
+    }
+
     fn observe(&mut self, mut status: ReceiveStatus) {
         self.cancel_requested |= status.cancel_requested;
         if let Some(Err(error)) = self.status.as_ref().and_then(|previous| previous.cleanup) {

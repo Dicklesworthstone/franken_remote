@@ -8,6 +8,10 @@ struct MachinePickerView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var editing: HostEditor.Target?
     @State private var showSettings = false
+    @State private var showReceivedFiles = false
+    @State private var confirmReceiving = false
+    @State private var receiveHost: SavedHost?
+    @State private var receiveMachine: DirectoryMachine?
 
     var body: some View {
         NavigationStack {
@@ -52,6 +56,10 @@ struct MachinePickerView: View {
                             model.connect(host, control: control)
                         } edit: {
                             editing = .edit(host)
+                        } receiveFiles: {
+                            receiveHost = host
+                            receiveMachine = nil
+                            confirmReceiving = true
                         }
                     }
                     .onDelete { offsets in
@@ -71,6 +79,10 @@ struct MachinePickerView: View {
                 if !store.hosts.isEmpty {
                     DirectorySection(listing: model.listing, asking: model.listingFrom) { machine, control in
                         model.connect(machine, control: control)
+                    } receiveFiles: { machine in
+                        receiveHost = nil
+                        receiveMachine = machine
+                        confirmReceiving = true
                     }
                 }
             }
@@ -78,6 +90,12 @@ struct MachinePickerView: View {
             .task(id: store.hosts.map(\.name)) { await model.refreshDirectory() }
             .navigationTitle("FrankenRemote")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { showReceivedFiles = true } label: {
+                        Image(systemName: "tray.and.arrow.down")
+                    }
+                    .accessibilityLabel("Received files")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showSettings = true
@@ -94,6 +112,22 @@ struct MachinePickerView: View {
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView().environmentObject(settings)
+            }
+            .sheet(isPresented: $showReceivedFiles) { ReceivedFilesView() }
+            .confirmationDialog("Allow files from \(receiveHost?.title ?? receiveMachine?.machine ?? "this host")?", isPresented: $confirmReceiving,
+                                titleVisibility: .visible) {
+                Button("Connect and allow receiving") {
+                    if let host = receiveHost { model.connect(host, control: true, receiveFiles: true) }
+                    else if let machine = receiveMachine { model.connect(machine, control: true, receiveFiles: true) }
+                    receiveHost = nil
+                    receiveMachine = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    receiveHost = nil
+                    receiveMachine = nil
+                }
+            } message: {
+                Text("Once you take control, this host can send selected files into FrankenRemote on this device: up to 256 MiB per file and 1 GiB for this session. Existing files are kept. Nothing opens automatically. This permission ends with the original connection; a reconnect needs a new choice.")
             }
             .overlay {
                 if store.hosts.isEmpty {
@@ -123,6 +157,7 @@ private struct DirectorySection: View {
     let listing: DirectoryResult?
     let asking: String?
     let connect: (DirectoryMachine, Bool) -> Void
+    let receiveFiles: (DirectoryMachine) -> Void
 
     var body: some View {
         Section {
@@ -136,7 +171,7 @@ private struct DirectorySection: View {
             switch listing {
             case .listed(_, let machines, _):
                 ForEach(machines) { machine in
-                    DirectoryRow(machine: machine, connect: connect)
+                    DirectoryRow(machine: machine, connect: connect, receiveFiles: receiveFiles)
                 }
             case .refused(let via, let refusal):
                 Label(refusal.message(via: label(via)), systemImage: "list.bullet.rectangle")
@@ -175,6 +210,7 @@ private struct DirectorySection: View {
 private struct DirectoryRow: View {
     let machine: DirectoryMachine
     let connect: (DirectoryMachine, Bool) -> Void
+    let receiveFiles: (DirectoryMachine) -> Void
 
     var body: some View {
         Button {
@@ -216,6 +252,7 @@ private struct DirectoryRow: View {
         .contextMenu {
             Button { connect(machine, true) } label: { Label("View and control", systemImage: "cursorarrow.rays") }
             Button { connect(machine, false) } label: { Label("View only", systemImage: "eye") }
+            Button { receiveFiles(machine) } label: { Label("Connect and receive files…", systemImage: "tray.and.arrow.down") }
         }
     }
 
@@ -244,6 +281,7 @@ private struct HostRow: View {
     let host: SavedHost
     let connect: (Bool) -> Void
     let edit: () -> Void
+    let receiveFiles: () -> Void
 
     var body: some View {
         Button {
@@ -273,6 +311,7 @@ private struct HostRow: View {
         .contextMenu {
             Button { connect(true) } label: { Label("View and control", systemImage: "cursorarrow.rays") }
             Button { connect(false) } label: { Label("View only", systemImage: "eye") }
+            Button(action: receiveFiles) { Label("Connect and receive files…", systemImage: "tray.and.arrow.down") }
             Button { edit() } label: { Label("Edit", systemImage: "pencil") }
         }
         .swipeActions(edge: .leading) {

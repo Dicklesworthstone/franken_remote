@@ -69,8 +69,11 @@ struct SessionScreen: View {
             }
         }
         .overlay(alignment: .bottom) {
-            FileUploadBar(session: session)
-                .padding(.horizontal, 12).padding(.bottom, 12)
+            VStack(spacing: 8) {
+                FileUploadBar(session: session)
+                FileDownloadBar(session: session)
+            }
+            .padding(.horizontal, 12).padding(.bottom, 12)
         }
         .background(Color.black)
         .statusBarHidden(session.phase.isViewing && !toolbarVisible)
