@@ -611,8 +611,10 @@ jobs:
     runs-on: macos-15
     # frd's library tests are one large test crate; on this 7 GB runner its
     # compile pages. Every frd --lib step below shares one feature set, so the
-    # test executable is compiled once.
-    timeout-minutes: 90
+    # test executable is compiled once. That compile is most of "Test original
+    # native session evidence deadlines" (51-64 min). Green runs on 11-19/20
+    # took 65-82 min in all, and two were cancelled at 90 (ad71f7cf, 958d0aac).
+    timeout-minutes: 120
     steps:
       - name: Check out repository
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
