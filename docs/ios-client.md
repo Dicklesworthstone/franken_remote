@@ -573,6 +573,14 @@ Simulator execution and real-device scroll feel require the Apple validation
 lane; this source change does not establish native touch or host-injection
 qualification.
 
+The shared mobile core advertises this precise producer only on iOS. Portable
+tests exercise the production profile helpers, actual wire intersections and
+upload/download combinations. The macOS host tests additionally compare the iOS
+profile against the real host offer; those native tests remain unexecuted here.
+The production macOS AppKit viewer uses
+its separate `fr-native` scroll producer and negotiation; the Windows producer
+continues to request line scrolling only.
+
 ## Lifecycle
 
 - The session is visible only while its view is on screen in the active app.

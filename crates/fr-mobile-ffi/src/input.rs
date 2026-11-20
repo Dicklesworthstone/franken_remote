@@ -7,6 +7,18 @@
 //! keeps line and precise scroll independent: whole native line steps or
 //! signed 16.16 logical distances, only under that host-granted capability.
 
+#[cfg(any(
+    test,
+    all(
+        feature = "session",
+        any(
+            target_os = "ios",
+            all(target_os = "macos", feature = "macos-session"),
+            all(windows, feature = "windows-session")
+        )
+    )
+))]
+pub(crate) mod profile;
 mod scroll;
 // Typing plans serve only the native session (the same gate as
 // `crate::session`). A build without it, such as the workspace's featureless

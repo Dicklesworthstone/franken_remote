@@ -3,10 +3,8 @@
 #![forbid(unsafe_code)]
 
 use super::InputResult;
-use fr_core::{
-    input::MAX_COMMITTED_TEXT_BYTES,
-    input_submission::{Capabilities, Capability},
-};
+use crate::input::profile::{capabilities as input_capabilities, offer as input_offer};
+use fr_core::{input::MAX_COMMITTED_TEXT_BYTES, input_submission::Capabilities};
 use fr_wire::negotiation::{Error, Offer};
 use frd::session_startup::viewer_events::Error as CaptureError;
 
@@ -41,29 +39,17 @@ pub(super) fn offer_with_download(
 }
 
 fn with_input(original: Offer) -> Result<Offer, Error> {
-    let offered = fr_wire::control::with_committed_text(original)?;
-    if cfg!(any(target_os = "ios", target_os = "macos")) {
-        fr_wire::control::with_pixel_scroll(offered)
-    } else {
-        Ok(offered)
-    }
+    // This core's precise producer is the iOS touch interpreter. macOS builds
+    // this crate for host tests; its shipping AppKit viewer has a separate
+    // fr-native input producer and negotiation path.
+    input_offer(original, cfg!(target_os = "ios"))
 }
 
 /// The app produces whole committed text but never synthesizes physical repeat.
 /// `NativeObserver` meets this intent with the negotiated host profile before
 /// sending a control request, so legacy hosts retain physical-key control.
 pub(super) fn requested_capabilities() -> Capabilities {
-    let requested = Capabilities::default()
-        .with(Capability::Keys)
-        .with(Capability::Absolute)
-        .with(Capability::Buttons)
-        .with(Capability::LineScroll)
-        .with(Capability::Text);
-    if cfg!(any(target_os = "ios", target_os = "macos")) {
-        requested.with(Capability::PixelScroll)
-    } else {
-        requested
-    }
+    input_capabilities(cfg!(target_os = "ios"))
 }
 
 /// The C string boundary cannot represent an embedded NUL. Reject the whole
@@ -87,14 +73,16 @@ pub(super) fn text_result(result: Result<(), CaptureError>) -> InputResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fr_core::input_submission::Capability;
     use fr_wire::control::{TEXT_CAPABILITY, requestable, with_committed_text};
     use frd::session_startup::{host_offer, host_offer_with, with_line_scroll};
 
     #[test]
-    #[cfg(any(target_os = "ios", target_os = "macos"))]
-    fn precise_scroll_is_selected_only_bilaterally_and_keeps_legacy_control() {
+    fn ios_precise_scroll_is_selected_only_bilaterally_and_keeps_legacy_control() {
         use fr_wire::control::{PIXEL_SCROLL_CAPABILITY, with_pixel_scroll};
-        let client = offer(true, false, false).unwrap();
+        // Exercise the actual iOS profile on macOS host tests without
+        // advertising an iOS producer in a non-iOS production offer.
+        let client = input_offer(fr_client::native::control_offer(), true).unwrap();
         assert!(
             client
                 .capabilities
@@ -112,7 +100,7 @@ mod tests {
             .version = 2;
         for (host, wanted) in [(legacy, false), (precise, true), (wrong_version, false)] {
             let selected = host.intersect(&client).unwrap();
-            let granted = requested_capabilities().meet(requestable(&selected.capabilities));
+            let granted = input_capabilities(true).meet(requestable(&selected.capabilities));
             assert_eq!(granted.contains(Capability::PixelScroll), wanted);
             assert!(granted.contains(Capability::LineScroll));
             assert!(granted.contains(Capability::Keys));
@@ -120,9 +108,27 @@ mod tests {
         }
         let precise_only = with_pixel_scroll(host_offer(true)).unwrap();
         let selected = precise_only.intersect(&client).unwrap();
-        let granted = requested_capabilities().meet(requestable(&selected.capabilities));
+        let granted = input_capabilities(true).meet(requestable(&selected.capabilities));
         assert!(granted.contains(Capability::PixelScroll));
         assert!(!granted.contains(Capability::LineScroll));
+    }
+
+    #[test]
+    fn the_platform_offer_and_request_only_advertise_its_actual_scroll_producer() {
+        use fr_wire::control::PIXEL_SCROLL_CAPABILITY;
+        let offered = offer(true, false, false).unwrap();
+        assert_eq!(
+            offered
+                .capabilities
+                .iter()
+                .any(|cap| cap.name == PIXEL_SCROLL_CAPABILITY),
+            cfg!(target_os = "ios")
+        );
+        assert_eq!(
+            requested_capabilities().contains(Capability::PixelScroll),
+            cfg!(target_os = "ios")
+        );
+        assert!(requested_capabilities().contains(Capability::LineScroll));
     }
 
     #[test]
@@ -383,8 +389,8 @@ mod tests {
             .filter(|cap| !upload.capabilities.contains(cap))
             .map(|cap| (cap.name.as_str(), cap.required))
             .collect();
-        if cfg!(any(target_os = "ios", target_os = "macos")) {
-            // The full Apple profile fills all 24 slots. Exactly the optional
+        if cfg!(target_os = "ios") {
+            // The full iOS profile fills all 24 slots. Exactly the optional
             // diagnostic yields; input, clipboard and ATP boundaries stay.
             assert_eq!(
                 omitted,

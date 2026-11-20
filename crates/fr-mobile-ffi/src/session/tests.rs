@@ -80,7 +80,7 @@ fn the_control_request_never_asks_for_client_side_repeat() {
     assert!(!caps.contains(Capability::Repeat));
     assert_eq!(
         caps.contains(Capability::PixelScroll),
-        cfg!(any(target_os = "ios", target_os = "macos"))
+        cfg!(target_os = "ios")
     );
 }
 
