@@ -1,7 +1,7 @@
 //! `Controller::observe_path`: a held queue on the viewer's path lowers the
 //! rate toward what the path delivered; a clear path probes back up (fr-7al9).
 
-use fr_media::bitrate::{Controller, Reason};
+use fr_media::bitrate::{Controller, PathEvidence, Reason};
 
 const TURN: u64 = 20_000;
 
@@ -303,4 +303,235 @@ fn path_time_cannot_run_backwards() {
     let mut c = Controller::new(2_000_000).unwrap();
     c.observe_path(100_000, false, 0).unwrap();
     assert!(c.observe_path(99_999, false, 0).is_err());
+}
+
+#[test]
+fn replacement_cohort_cannot_inherit_path_pressure_or_headroom() {
+    let mut pressure = Controller::new(2_000_000).unwrap();
+    path(&mut pressure, 0, 200_000, true, 800_000);
+    pressure.reset_evidence().unwrap();
+    path(&mut pressure, 200_000, 400_000, true, 800_000);
+    assert_eq!(pressure.pending(), None);
+    pressure.observe_path(400_000, true, 800_000).unwrap();
+    assert_eq!(pressure.pending().unwrap().bitrate(), 480_000);
+
+    let mut headroom = Controller::new(2_000_000).unwrap();
+    path(&mut headroom, 0, 220_000, true, 800_000);
+    apply(&mut headroom, 220_000);
+    path(&mut headroom, 220_000, 3_220_000, false, 0);
+    headroom.reset_evidence().unwrap();
+    path(&mut headroom, 3_220_000, 7_220_000, false, 0);
+    assert_eq!(headroom.pending(), None);
+    headroom.observe_path(7_220_000, false, 0).unwrap();
+    assert_eq!(headroom.pending().unwrap().reason(), Reason::Headroom);
+}
+
+#[test]
+fn service_gaps_cannot_be_counted_as_continuous_path_evidence() {
+    let mut pressure = Controller::new(2_000_000).unwrap();
+    path(&mut pressure, 0, 200_000, true, 800_000);
+    path(&mut pressure, 5_000_000, 5_200_000, true, 800_000);
+    assert_eq!(pressure.pending(), None);
+    pressure.observe_path(5_200_000, true, 800_000).unwrap();
+    assert_eq!(pressure.pending().unwrap().reason(), Reason::PathQueue);
+
+    let mut headroom = Controller::new(2_000_000).unwrap();
+    path(&mut headroom, 0, 220_000, true, 800_000);
+    apply(&mut headroom, 220_000);
+    path(&mut headroom, 220_000, 3_220_000, false, 0);
+    path(&mut headroom, 10_000_000, 14_000_000, false, 0);
+    assert_eq!(headroom.pending(), None);
+    headroom.observe_path(14_000_000, false, 0).unwrap();
+    assert_eq!(headroom.pending().unwrap().reason(), Reason::Headroom);
+}
+
+#[test]
+fn shared_publishers_at_two_hundred_millisecond_cadence_still_adapt() {
+    let mut c = Controller::new(2_000_000).unwrap();
+    let queued = PathEvidence::Queued {
+        delivered_bits_per_second: 800_000,
+    };
+    c.observe_path_evidence(0, queued).unwrap();
+    c.observe_path_evidence(200_000, queued).unwrap();
+    assert_eq!(apply(&mut c, 200_000), 480_000);
+    for now in (200_000..4_200_000).step_by(200_000) {
+        c.observe_path_evidence(now, PathEvidence::Clear).unwrap();
+        assert_eq!(c.pending(), None);
+    }
+    c.observe_path_evidence(4_200_000, PathEvidence::Clear)
+        .unwrap();
+    assert_eq!(c.pending().unwrap().bitrate(), 600_000);
+}
+
+#[test]
+fn typed_path_samples_have_a_bounded_lifetime_without_extending_legacy_samples() {
+    let queued = PathEvidence::Queued {
+        delivered_bits_per_second: 800_000,
+    };
+    for gap in [250_000, 250_001] {
+        let mut c = Controller::new(2_000_000).unwrap();
+        c.observe_path_evidence(0, queued).unwrap();
+        c.observe_path_evidence(gap, queued).unwrap();
+        if gap > 250_000 {
+            assert_eq!(c.pending(), None);
+            c.observe_path_evidence(gap + 200_000, queued).unwrap();
+        }
+        assert_eq!(c.pending().unwrap().bitrate(), 480_000);
+    }
+    for legacy_first in [false, true] {
+        let mut c = Controller::new(2_000_000).unwrap();
+        if legacy_first {
+            c.observe_path(0, true, 800_000).unwrap();
+            c.observe_path_evidence(200_000, queued).unwrap();
+        } else {
+            c.observe_path_evidence(0, queued).unwrap();
+            c.observe_path(200_000, true, 800_000).unwrap();
+        }
+        assert_eq!(c.pending(), None, "API changes cannot extend old samples");
+    }
+}
+
+#[test]
+fn idle_or_unavailable_paths_never_probe_back_to_the_congesting_rate() {
+    for evidence in [PathEvidence::Idle, PathEvidence::Unknown] {
+        let mut c = Controller::new(2_000_000).unwrap();
+        path(&mut c, 0, 220_000, true, 800_000);
+        apply(&mut c, 220_000);
+        for now in (220_000..20_000_000).step_by(20_000) {
+            c.observe_path_evidence(now, evidence).unwrap();
+            assert_eq!(c.pending(), None);
+            assert_eq!(c.applied_bitrate(), 480_000);
+        }
+        path(&mut c, 20_000_000, 24_000_000, false, 0);
+        assert_eq!(c.pending(), None, "new busy delivery needs its full dwell");
+        c.observe_path(24_000_000, false, 0).unwrap();
+        assert_eq!(c.pending().unwrap().bitrate(), 600_000);
+    }
+}
+
+#[test]
+fn a_cut_survives_the_queue_drain_that_allows_its_capture() {
+    for evidence in [
+        PathEvidence::Clear,
+        PathEvidence::Idle,
+        PathEvidence::Unknown,
+    ] {
+        let mut c = Controller::new(2_000_000).unwrap();
+        path(&mut c, 0, 220_000, true, 800_000);
+        let cut = c.pending();
+        c.observe_path_evidence(240_000, evidence).unwrap();
+        assert_eq!(c.pending(), cut);
+        assert_eq!(apply(&mut c, 240_000), 480_000);
+    }
+}
+
+#[test]
+fn disappearing_path_evidence_cancels_unsent_and_deferred_probes() {
+    for evidence in [PathEvidence::Idle, PathEvidence::Unknown] {
+        for deferred in [false, true] {
+            let mut c = Controller::new(2_000_000).unwrap();
+            path(&mut c, 0, 220_000, true, 800_000);
+            apply(&mut c, 220_000);
+            path(&mut c, 220_000, 4_240_000, false, 0);
+            assert_eq!(c.pending().unwrap().bitrate(), 600_000);
+            if deferred {
+                let capture = c.begin_capture().unwrap();
+                c.complete_capture(capture, 480_000, false, 4_240_000)
+                    .unwrap();
+            }
+            c.observe_path_evidence(4_260_000, evidence).unwrap();
+            if deferred {
+                let restore = c.pending().unwrap();
+                assert_eq!(restore.reason(), Reason::EvidenceReset);
+                assert_eq!(restore.bitrate(), 480_000);
+                assert_eq!(apply(&mut c, 4_260_000), 480_000);
+            } else {
+                assert_eq!(c.pending(), None);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_new_healthy_viewer_cancels_a_whole_cohort_cut() {
+    for deferred in [false, true] {
+        let mut c = Controller::new(2_000_000).unwrap();
+        path(&mut c, 0, 220_000, true, 800_000);
+        assert_eq!(c.pending().unwrap().bitrate(), 480_000);
+        if deferred {
+            let capture = c.begin_capture().unwrap();
+            c.complete_capture(capture, 2_000_000, false, 220_000)
+                .unwrap();
+        }
+        c.observe_split_path(240_000).unwrap();
+        if deferred {
+            assert_eq!(c.pending().unwrap().reason(), Reason::EvidenceReset);
+            assert_eq!(apply(&mut c, 240_000), 2_000_000);
+        } else {
+            assert_eq!(c.pending(), None);
+        }
+    }
+}
+
+#[test]
+fn path_reset_records_in_flight_effect_before_restoring_the_original_rate() {
+    let mut c = Controller::new(2_000_000).unwrap();
+    path(&mut c, 0, 220_000, true, 800_000);
+    let old = c.begin_capture().unwrap();
+    c.reset_evidence().unwrap();
+    let restore = c.pending().unwrap();
+    c.complete_capture(old, 480_000, true, 220_000).unwrap();
+    assert_eq!(c.applied_bitrate(), 480_000);
+    assert_eq!(c.pending(), Some(restore));
+    c.reset_evidence().unwrap();
+    assert_eq!(c.pending(), Some(restore));
+    assert_eq!(apply(&mut c, 2_220_000), 2_000_000);
+    path(&mut c, 2_220_000, 4_220_000, true, 800_000);
+    assert_eq!(
+        c.pending(),
+        None,
+        "the restoration retains its change dwell"
+    );
+    c.observe_path(4_220_000, true, 800_000).unwrap();
+    assert_eq!(c.pending().unwrap().bitrate(), 480_000);
+}
+
+#[test]
+fn local_enqueue_headroom_cannot_override_an_idle_or_unknown_path() {
+    use fr_media::pacing::{Availability, Observation, Policy, Sample};
+
+    for evidence in [PathEvidence::Idle, PathEvidence::Unknown] {
+        for path_first in [false, true] {
+            let mut c = Controller::new(2_000_000).unwrap();
+            path(&mut c, 0, 220_000, true, 800_000);
+            apply(&mut c, 220_000);
+            let mut pacing = fr_media::pacing::Controller::new(Policy {
+                minimum_interval_us: 40_000,
+                maximum_interval_us: 40_000,
+            })
+            .unwrap();
+            for now in (240_000..12_000_000).step_by(20_000) {
+                if path_first {
+                    c.observe_path_evidence(now, evidence).unwrap();
+                }
+                let report = pacing
+                    .update(Sample {
+                        now_us: now,
+                        source_work_us: Some(1_000),
+                        send: Availability::Ready,
+                        capture_credit: Availability::Ready,
+                        observation: Some(Observation {
+                            at_us: now,
+                            changed: true,
+                        }),
+                    })
+                    .unwrap();
+                c.observe(&report).unwrap();
+                assert_eq!(c.pending(), None, "local enqueue is not path capacity");
+                if !path_first {
+                    c.observe_path_evidence(now, evidence).unwrap();
+                }
+            }
+        }
+    }
 }
