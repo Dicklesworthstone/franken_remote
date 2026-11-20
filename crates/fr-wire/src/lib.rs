@@ -18,6 +18,7 @@ pub mod decoder;
 pub mod directory;
 pub mod display;
 pub mod files;
+pub mod geometry_changed;
 pub mod held_state;
 pub mod input;
 pub mod input_result;
@@ -28,10 +29,12 @@ pub mod negotiation;
 pub mod presented;
 pub mod quality_decision;
 pub mod receiver_metrics;
+pub mod receiver_pressure;
 mod record;
 pub mod recovery_request;
 pub mod refusal;
 pub mod stream;
+pub mod sync_job_state;
 
 pub use cursor::{
     CursorPosition, CursorShape, POSITION_FLAG_LOCKED, POSITION_FLAG_VISIBLE,

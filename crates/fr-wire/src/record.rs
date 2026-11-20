@@ -113,6 +113,7 @@ pub enum Kind {
     CloseRequest = 0x001d,
     Closed = 0x001e,
     DisplayCatalog = 0x0020,
+    GeometryChanged = 0x0021,
     SelectDisplay = 0x0022,
     DecoderConfiguration = 0x0030,
     DecoderConfigured = 0x0031,
@@ -147,7 +148,9 @@ pub enum Kind {
     FileChunk = 0x0072,
     FileComplete = 0x0073,
     FileCancel = 0x0074,
+    SyncJobState = 0x0075,
     PresentedState = 0x0080,
+    ReceiverPressure = 0x0081,
     StageMetrics = 0x0082,
     QualityDecision = 0x0083,
     ClockProbe = 0x0084,
@@ -191,6 +194,7 @@ impl Kind {
             0x001d => Ok(Self::CloseRequest),
             0x001e => Ok(Self::Closed),
             0x0020 => Ok(Self::DisplayCatalog),
+            0x0021 => Ok(Self::GeometryChanged),
             0x0022 => Ok(Self::SelectDisplay),
             0x0030 => Ok(Self::DecoderConfiguration),
             0x0031 => Ok(Self::DecoderConfigured),
@@ -225,7 +229,9 @@ impl Kind {
             0x0072 => Ok(Self::FileChunk),
             0x0073 => Ok(Self::FileComplete),
             0x0074 => Ok(Self::FileCancel),
+            0x0075 => Ok(Self::SyncJobState),
             0x0080 => Ok(Self::PresentedState),
+            0x0081 => Ok(Self::ReceiverPressure),
             0x0082 => Ok(Self::StageMetrics),
             0x0083 => Ok(Self::QualityDecision),
             0x0084 => Ok(Self::ClockProbe),
@@ -265,6 +271,7 @@ impl Kind {
             | Self::CloseRequest
             | Self::Closed
             | Self::DisplayCatalog
+            | Self::GeometryChanged
             | Self::RecoveryRequest
             | Self::SelectDisplay
             | Self::Key
@@ -290,7 +297,9 @@ impl Kind {
             | Self::FileChunk
             | Self::FileComplete
             | Self::FileCancel
+            | Self::SyncJobState
             | Self::PresentedState
+            | Self::ReceiverPressure
             | Self::StageMetrics
             | Self::QualityDecision
             | Self::ClockProbe

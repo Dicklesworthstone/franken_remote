@@ -169,7 +169,7 @@ pub enum Reason {
     Cancelled = 9,
 }
 impl Reason {
-    fn parse(v: u16) -> Result<Self, WireError> {
+    pub(crate) fn parse(v: u16) -> Result<Self, WireError> {
         match v {
             0 => Ok(Self::None),
             1 => Ok(Self::User),

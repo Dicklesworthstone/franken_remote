@@ -141,6 +141,30 @@ impl DisplayCatalogTracker {
         &self.active_catalog
     }
 
+    /// Build a wire-ready `0x0021 GeometryChanged` notification for a display
+    /// present in the active catalog, enforcing that `previous_geometry` is
+    /// strictly older and marking prior coordinate input as fenced.
+    pub fn geometry_changed_for(
+        &self,
+        handle: u128,
+        previous_geometry: DisplayGeometryGeneration,
+        viewport: fr_core::ids::ViewportMappingGeneration,
+    ) -> Result<crate::geometry_changed::GeometryChanged, crate::WireError> {
+        let display = self
+            .active_catalog
+            .find(handle)
+            .ok_or(crate::WireError::InvalidBinding)?;
+        let event = crate::geometry_changed::GeometryChanged {
+            revision: self.revision,
+            previous_geometry,
+            display,
+            viewport,
+            input_fenced: true,
+        };
+        event.validate(&self.limits)?;
+        Ok(event)
+    }
+
     /// Update host topology with a new list of OS monitor descriptors.
     /// If ANY monitor is added, removed, or changed, this:
     /// 1. Advances `DisplayGeometryGeneration` BEFORE new input is accepted.
