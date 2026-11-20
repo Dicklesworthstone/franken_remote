@@ -1,7 +1,7 @@
 //! The final check's deadline reaches an out-of-thread executor, and executor
 //! expiry/fencing are confirmed non-submissions that end the input owner.
 use fr_core::{
-    authority::{AuthorityPolicy, SessionAuthority},
+    authority::{AuthorityError, AuthorityPolicy, SessionAuthority},
     held_state::{HeldState, HeldStateRequest},
     ids::*,
     input::*,
@@ -9,6 +9,7 @@ use fr_core::{
     input_submission::*,
     time::HostInstant,
 };
+use std::sync::{Arc, Mutex};
 
 /// Records the deadline each submission receives and answers with a scripted
 /// executor result. It is a boundary fixture, not native evidence.
@@ -297,4 +298,127 @@ fn in_thread_sinks_keep_their_direct_submission_and_report_no_local_state() {
     assert_eq!(sink.0.len(), 1);
     assert!(!sink.locally_revoked());
     assert!(!sink.native_failed());
+}
+
+/// `grant(Some(view_until))` on a shared authority, so the test can play the
+/// media owner's later readiness report.
+fn shared_grant(view_until: HostInstant) -> (Arc<Mutex<SessionAuthority>>, InputSession) {
+    let c = credentials();
+    let mut a = SessionAuthority::new(c.session, AuthorityPolicy::plan_defaults());
+    a.mark_capabilities_checked().unwrap();
+    a.authorize_observation(at(0)).unwrap();
+    a.mark_view_ready_until(view_until, at(0)).unwrap();
+    a.grant_lease(c.lease, at(0)).unwrap();
+    a.issue_input_ticket(c.lease, c.ticket, at(0)).unwrap();
+    let shared = Arc::new(Mutex::new(a));
+    let owner = InputSession::from_shared_authority(
+        shared.clone(),
+        c,
+        InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
+        Capabilities::default()
+            .with(Capability::Keys)
+            .with(Capability::Absolute),
+        at(0),
+    )
+    .unwrap();
+    (shared, owner)
+}
+fn pointer(x: i32) -> InputEvent<'static> {
+    InputEvent::Pointer {
+        position: DesktopPoint { x, y: 20 },
+    }
+}
+
+#[test]
+fn a_pointer_on_a_stale_view_is_dropped_and_control_resumes() {
+    // Plan 11.3: a stale view suspends input under a held lease; it does not
+    // end control. Pointer state already on the wire meets that suspension
+    // when a narrowed downlink delays the view's evidence (fr-7al9). Pointer
+    // state is latest-wins and fences nothing: it is refused with no effect.
+    let (shared, mut owner) = shared_grant(at(250_000));
+    let monitor = owner.monitor();
+    let mut sink = Executor::default();
+    let r = receipt(send(&mut owner, &mut sink, 0, pointer(10), 100));
+    assert_eq!(r.outcome, InputOutcome::SubmittedToOs);
+    let r = receipt(send(&mut owner, &mut sink, 1, pointer(11), 250_000));
+    assert_eq!(r.outcome, InputOutcome::RejectedBeforeSubmission);
+    assert_eq!(
+        r.refusal,
+        Some(Refusal::Authority(AuthorityError::ViewUnready))
+    );
+    assert_eq!(r.submitted_operations, 0);
+    assert!(!monitor.is_revoked());
+    // The watchdog's suspension service confirms the release; fresh evidence
+    // revives the view. The old ticket is gone, which is again only a drop.
+    assert_eq!(owner.maintain(at(250_001), &mut sink).remaining, 0);
+    shared
+        .lock()
+        .unwrap()
+        .mark_view_ready_until(at(500_000), at(250_002))
+        .unwrap();
+    let r = receipt(send(&mut owner, &mut sink, 2, pointer(12), 250_003));
+    assert_eq!(
+        r.refusal,
+        Some(Refusal::Authority(AuthorityError::TicketInvalid))
+    );
+    assert!(!monitor.is_revoked());
+    // A fresh ticket resumes pointer input on the same owner and lease.
+    let fresh = InputTicketId::from_raw(4);
+    owner.issue_ticket(fresh, at(250_004)).unwrap();
+    let r = receipt(owner.dispatch(
+        InputRequest {
+            credentials: InputCredentials {
+                ticket: fresh,
+                ..credentials()
+            },
+            sequence: 3,
+            event: pointer(13),
+        },
+        &mut sink,
+        || at(250_005),
+    ));
+    assert_eq!(r.outcome, InputOutcome::SubmittedToOs);
+    assert_eq!(sink.effects.len(), 2);
+}
+
+#[test]
+fn a_stale_view_still_ends_ordered_input_and_an_uncertain_pointer() {
+    // A refused ordered action keeps its fence: dependent input must not
+    // apply after it, so the owner ends as before.
+    let (_, mut owner) = shared_grant(at(250_000));
+    let monitor = owner.monitor();
+    let r = receipt(send(
+        &mut owner,
+        &mut Executor::default(),
+        0,
+        press(),
+        250_000,
+    ));
+    assert_eq!(
+        r.refusal,
+        Some(Refusal::Authority(AuthorityError::ViewUnready))
+    );
+    assert!(monitor.is_revoked());
+    // A pointer whose native effect is unknown still ends control.
+    let (_, mut owner) = shared_grant(at(250_000));
+    let monitor = owner.monitor();
+    let mut sink = Executor {
+        answer: Some(Submission::Unknown),
+        ..Executor::default()
+    };
+    let r = receipt(send(&mut owner, &mut sink, 0, pointer(10), 100));
+    assert_eq!(r.outcome, InputOutcome::EffectUnknown);
+    assert!(monitor.is_revoked());
+    // So does a pointer that meets an expired lease.
+    let (_, mut owner) = shared_grant(at(10_000_000));
+    let monitor = owner.monitor();
+    let r = receipt(send(
+        &mut owner,
+        &mut Executor::default(),
+        0,
+        pointer(10),
+        3_000_000,
+    ));
+    assert_eq!(r.outcome, InputOutcome::ExpiredBeforeSubmission);
+    assert!(monitor.is_revoked());
 }

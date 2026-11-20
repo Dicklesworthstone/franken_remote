@@ -71,7 +71,32 @@ jobs:
       - name: Tests
         id: test
         continue-on-error: true
-        run: ./scripts/verify.sh test
+        # frd's lib-test rustc peaks at 26-28 GB (trj, 11-20) on this 16 GB
+        # runner. Three runs on 11-20 lost the runner ~50 min into this step
+        # (21 min when green). Global reclaim also pages out the runner agent.
+        # In a cgroup whose memory.high leaves 2 GB of RAM, the kernel reclaims
+        # from the build first. If the cgroup cannot be set up, the step runs
+        # unprotected, as before.
+        run: |
+          cg=/sys/fs/cgroup/fr-build
+          protect() {
+            sudo mkdir -p "$cg" && [ -e "$cg/memory.high" ] || return 1
+            ram=$(awk '/^MemTotal:/ {printf "%d", $2 * 1024}' /proc/meminfo)
+            echo $(( ram - 2147483648 )) | sudo tee "$cg/memory.high" >/dev/null || return 1
+            echo $$ | sudo tee "$cg/cgroup.procs" >/dev/null || return 1
+          }
+          if protect; then
+            echo "Tests run in $cg, memory.high $(cat "$cg/memory.high")"
+          else
+            echo "::warning::no build cgroup; the runner is not protected from build paging"
+          fi
+          status=0
+          ./scripts/verify.sh test || status=$?
+          if [ -e "$cg/memory.peak" ]; then
+            echo "build cgroup memory.peak $(cat "$cg/memory.peak")"
+            cat "$cg/memory.events"
+          fi
+          exit "$status"
       - name: Exercise serial reconnects and retirement fences
         id: serial_turnover
         continue-on-error: true
@@ -296,7 +321,9 @@ jobs:
           prefix = 'local::ingress::helper::tests::'
           tests = [
               'a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends',
+              'a_table_a_failed_disconnect_left_is_cleared_while_no_other_connection_ends',
               'a_renewal_reads_the_interface_and_the_table_together_and_judges_the_interface_first',
+              'a_renewal_whose_table_read_takes_over_a_second_still_renews',
           ]
           listed = subprocess.check_output([binaries[0], '--list', '--ignored'], text=True).splitlines()
           for test in tests:
@@ -609,8 +636,10 @@ jobs:
     runs-on: macos-15
     # frd's library tests are one large test crate; on this 7 GB runner its
     # compile pages. Every frd --lib step below shares one feature set, so the
-    # test executable is compiled once.
-    timeout-minutes: 90
+    # test executable is compiled once. That compile is most of "Test original
+    # native session evidence deadlines" (51-64 min). Green runs on 11-19/20
+    # took 65-82 min in all, and two were cancelled at 90 (ad71f7cf, 958d0aac).
+    timeout-minutes: 120
     steps:
       - name: Check out repository
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
@@ -629,6 +658,10 @@ jobs:
           cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=13.0 -Wall -Wextra -Werror crates/fr-native/src/macos_audio_capture.m
           cc -std=c11 -Wall -Wextra -Werror -pthread crates/fr-native/tests/macos_audio_capture_policy.c -o "$RUNNER_TEMP/fr-macos-audio-policy"
           "$RUNNER_TEMP/fr-macos-audio-policy"
+      - name: Test the screen capture policy the encoder uses
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic crates/fr-native/tests/macos_capture_policy.c -o "$RUNNER_TEMP/fr-macos-capture-policy"
+          "$RUNNER_TEMP/fr-macos-capture-policy"
       - name: Check the read-only session monitor against the Apple SDK
         run: cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=11.0 -Wall -Wextra -Werror crates/fr-native/src/macos_session.m
       - name: Check the observation indicator against the Apple SDK

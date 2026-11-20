@@ -4,7 +4,8 @@
 //! a private network namespace (`examples/qualify_ingress_helper.rs`).
 use super::{
     server::{
-        Lifecycle, MAX_CONNECTIONS, Observed, Shared, check_assigned, check_request, connection,
+        Lifecycle, MAX_CONNECTIONS, Observed, Shared, accept, check_assigned, check_request,
+        connection,
     },
     *,
 };
@@ -553,14 +554,82 @@ fn a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends() {
     );
 }
 
+/// The serving loop retries an orphan by itself. A broker can stay connected
+/// for hours, so a table its failed disconnect left waited for a later
+/// connection to end, and after tailscaled restarted its stale `iif != index`
+/// drop refused the port's tailnet traffic (ts2, 2026-11-19, fr-eny1).
+#[test]
+#[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
+fn a_table_a_failed_disconnect_left_is_cleared_while_no_other_connection_ends() {
+    use asupersync::net::unix::UnixListener;
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+    // A live rule of another broker: never an orphan, so never touched.
+    const OTHER: &str = "frdh_fedcba9876543210fedcba9876543210";
+    assert_eq!(
+        fs::read_to_string("/run/fr-synthetic-ingress").unwrap(),
+        "synthetic-only\n"
+    );
+    let dir = PathBuf::from(format!("/run/fr-helper-retry-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.join("tables.json"), json!([TABLE, OTHER]).to_string()).unwrap();
+    fs::write(dir.join("fail"), "1").unwrap();
+    let nft = dir.join("nft");
+    fs::write(&nft, FAKE_NFT).unwrap();
+    fs::set_permissions(&nft, fs::Permissions::from_mode(0o700)).unwrap();
+    let tables = || -> Vec<String> {
+        serde_json::from_slice(&fs::read(dir.join("tables.json")).unwrap()).unwrap()
+    };
+    let socket = dir.join("helper.sock");
+    let settings = Settings::parse(
+        json!({"interface": "fr-fixture", "allowed_uids": [1000], "nft": nft, "socket": socket})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let events = Mutex::new(Vec::new());
+    let record = |event: Event| events.lock().unwrap().push(event);
+    RuntimeBuilder::new()
+        .worker_threads(1)
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let cx = Cx::current().unwrap();
+            let shared = Shared::new(&cx, &settings, &record);
+            let mut first = Lifecycle::default();
+            first.installed(1, TABLE);
+            first.release(&shared).await;
+            assert_eq!(tables(), [TABLE, OTHER], "the failed delete left it");
+            // Serve with no connection at all for twice the retry period.
+            let listener = UnixListener::bind(&socket).await.unwrap();
+            let shutdown = asupersync::time::sleep(cx.now(), Duration::from_secs(5));
+            accept(&shared, &listener, shutdown).await.unwrap();
+        });
+    assert_eq!(tables(), [OTHER]);
+    assert_eq!(
+        events.into_inner().unwrap(),
+        [
+            Event::CleanupFailed {
+                table: TABLE.into()
+            },
+            Event::OrphanCleared {
+                table: TABLE.into()
+            },
+        ]
+    );
+}
+
 /// A root-owned stand-in for both `ip` and `nft`. Its interface report answers
 /// only once the table read has started, so a renewal that ran the two in
-/// turn could never get one. In `fail` mode both reads exit 1.
+/// turn could never get one. In `fail` mode both reads exit 1; in `slow S`
+/// mode the table read answers after S seconds.
 const FAKE_RENEW_TOOLS: &str = r"#!/usr/bin/python3
 import json, pathlib, sys, time
 root = pathlib.Path(__file__).parent
 assert pathlib.Path('/run/fr-synthetic-ingress').read_text() == 'synthetic-only\n'
-fail = (root / 'mode').read_text() == 'fail'
+mode = (root / 'mode').read_text()
+fail = mode == 'fail'
 args = sys.argv[1:]
 if args == ['-j', 'address', 'show', 'dev', 'fr-fixture']:
     deadline = time.monotonic() + 0.9
@@ -575,6 +644,8 @@ elif args[:5] == ['-j', '-n', 'list', 'table', 'inet'] and len(args) == 6:
     (root / 'table-read').write_text('1')
     if fail:
         raise SystemExit(1)
+    if mode.startswith('slow '):
+        time.sleep(float(mode.split()[1]))
     t = args[5]
     expr = [
         {'match': {'op': '==', 'left': {'payload': {'protocol': 'ip', 'field': 'daddr'}}, 'right': '100.64.0.1'}},
@@ -592,15 +663,15 @@ else:
     raise SystemExit(2)
 ";
 
-#[test]
-#[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
-fn a_renewal_reads_the_interface_and_the_table_together_and_judges_the_interface_first() {
+/// A root-only directory holding [`FAKE_RENEW_TOOLS`] as both `ip` and `nft`,
+/// and the helper settings that use them.
+fn renewal_tools(tag: &str) -> (std::path::PathBuf, Settings) {
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
     assert_eq!(
         fs::read_to_string("/run/fr-synthetic-ingress").unwrap(),
         "synthetic-only\n"
     );
-    let dir = PathBuf::from(format!("/run/fr-helper-renew-{}", std::process::id()));
+    let dir = PathBuf::from(format!("/run/fr-helper-{tag}-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     for name in ["ip", "nft"] {
@@ -614,29 +685,58 @@ fn a_renewal_reads_the_interface_and_the_table_together_and_judges_the_interface
         .as_bytes(),
     )
     .unwrap();
+    (dir, settings)
+}
+/// One renewal of generation 7 of [`TABLE`] with the tools in `mode`.
+fn renew_once(dir: &std::path::Path, settings: &Settings, mode: &str) -> Result<Response, Refusal> {
+    std::fs::write(dir.join("mode"), mode).unwrap();
+    let _ = std::fs::remove_file(dir.join("table-read"));
     let record = |_: Event| {};
-    let renew = |mode: &str| {
-        fs::write(dir.join("mode"), mode).unwrap();
-        let _ = fs::remove_file(dir.join("table-read"));
-        RuntimeBuilder::new()
-            .worker_threads(1)
-            .enable_platform_reactor(true)
-            .build()
-            .unwrap()
-            .block_on(async {
-                let cx = Cx::current().unwrap();
-                let shared = Shared::new(&cx, &settings, &record);
-                let mut rule = Lifecycle::default();
-                rule.installed(7, TABLE);
-                rule.renew(&shared, 7).await
-            })
-    };
-    match renew("ok") {
+    RuntimeBuilder::new()
+        .worker_threads(1)
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let cx = Cx::current().unwrap();
+            let shared = Shared::new(&cx, settings, &record);
+            let mut rule = Lifecycle::default();
+            rule.installed(7, TABLE);
+            rule.renew(&shared, 7).await
+        })
+}
+
+#[test]
+#[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
+fn a_renewal_reads_the_interface_and_the_table_together_and_judges_the_interface_first() {
+    let (dir, settings) = renewal_tools("renew");
+    match renew_once(&dir, &settings, "ok") {
         Ok(Response::Renewed { generation: 7, .. }) => {}
         other => panic!("renewal with overlapping reads: {other:?}"),
     }
     // Both reads fail: the table read still ran, and the interface's refusal
     // is the one reported, as when the reads ran in turn.
-    assert_eq!(renew("fail"), Err(Refusal::InterfaceUnqualified));
+    assert_eq!(
+        renew_once(&dir, &settings, "fail"),
+        Err(Refusal::InterfaceUnqualified)
+    );
     assert!(dir.join("table-read").exists());
+}
+
+/// With a one-second bound, a table read slowed by load refused the renewal
+/// and so ended the host (ts2's helper: 180 `firewall_failed` in 19 hours,
+/// fr-eny1). A renewal's reads may now run for the broker's remaining
+/// snapshot validity, at most 2.5 s; a read past that is still refused.
+#[test]
+#[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
+fn a_renewal_whose_table_read_takes_over_a_second_still_renews() {
+    let (dir, settings) = renewal_tools("slow");
+    match renew_once(&dir, &settings, "slow 1.6") {
+        Ok(Response::Renewed { generation: 7, .. }) => {}
+        other => panic!("renewal with a 1.6 s table read: {other:?}"),
+    }
+    assert_eq!(
+        renew_once(&dir, &settings, "slow 3.2"),
+        Err(Refusal::FirewallFailed)
+    );
 }

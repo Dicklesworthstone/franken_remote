@@ -414,6 +414,15 @@ impl Assembly {
             ReceiveUpdate::Accepted
         })
     }
+    /// The display budget bounds this receiver's own queue, so it runs from the
+    /// moment the picture is whole. Counted from the first fragment it also
+    /// charged the link's time to carry the picture, which the source-age bound
+    /// already includes: on a link that takes 50 ms to carry one picture, no
+    /// picture was ever fresh and input stayed suspended (fr-7al9).
+    fn display_from(&mut self, now: u64, budget: u64) -> Result<(), DeliveryError> {
+        self.display_until = self.display_until.max(deadline(now, budget)?);
+        Ok(())
+    }
     fn has_prefix_hole(&self) -> bool {
         let prefix_bytes = (u64::from(self.received_end) * u64::from(self.descriptor.stride))
             .min(u64::from(self.descriptor.total_bytes));
@@ -849,12 +858,10 @@ impl ReceivePipeline {
         let Some(index) = self.datagram_slot(fragment.descriptor, now)? else {
             return Ok(ReceiveUpdate::Deferred);
         };
-        let update = self.slots[index].as_mut().expect("inserted").fragment(
-            fragment,
-            now,
-            self.config.policy.repair_delay_micros,
-        )?;
+        let assembly = self.slots[index].as_mut().expect("inserted");
+        let update = assembly.fragment(fragment, now, self.config.policy.repair_delay_micros)?;
         if update == ReceiveUpdate::PictureComplete {
+            self.picture_whole(index, now)?;
             self.discard_superseded();
         }
         Ok(update)
@@ -882,10 +889,36 @@ impl ReceivePipeline {
         };
         let index = self.slot(descriptor, now, true)?;
         self.recovery_frame = Some(chunk.frame);
+        let assembly = self.slots[index].as_mut().expect("inserted");
+        let update = assembly.recovery(chunk, self.config.limits.max_fragments())?;
+        if update == ReceiveUpdate::PictureComplete {
+            self.picture_whole(index, now)?;
+        }
+        Ok(update)
+    }
+    /// A picture that becomes whole after a later picture already was (a
+    /// reference repaired behind its dependent) is superseded work. It keeps
+    /// the budget from its first fragment, so a late one is decoded and not
+    /// shown before the newer picture.
+    fn picture_whole(&mut self, index: usize, now: u64) -> Result<(), DeliveryError> {
+        let frame = self.slots[index]
+            .as_ref()
+            .expect("inserted")
+            .descriptor
+            .frame;
+        if self
+            .slots
+            .iter()
+            .flatten()
+            .any(|a| a.descriptor.frame > frame && a.complete())
+        {
+            return Ok(());
+        }
+        let budget = self.config.policy.display_budget_micros;
         self.slots[index]
             .as_mut()
             .expect("inserted")
-            .recovery(chunk, self.config.limits.max_fragments())
+            .display_from(now, budget)
     }
     fn on_progress(
         &mut self,

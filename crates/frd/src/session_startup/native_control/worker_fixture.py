@@ -15,6 +15,7 @@ def reply(h, k, b=b''):
     sys.stdout.buffer.flush()
 try:
     last = None
+    rate = None
     while True:
         h = read(36)
         k = int.from_bytes(h[6:8],'big')
@@ -24,6 +25,7 @@ try:
             reply(h,269,struct.pack('>QB',1,1)+d)
         elif k == 12:
             assert len(b) == 52
+            rate = int.from_bytes(b[12:16],'big')
             reply(h,270,b)
         elif k == 13: reply(h,271)
         elif k == 8: reply(h,266,b)
@@ -34,6 +36,17 @@ try:
                 reply(h,265,struct.pack('>QQQ',frame,last,at))
             else:
                 reply(h,258,struct.pack('>QQQQB',frame,at,0,0,0)+bytes(7)+IDR)
+                last = frame
+        # CaptureAtRate: a static screen keeps the applied rate (the target
+        # stays deferred); an IDR applies the requested one.
+        elif k == 20:
+            frame,at,flags,target = struct.unpack('>QQBI',b)
+            assert flags & ~3 == 0 and 10_000 <= target <= 200_000_000 and rate
+            if last is not None and not flags & 1:
+                reply(h,279,struct.pack('>QQQI',frame,last,at,rate))
+            else:
+                rate = target
+                reply(h,278,struct.pack('>QQQQBI3x',frame,at,0,0,0,rate)+IDR)
                 last = frame
         elif k == 5: reply(h,262); break
         # ReadCursor: no separate cursor exists here (typed Unsupported).

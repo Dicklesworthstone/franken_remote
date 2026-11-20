@@ -1,5 +1,87 @@
 # Changelog
 
+## 2026-11-20 — a stale pointer no longer ends control; Mac hosts keep to their bitrate
+
+- Controlled sessions, narrowing link: when pictures slow down, the host's
+  view of what the viewer sees lapses and input is suspended until a fresh
+  picture arrives. A pointer move already on its way was then refused, and
+  both sides treated that refusal as a failure: the host revoked control,
+  and the viewer stopped control for any pointer the host had not applied.
+  Both now drop such a pointer (refused before any native call because its
+  view or ticket was no longer current), and control continues through the
+  suspension (7dc74385).
+- Keys, buttons, wheel turns and text still end control when refused this
+  way, because later input depends on them. Whether they should also wait
+  out the lapse is an open owner decision (bead f7ts).
+- Namespace measurements (narrow-link episodes against a 2 Mbit/s controlled
+  host, 20 interleaved runs of 3 rows): rows that ended before the link
+  widened went from 9 of 60 to 0 of 60, and every fixed row resumed input
+  after widening. Rows that survived on both builds are unchanged.
+- Linux hosts: when the root ingress helper failed to delete a connection's
+  nftables table (a slow `nft` under load), it retried only when another
+  connection ended. A host whose broker stayed connected kept the table, and
+  after tailscaled restarted, its rule for the old interface index dropped
+  every tailnet packet to the port. ts2's installed host stopped answering
+  this way on 11-19. The helper now retries leftovers every 2 s while it
+  serves (958d0aac). ts2's installed host predates this; its leftover tables
+  stay until its helper is restarted or reinstalled (bead fr-eny1).
+- Linux hosts with the root ingress helper, under load: each periodic
+  renewal gave the helper's `ip` and `nft` reads one second, and a slower
+  read was a refusal that ended the host (ts2's helper logged 261 such
+  refusals in 19 hours). Those reads now get 2.5 s, which still fits inside
+  the 3 s snapshot they renew. The broker's own interface read beside them
+  may use what is left of the old snapshot. A renewal that finds the helper
+  gone fences every connection at once instead of waiting for that read
+  (92b2df81). In a namespace test, a 1.6 s table read now renews and a
+  3.2 s one is still refused. Not yet checked on a loaded live host.
+- Mac hosts, high-motion content at a capped or path-following bitrate:
+  when VideoToolbox's rate control dropped a picture, the encoder resubmitted
+  it at once with a later timestamp. Each resubmission spent budget for time
+  that had not passed, so the link carried 2 to 2.7 times the target (a
+  full-noise 1280x720 window came out at 18.5 Mbit/s against an 8 Mbit/s
+  cap), and at 2 Mbit/s and below some pictures still failed and ended the
+  capture. Resubmissions now wait until the timestamp is at most 100 ms
+  ahead of the clock. In a synthetic-frame harness the output then matched
+  every target from 8 down to 1 Mbit/s with no failures. Content that cannot
+  fit its target shows fewer pictures per second instead (that window: 13.6
+  per second at 8.3 Mbit/s). Not yet checked on a live Mac host (8db1cf7a,
+  bead fr-8xl4).
+
+## 2026-11-19 — input keeps working on a link slower than one picture per 50 ms
+
+- Controlled sessions: on a link that takes longer than about 50 ms to carry
+  one picture (an 18 KB picture below about 3 Mbit/s), input stayed
+  suspended while the screen kept changing. After 10 s the viewer ended the
+  session with `view_stale`. The receiver's 50 ms display budget counted from
+  a picture's first fragment, so the link's own transfer time made every
+  picture late. It now counts from the fragment that completes the picture.
+  The source-age bound on what input may act on is unchanged.
+- Namespace measurements (PRESENTATION_FRESHNESS.md): 20 s at 1000-1500
+  kbit/s against a 2 Mbit/s host kept the session, with 714-771 pointer
+  motions reaching the host. Before, all 4 runs ended with `view_stale`.
+- The namespace narrow-link fixture now limits the rate with a token bucket,
+  which passes a picture's datagrams one at a time as a real bottleneck does.
+  netem's rate delivered each picture's GSO batch whole, which hid this.
+
+## 2026-11-19 — the host's bitrate follows a narrow viewer path
+
+- The 11-18 entry below says real bitrate adaptation was not built. It now
+  is, by default, on the backends that can change rate while capturing:
+  x265, VideoToolbox and Media Foundation. NVENC and VA-API keep a fixed
+  rate.
+- A host skips captures while the viewer's path holds a queue (011034c7).
+  A queue held for 200 ms cuts the bitrate to three fifths, and 4 s clear
+  probes a quarter back up, capped at the configured rate (cfad68f8,
+  controlled sessions). View-only sessions do the same, but only when every
+  viewer's path is queued, so one slow viewer never lowers the others'
+  picture (8eb44e3b).
+- Namespace measurements, 2 Mbit/s host: 20 s at 1500 or 1000 kbit/s kept
+  11 of 12 controlled sessions, against 0 of 12 with a fixed rate.
+  View-only sessions decoded about twice the pictures, and changes were
+  shown in 104-219 ms instead of 486-919 ms.
+- The installed hosts on mac-studio and ts2 predate this and still send a
+  fixed rate. The installers' 8 Mbit/s cap for Mac hosts is unchanged.
+
 ## 2026-11-18 — sharing indicators live in the menu bar and the notification area
 
 - macOS host, remote control and clipboard: each is now a template icon in

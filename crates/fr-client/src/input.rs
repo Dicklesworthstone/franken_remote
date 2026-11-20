@@ -20,7 +20,7 @@ use fr_core::{
 use fr_wire::{
     WireError,
     input::{InputDelivery, InputDirection, encode_input},
-    input_result::{InputResult, ResultBinding, SequenceSpace, decode_input_result},
+    input_result::{InputResult, Reason, ResultBinding, SequenceSpace, decode_input_result},
 };
 
 use std::sync::Arc;
@@ -840,7 +840,8 @@ impl InputClient {
             }
             // A host pointer failure also fences its input owner. Never keep
             // issuing keys just because this result is in a separate space.
-            if result.outcome != InputOutcome::SubmittedToOs {
+            // A pointer the host dropped as stale is not a failure.
+            if result.outcome != InputOutcome::SubmittedToOs && !stale_pointer(result) {
                 self.stop(StopReason::ActionFailed);
             }
             // Never acknowledges a reliable action with the same number.
@@ -887,6 +888,30 @@ impl InputClient {
         }
         Ok(ResultEvent::Completed(result))
     }
+}
+
+/// The host's rule for a pointer refused before any native call because the
+/// view or ticket it was decided on is no longer current (fr-core
+/// `InputSession::record`): pointer state is latest-wins and fences no
+/// dependent input, so the host drops it and keeps control. Stopping here
+/// instead ended the session from the viewer side when a narrowed downlink let
+/// the host's view lapse while pointer datagrams were in flight (fr-7al9).
+/// This owner's own view and ticket checks still suspend later input.
+fn stale_pointer(result: InputResult) -> bool {
+    result.submitted_operations == 0
+        && matches!(
+            result.outcome,
+            InputOutcome::RejectedBeforeSubmission | InputOutcome::ExpiredBeforeSubmission
+        )
+        && matches!(
+            result.reason,
+            Some(
+                Reason::ViewUnready
+                    | Reason::StaleView
+                    | Reason::TicketInvalid
+                    | Reason::TicketExpired
+            )
+        )
 }
 
 #[cfg(test)]

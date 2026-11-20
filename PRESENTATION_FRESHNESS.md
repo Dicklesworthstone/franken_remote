@@ -385,9 +385,10 @@ Diagnostic prints (never committed) name each remaining control end:
   earlier experiment with a flat 1 s floor held these rows.
 - The 120 ms rows mostly end at the first host desktop change. The likely
   mechanism: a large picture needs several round trips while the congestion
-  window grows. It misses the 50 ms display budget (counted from its first
-  fragment), is shown unqualified, and the previous view's deadline lapses
-  first. Suspension would absorb this. A grant now judges its first evidence
+  window grows. It misses the 50 ms display budget (then counted from its
+  first fragment; see "Display budget from the last fragment" below), is
+  shown unqualified, and the previous view's deadline lapses first.
+  Suspension would absorb this. A grant now judges its first evidence
   with the same path bound that made the view ready.
 
 View-only at 120 ms RTT without loss held in 5 of 8 rows across the four
@@ -473,6 +474,77 @@ RTT.
 
 So the matrix does not exercise controlled recovery yet; only fr-core and
 fr-client unit tests do. Bead fr-xfvs carries the options.
+
+## Display budget from the last fragment (2026-11-19)
+
+The receiver's 50 ms display budget bounds its own queue: a whole picture
+waiting behind a busy decoder. It used to run from the picture's first
+fragment, so it also charged the time the link takes to carry the picture,
+which the source-age bound already includes. On a link that takes longer than
+about 50 ms to carry one picture, no picture was ever fresh. Each was shown
+unqualified, nothing newer qualified it while the screen kept changing, and
+input stayed suspended until the viewer ended the session with `view_stale`.
+An 18 KB picture takes 48 ms at 3 Mbit/s and 180 ms at 800 kbit/s.
+
+The budget now runs from the fragment that completes the picture
+(`Assembly::display_from`), and for a reliable recovery picture from its last
+chunk. The 250 ms reference horizon still runs from the first fragment. The
+source-age bound and the rule that late presentation is never fresh evidence
+are unchanged: "late" now means late after the picture was whole.
+
+One exception: a picture that becomes whole only after a later picture already
+was, such as a reference repaired behind its dependent, keeps the budget from
+its first fragment (`ReceivePipeline::picture_whole`). It is superseded work.
+If it is late, it is decoded to unlock its dependent but not shown before it.
+
+The namespace narrow-link fixture hid this. QUIC sends a picture as one UDP
+GSO batch, which loopback never splits, and netem's `rate` delivered the whole
+batch at once after its transfer time. `Netem::narrow_downlink` now uses a
+token bucket (`tbf`), which passes the batch's datagrams one at a time at the
+rate, as a real bottleneck does.
+
+trj namespace, 2 Mbit/s test host drawing noise, tbf narrow downlink, e811faaf
+against this change, runs alternating:
+
+| Row | Motion reaching the host while narrow | Input suspended | Alive at widening |
+|---|---|---|---|
+| 8 s at 3000 kbit/s | 315-316 vs 3-4 | 0 vs 8.2 s | 3/3 vs 3/3 |
+| 8 s at 1000 kbit/s | 240-241 vs 19-31 | 1.5 s vs 4.7-5.1 s | 2/3 vs 3/3 |
+| 8 s at 800 kbit/s | 191-262 vs 7-8 | 1.2-2.9 s vs 7.8-8.2 s | 2/3 vs 3/3 |
+| 20 s at 1500 kbit/s | 771 vs 6 | 0.4-0.5 s vs 10 s | 2/2 vs 0/2 (`view_stale`) |
+| 20 s at 1000 kbit/s | 714-717 vs 44-75 | 1.5 s vs 13.6 s | 2/2 vs 0/2 (`view_stale`) |
+
+- First motion after the link widened: 25 ms against 479 ms.
+- The 20 s rows decoded 335-344 pictures on this change. The old rows ended
+  before reporting media.
+- The two episodes that ended on this change ended in their first second of
+  narrowing: `host_control_failure` at 1000 kbit/s and `host_session_ended` at
+  800 kbit/s. e811faaf ended the same way in 2 of 5 earlier 800 kbit/s runs on
+  this fixture.
+- View-only noise rows: 6/6 on both. The controlled delay/loss matrix (netem
+  without tbf): 2 short rows on each, both at 120 ms RTT with 5% loss.
+
+### Starting on a narrow link
+
+The rows above narrow a link under a session that started on a clean one. The
+11-18 hotel link was narrower than the host's rate from the first picture, and
+then the path's base RTT is learned on the narrow link.
+`controlled_session_that_starts_on_a_narrow_link` (ignored, run by hand)
+applies the narrow downlink before the session connects and draws noise from
+the moment control is granted, for 20 s, then widens the link.
+
+On e1bead3f, 5 rounds at 1500, 1000 and 800 kbit/s (0.75x, 0.5x and 0.4x of
+the 2 Mbit/s host) held 15 of 15 sessions, with no start retried:
+
+| Rate | Motion reaching the host while narrow | Input suspended | Pictures decoded |
+|---|---|---|---|
+| 1500 kbit/s | 717-719 | 1.4-1.5 s | 298-306 |
+| 1000 kbit/s | 646-700 | 1.8-3.3 s | 293-310 |
+| 800 kbit/s | 695-718 | 1.6-2.0 s | 290-318 |
+
+After the link widened, every session's motion reached the host 8 of 8 times,
+the first after 25 ms. No arm without path-following bitrate or the
+display-budget change was run for this row.
 
 ## Verification scope
 

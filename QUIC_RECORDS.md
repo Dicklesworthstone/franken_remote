@@ -136,7 +136,8 @@ ingress after flushing it, so the bound is one turn's worth of records: a
 multi-fragment picture leaves in about `fragments / 16` turns rather than one
 receive wait per four fragments. With four, a 23-fragment periodic IDR spent
 about 40 ms in transit on a loaded host and missed the receiver's 50 ms display
-budget, which starts at the first fragment. Likewise one `receive` turn drains
+budget, which then started at the first fragment (since 2026-11-19 it starts
+when the picture is whole; PRESENTATION_FRESHNESS.md). Likewise one `receive` turn drains
 at most sixteen records, one per lane per round; idle or blocked lanes do not
 spend that budget, so a viewer with several quiet streams takes a burst of
 fragments in one turn instead of two per call.

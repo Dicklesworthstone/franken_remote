@@ -3,9 +3,9 @@
 //! request at a time and owns at most one rule, removed when it ends.
 use super::{
     super::{
-        Leaf, SocketAddr, address_assigned, both, command, delete_table, install_script,
-        interface_index, interface_valid, net_admin, new_table, observe, protected,
-        protected_executable, read_back, table_exists, validate_rule,
+        COMMAND_TIMEOUT, Leaf, SocketAddr, address_assigned, both, command, delete_table,
+        install_script, interface_index, interface_valid, net_admin, new_table, observe_within,
+        protected, protected_executable, read_back, read_back_within, table_exists, validate_rule,
     },
     Install, MAX_REQUEST, Refusal, Request, Response, TABLE_PREFIX, decode_request,
     encode_response, owned_table,
@@ -32,9 +32,22 @@ use std::{
 /// Concurrent broker connections (each holds at most one rule).
 pub const MAX_CONNECTIONS: usize = 8;
 /// Tables a connection could not remove when it ended. They are kept
-/// helper-wide and retried when a later connection ends. Past this many, the
-/// rest wait for the next start's reclaim.
+/// helper-wide and retried when a later connection ends and every
+/// `ORPHAN_RETRY`. Past this many, the rest wait for the next start's reclaim.
 const MAX_ORPHANS: usize = 4 * MAX_CONNECTIONS;
+/// A broker can stay connected for hours, so waiting for a later connection
+/// to end could leave an orphan in place until tailscaled restarts and its
+/// stale `iif != index` drop refuses the port's tailnet traffic (ts2,
+/// 2026-11-19, fr-eny1). Costs nothing while no orphan is listed.
+const ORPHAN_RETRY: Duration = Duration::from_secs(2);
+/// A renewal's interface and table reads may each take this long (they run
+/// together). The broker's snapshot lives 3 s from its lookup and it renews
+/// 500 ms after that, so a slower renewal could not keep its lease anyway.
+/// With one second, a loaded host's renewals were refused: ts2's helper logged
+/// 180 `firewall_failed` and 81 `interface_unqualified` refusals in 19 hours,
+/// and a refused renewal ends the host (fr-eny1). Installation and cleanup
+/// keep their one-second bounds.
+const RENEW_READ_TIMEOUT: Duration = Duration::from_millis(2_500);
 const MAX_SETTINGS: usize = 4096;
 const MAX_ALLOWED_UIDS: usize = 16;
 /// Once a frame starts, all of it must arrive within this deadline.
@@ -187,7 +200,8 @@ pub enum Event {
         table: String,
         disconnect: bool,
     },
-    /// Kept and retried when a later connection ends (`OrphanCleared`).
+    /// Kept and retried when a later connection ends and every
+    /// `ORPHAN_RETRY` (`OrphanCleared`).
     CleanupFailed {
         table: String,
     },
@@ -426,9 +440,9 @@ impl Lifecycle {
             Response::Refused(reason)
         })
     }
-    async fn observe(shared: &Shared<'_>) -> Result<Observed, Refusal> {
+    async fn observe(shared: &Shared<'_>, limit: Duration) -> Result<Observed, Refusal> {
         let settings = shared.settings;
-        let (index, report) = observe(&shared.cx, &settings.ip, &settings.interface)
+        let (index, report) = observe_within(&shared.cx, &settings.ip, &settings.interface, limit)
             .await
             .map_err(|_| Refusal::InterfaceUnqualified)?;
         Ok(Observed { index, report })
@@ -442,7 +456,7 @@ impl Lifecycle {
         let (cx, settings) = (&shared.cx, shared.settings);
         self.admit_install()?;
         check_request(settings, install)?;
-        let observed = Self::observe(shared).await?;
+        let observed = Self::observe(shared, COMMAND_TIMEOUT).await?;
         let index = check_assigned(settings, install.address, &observed)?;
         self.clear_residue(shared).await?;
         let table = new_table(TABLE_PREFIX).map_err(|_| Refusal::FirewallFailed)?;
@@ -507,8 +521,13 @@ impl Lifecycle {
         // the broker's snapshot validity (fr-eny1). Both finish before either
         // is judged, in the old order, so the refusal reason is unchanged.
         let (observed, readback) = both(
-            Box::pin(Self::observe(shared)),
-            Box::pin(read_back(cx, &settings.nft, &owned.table)),
+            Box::pin(Self::observe(shared, RENEW_READ_TIMEOUT)),
+            Box::pin(read_back_within(
+                cx,
+                &settings.nft,
+                &owned.table,
+                RENEW_READ_TIMEOUT,
+            )),
         )
         .await;
         let index = check_assigned(settings, owned.address.ip(), &observed?)?;
@@ -602,21 +621,35 @@ impl Lifecycle {
                 shared.orphan(table);
             }
         }
-        if orphans.is_empty() {
-            return;
+        clear_orphans(shared, orphans).await;
+    }
+}
+
+/// Delete tables earlier connections failed to remove; on failure they stay
+/// listed for the next attempt.
+async fn clear_orphans(shared: &Shared<'_>, orphans: Vec<String>) {
+    if orphans.is_empty() {
+        return;
+    }
+    if delete_tables(&shared.cx, &shared.settings.nft, &orphans)
+        .await
+        .is_ok()
+    {
+        for table in orphans {
+            (shared.report)(Event::OrphanCleared { table });
         }
-        if delete_tables(&shared.cx, &shared.settings.nft, &orphans)
-            .await
-            .is_ok()
-        {
-            for table in orphans {
-                (shared.report)(Event::OrphanCleared { table });
-            }
-        } else {
-            for table in orphans {
-                shared.orphan(table);
-            }
+    } else {
+        for table in orphans {
+            shared.orphan(table);
         }
+    }
+}
+
+/// Retry orphans every `period` for as long as the helper serves.
+async fn retry_orphans(shared: &Shared<'_>, period: Duration) {
+    loop {
+        asupersync::time::sleep(shared.cx.now(), period).await;
+        clear_orphans(shared, shared.take_orphans()).await;
     }
 }
 
@@ -803,12 +836,13 @@ pub async fn serve(
 }
 
 type Handler<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
-async fn accept<'a>(
+pub(super) async fn accept<'a>(
     shared: &'a Shared<'a>,
     listener: &UnixListener,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
     let mut shutdown = pin!(shutdown);
+    let mut janitor = pin!(retry_orphans(shared, ORPHAN_RETRY));
     let mut handlers: Vec<Handler<'a>> = Vec::with_capacity(MAX_CONNECTIONS);
     let mut admission = Bucket::new(ACCEPT_BURST, ACCEPT_REFILL_US, shared.now());
     // Dropping `handlers` on return closes every connection (brokers fence).
@@ -850,6 +884,8 @@ async fn accept<'a>(
             handlers.push(Box::pin(connection(shared, stream, uid)));
         }
         handlers.retain_mut(|handler| handler.as_mut().poll(task).is_pending());
+        // Never completes; dropped with the loop like the handlers.
+        let _ = janitor.as_mut().poll(task);
         Poll::Pending
     })
     .await

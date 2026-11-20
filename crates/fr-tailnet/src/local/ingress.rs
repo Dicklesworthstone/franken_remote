@@ -423,12 +423,31 @@ async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
     })
     .await
 }
-/// Kernel view of one interface: its qualified TUN index and the unprivileged
-/// `ip -j address show` report. Neither value comes from a caller.
-#[cfg(unix)]
-async fn observe(cx: &Cx, ip: &Path, interface: &str) -> Result<(u32, Vec<u8>), Error> {
-    observe_within(cx, ip, interface, COMMAND_TIMEOUT).await
+/// The bound on a refresh's interface and kernel reads. Initial confirmation
+/// has no admitted protection lifetime to spend, so it keeps the cold bound. A
+/// periodic refresh may take the old snapshot's remaining validity: the lease
+/// ends at that expiry whether or not the read finishes.
+fn read_limit(periodic: bool, old: &NodeIdentity, now_us: u64) -> Duration {
+    if !periodic {
+        return COMMAND_TIMEOUT;
+    }
+    Duration::from_micros(old.expires_us().saturating_sub(now_us))
 }
+/// A helper renewal. If it finds the helper gone, it fences every lease at once,
+/// without waiting for the interface read that runs beside it. The helper
+/// deletes the rule `SHUTDOWN_GRACE` after closing its connections, and a
+/// periodic interface read may take longer than that.
+#[cfg(unix)]
+async fn renew_fenced(link: &mut helper::Link, lease: &Lease) -> Result<Vec<u8>, Error> {
+    let renewed = link.renew(&lease.cx).await;
+    if matches!(renewed, Err(Error::HelperUnavailable)) {
+        lease.fail(Error::HelperUnavailable);
+    }
+    renewed
+}
+/// Kernel view of one interface: its qualified TUN index and the unprivileged
+/// `ip -j address show` report, read within `limit`. Neither value comes from
+/// a caller.
 #[cfg(unix)]
 async fn observe_within(
     cx: &Cx,
@@ -868,28 +887,22 @@ impl Boundary {
                 .map_err(|_| Error::Closed)?
                 .node
                 .clone();
-            // A periodic refresh of a boundary this process owns (a direct
-            // rule, or macOS kernel state) spends the old snapshot's remaining
-            // validity on its lookup and kernel reads. The lease ends at that
-            // expiry anyway, so the fixed one-second bound only ended
-            // protected sessions early when the task driving this refresh was
-            // slow to poll (namespace e2e, fr-jlgm; installed macOS host log).
+            // A periodic refresh spends the old snapshot's remaining validity
+            // on its interface and kernel reads. The lease ends at that expiry
+            // anyway, so the fixed one-second bound only ended protected
+            // sessions early when a read or the task driving it was slow
+            // (namespace e2e, fr-jlgm; installed macOS host log; ts2's helper
+            // host, fr-eny1).
             #[cfg(unix)]
             let helper = matches!(&owner.backend, Backend::Helper(_));
             #[cfg(windows)]
             let helper = false;
-            let periodic_owned = matches!(refresh, Refresh::Periodic) && !helper;
+            let periodic = matches!(refresh, Refresh::Periodic);
             let cx = owner.lease.cx.clone();
             let limit = |old: &NodeIdentity| -> Result<Duration, Error> {
-                if !periodic_owned {
-                    return Ok(COMMAND_TIMEOUT);
-                }
-                let current = now(&cx)?;
-                Ok(Duration::from_micros(
-                    old.expires_us().saturating_sub(current),
-                ))
+                Ok(read_limit(periodic, old, now(&cx)?))
             };
-            let node = if periodic_owned {
+            let node = if periodic && !helper {
                 owner
                     .lease
                     .api
@@ -897,8 +910,9 @@ impl Boundary {
                     .await?
             } else {
                 // Initial confirmation has no admitted protection lifetime to
-                // spend. Helper renewal must also keep its original bound so
-                // metadata cannot postpone observing helper EOF past shutdown.
+                // spend. A helper renewal's lookup also keeps its one-second
+                // bound: it runs before the renewal that would see the helper's
+                // EOF, and brokers must fence within the helper's shutdown grace.
                 owner
                     .lease
                     .api
@@ -916,6 +930,8 @@ impl Boundary {
             let table = owner.table.as_str();
             let interface = qualified_interface(cx, config, limit(&old)?);
             let kernel_limit = limit(&old)?;
+            #[cfg(unix)]
+            let lease = &owner.lease;
             let backend = &mut owner.backend;
             let kernel = async move {
                 match backend {
@@ -926,7 +942,7 @@ impl Boundary {
                     // The helper re-qualifies the interface/address and reads the
                     // kernel ruleset as root; its read-back must pass the same check.
                     #[cfg(unix)]
-                    Backend::Helper(link) => link.renew(cx).await.map(Some),
+                    Backend::Helper(link) => renew_fenced(link, lease).await.map(Some),
                     // Installation included: the boundary IS this kernel state.
                     #[cfg(any(target_os = "macos", windows))]
                     Backend::StrongHost => {

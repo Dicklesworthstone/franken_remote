@@ -579,3 +579,65 @@ fn a_refresh_runs_its_two_reads_together_and_finishes_both() {
         "one pass each, then a again"
     );
 }
+#[test]
+fn a_periodic_refresh_reads_for_the_old_validity_and_initial_confirmation_does_not() {
+    // Helper-backed or not (fr-eny1): the lease ends at the old snapshot's
+    // expiry whether or not a periodic read finishes, so a read may use what
+    // is left of it. Initial confirmation has nothing to spend.
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let owner = fixture(&cx).await;
+        let old = owner.lease.state.lock().unwrap().node.clone();
+        let at = old.expires_us() - 2_400_000;
+        assert_eq!(read_limit(false, &old, at), COMMAND_TIMEOUT);
+        assert_eq!(read_limit(true, &old, at), Duration::from_millis(2_400));
+        assert_eq!(read_limit(true, &old, old.expires_us() + 1), Duration::ZERO);
+    });
+}
+#[test]
+fn a_renewal_that_finds_the_helper_gone_fences_at_once_but_a_refusal_waits() {
+    // The helper deletes its rule SHUTDOWN_GRACE after closing its
+    // connections, and a periodic interface read beside the renewal may take
+    // longer than that. So the renewal that sees the helper gone fences every
+    // lease itself. A typed refusal is judged by the refresh, in its order.
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let owner = fixture(&cx).await;
+        let lease = owner.lease().unwrap();
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut stream = theirs.as_std().try_clone().unwrap();
+        drop(theirs);
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let helper_side = thread::spawn(move || {
+            // A request frame has a u16 length; a response frame a u32 one.
+            let mut header = [0_u8; 2];
+            stream.read_exact(&mut header).unwrap();
+            let mut body = vec![0; usize::from(u16::from_be_bytes(header))];
+            stream.read_exact(&mut body).unwrap();
+            assert_eq!(
+                helper::decode_request(&body),
+                Ok(helper::Request::Renew { generation: 1 })
+            );
+            let refusal = helper::Response::Refused(helper::Refusal::FirewallFailed);
+            stream
+                .write_all(&helper::encode_response(&refusal))
+                .unwrap();
+            stream
+        });
+        let mut link = helper::Link::fixture(ours);
+        assert_eq!(
+            renew_fenced(&mut link, &owner.lease).await,
+            Err(Error::HelperRefused(helper::Refusal::FirewallFailed))
+        );
+        assert_eq!(lease.check(address()), Ok(()));
+        drop(helper_side.join().unwrap());
+        assert_eq!(
+            renew_fenced(&mut link, &owner.lease).await,
+            Err(Error::HelperUnavailable)
+        );
+        assert_eq!(lease.check(address()), Err(Error::HelperUnavailable));
+    });
+}
