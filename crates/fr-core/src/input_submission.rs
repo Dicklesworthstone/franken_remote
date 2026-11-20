@@ -938,13 +938,42 @@ impl InputSession {
             self.receipts[self.receipt_cursor] = Some(receipt);
             self.receipt_cursor = (self.receipt_cursor + 1) % self.receipts.len();
         }
-        if !matches!(
+        let live = matches!(
             receipt.outcome,
             InputOutcome::SubmittedToOs | InputOutcome::AppliedLocally
-        ) {
+        ) || (pointer && stale_pointer(receipt));
+        if !live {
             self.revoke();
         }
     }
+}
+
+/// Pointer state refused before any native call because the view or ticket it
+/// was decided on is no longer current. A stale view suspends input (plan
+/// 11.3) and a recovery makes older views stale (plan 12.3); pointer state is
+/// latest-wins and fences no dependent input, so such a refusal drops it and
+/// control continues. Before this, one pointer datagram still in flight when
+/// a narrowed downlink delayed the view's evidence ended the session (fr-7al9).
+/// Lease, observation and clock failures, platform refusals and unknown
+/// effects still end the owner, as does any refused ordered action.
+fn stale_pointer(receipt: Receipt) -> bool {
+    receipt.submitted_operations == 0
+        && matches!(
+            receipt.outcome,
+            InputOutcome::RejectedBeforeSubmission | InputOutcome::ExpiredBeforeSubmission
+        )
+        && matches!(
+            receipt.refusal,
+            Some(
+                Refusal::StaleView
+                    | Refusal::ExpiredAtBoundary
+                    | Refusal::Authority(
+                        AuthorityError::ViewUnready
+                            | AuthorityError::TicketInvalid
+                            | AuthorityError::TicketExpired
+                    )
+            )
+        )
 }
 
 impl Drop for InputSession {

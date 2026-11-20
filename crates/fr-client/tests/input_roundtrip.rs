@@ -503,18 +503,64 @@ fn pointer_results_do_not_ack_actions_and_failed_pointer_results_stop_control() 
         Ok(ResultEvent::Pointer(r))
     );
     assert_eq!(viewer.pending_actions(), 1);
-    let failed = InputResult {
-        outcome: InputOutcome::RejectedBeforeSubmission,
-        stage: Stage::Admitted,
-        submitted_operations: 0,
-        reason: Some(Reason::ViewUnready),
-        ..r
-    };
-    assert_eq!(
-        viewer.result(&result_bytes(failed), local(1)),
-        Ok(ResultEvent::Pointer(failed))
-    );
-    assert_eq!(viewer.stopped(), Some(StopReason::ActionFailed));
+    // A pointer the host dropped because its view or ticket went stale (plan
+    // 11.3) is not a failure: the host keeps control, and so does this owner
+    // (fr-7al9).
+    for (outcome, reason) in [
+        (InputOutcome::RejectedBeforeSubmission, Reason::ViewUnready),
+        (InputOutcome::RejectedBeforeSubmission, Reason::StaleView),
+        (
+            InputOutcome::RejectedBeforeSubmission,
+            Reason::TicketInvalid,
+        ),
+        (InputOutcome::ExpiredBeforeSubmission, Reason::TicketExpired),
+    ] {
+        let stale = InputResult {
+            outcome,
+            stage: Stage::Admitted,
+            submitted_operations: 0,
+            reason: Some(reason),
+            ..r
+        };
+        assert_eq!(
+            viewer.result(&result_bytes(stale), local(1)),
+            Ok(ResultEvent::Pointer(stale))
+        );
+        assert_eq!(viewer.stopped(), None, "{reason:?}");
+    }
+    // `pointer` unwraps: the owner still encodes pointer state.
+    let _next = pointer(&mut viewer, 2);
+    // Any other pointer failure still fences the owner.
+    for (outcome, reason) in [
+        (
+            InputOutcome::RejectedBeforeSubmission,
+            Reason::PlatformUnavailable,
+        ),
+        (InputOutcome::RejectedBeforeSubmission, Reason::OutOfBounds),
+        (InputOutcome::ExpiredBeforeSubmission, Reason::LeaseExpired),
+        (InputOutcome::EffectUnknown, Reason::UnknownEffect),
+    ] {
+        let mut viewer = client(Policy::default());
+        ready(&mut viewer);
+        let _p = pointer(&mut viewer, 1);
+        let failed = InputResult {
+            outcome,
+            stage: Stage::Admitted,
+            submitted_operations: 0,
+            unknown_next_operation: outcome == InputOutcome::EffectUnknown,
+            reason: Some(reason),
+            ..r
+        };
+        assert_eq!(
+            viewer.result(&result_bytes(failed), local(1)),
+            Ok(ResultEvent::Pointer(failed))
+        );
+        assert_eq!(
+            viewer.stopped(),
+            Some(StopReason::ActionFailed),
+            "{reason:?}"
+        );
+    }
 }
 #[test]
 fn foreign_future_conflicting_and_action_specific_invalid_results_do_not_free_slots() {
