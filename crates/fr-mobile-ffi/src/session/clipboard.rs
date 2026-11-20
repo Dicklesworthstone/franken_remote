@@ -269,6 +269,7 @@ impl Clipboard {
 
     /// The iOS app services this only while its persistent On/Off control is
     /// actually visible. A hidden or late callback cannot revive this owner.
+    #[cfg_attr(not(target_os = "ios"), allow(clippy::unused_self))] // Only iOS has a visible control.
     pub(super) fn presence(&self, visible: bool) {
         #[cfg(target_os = "ios")]
         {
