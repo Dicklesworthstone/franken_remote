@@ -1229,6 +1229,7 @@ fn demote_to_viewing_refuses_when_observation_is_already_revoked() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn streaming_demote_to_viewing_fences_control_and_continues_live_video_on_same_connection() {
     crate::session_startup::running::streaming::tests::run(|c, h| async move {
         let Fixture {

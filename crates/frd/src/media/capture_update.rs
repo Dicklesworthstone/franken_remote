@@ -148,6 +148,7 @@ impl CaptureSource {
         )
         .await
     }
+    #[allow(clippy::too_many_lines)] // One exchange keeps its original deadline across drops and polls.
     async fn capture_request(
         &mut self,
         control: &ObservationControl,

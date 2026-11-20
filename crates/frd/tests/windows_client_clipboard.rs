@@ -17,5 +17,12 @@ enum InputResult {
     ControlLost,
 }
 
+// control_policy's input profile, also included verbatim.
+#[path = "../../fr-mobile-ffi/src/input/profile.rs"]
+mod input_profile;
+mod input {
+    pub(crate) use super::input_profile as profile;
+}
+
 #[path = "../../fr-mobile-ffi/src/session/control_policy.rs"]
 mod control_policy;

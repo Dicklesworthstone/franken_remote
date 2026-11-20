@@ -142,8 +142,11 @@ fn sync_retains_committed_receipts_and_original_cleanup_failure_after_revocation
     sync_cleanup_failure(true);
 }
 
+#[allow(clippy::too_many_lines)]
 fn sync_cleanup_failure(supervised: bool) {
-    use crate::sync::{SyncBaseline, SyncError, SyncJobConfig, SyncLimits, execute_sync_round};
+    use crate::sync::{
+        PublishedSyncEntry, SyncBaseline, SyncError, SyncJobConfig, SyncLimits, execute_sync_round,
+    };
     use fr_core::ids::{InputLeaseId, RemoteSessionId};
     use fr_wire::{
         files::{Context, Direction, Lane, Reason, Role},
@@ -256,6 +259,6 @@ fn sync_cleanup_failure(supervised: bool) {
     assert!(!admitted);
     assert_eq!(retry.error, SyncError::Receive(Error::Retired));
     assert!(retry.cleanup_failed);
-    assert!(retry.published.is_empty());
+    assert_eq!(retry.published, [] as [PublishedSyncEntry; 0]);
     assert_eq!(retry.baseline, failure.baseline);
 }

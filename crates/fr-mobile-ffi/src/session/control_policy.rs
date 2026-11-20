@@ -397,7 +397,7 @@ mod tests {
                 vec![(fr_wire::quality_decision::CAPABILITY, false)]
             );
         } else {
-            assert!(omitted.is_empty());
+            assert_eq!(omitted, [] as [(&str, bool); 0]);
         }
         let file_names = [
             fr_wire::attachment::FILES_CAPABILITY,

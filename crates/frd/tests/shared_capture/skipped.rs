@@ -20,7 +20,7 @@ pub(super) async fn skipping_source(
     config.backend = fr_media::worker::Backend::VideoToolbox;
     CaptureSource::start(
         owner,
-        Launch::new(file, ":0", None, Role::Capture, 78).unwrap(),
+        Launch::new(&file, ":0", None, Role::Capture, 78).unwrap(),
         config,
     )
     .await
@@ -61,7 +61,7 @@ fn skipped_shared_result_refunds_capacity_without_progress_and_retains_the_refer
             assert_eq!(p.usage(), usage);
             sender.enqueue_shared_capture(&skipped).unwrap();
             assert_eq!(sender.cache_usage(), cached);
-            assert!(pump(&cx, &mut sender, &mut r).is_empty());
+            assert_eq!(pump(&cx, &mut sender, &mut r), [] as [Channel; 0]);
             let mut fresh = egress(&viewer, limits(1150), bindings(21), SendPolicy::default());
             assert_eq!(
                 fresh.enqueue_shared_capture(&skipped),
@@ -82,7 +82,7 @@ fn skipped_shared_result_refunds_capacity_without_progress_and_retains_the_refer
             }
         );
         sender.enqueue_shared_capture(&next).unwrap();
-        assert!(!pump(&cx, &mut sender, &mut r).is_empty());
+        assert_ne!(pump(&cx, &mut sender, &mut r), [] as [Channel; 0]);
         stop(&mut source, &cx).await;
     });
 }
@@ -105,7 +105,7 @@ fn skipped_private_result_never_becomes_source_freshness_or_a_reference() {
         assert_eq!(skipped.frame(), reference);
         assert_eq!(skipped.observed_micros(), None);
         sender.enqueue_capture(skipped).unwrap();
-        assert!(pump(&cx, &mut sender, &mut r).is_empty());
+        assert_eq!(pump(&cx, &mut sender, &mut r), [] as [Channel; 0]);
         let next = source.capture_if_changed(&owner, false).await.unwrap();
         assert_eq!(next.frame(), FrameId::from_raw(2));
         assert_eq!(

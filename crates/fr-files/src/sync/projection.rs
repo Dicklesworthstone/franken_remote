@@ -32,7 +32,7 @@ impl Destination {
     }
 }
 
-/// Simulate the entire plan before its first publication. KeepBoth always
+/// Simulate the entire plan before its first publication. `KeepBoth` always
 /// creates a new entry, including when the original name is occupied. Private
 /// staging entries consumed scan work too and remain charged to the next scan.
 pub(super) fn validate(

@@ -9,8 +9,8 @@ use fr_core::{
 };
 use fr_files::receive::{ConflictPolicy, DropDirectory, Limits as ReceiveLimits};
 use fr_files::sync::{
-    SyncBaseline, SyncError, SyncJobConfig, SyncLimits, TransferLeg, execute_sync_round,
-    scan_directory, scan_directory_checked,
+    PublishedSyncEntry, SyncBaseline, SyncError, SyncJobConfig, SyncLimits, TransferLeg,
+    execute_sync_round, scan_directory, scan_directory_checked,
 };
 use fr_wire::files::{
     Context as WireContext, Direction as WireDirection, Lane as WireLane, Limits as WireLimits,
@@ -198,6 +198,7 @@ fn bidirectional_sync_transfers_both_ways_and_emits_valid_wire_records() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn concurrent_edits_preserve_both_versions_with_keep_both_and_report_conflict_phase() {
     let host_dir = TempSyncDir::new("conflict-host");
     let ctrl_dir = TempSyncDir::new("conflict-ctrl");
@@ -297,7 +298,7 @@ fn concurrent_edits_preserve_both_versions_with_keep_both_and_report_conflict_ph
         || Ok(()),
     )
     .unwrap();
-    assert!(second.published.is_empty());
+    assert_eq!(second.published, [] as [PublishedSyncEntry; 0]);
     assert_eq!(second.bytes_transferred, 0);
     assert_eq!(fs::read_dir(host_dir.path()).unwrap().count(), 2);
     assert_eq!(fs::read_dir(ctrl_dir.path()).unwrap().count(), 2);
@@ -345,7 +346,7 @@ fn concurrent_edits_preserve_both_versions_with_keep_both_and_report_conflict_ph
         || Ok(()),
     )
     .unwrap();
-    assert!(fourth.published.is_empty());
+    assert_eq!(fourth.published, [] as [PublishedSyncEntry; 0]);
 
     // Removing the occupied original name must not turn the same acknowledged
     // source version into a new, non-conflicting transfer that resurrects it.
@@ -363,7 +364,7 @@ fn concurrent_edits_preserve_both_versions_with_keep_both_and_report_conflict_ph
         || Ok(()),
     )
     .unwrap();
-    assert!(fifth.published.is_empty());
+    assert_eq!(fifth.published, [] as [PublishedSyncEntry; 0]);
     assert!(!ctrl_dir.path().join("report.txt").exists());
 
     // A later source edit is new work and can use the now-empty original name.
@@ -586,7 +587,7 @@ fn a_replaced_root_cannot_redirect_a_round_away_from_its_receive_owner() {
     )
     .unwrap_err();
     assert_eq!(error.error, SyncError::RootChanged);
-    assert!(error.published.is_empty());
+    assert_eq!(error.published, [] as [PublishedSyncEntry; 0]);
     assert_eq!(fs::read_dir(controller.path()).unwrap().count(), 0);
 }
 
@@ -710,13 +711,14 @@ fn a_grown_source_is_not_published_as_its_old_manifest_prefix() {
 #[test]
 fn a_fifo_source_is_refused_without_waiting_for_a_writer() {
     let dir = TempSyncDir::new("fifo-source");
-    let root = fs::File::open(dir.path()).unwrap();
-    rustix::fs::mkfifoat(
-        &root,
-        "pipe",
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    // POSIX mkfifo(1): rustix has no FIFO constructor on Apple targets.
+    let fifo = dir.path().join("pipe");
+    let made = std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success(), "mkfifo {}", fifo.display());
     let path = dir.path().to_owned();
     let (send, receive) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -815,5 +817,5 @@ fn a_failed_conflict_round_returns_a_baseline_for_its_committed_prefix() {
         || Ok(()),
     )
     .unwrap();
-    assert!(settled.published.is_empty());
+    assert_eq!(settled.published, [] as [PublishedSyncEntry; 0]);
 }

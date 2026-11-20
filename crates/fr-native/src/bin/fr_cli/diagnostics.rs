@@ -8,7 +8,7 @@ use crate::Failure;
 #[cfg(any(
     feature = "linux-desktop",
     all(target_os = "macos", feature = "macos-desktop"),
-    test
+    all(test, target_os = "linux")
 ))]
 use fr_client::diagnostics::{
     CodecPathKind, DiagnosticEventKind, DiagnosticLimits, DiagnosticRing, NetworkPathKind,
@@ -21,20 +21,20 @@ use fr_client::diagnostics::{
 #[cfg(any(
     feature = "linux-desktop",
     all(target_os = "macos", feature = "macos-desktop"),
-    test
+    all(test, target_os = "linux")
 ))]
 use fr_core::limits::ProtocolLimits;
 #[cfg(any(
     feature = "linux-desktop",
     all(target_os = "macos", feature = "macos-desktop"),
-    test
+    all(test, target_os = "linux")
 ))]
 use fr_media::quality::QualityPolicy;
 use serde::Serialize;
 #[cfg(any(
     feature = "linux-desktop",
     all(target_os = "macos", feature = "macos-desktop"),
-    test
+    all(test, target_os = "linux")
 ))]
 use std::io::Write;
 use std::{
@@ -183,7 +183,7 @@ fn open_regular_readonly(path: &Path) -> Result<File, Failure> {
     any(
         feature = "linux-desktop",
         all(target_os = "macos", feature = "macos-desktop"),
-        test
+        all(test, target_os = "linux")
     )
 ))]
 fn write_private_regular_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
@@ -239,7 +239,7 @@ fn write_private_regular_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> 
     any(
         feature = "linux-desktop",
         all(target_os = "macos", feature = "macos-desktop"),
-        test
+        all(test, target_os = "linux")
     )
 ))]
 fn write_private_regular_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
@@ -455,7 +455,7 @@ fn render_text(
 #[cfg(any(
     feature = "linux-desktop",
     all(target_os = "macos", feature = "macos-desktop"),
-    test
+    all(test, target_os = "linux")
 ))]
 pub(crate) fn export_session(
     path: &Path,
@@ -561,7 +561,15 @@ pub(crate) fn export_session(
     write_private_regular_file(path, json.as_bytes())
 }
 
-#[cfg(test)]
+// The tests export through frd's viewer statistics, which a macOS build
+// without `macos-desktop` does not compile.
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop")
+    )
+))]
 mod tests {
     use super::*;
     use fr_media::quality::{

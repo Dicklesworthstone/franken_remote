@@ -1,12 +1,12 @@
-//! Projected KeepBoth destinations must fit the next unchanged bounded scan.
+//! Projected `KeepBoth` destinations must fit the next unchanged bounded scan.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use fr_core::ids::{InputLeaseId, RemoteSessionId};
 use fr_files::{
     receive::{DropDirectory, Limits as ReceiveLimits},
     sync::{
-        SyncBaseline, SyncError, SyncJobConfig, SyncLimits, SyncRoundFailure, SyncRoundOutcome,
-        execute_sync_round, scan_directory,
+        PublishedSyncEntry, SyncBaseline, SyncError, SyncJobConfig, SyncLimits, SyncRoundFailure,
+        SyncRoundOutcome, execute_sync_round, scan_directory,
     },
 };
 use fr_wire::{
@@ -122,7 +122,7 @@ fn limits(entries: u32, bytes: u64) -> SyncLimits {
 
 fn assert_refused_before_publication(failure: &SyncRoundFailure, error: SyncError) {
     assert_eq!(failure.error, error);
-    assert!(failure.published.is_empty());
+    assert_eq!(failure.published, [] as [PublishedSyncEntry; 0]);
     assert_eq!(failure.baseline, SyncBaseline::new());
     let terminal = &failure.wire_states.last().unwrap().state;
     assert_eq!(terminal.phase, SyncPhase::Failed);
@@ -200,7 +200,7 @@ fn exact_entry_and_byte_bounds_allow_conflicts_and_an_unchanged_next_round() {
     }
     let settled = pair.round(limits, &outcome.baseline, 2).unwrap();
     assert_eq!(settled.final_phase, SyncPhase::Settled);
-    assert!(settled.published.is_empty());
+    assert_eq!(settled.published, [] as [PublishedSyncEntry; 0]);
     assert_eq!(settled.bytes_transferred, 0);
     assert_eq!(fs::read(pair.host.join("same.txt")).unwrap(), b"one");
     assert_eq!(fs::read(pair.controller.join("same.txt")).unwrap(), b"two");

@@ -56,20 +56,16 @@ pub unsafe extern "C" fn fr_download_destination_prepare(
     let Ok(mut destinations) = DESTINATIONS.lock() else {
         return FR_BUSY;
     };
-    match selected {
-        Ok(owner) => {
-            if !destinations.prepared(token, owner) {
-                return FR_STALE;
-            }
-            // SAFETY: non-null and writable per the caller's contract.
-            unsafe { out.write(token) };
-            FR_OK
-        }
-        Err(_) => {
-            destinations.discard(token);
-            FR_INVALID
-        }
+    let Ok(owner) = selected else {
+        destinations.discard(token);
+        return FR_INVALID;
+    };
+    if !destinations.prepared(token, owner) {
+        return FR_STALE;
     }
+    // SAFETY: non-null and writable per the caller's contract.
+    unsafe { out.write(token) };
+    FR_OK
 }
 
 /// Discard only this pending destination. Its one-use ID never becomes valid

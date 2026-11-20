@@ -106,12 +106,12 @@ impl Rate {
             if (actual != target && actual != self.installed) || !idr {
                 return Err(());
             }
-            if actual != self.installed {
-                self.applied(actual, host, worker);
-            } else {
+            if actual == self.installed {
                 // Qualifying a setting already installed on a dropped request
                 // cannot restart that physical mutation's original dwell.
                 self.applied = actual;
+            } else {
+                self.applied(actual, host, worker);
             }
         }
         Ok(())
@@ -233,6 +233,27 @@ mod tests {
             assert_eq!(rate.request_with_ceiling(10_000, invalid_ceiling), Err(()));
             assert_eq!(rate.due(2_000_010, start + DWELL, true), Some(8_000_000));
         }
+    }
+
+    #[test]
+    fn a_completed_drop_installs_only_the_admitted_target_and_charges_it_once() {
+        let start = Instant::now();
+        let mut rate = Rate::new(8_000_000);
+        rate.request(4_000_000);
+        // A readback that is neither the admitted target nor the installed
+        // setting proves nothing and charges no dwell.
+        assert_eq!(rate.dropped(4_000_000, 2_000_000, 10, start), Err(()));
+        assert_eq!(rate.installed_bitrate(), 8_000_000);
+        assert_eq!(rate.due(10, start, true), Some(4_000_000));
+        rate.dropped(4_000_000, 4_000_000, 10, start).unwrap();
+        assert_eq!(rate.installed_bitrate(), 4_000_000);
+        assert_eq!(rate.applied, 8_000_000);
+        // A later drop at the installed setting cannot restart that dwell.
+        rate.dropped(4_000_000, 4_000_000, 1_000_010, start + DWELL / 2)
+            .unwrap();
+        rate.request(2_000_000);
+        assert_eq!(rate.due(2_000_009, start + DWELL, true), None);
+        assert_eq!(rate.due(2_000_010, start + DWELL, true), Some(2_000_000));
     }
 
     #[test]

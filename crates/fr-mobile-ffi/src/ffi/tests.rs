@@ -136,6 +136,7 @@ fn receive_bridge_refuses_stale_handles_and_invalid_destinations_without_writes(
 
 #[test]
 fn a_receive_destination_is_spent_even_when_start_refuses_the_role_or_mode() {
+    use std::os::unix::fs::PermissionsExt;
     let _serial = REGISTRY_TESTS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
@@ -148,7 +149,6 @@ fn a_receive_destination_is_spent_even_when_start_refuses_the_role_or_mode() {
             .as_nanos()
     ));
     std::fs::create_dir(&root).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = CString::new(root.to_str().unwrap()).unwrap();
     let host = CString::new("mac.tailtest.ts.net").unwrap();

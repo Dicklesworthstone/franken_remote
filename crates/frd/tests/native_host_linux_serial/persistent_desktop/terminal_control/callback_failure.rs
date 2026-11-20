@@ -120,7 +120,13 @@ fn callback_failure(controlled: bool) {
                         Err(CallbackError)
                     },
                 );
-                failed_application(&mut application, viewer, &broker, &mut retirement).await;
+                Box::pin(failed_application(
+                    &mut application,
+                    viewer,
+                    &broker,
+                    &mut retirement,
+                ))
+                .await;
             } else {
                 let mut application = native_view(
                     ObserverPolicy::default(),
@@ -136,7 +142,13 @@ fn callback_failure(controlled: bool) {
                     },
                     |_| Ok(()),
                 );
-                failed_application(&mut application, viewer, &broker, &mut retirement).await;
+                Box::pin(failed_application(
+                    &mut application,
+                    viewer,
+                    &broker,
+                    &mut retirement,
+                ))
+                .await;
             }
             assert_eq!(calls.get(), 1);
             assert!(launch.is_none());

@@ -174,6 +174,7 @@ impl Publisher {
     /// Source consent is rechecked immediately afterward. Dropping this future,
     /// including before its first poll, fences the cohort and aborts the original
     /// child. Keep the Publisher to confirm cleanup through `reap`.
+    #[allow(clippy::too_many_lines)] // One cadence loop; its consent and cohort fences stay in order.
     pub fn serve<'a>(
         &'a mut self,
         capture_interval: Duration,

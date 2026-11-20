@@ -473,22 +473,15 @@ pub fn plan_sync(
     controller: &FolderManifest,
     direction: SyncDirection,
 ) -> Result<SyncPlan, SyncError> {
-    let mut names = BTreeSet::new();
-    for k in host.entries.keys() {
-        names.insert(k.as_str());
-    }
-    for k in controller.entries.keys() {
-        names.insert(k.as_str());
-    }
+    let names: BTreeSet<&str> = host
+        .entries
+        .keys()
+        .chain(controller.entries.keys())
+        .map(String::as_str)
+        .collect();
 
-    let allow_h2c = matches!(
-        direction,
-        SyncDirection::HostToController | SyncDirection::Bidirectional
-    );
-    let allow_c2h = matches!(
-        direction,
-        SyncDirection::ControllerToHost | SyncDirection::Bidirectional
-    );
+    let allow_h2c = direction != SyncDirection::ControllerToHost;
+    let allow_c2h = direction != SyncDirection::HostToController;
 
     let mut transfers = Vec::new();
     let mut in_sync_count = 0u32;
@@ -1192,7 +1185,7 @@ pub fn execute_sync_round<F>(
     _host_drop: &DropDirectory,
     _controller_root: &Path,
     _controller_drop: &DropDirectory,
-    _baseline: &SyncBaseline,
+    baseline: &SyncBaseline,
     _manifest_revision: u64,
     _check_authority: F,
 ) -> Result<SyncRoundOutcome, SyncRoundFailure>
@@ -1203,7 +1196,7 @@ where
         error: SyncError::UnsupportedPlatform,
         cleanup_failed: false,
         published: Vec::new(),
-        baseline: _baseline.clone(),
+        baseline: baseline.clone(),
         wire_states: Vec::new(),
     })
 }

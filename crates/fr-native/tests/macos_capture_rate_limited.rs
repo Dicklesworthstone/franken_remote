@@ -69,7 +69,7 @@ fn native_rate_change_and_cancellation_keep_the_original_physical_dwell() {
         4_000_000,
         true,
         1_900_010,
-        now + Duration::from_micros(1_900_000),
+        now + Duration::from_millis(1_900),
     )
     .unwrap();
     output.encoded(FrameId::from_raw(5), 4_000_000);
