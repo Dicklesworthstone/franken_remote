@@ -13,7 +13,9 @@ env:
 jobs:
   committed-source:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Building and running every frd lib test at one job ran past 15 minutes:
+    # cancelled at 20 on 11-18 and 11-19 (fr-nightly-workflow-budget-yolw).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
