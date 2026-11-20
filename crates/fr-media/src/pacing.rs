@@ -240,7 +240,6 @@ impl Controller {
             .is_some_and(|o| s.now_us - o.at_us > SOURCE_EVIDENCE_US)
         {
             self.unchanged_since = None;
-            self.reset_headroom();
             if self.mode == Mode::Idle {
                 self.mode = Mode::Active;
                 reason = Reason::EvidenceGap;
@@ -286,11 +285,13 @@ impl Controller {
                 .is_some_and(|work| work <= self.interval * 3 / 4)
             && s.send == Availability::Ready
             && s.capture_credit == Availability::Ready;
-        // A short outstanding source operation can make credit unknown. It
-        // contributes no headroom duration, but must not erase every preceding
-        // measured interval and make recovery impossible in a real pipeline.
+        // A short outstanding source operation can make credit unknown or let
+        // the previous source observation expire. Neither is positive evidence
+        // or known pressure. Pause measured headroom under its original 100 ms
+        // grace; stale source evidence never contributes time or permits a probe.
+        // Resetting at the 250 ms source boundary would strand a 200 ms cadence
+        // whenever a new capture is briefly late, even after overload has ended.
         let uncertain = !remote.contains(&true)
-            && fresh
             && !idle
             && self.mode == Mode::Active
             && s.source_work_us

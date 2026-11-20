@@ -225,6 +225,18 @@ intervals pause the evidence clock; known pressure or more than 100 ms without
 known evidence resets it. Unknown evidence never triggers or contributes time
 to a probe. This preserves the concurrently landed `b82f1e4` correction.
 
+The same grace applies when the previous source observation becomes older than
+250 ms while a new capture is briefly late. The stale sample is unknown: it
+cannot trigger a probe, contribute measured headroom, or renew its own lifetime.
+Only new positive samples resume the clock, and neither edge beside an unknown
+sample counts. More than 100 ms since the last positive sample, known pressure,
+or a changed receiver scope still clears the accumulated headroom. This lets a
+source slowed to a 200 ms interval recover after transient overload without
+requiring every subsequent capture to arrive within the remaining 50 ms of the
+source-evidence window. Source freshness, idle classification, original receiver
+query expiry, presentation readiness and input authority retain their existing
+bounds.
+
 Idle is established only by distinct, recent unchanged observations spanning at
 least one second. It moves to the bounded maximum interval and keeps genuine
 source checks and observation renewal running without dummy encoded frames.
@@ -338,6 +350,21 @@ without `--adaptive-capture`. Each service turn passes the path sample to
 - The existing rules still apply: a 2 s dwell between actual changes, an IDR
   for each change, a floor of an eighth of the configured rate, and no encode
   just to apply a target.
+
+Queue and clear-path intervals require consecutive path observations no more
+than 100 ms apart. A scheduling stall, a split/unknown cohort, a change of
+eligible viewers or view bindings, and an actual encoder rate change discard
+the old intervals. Native capture completions and unrelated pacing reports do
+not fill missing path measurements. A replacement cohort therefore supplies
+its own 200 ms of pressure or 4 s of headroom before proposing a change.
+
+A path-evidence gap also cancels an optimistic pending increase. If the worker
+already retained or started that target, the existing explicit restoration
+transaction preserves its actual outcome and restores the prior rate. An
+already justified conservative reduction survives a sampling gap. These rules
+are covered by deterministic production-controller regressions in
+`crates/fr-media/tests/bitrate_path.rs`; they do not establish new live-link
+performance or native rate-change qualification (bead `fr-7al9`).
 
 Backends that cannot change their rate (NVENC, VA-API) keep a fixed rate and
 the capture gate. A Media Foundation transform that cannot change its rate

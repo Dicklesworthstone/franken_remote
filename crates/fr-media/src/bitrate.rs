@@ -19,6 +19,9 @@ const EVIDENCE_GAP_US: u64 = 100_000;
 const PATH_PRESSURE_US: u64 = 200_000;
 /// A clear path probes a quarter up after this long without a queue.
 const PATH_HEADROOM_US: u64 = 4_000_000;
+/// Shared publishers may sample at their 200 ms adaptive capture cadence.
+/// Permit that bounded interval without inheriting arbitrarily old evidence.
+const PATH_EVIDENCE_GAP_US: u64 = 250_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -40,6 +43,17 @@ pub enum Reason {
     Headroom,
     /// Cancel a retained native target after its supporting evidence was invalidated.
     EvidenceReset,
+}
+
+/// Content-free evidence from one original path, or a shared encoder's whole
+/// current viewer cohort. A drained/application-limited path is not measured
+/// capacity: only recent acknowledged busy traffic can establish `Clear`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathEvidence {
+    Unknown,
+    Idle,
+    Clear,
+    Queued { delivered_bits_per_second: u64 },
 }
 
 /// One pending decision, unchanged while native captures defer its target.
@@ -134,6 +148,9 @@ pub struct Controller {
     /// Since when the viewer's path has held a queue, or been clear of one.
     path_queued_since: Option<u64>,
     path_clear_since: Option<u64>,
+    last_path_sample: Option<u64>,
+    path_sample_lifetime_us: Option<u64>,
+    path_evidence: Option<PathEvidence>,
     closed: bool,
 }
 impl Controller {
@@ -157,6 +174,9 @@ impl Controller {
             headroom: Headroom::default(),
             path_queued_since: None,
             path_clear_since: None,
+            last_path_sample: None,
+            path_sample_lifetime_us: None,
+            path_evidence: None,
             closed: false,
         })
     }
@@ -184,7 +204,16 @@ impl Controller {
             .is_some_and(|last| now - last > EVIDENCE_GAP_US);
         self.last_sample = Some(now);
         let evidence_gap = gap || report.reason == crate::pacing::Reason::EvidenceGap;
-        let negative = headroom_negative(report);
+        // Once a path observer is installed, local enqueue/decoder headroom
+        // cannot override its absent or congested capacity evidence. This also
+        // holds when a native service polls local pacing after the path sample.
+        let path_negative = self.path_evidence.is_some()
+            && (self.path_evidence != Some(PathEvidence::Clear)
+                || self
+                    .last_path_sample
+                    .zip(self.path_sample_lifetime_us)
+                    .is_none_or(|(last, lifetime)| now - last > lifetime));
+        let negative = headroom_negative(report) || path_negative;
         if self
             .pending
             .is_some_and(|change| change.reason == Reason::Headroom)
@@ -197,7 +226,7 @@ impl Controller {
             self.reset_evidence()?;
         }
         if evidence_gap {
-            self.clear_measurements();
+            self.clear_local_measurements();
         }
         let blocked = report.mode == Mode::Active && report.sample.send == Availability::Blocked;
         let pressure = if blocked {
@@ -208,7 +237,7 @@ impl Controller {
         };
         let headroom = self.headroom.observe(
             now,
-            report.mode == Mode::Active && report.headroom_us > 0,
+            report.mode == Mode::Active && report.headroom_us > 0 && !path_negative,
             negative,
         );
         if self.pending.is_some() || self.changed_at.is_some_and(|at| now - at < CHANGE_DWELL_US) {
@@ -236,13 +265,85 @@ impl Controller {
     /// cut. A path clear of any queue for [`PATH_HEADROOM_US`] probes a
     /// quarter up. Never past the original ceiling or the floor, and never
     /// within the change dwell.
+    ///
+    /// These boolean samples must be at most [`EVIDENCE_GAP_US`] apart. Native
+    /// callers with independently verified activity use [`Self::observe_path_evidence`],
+    /// whose bounded lifetime also supports the shared publisher's 200 ms cadence.
     pub fn observe_path(
         &mut self,
         now_us: u64,
         queued: bool,
         delivered_bits_per_second: u64,
     ) -> Result<(), Error> {
+        self.observe_path_with_lifetime(
+            now_us,
+            if queued {
+                PathEvidence::Queued {
+                    delivered_bits_per_second,
+                }
+            } else {
+                PathEvidence::Clear
+            },
+            EVIDENCE_GAP_US,
+        )
+    }
+
+    /// Observe the path without treating an empty queue as spare bandwidth.
+    /// `Clear` must come from recent acknowledged busy traffic, not silence,
+    /// a repeated old RTT or an unavailable transport sample. Gaps in service
+    /// cannot supply pressure/headroom for the time that was not observed.
+    /// Native path owners independently expire unavailable/stale samples; this
+    /// consumer permits at most [`PATH_EVIDENCE_GAP_US`] between observations so
+    /// a shared publisher's 200 ms capture cadence can retain measured evidence.
+    pub fn observe_path_evidence(
+        &mut self,
+        now_us: u64,
+        evidence: PathEvidence,
+    ) -> Result<(), Error> {
+        self.observe_path_with_lifetime(now_us, evidence, PATH_EVIDENCE_GAP_US)
+    }
+
+    fn observe_path_with_lifetime(
+        &mut self,
+        now_us: u64,
+        evidence: PathEvidence,
+        lifetime_us: u64,
+    ) -> Result<(), Error> {
         self.clock(now_us)?;
+        let gap = self
+            .last_path_sample
+            .zip(self.path_sample_lifetime_us)
+            .is_some_and(|(last, previous_lifetime)| {
+                now_us - last > lifetime_us.min(previous_lifetime)
+            });
+        let queued = matches!(evidence, PathEvidence::Queued { .. });
+        let measured = matches!(evidence, PathEvidence::Clear | PathEvidence::Queued { .. });
+        if (gap || !measured || queued)
+            && self
+                .pending
+                .is_some_and(|change| change.reason == Reason::Headroom)
+        {
+            // Preserve an in-flight/deferred native effect, but explicitly
+            // withdraw its optimistic target on the next capture credit.
+            self.reset_evidence()?;
+        }
+        if gap || !measured {
+            self.clear_path_measurements();
+        }
+        self.last_path_sample = Some(now_us);
+        self.path_sample_lifetime_us = Some(lifetime_us);
+        self.path_evidence = Some(evidence);
+        if !measured {
+            // A previously admitted cut survives a drained queue: capture
+            // waits for that drain before it can apply the lower rate.
+            return Ok(());
+        }
+        let delivered_bits_per_second = match evidence {
+            PathEvidence::Queued {
+                delivered_bits_per_second,
+            } => delivered_bits_per_second,
+            _ => 0,
+        };
         let (held, clear) = if queued {
             self.path_clear_since = None;
             (now_us - *self.path_queued_since.get_or_insert(now_us), 0)
@@ -250,14 +351,6 @@ impl Controller {
             self.path_queued_since = None;
             (0, now_us - *self.path_clear_since.get_or_insert(now_us))
         };
-        if queued
-            && self
-                .pending
-                .is_some_and(|change| change.reason == Reason::Headroom)
-        {
-            // An unsent upward probe cannot apply into a queue.
-            self.reset_evidence()?;
-        }
         if self.pending.is_some()
             || self
                 .changed_at
@@ -294,12 +387,15 @@ impl Controller {
     /// and both [`Self::observe_path`] intervals start over.
     pub fn observe_split_path(&mut self, now_us: u64) -> Result<(), Error> {
         self.clock(now_us)?;
-        self.path_queued_since = None;
-        self.path_clear_since = None;
+        self.clear_path_measurements();
+        self.path_evidence = Some(PathEvidence::Unknown);
         if self
             .pending
-            .is_some_and(|change| change.reason == Reason::Headroom)
+            .is_some_and(|change| matches!(change.reason, Reason::Headroom | Reason::PathQueue))
         {
+            // A slow viewer cannot apply a cohort-wide cut after another
+            // viewer has become healthy. Restore a native-retained target
+            // explicitly; already completed effects remain recorded.
             self.reset_evidence()?;
         }
         Ok(())
@@ -414,8 +510,21 @@ impl Controller {
         Ok(())
     }
     fn clear_measurements(&mut self) {
+        self.clear_local_measurements();
+        self.clear_path_measurements();
+    }
+    fn clear_local_measurements(&mut self) {
         self.pressure_since = None;
         self.headroom.clear();
+    }
+    fn clear_path_measurements(&mut self) {
+        self.path_queued_since = None;
+        self.path_clear_since = None;
+        self.last_path_sample = None;
+        self.path_sample_lifetime_us = None;
+        if self.path_evidence.is_some() {
+            self.path_evidence = Some(PathEvidence::Unknown);
+        }
     }
     fn propose(&mut self, bitrate: u32, reason: Reason) -> Result<(), Error> {
         let id = self.next_change;

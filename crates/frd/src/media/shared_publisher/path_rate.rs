@@ -226,6 +226,7 @@ mod tests {
     fn a_split_cohort_cancels_an_unsent_probe() {
         let mut c = Controller::new(2_000_000).unwrap();
         observe(&mut c, 0, Paths::Queued(0)).unwrap();
+        observe(&mut c, 100_000, Paths::Queued(0)).unwrap();
         observe(&mut c, 200_000, Paths::Queued(0)).unwrap();
         let capture = c.begin_capture().unwrap();
         c.complete_capture(capture, capture.bitrate(), true, 200_000)
