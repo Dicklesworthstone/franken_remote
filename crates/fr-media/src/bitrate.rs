@@ -131,6 +131,8 @@ pub struct Controller {
     changed_at: Option<u64>,
     pressure_since: Option<u64>,
     headroom: Headroom,
+    /// Path continuity is independent of pacing reports and native replies.
+    last_path_sample: Option<u64>,
     /// Since when the viewer's path has held a queue, or been clear of one.
     path_queued_since: Option<u64>,
     path_clear_since: Option<u64>,
@@ -155,6 +157,7 @@ impl Controller {
             changed_at: None,
             pressure_since: None,
             headroom: Headroom::default(),
+            last_path_sample: None,
             path_queued_since: None,
             path_clear_since: None,
             closed: false,
@@ -234,8 +237,10 @@ impl Controller {
     /// one change. The delivery counts every acknowledged packet as full, so
     /// it reads high (about 1.5 times on the namespace link) and never limits a
     /// cut. A path clear of any queue for [`PATH_HEADROOM_US`] probes a
-    /// quarter up. Never past the original ceiling or the floor, and never
-    /// within the change dwell.
+    /// quarter up. Both intervals require consecutive path samples at most
+    /// [`EVIDENCE_GAP_US`] apart; native completions and pacing reports cannot
+    /// fill missing path observations. Never past the original ceiling or the
+    /// floor, and never within the change dwell.
     pub fn observe_path(
         &mut self,
         now_us: u64,
@@ -243,6 +248,23 @@ impl Controller {
         delivered_bits_per_second: u64,
     ) -> Result<(), Error> {
         self.clock(now_us)?;
+        let gap = self
+            .last_path_sample
+            .is_some_and(|last| now_us - last > EVIDENCE_GAP_US);
+        if (queued || gap)
+            && self
+                .pending
+                .is_some_and(|change| change.reason == Reason::Headroom)
+        {
+            // An optimistic target cannot survive a queue or an unobserved
+            // interval. Retain the original native effect/restoration protocol.
+            self.reset_evidence()?;
+        } else if gap {
+            self.clear_path_measurements();
+        }
+        // Take the new sample after any reset, so none of the erased interval
+        // can support a decision on this same turn.
+        self.last_path_sample = Some(now_us);
         let (held, clear) = if queued {
             self.path_clear_since = None;
             (now_us - *self.path_queued_since.get_or_insert(now_us), 0)
@@ -250,14 +272,6 @@ impl Controller {
             self.path_queued_since = None;
             (0, now_us - *self.path_clear_since.get_or_insert(now_us))
         };
-        if queued
-            && self
-                .pending
-                .is_some_and(|change| change.reason == Reason::Headroom)
-        {
-            // An unsent upward probe cannot apply into a queue.
-            self.reset_evidence()?;
-        }
         if self.pending.is_some()
             || self
                 .changed_at
@@ -294,8 +308,7 @@ impl Controller {
     /// and both [`Self::observe_path`] intervals start over.
     pub fn observe_split_path(&mut self, now_us: u64) -> Result<(), Error> {
         self.clock(now_us)?;
-        self.path_queued_since = None;
-        self.path_clear_since = None;
+        self.clear_path_measurements();
         if self
             .pending
             .is_some_and(|change| change.reason == Reason::Headroom)
@@ -416,6 +429,12 @@ impl Controller {
     fn clear_measurements(&mut self) {
         self.pressure_since = None;
         self.headroom.clear();
+        self.clear_path_measurements();
+    }
+    fn clear_path_measurements(&mut self) {
+        self.last_path_sample = None;
+        self.path_queued_since = None;
+        self.path_clear_since = None;
     }
     fn propose(&mut self, bitrate: u32, reason: Reason) -> Result<(), Error> {
         let id = self.next_change;

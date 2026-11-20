@@ -351,6 +351,21 @@ without `--adaptive-capture`. Each service turn passes the path sample to
   for each change, a floor of an eighth of the configured rate, and no encode
   just to apply a target.
 
+Queue and clear-path intervals require consecutive path observations no more
+than 100 ms apart. A scheduling stall, a split/unknown cohort, a change of
+eligible viewers or view bindings, and an actual encoder rate change discard
+the old intervals. Native capture completions and unrelated pacing reports do
+not fill missing path measurements. A replacement cohort therefore supplies
+its own 200 ms of pressure or 4 s of headroom before proposing a change.
+
+A path-evidence gap also cancels an optimistic pending increase. If the worker
+already retained or started that target, the existing explicit restoration
+transaction preserves its actual outcome and restores the prior rate. An
+already justified conservative reduction survives a sampling gap. These rules
+are covered by deterministic production-controller regressions in
+`crates/fr-media/tests/bitrate_path.rs`; they do not establish new live-link
+performance or native rate-change qualification (bead `fr-7al9`).
+
 Backends that cannot change their rate (NVENC, VA-API) keep a fixed rate and
 the capture gate. A Media Foundation transform that cannot change its rate
 while streaming defers every target. With `--adaptive-capture`, the same
