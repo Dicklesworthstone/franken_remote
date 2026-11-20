@@ -4,7 +4,8 @@
 //! a private network namespace (`examples/qualify_ingress_helper.rs`).
 use super::{
     server::{
-        Lifecycle, MAX_CONNECTIONS, Observed, Shared, check_assigned, check_request, connection,
+        Lifecycle, MAX_CONNECTIONS, Observed, Shared, accept, check_assigned, check_request,
+        connection,
     },
     *,
 };
@@ -545,6 +546,72 @@ fn a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends() {
                 generation: 2,
                 table: OTHER.into(),
                 disconnect: true
+            },
+            Event::OrphanCleared {
+                table: TABLE.into()
+            },
+        ]
+    );
+}
+
+/// The serving loop retries an orphan by itself. A broker can stay connected
+/// for hours, so a table its failed disconnect left waited for a later
+/// connection to end, and after tailscaled restarted its stale `iif != index`
+/// drop refused the port's tailnet traffic (ts2, 2026-11-19, fr-eny1).
+#[test]
+#[ignore = "explicit isolated mount/network namespace as root: scripts/test_linux_serial_lifecycle.sh"]
+fn a_table_a_failed_disconnect_left_is_cleared_while_no_other_connection_ends() {
+    use asupersync::net::unix::UnixListener;
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+    // A live rule of another broker: never an orphan, so never touched.
+    const OTHER: &str = "frdh_fedcba9876543210fedcba9876543210";
+    assert_eq!(
+        fs::read_to_string("/run/fr-synthetic-ingress").unwrap(),
+        "synthetic-only\n"
+    );
+    let dir = PathBuf::from(format!("/run/fr-helper-retry-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.join("tables.json"), json!([TABLE, OTHER]).to_string()).unwrap();
+    fs::write(dir.join("fail"), "1").unwrap();
+    let nft = dir.join("nft");
+    fs::write(&nft, FAKE_NFT).unwrap();
+    fs::set_permissions(&nft, fs::Permissions::from_mode(0o700)).unwrap();
+    let tables = || -> Vec<String> {
+        serde_json::from_slice(&fs::read(dir.join("tables.json")).unwrap()).unwrap()
+    };
+    let socket = dir.join("helper.sock");
+    let settings = Settings::parse(
+        json!({"interface": "fr-fixture", "allowed_uids": [1000], "nft": nft, "socket": socket})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let events = Mutex::new(Vec::new());
+    let record = |event: Event| events.lock().unwrap().push(event);
+    RuntimeBuilder::new()
+        .worker_threads(1)
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let cx = Cx::current().unwrap();
+            let shared = Shared::new(&cx, &settings, &record);
+            let mut first = Lifecycle::default();
+            first.installed(1, TABLE);
+            first.release(&shared).await;
+            assert_eq!(tables(), [TABLE, OTHER], "the failed delete left it");
+            // Serve with no connection at all for twice the retry period.
+            let listener = UnixListener::bind(&socket).await.unwrap();
+            let shutdown = asupersync::time::sleep(cx.now(), Duration::from_secs(5));
+            accept(&shared, &listener, shutdown).await.unwrap();
+        });
+    assert_eq!(tables(), [OTHER]);
+    assert_eq!(
+        events.into_inner().unwrap(),
+        [
+            Event::CleanupFailed {
+                table: TABLE.into()
             },
             Event::OrphanCleared {
                 table: TABLE.into()

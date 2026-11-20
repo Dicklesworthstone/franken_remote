@@ -296,6 +296,7 @@ jobs:
           prefix = 'local::ingress::helper::tests::'
           tests = [
               'a_table_a_failed_disconnect_left_is_cleared_when_a_later_connection_ends',
+              'a_table_a_failed_disconnect_left_is_cleared_while_no_other_connection_ends',
               'a_renewal_reads_the_interface_and_the_table_together_and_judges_the_interface_first',
           ]
           listed = subprocess.check_output([binaries[0], '--list', '--ignored'], text=True).splitlines()

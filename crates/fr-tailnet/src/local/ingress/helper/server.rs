@@ -32,9 +32,14 @@ use std::{
 /// Concurrent broker connections (each holds at most one rule).
 pub const MAX_CONNECTIONS: usize = 8;
 /// Tables a connection could not remove when it ended. They are kept
-/// helper-wide and retried when a later connection ends. Past this many, the
-/// rest wait for the next start's reclaim.
+/// helper-wide and retried when a later connection ends and every
+/// `ORPHAN_RETRY`. Past this many, the rest wait for the next start's reclaim.
 const MAX_ORPHANS: usize = 4 * MAX_CONNECTIONS;
+/// A broker can stay connected for hours, so waiting for a later connection
+/// to end could leave an orphan in place until tailscaled restarts and its
+/// stale `iif != index` drop refuses the port's tailnet traffic (ts2,
+/// 2026-11-19, fr-eny1). Costs nothing while no orphan is listed.
+const ORPHAN_RETRY: Duration = Duration::from_secs(2);
 const MAX_SETTINGS: usize = 4096;
 const MAX_ALLOWED_UIDS: usize = 16;
 /// Once a frame starts, all of it must arrive within this deadline.
@@ -187,7 +192,8 @@ pub enum Event {
         table: String,
         disconnect: bool,
     },
-    /// Kept and retried when a later connection ends (`OrphanCleared`).
+    /// Kept and retried when a later connection ends and every
+    /// `ORPHAN_RETRY` (`OrphanCleared`).
     CleanupFailed {
         table: String,
     },
@@ -602,21 +608,35 @@ impl Lifecycle {
                 shared.orphan(table);
             }
         }
-        if orphans.is_empty() {
-            return;
+        clear_orphans(shared, orphans).await;
+    }
+}
+
+/// Delete tables earlier connections failed to remove; on failure they stay
+/// listed for the next attempt.
+async fn clear_orphans(shared: &Shared<'_>, orphans: Vec<String>) {
+    if orphans.is_empty() {
+        return;
+    }
+    if delete_tables(&shared.cx, &shared.settings.nft, &orphans)
+        .await
+        .is_ok()
+    {
+        for table in orphans {
+            (shared.report)(Event::OrphanCleared { table });
         }
-        if delete_tables(&shared.cx, &shared.settings.nft, &orphans)
-            .await
-            .is_ok()
-        {
-            for table in orphans {
-                (shared.report)(Event::OrphanCleared { table });
-            }
-        } else {
-            for table in orphans {
-                shared.orphan(table);
-            }
+    } else {
+        for table in orphans {
+            shared.orphan(table);
         }
+    }
+}
+
+/// Retry orphans every `period` for as long as the helper serves.
+async fn retry_orphans(shared: &Shared<'_>, period: Duration) {
+    loop {
+        asupersync::time::sleep(shared.cx.now(), period).await;
+        clear_orphans(shared, shared.take_orphans()).await;
     }
 }
 
@@ -803,12 +823,13 @@ pub async fn serve(
 }
 
 type Handler<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
-async fn accept<'a>(
+pub(super) async fn accept<'a>(
     shared: &'a Shared<'a>,
     listener: &UnixListener,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
     let mut shutdown = pin!(shutdown);
+    let mut janitor = pin!(retry_orphans(shared, ORPHAN_RETRY));
     let mut handlers: Vec<Handler<'a>> = Vec::with_capacity(MAX_CONNECTIONS);
     let mut admission = Bucket::new(ACCEPT_BURST, ACCEPT_REFILL_US, shared.now());
     // Dropping `handlers` on return closes every connection (brokers fence).
@@ -850,6 +871,8 @@ async fn accept<'a>(
             handlers.push(Box::pin(connection(shared, stream, uid)));
         }
         handlers.retain_mut(|handler| handler.as_mut().poll(task).is_pending());
+        // Never completes; dropped with the loop like the handlers.
+        let _ = janitor.as_mut().poll(task);
         Poll::Pending
     })
     .await
