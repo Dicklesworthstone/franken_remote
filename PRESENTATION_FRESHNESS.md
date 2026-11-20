@@ -524,6 +524,28 @@ against this change, runs alternating:
 - View-only noise rows: 6/6 on both. The controlled delay/loss matrix (netem
   without tbf): 2 short rows on each, both at 120 ms RTT with 5% loss.
 
+### Starting on a narrow link
+
+The rows above narrow a link under a session that started on a clean one. The
+11-18 hotel link was narrower than the host's rate from the first picture, and
+then the path's base RTT is learned on the narrow link.
+`controlled_session_that_starts_on_a_narrow_link` (ignored, run by hand)
+applies the narrow downlink before the session connects and draws noise from
+the moment control is granted, for 20 s, then widens the link.
+
+On e1bead3f, 5 rounds at 1500, 1000 and 800 kbit/s (0.75x, 0.5x and 0.4x of
+the 2 Mbit/s host) held 15 of 15 sessions, with no start retried:
+
+| Rate | Motion reaching the host while narrow | Input suspended | Pictures decoded |
+|---|---|---|---|
+| 1500 kbit/s | 717-719 | 1.4-1.5 s | 298-306 |
+| 1000 kbit/s | 646-700 | 1.8-3.3 s | 293-310 |
+| 800 kbit/s | 695-718 | 1.6-2.0 s | 290-318 |
+
+After the link widened, every session's motion reached the host 8 of 8 times,
+the first after 25 ms. No arm without path-following bitrate or the
+display-budget change was run for this row.
+
 ## Verification scope
 
 The new media regressions use actual record codecs/reassembly with explicitly

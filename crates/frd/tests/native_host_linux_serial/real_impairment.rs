@@ -239,6 +239,8 @@ struct Episode {
     input_suspended_ms: Option<u64>,
     /// The completion's content-free `last_attempt_media` counters.
     media: Option<String>,
+    /// Session starts that failed and were retried ([`start_row`]).
+    setup_retries: u32,
 }
 
 /// A fresh controlled session with [`NOISE`] on the host: the link narrows to
@@ -246,17 +248,28 @@ struct Episode {
 /// while the viewer keeps moving, as a person would, then widens again and the
 /// viewer's motion must reach the host.
 fn narrow_episode(rate_kbit: u32, length: Duration) -> Episode {
-    let (mut s, _) = start_row();
+    narrow_run(rate_kbit, length, false)
+}
+
+/// [`narrow_episode`], or with `from_start` a session that connects on the
+/// already narrow link and gets [`NOISE`] as soon as control is granted, as on
+/// the 11-18 hotel link that was narrower than the host's rate from its first
+/// picture. Then the path's base RTT is learned on the narrow link.
+fn narrow_run(rate_kbit: u32, length: Duration, from_start: bool) -> Episode {
+    let early = from_start.then(|| Netem::narrow_downlink(3, rate_kbit));
+    let (mut s, setup_retries) = start_row();
     // Clear of the 480x148 control indicator at the host's top left: covering
     // any of it is a local revoke.
     let mut painter = Command::new("python3")
         .args(["-c", NOISE, &s.host.display, "336", "270"])
         .spawn()
         .unwrap();
-    // The encoder is at its steady busy rate before the link narrows.
-    thread::sleep(Duration::from_secs(2));
+    if !from_start {
+        // The encoder is at its steady busy rate before the link narrows.
+        thread::sleep(Duration::from_secs(2));
+    }
     let target = |step: usize| (120 + 40 * i32::try_from(step % 8).unwrap(), 150);
-    let netem = Netem::narrow_downlink(3, rate_kbit);
+    let netem = early.unwrap_or_else(|| Netem::narrow_downlink(3, rate_kbit));
     let narrowed = Instant::now();
     let mut step = 0;
     let mut during = 0;
@@ -337,6 +350,7 @@ fn narrow_episode(rate_kbit: u32, length: Duration) -> Episode {
         ended,
         input_suspended_ms,
         media: counters,
+        setup_retries,
     }
 }
 
@@ -771,6 +785,31 @@ fn controlled_session_across_a_sustained_narrow_link() {
             "SUSTAINED rate {} kbit/s for {:?}: during {}, alive at widening {}, resumed {}/{STEPS}, first motion after {:?}, input suspended {:?} ms, media {:?}, ended {:?}",
             e.rate_kbit,
             SUSTAINED,
+            e.during,
+            e.alive,
+            e.resumed,
+            e.first_motion,
+            e.input_suspended_ms,
+            e.media,
+            e.ended
+        );
+    }
+}
+
+/// A controlled session that starts on a narrow link (host 2 Mbit/s, the link
+/// 0.75x, 0.5x and 0.4x of that) and stays narrow for [`SUSTAINED`] under
+/// [`NOISE`]. Whether it holds decides whether hosts can ask for more than a
+/// link carries now that the bitrate follows the path (fr-7al9).
+#[test]
+#[ignore = "measurement: about 1.5 min of namespace sessions; run by hand"]
+fn controlled_session_that_starts_on_a_narrow_link() {
+    for rate_kbit in [1500, 1000, 800] {
+        let e = narrow_run(rate_kbit, SUSTAINED, true);
+        println!(
+            "FROM START rate {} kbit/s for {:?}: setup retries {}, during {}, alive at widening {}, resumed {}/{STEPS}, first motion after {:?}, input suspended {:?} ms, media {:?}, ended {:?}",
+            e.rate_kbit,
+            SUSTAINED,
+            e.setup_retries,
             e.during,
             e.alive,
             e.resumed,
