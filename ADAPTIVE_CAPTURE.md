@@ -338,21 +338,25 @@ half the encoder's rate; below that only a lower bitrate keeps the session.
 A one-viewer stream (`running/streaming.rs`, which serves every controlled
 session) now lowers its encoder's rate when the viewer's path keeps a queue,
 without `--adaptive-capture`. Each service turn passes the path sample to
-`fr_media::bitrate::Controller::observe_path`:
+`fr_media::bitrate::Controller::observe_path_evidence`:
 
 - A queue held for 200 ms cuts the rate to three fifths of the current rate,
   or to three fifths of what the path delivered while busy when that is lower.
   The delivery counts every acknowledged packet as 1200 bytes, so it reads high
   (about 1.5 times on the namespace link). It only speeds up a cut from a rate
   far above its path.
-- A path clear of any queue for 4 s probes a quarter up, toward the configured
-  rate, which stays the ceiling.
+- A path with recent acknowledged traffic and no queue for 4 s probes a quarter
+  up, toward the configured rate, which stays the ceiling. Silence alone does
+  not establish headroom.
 - The existing rules still apply: a 2 s dwell between actual changes, an IDR
   for each change, a floor of an eighth of the configured rate, and no encode
   just to apply a target.
 
-Queue and clear-path intervals require consecutive path observations no more
-than 100 ms apart. A scheduling stall, a split/unknown cohort, a change of
+Native path observations expire after 100 ms if their viewer stops being
+serviced. The bitrate controller permits up to 250 ms between these independently
+validated observations, including the shared publisher's 200 ms slow-capture
+cadence. The legacy boolean observer retains its 100 ms limit. A scheduling
+stall, a split/unknown cohort, a change of
 eligible viewers or view bindings, and an actual encoder rate change discard
 the old intervals. Native capture completions and unrelated pacing reports do
 not fill missing path measurements. A replacement cohort therefore supplies
@@ -365,6 +369,24 @@ already justified conservative reduction survives a sampling gap. These rules
 are covered by deterministic production-controller regressions in
 `crates/fr-media/tests/bitrate_path.rs`; they do not establish new live-link
 performance or native rate-change qualification (bead `fr-7al9`).
+
+Headroom is tied to actual native I/O. A flight above 4,800 bytes followed by
+ACK progress qualifies even when it drains before the subscriber next samples
+it. A smaller video fragment qualifies only after validated admission, actual
+packet transmission that drains the native datagram queue without a drop, and
+later ACK progress that drains the entire flight without packet loss since
+admission. A partial ACK of older control traffic cannot qualify that video.
+Cursor-only traffic and native admission alone cannot qualify a small flight.
+The original I/O timestamp bounds this evidence to
+250 ms; rereading counters never renews it.
+
+Route learning also requires new evidence. An increased ACK count without a
+changed RTT estimator cannot turn an old queue into a longer baseline. A drain
+only arms a route probe: subsequent fresh RTTs must cover two round trips, and
+an idle gap restarts that observation. The fallback five-second route window
+also restarts across gaps between genuinely new RTTs; repeated stale readings
+cannot mature it. These checks preserve capture gating
+while the path is congested; they do not extend any delivery deadline.
 
 Backends that cannot change their rate (NVENC, VA-API) keep a fixed rate and
 the capture gate. A Media Foundation transform that cannot change its rate

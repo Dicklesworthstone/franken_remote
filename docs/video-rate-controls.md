@@ -24,14 +24,48 @@ output depends on the selected encoder, content, source and transport.
 
 The same settings pass through observation, controlled capture and the optional
 observation-indicator wrapper. They remain the host run's original ceilings
-through its existing bounded retries. Without `--adaptive-capture`, the encoder
-target stays fixed. With that option and explicit software encoding, the live
-controller may reduce bitrate and slowly probe back toward the original ceiling.
+through its existing bounded retries. The default path can reduce bitrate when
+the viewer's path holds a queue, then slowly probe back toward the original
+ceiling. Software, VideoToolbox and modifiable Media Foundation encoders expose
+the required rate transaction; NVENC and VA-API retain their fixed targets.
+`--adaptive-capture` additionally adapts capture cadence and uses measured local
+send pressure in the same bitrate controller.
 See [adaptive capture](../ADAPTIVE_CAPTURE.md#live-software-bitrate-control).
 No change is made to the saved authority policy.
 Selecting rates does not select an encoder, enable audio/control/clipboard/files,
 change sharing scope, or bypass local approval. All existing startup checks and
 hardware failure behavior remain in place; hardware never falls back silently.
+
+### Path evidence and idle behavior
+
+An empty send queue alone does not justify raising the encoder rate. Upward
+probes require recent acknowledged busy traffic or an actually transmitted
+video fragment throughout the four-second headroom interval. Small video frames
+whose flights drain can therefore recover after a rate cut even below the busy
+threshold. Small-frame proof requires the flight to drain with ACK progress
+and no packet loss since admission. Native admission, cursor-only small packets,
+dropped datagrams and stale ACK counters supply no such evidence. Static screens,
+unavailable telemetry and gaps in
+service do not supply bandwidth evidence. A new viewer cohort discards the old
+cohort's pressure and headroom; a shared encoder probes only when every eligible
+viewer has current clear-path evidence. Mixed queued/healthy cohorts hold the
+rate instead of letting one slow viewer reduce another viewer's quality.
+
+Unsent optimistic changes are cancelled when their evidence disappears. If the
+worker already retained that request, the next original capture explicitly
+restores the applied target; an in-flight change is still reported honestly.
+Completed changes retain the existing dwell and IDR requirements. A queued-path
+reduction survives the queue draining because capture must wait for that drain
+before it can apply the reduction. None of these scheduling decisions refreshes
+source, input, session or transport authority deadlines.
+
+Deterministic `fr-media` bitrate tests cover cohort replacement, long service
+gaps, application-limited idle, deferred targets and late native completions.
+Native activity and path-queue unit tests cover small frames, flush/drop
+boundaries, bursts that drain between subscriber samples, stale RTT estimators
+and route probes that must observe new round trips after a drain.
+They establish controller behavior, not new hardware or shaped-path performance
+measurements.
 
 ## Installed services
 

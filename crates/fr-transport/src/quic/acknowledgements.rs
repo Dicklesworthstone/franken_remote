@@ -117,7 +117,7 @@ impl QuicRecords {
         // Entry rejected unsettled protected output. The ACK-only driver cannot
         // create protected application packets, so successful completion proves
         // that its own output has settled without flushing queued payload.
-        self.finish_native_io(native, result)?;
+        self.finish_native_io(native, result, current, false)?;
         self.retire_acknowledged()?;
         self.check(cx, authorize)?;
         self.check_native_state()

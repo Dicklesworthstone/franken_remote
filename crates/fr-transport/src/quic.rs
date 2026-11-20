@@ -50,6 +50,10 @@ mod peer_close;
 pub use peer_close::{ClientCloseReason, PeerClose};
 mod doorbell;
 pub use doorbell::Doorbell;
+mod path_activity;
+
+/// A flight larger than this can supply acknowledged busy-path evidence.
+pub const BUSY_PATH_BYTES: u64 = path_activity::BUSY_BYTES;
 
 pub const ALPN: &[u8] = b"fr-remote/0";
 /// Unidirectional streams per connection over its WHOLE lifetime: QUIC stream
@@ -288,10 +292,24 @@ pub struct PathLoad {
     /// The round trip of the most recently acknowledged packet, ACK delay
     /// included: unlike the smoothed estimate it shows a queue as it forms.
     pub latest_rtt_us: u64,
+    /// The rest of the same RTT estimator snapshot. Acknowledging older packets can
+    /// increase `packets_acked` without producing a new RTT sample; consumers
+    /// must not infer route progress from that packet count alone.
+    pub smoothed_rtt_us: u64,
+    pub rtt_variation_us: u64,
     /// Sent and neither acknowledged nor declared lost, datagrams included.
     pub bytes_in_flight: u64,
-    /// Ack-eliciting packets acknowledged so far on this path.
+    /// Tracked packets acknowledged so far on this path, including ACK-only
+    /// packets. Count growth alone does not prove a new RTT or video delivery.
     pub packets_acked: u64,
+    /// ACK counter at the last progress from a busy native flight or a
+    /// validated video fragment flushed into a flight that fully drained with
+    /// ACK progress and no packet loss. Unlike an idle ACK count, this covers
+    /// small frames and bursts that flush and drain entirely between a caller's
+    /// path samples. Zero means unobserved.
+    pub busy_packets_acked: u64,
+    /// Original pre-I/O host time for that progress, never a later read time.
+    pub busy_acked_at_us: Option<u64>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatagramRoute {
@@ -461,6 +479,7 @@ pub struct QuicRecords {
     // Native protected packets are private. This remains true across a failed
     // or dropped payload-bearing operation, even if stream queues look empty.
     native_io_unsettled: bool,
+    path_activity: path_activity::Activity,
     streams: Vec<StreamRoute>,
     datagrams: Vec<DatagramRoute>,
     inbound: Vec<Inbound>,
@@ -576,6 +595,7 @@ impl QuicRecords {
             attachments: Vec::new(),
             native: Some(native),
             native_io_unsettled,
+            path_activity: path_activity::Activity::default(),
             streams: streams.to_vec(),
             datagrams: datagrams.to_vec(),
             inbound,
@@ -605,10 +625,15 @@ impl QuicRecords {
     /// evidence for pacing a sender; it grants nothing.
     pub fn path_load(&self) -> Option<PathLoad> {
         let path = self.native.as_ref()?.connection().path_stats();
+        let busy = self.path_activity.progress();
         Some(PathLoad {
             latest_rtt_us: path.latest_rtt_micros?,
+            smoothed_rtt_us: path.smoothed_rtt_micros?,
+            rtt_variation_us: path.rttvar_micros?,
             bytes_in_flight: path.bytes_in_flight,
             packets_acked: path.packets_acked,
+            busy_packets_acked: busy.map_or(0, |(packets, _)| packets),
+            busy_acked_at_us: busy.map(|(_, at)| at),
         })
     }
     pub fn binding(&self) -> ConnectionBinding {
@@ -995,6 +1020,18 @@ impl QuicRecords {
                     self.close();
                     return Err(Error::Native);
                 }
+                // The installed route also admits cursor positions. Only the
+                // actual, already validated video-fragment kind can witness a
+                // small active video flight; admission alone proves no send.
+                let kind = u16::from_be_bytes([bytes[6], bytes[7]]);
+                let native = self.native.as_ref().ok_or(Error::Closed)?;
+                let connection = native.connection().inner();
+                self.path_activity.admitted_datagram(
+                    kind,
+                    connection.datagrams_sent(),
+                    connection.datagrams_dropped_on_send(),
+                    native.connection().path_stats().packets_lost,
+                );
             }
         }
         Ok(SendAdmission::Accepted)
@@ -1071,8 +1108,9 @@ impl QuicRecords {
                 )
                 .await
             };
+            let sent = result.as_ref().is_ok_and(|packets| *packets > 0);
             let native = held.release();
-            self.finish_native_io(native, result)?;
+            self.finish_native_io(native, result, current, sent)?;
             if bulk_opportunity || queued.is_none() {
                 break;
             }
@@ -1104,8 +1142,11 @@ impl QuicRecords {
             )
             .await
         };
+        let sent = result
+            .as_ref()
+            .is_ok_and(|progress| progress.packets_sent > 0);
         let native = held.release();
-        self.finish_native_io(native, result)?;
+        self.finish_native_io(native, result, current, sent)?;
         // This completed operation may have authenticated the last ACK of a
         // record. Retire that custody before sampling the clock again: a local
         // scheduling pause after successful I/O is not a missed peer deadline.
@@ -1221,11 +1262,31 @@ impl QuicRecords {
         &mut self,
         native: NativeQuicUdpConnection,
         result: Result<T, Error>,
+        started: u64,
+        sent: bool,
     ) -> Result<T, Error> {
         // Successful flush/drive completion empties private protected output.
         // A failure preserves the entry witness through close and Held::Drop.
         if result.is_ok() {
             self.native_io_unsettled = false;
+            let path = native.connection().path_stats();
+            self.path_activity.observe(
+                path.bytes_in_flight,
+                path.packets_acked,
+                path.packets_lost,
+                started,
+            );
+            // Receive operations may flush after processing ACKs. Mark the
+            // newly sent video only after observing those ACKs, so proof needs
+            // progress from a later operation, never this same completion.
+            let connection = native.connection().inner();
+            self.path_activity.flushed(
+                path.bytes_in_flight,
+                sent,
+                connection.pending_outbound_datagram_count(),
+                connection.datagrams_sent(),
+                connection.datagrams_dropped_on_send(),
+            );
         }
         self.native = Some(native);
         if let Err(error) = result {

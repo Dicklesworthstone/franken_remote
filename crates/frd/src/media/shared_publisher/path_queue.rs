@@ -27,6 +27,7 @@
 //! over the next two is its route: the first packets sent into an empty queue
 //! come back near the old baseline unless the route itself grew.
 
+use fr_media::bitrate::PathEvidence;
 use fr_transport::quic::PathLoad;
 
 /// Queueing delay a path may hold before capture waits for it to drain:
@@ -39,7 +40,7 @@ pub(super) const QUEUE_LIMIT_US: u64 = 150_000;
 pub(super) const RISE_US: u64 = QUEUE_LIMIT_US / 3;
 /// At most this much in flight is no queue, whatever the last sample said:
 /// the sample may be from a packet that waited behind pictures already acked.
-pub(super) const DRAINED_BYTES: u64 = 4 * 1200;
+pub(super) const DRAINED_BYTES: u64 = fr_transport::quic::BUSY_PATH_BYTES;
 /// A path whose round trip never came within the limit of its lowest sample
 /// for a whole window of this length has a longer route now (a relay), not a
 /// queue. The drain probe normally finds the route first; this window covers
@@ -53,9 +54,25 @@ pub(super) const PACKET_BYTES: u64 = 1200;
 pub(super) const RATE_WINDOW_US: u64 = 1_000_000;
 /// Less busy time than this measures no rate.
 pub(super) const MIN_BUSY_US: u64 = 100_000;
+/// Acknowledged busy traffic or a losslessly drained video flight can justify
+/// a short, bounded headroom observation between service turns. An idle
+/// connection cannot keep that evidence alive by rereading transport counters.
+const HEADROOM_EVIDENCE_US: u64 = 250_000;
+/// Shared viewers can be serviced independently. Consuming a member's cached
+/// path must not renew its sampling lifetime when that viewer has stopped.
+const SAMPLE_EVIDENCE_US: u64 = 100_000;
 
 /// Busy time (microseconds) and the packets delivered in it.
 type Delivered = (u64, u64);
+
+/// A drain arms a probe; only later, genuinely new round trips can measure it.
+/// The RTT on the drain itself may still belong to a packet from the old queue.
+#[derive(Debug, Default)]
+struct RouteProbe {
+    sample: Option<(u64, u64)>,
+    until: u64,
+    lowest: u64,
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct PathQueue {
@@ -63,14 +80,24 @@ pub(crate) struct PathQueue {
     base_us: Option<u64>,
     /// When the current baseline window started, and its lowest sample.
     window: Option<(u64, u64)>,
-    /// Since the path last drained: when the probe ends, and its lowest sample.
-    probe: Option<(u64, u64)>,
+    /// Fresh round trips observed after the path last drained.
+    probe: Option<RouteProbe>,
     /// The previous sample: when, packets acknowledged by then, and whether
     /// the path was busy.
     last: Option<(u64, u64, bool)>,
+    /// The last estimator snapshot. A new packet ACK is not necessarily a new
+    /// RTT sample (reordered ACK ranges can acknowledge only older packets).
+    rtt: Option<(u64, u64, u64)>,
+    /// Last positive RTT observation. Repeated reads cannot fill a route window.
+    rtt_at: Option<u64>,
     /// When the current rate window started, and the current and previous
     /// windows' busy time and packets delivered in it.
     delivery: Option<(u64, Delivered, Delivered)>,
+    /// Most recent acknowledged progress from a previously busy path.
+    clear_at: Option<u64>,
+    /// Consume each native busy-flight progress witness once. Its original
+    /// timestamp, rather than receipt here, bounds its use as headroom.
+    busy_packets_acked: u64,
     queued: bool,
 }
 impl PathQueue {
@@ -82,17 +109,98 @@ impl PathQueue {
     pub(crate) fn delivered_bits_per_second(&self) -> u64 {
         self.rate().saturating_mul(8)
     }
+    /// Advisory evidence for the rate controller. A clear queue alone is not
+    /// measured headroom: after traffic stops, the last RTT and delivery rate
+    /// remain readable but no longer justify an optimistic encoder change.
+    pub(crate) fn evidence(&self, now: u64) -> PathEvidence {
+        let Some((sampled, _, _)) = self.last else {
+            return PathEvidence::Unknown;
+        };
+        let Some(age) = now.checked_sub(sampled) else {
+            return PathEvidence::Unknown;
+        };
+        if age > SAMPLE_EVIDENCE_US {
+            return PathEvidence::Unknown;
+        }
+        if self.queued {
+            PathEvidence::Queued {
+                delivered_bits_per_second: self.delivered_bits_per_second(),
+            }
+        } else if self.clear_at.is_some_and(|at| {
+            now.checked_sub(at)
+                .is_some_and(|age| age <= HEADROOM_EVIDENCE_US)
+        }) {
+            PathEvidence::Clear
+        } else {
+            PathEvidence::Idle
+        }
+    }
     /// Take one sample of the viewer's connection at host time `now`.
     pub(crate) fn observe(&mut self, load: Option<PathLoad>, now: u64) {
         let Some(load) = load else {
-            self.queued = false;
+            // No connection/sample cannot preserve another path's baseline,
+            // pending drain probe, or delivery measurement.
+            *self = Self::default();
             return;
         };
+        if self
+            .last
+            .is_some_and(|(at, acked, _)| now < at || load.packets_acked < acked)
+        {
+            // A clock or counter discontinuity is not path progress. Reset
+            // advisory history without changing any session/authority deadline.
+            *self = Self::default();
+        } else if self
+            .last
+            .is_some_and(|(at, _, _)| now - at > RATE_WINDOW_US)
+        {
+            // A long service gap cannot measure busy time or a route change.
+            // Retain the known baseline conservatively; collect new evidence
+            // before adopting a longer route or measuring delivery again.
+            self.last = None;
+            self.delivery = None;
+            self.clear_at = None;
+            self.window = None;
+            self.probe = None;
+        }
         let rtt = load.latest_rtt_us;
         let busy = load.bytes_in_flight > DRAINED_BYTES;
         let drained = !busy && self.last.is_some_and(|(_, _, was_busy)| was_busy);
-        let base = self.baseline(rtt, now);
-        let base = self.adopt_route(drained, base, rtt, now);
+        let progressed = self
+            .last
+            .is_some_and(|(_, acked, _)| load.packets_acked > acked);
+        let estimator = (rtt, load.smoothed_rtt_us, load.rtt_variation_us);
+        let sampled_rtt = progressed && self.rtt != Some(estimator);
+        let rtt_gap = self.rtt_at.zip(self.rtt).is_some_and(|(at, previous)| {
+            now - at > previous.0.saturating_mul(2).max(SAMPLE_EVIDENCE_US)
+        });
+        self.rtt = Some(estimator);
+        let base = if let (Some(base), false) = (self.base_us, sampled_rtt) {
+            base
+        } else {
+            if rtt_gap {
+                // An occasional new ACK cannot complete a five-second route
+                // window made mostly of stale readings. Keep the known route
+                // and start this observation window with new evidence.
+                self.window = None;
+            }
+            self.rtt_at = Some(now);
+            self.baseline(rtt, now)
+        };
+        // A changed estimator plus ACK progress is positive RTT evidence.
+        // Repeated, fully converged estimates remain usable for queue bounds
+        // and delivery, but cannot certify a longer route by themselves.
+        let base = self.adopt_route(drained && progressed, sampled_rtt, base, rtt, now);
+        if load.busy_packets_acked > self.busy_packets_acked
+            && load.busy_packets_acked <= load.packets_acked
+            && let Some(at) = load.busy_acked_at_us
+            && now
+                .checked_sub(at)
+                .is_some_and(|age| age <= HEADROOM_EVIDENCE_US)
+        {
+            self.clear_at = Some(at);
+        }
+        self.busy_packets_acked = load.busy_packets_acked;
         self.measure(load, busy, now);
         let rate = self.rate();
         let limit = base.saturating_add(QUEUE_LIMIT_US);
@@ -120,18 +228,41 @@ impl PathQueue {
     }
     /// Adopt a longer route once the round trips just after a drain were all
     /// past the limit; returns the baseline to judge this sample by.
-    fn adopt_route(&mut self, drained: bool, base: u64, rtt: u64, now: u64) -> u64 {
-        if drained && self.probe.is_none() {
-            self.probe = Some((now.saturating_add(rtt.saturating_mul(2)), rtt));
+    fn adopt_route(&mut self, drained: bool, sampled: bool, base: u64, rtt: u64, now: u64) -> u64 {
+        if sampled && rtt <= base.saturating_add(QUEUE_LIMIT_US) {
+            // A genuinely fast answer, including the one that drained the
+            // flight, disproves a longer route. A later congested burst must
+            // not discard that answer by starting its own post-drain window.
+            self.probe = None;
+            return base;
         }
-        let Some((until, lowest)) = self.probe else {
+        if drained && self.probe.is_none() {
+            self.probe = Some(RouteProbe::default());
+            return base;
+        }
+        if !sampled {
+            return base;
+        }
+        let Some(probe) = &mut self.probe else {
             return base;
         };
-        let lowest = lowest.min(rtt);
-        if now < until {
-            self.probe = Some((until, lowest));
+        if probe.sample.is_none_or(|(at, previous_rtt)| {
+            now - at > previous_rtt.saturating_mul(2).max(SAMPLE_EVIDENCE_US)
+        }) {
+            // Neither an old drain nor an idle interval can mature a route
+            // probe. Begin again with this first fresh answer, and require
+            // subsequent answers throughout the next two round trips.
+            probe.until = now.saturating_add(rtt.saturating_mul(2));
+            probe.lowest = rtt;
+            probe.sample = Some((now, rtt));
             return base;
         }
+        probe.lowest = probe.lowest.min(rtt);
+        probe.sample = Some((now, rtt));
+        if now < probe.until {
+            return base;
+        }
+        let lowest = probe.lowest;
         self.probe = None;
         if lowest <= base.saturating_add(QUEUE_LIMIT_US) {
             return base;
@@ -186,16 +317,37 @@ mod tests {
 
     const FULL: u64 = DRAINED_BYTES + 1;
 
-    fn load(latest_rtt_us: u64, bytes_in_flight: u64) -> PathLoad {
-        acked(latest_rtt_us, bytes_in_flight, 0)
+    /// Each call represents a newly acknowledged packet, not another read of
+    /// the same transport statistics.
+    fn sample(path: &mut PathQueue, rtt: u64, bytes: u64, now: u64) {
+        let packets = path.last.map_or(1, |(_, packets, _)| packets + 1);
+        let mut load = acked(rtt, bytes, packets);
+        // A changing smoothed estimator witnesses a new RTT sample even when
+        // individual latest RTT values happen to be identical.
+        load.smoothed_rtt_us = rtt + packets % 2;
+        path.observe(Some(load), now);
     }
 
     fn acked(latest_rtt_us: u64, bytes_in_flight: u64, packets_acked: u64) -> PathLoad {
         PathLoad {
             latest_rtt_us,
+            smoothed_rtt_us: latest_rtt_us,
+            rtt_variation_us: latest_rtt_us / 2,
             bytes_in_flight,
             packets_acked,
+            busy_packets_acked: 0,
+            busy_acked_at_us: None,
         }
+    }
+
+    fn busy_progress(mut load: PathLoad, at: u64) -> PathLoad {
+        load.busy_packets_acked = load.packets_acked;
+        load.busy_acked_at_us = Some(at);
+        load
+    }
+
+    fn current(path: &PathQueue) -> PathEvidence {
+        path.evidence(path.last.map_or(0, |(at, _, _)| at))
     }
 
     fn rate_at(path: &mut PathQueue, now: u64) -> u64 {
@@ -208,17 +360,17 @@ mod tests {
         let mut path = PathQueue::default();
         path.observe(None, 0);
         assert!(!path.queued(), "no sample is no queue");
-        path.observe(Some(load(30_000, FULL)), 1_000);
-        path.observe(Some(load(10_000, FULL)), 2_000);
+        sample(&mut path, 30_000, FULL, 1_000);
+        sample(&mut path, 10_000, FULL, 2_000);
         assert!(!path.queued());
         // The lowest sample is the baseline, not the first one.
-        path.observe(Some(load(10_000 + QUEUE_LIMIT_US, FULL)), 3_000);
+        sample(&mut path, 10_000 + QUEUE_LIMIT_US, FULL, 3_000);
         assert!(!path.queued(), "at the limit is not past it");
-        path.observe(Some(load(10_001 + QUEUE_LIMIT_US, FULL)), 4_000);
+        sample(&mut path, 10_001 + QUEUE_LIMIT_US, FULL, 4_000);
         assert!(path.queued());
-        path.observe(Some(load(10_001 + QUEUE_LIMIT_US, DRAINED_BYTES)), 5_000);
+        sample(&mut path, 10_001 + QUEUE_LIMIT_US, DRAINED_BYTES, 5_000);
         assert!(!path.queued(), "a drained path holds no queue");
-        path.observe(Some(load(400_000, FULL)), 6_000);
+        sample(&mut path, 400_000, FULL, 6_000);
         assert!(path.queued());
         path.observe(None, 7_000);
         assert!(!path.queued(), "a closed connection holds no queue");
@@ -227,20 +379,20 @@ mod tests {
     #[test]
     fn a_longer_route_becomes_the_baseline_after_a_window_without_a_low_sample() {
         let mut path = PathQueue::default();
-        path.observe(Some(load(5_000, FULL)), 0);
-        // The route grew by 200 ms just after the first window opened.
+        sample(&mut path, 5_000, FULL, 0);
+        // Regular, new ACK samples establish the route. Merely rereading the
+        // first high RTT for two windows is not evidence of a longer route.
         let relay = 205_000;
-        path.observe(Some(load(relay, FULL)), 1);
-        assert!(path.queued());
-        // The first window still holds the old route's sample.
-        path.observe(Some(load(relay, FULL)), BASELINE_WINDOW_US);
-        assert!(path.queued());
-        path.observe(Some(load(relay, FULL)), 2 * BASELINE_WINDOW_US - 1);
-        assert!(path.queued());
-        path.observe(Some(load(relay, FULL)), 2 * BASELINE_WINDOW_US);
+        for now in (100_000..2 * BASELINE_WINDOW_US).step_by(100_000) {
+            sample(&mut path, relay, FULL, now);
+            assert!(path.queued());
+        }
+        sample(&mut path, relay, FULL, 2 * BASELINE_WINDOW_US);
         assert!(!path.queued(), "a whole window without a low sample");
-        path.observe(
-            Some(load(relay + QUEUE_LIMIT_US + 1, FULL)),
+        sample(
+            &mut path,
+            relay + QUEUE_LIMIT_US + 1,
+            FULL,
             2 * BASELINE_WINDOW_US + 1,
         );
         assert!(path.queued(), "the new baseline still bounds the queue");
@@ -249,49 +401,57 @@ mod tests {
     #[test]
     fn a_drained_sample_in_a_window_keeps_the_baseline() {
         let mut path = PathQueue::default();
-        path.observe(Some(load(5_000, FULL)), 0);
-        path.observe(Some(load(400_000, FULL)), 1);
-        path.observe(Some(load(400_000, FULL)), BASELINE_WINDOW_US);
-        assert!(path.queued());
-        // Capture waited, the queue drained, and the path showed its delay.
-        path.observe(Some(load(6_000, DRAINED_BYTES)), BASELINE_WINDOW_US * 3 / 2);
-        assert!(!path.queued());
-        path.observe(Some(load(400_000, FULL)), 2 * BASELINE_WINDOW_US);
-        assert!(path.queued(), "the window's low sample kept the baseline");
-        path.observe(Some(load(400_000, FULL)), 3 * BASELINE_WINDOW_US);
-        assert!(!path.queued(), "the next window had none");
+        sample(&mut path, 5_000, FULL, 0);
+        for now in (100_000..3 * BASELINE_WINDOW_US).step_by(100_000) {
+            if now == BASELINE_WINDOW_US * 3 / 2 {
+                // Capture waited, the queue drained, and the path showed its
+                // real delay inside the second baseline window.
+                sample(&mut path, 6_000, DRAINED_BYTES, now);
+                assert!(!path.queued());
+            } else {
+                sample(&mut path, 400_000, FULL, now);
+                assert!(path.queued(), "the observed low sample kept the baseline");
+            }
+        }
+        sample(&mut path, 400_000, FULL, 3 * BASELINE_WINDOW_US);
+        assert!(!path.queued(), "the next window had no low sample");
     }
 
     #[test]
     fn a_drained_path_that_stays_slow_has_a_longer_route() {
         let mut path = PathQueue::default();
-        path.observe(Some(load(5_000, FULL)), 0);
+        sample(&mut path, 5_000, FULL, 0);
         // The route grows by 200 ms; capture waits for the path to drain.
-        path.observe(Some(load(205_000, FULL)), 10_000);
+        sample(&mut path, 205_000, FULL, 10_000);
         assert!(path.queued());
-        path.observe(Some(load(205_000, 0)), 20_000);
+        sample(&mut path, 205_000, 0, 20_000);
         assert!(!path.queued());
-        path.observe(Some(load(206_000, FULL)), 200_000);
+        sample(&mut path, 206_000, FULL, 200_000);
         assert!(
             path.queued(),
             "judged by the old route until the probe ends"
         );
-        path.observe(Some(load(205_500, FULL)), 430_000);
+        sample(&mut path, 205_500, FULL, 430_000);
+        assert!(
+            path.queued(),
+            "two new round trips are still being observed"
+        );
+        sample(&mut path, 205_250, FULL, 650_000);
         assert!(!path.queued(), "every sample after the drain was slow");
-        path.observe(Some(load(205_500 + QUEUE_LIMIT_US + 1, FULL)), 440_000);
+        sample(&mut path, 205_250 + QUEUE_LIMIT_US + 1, FULL, 660_000);
         assert!(path.queued(), "the new route still bounds the queue");
     }
 
     #[test]
     fn a_drained_path_that_answers_fast_had_a_queue() {
         let mut path = PathQueue::default();
-        path.observe(Some(load(5_000, FULL)), 0);
-        path.observe(Some(load(700_000, FULL)), 10_000);
+        sample(&mut path, 5_000, FULL, 0);
+        sample(&mut path, 700_000, FULL, 10_000);
         assert!(path.queued());
-        path.observe(Some(load(700_000, 0)), 20_000);
+        sample(&mut path, 700_000, 0, 20_000);
         // The first packet sent into the drained queue.
-        path.observe(Some(load(9_000, FULL)), 100_000);
-        path.observe(Some(load(400_000, FULL)), 1_420_000);
+        sample(&mut path, 9_000, FULL, 100_000);
+        sample(&mut path, 400_000, FULL, 1_420_000);
         assert!(
             path.queued(),
             "a fast sample after the drain kept the baseline"
@@ -302,7 +462,10 @@ mod tests {
     fn measured_at_120_kb_per_second() -> PathQueue {
         let mut path = PathQueue::default();
         path.observe(Some(acked(1_000, FULL, 0)), 0);
-        path.observe(Some(acked(1_000, FULL, 10)), 100_000);
+        path.observe(
+            Some(busy_progress(acked(1_000, FULL, 10), 100_000)),
+            100_000,
+        );
         assert_eq!(rate_at(&mut path, 100_000), 120_000);
         assert!(!path.queued());
         path
@@ -342,5 +505,237 @@ mod tests {
         // The first window's delivery survives one more window, then is gone.
         assert_eq!(rate_at(&mut path, 50_000 + RATE_WINDOW_US), 123_000);
         assert_eq!(rate_at(&mut path, 50_000 + 3 * RATE_WINDOW_US), 0);
+    }
+
+    #[test]
+    fn rereading_a_queued_rtt_never_teaches_a_longer_route() {
+        let mut path = PathQueue::default();
+        path.observe(Some(acked(5_000, FULL, 1)), 0);
+        let stalled = acked(400_000, FULL, 2);
+        path.observe(Some(stalled), 10_000);
+        for now in (20_000..=4 * BASELINE_WINDOW_US).step_by(10_000) {
+            path.observe(Some(stalled), now);
+            assert!(path.queued(), "no new ACK can justify a new route");
+            assert_eq!(path.base_us, Some(5_000));
+        }
+    }
+
+    #[test]
+    fn acknowledging_older_packets_cannot_refresh_an_unchanged_rtt_estimator() {
+        let mut path = PathQueue::default();
+        path.observe(Some(acked(5_000, FULL, 1)), 0);
+        let mut stale = acked(400_000, FULL, 2);
+        path.observe(Some(stale), 10_000);
+        // An ACK range can acknowledge older packets while repeating an
+        // already-acknowledged largest packet. QUIC counts those ACKs but does
+        // not update its RTT estimator. They cannot certify a route change.
+        for now in (20_000..=4 * BASELINE_WINDOW_US).step_by(10_000) {
+            stale.packets_acked += 1;
+            path.observe(Some(stale), now);
+            assert!(path.queued());
+            assert_eq!(path.base_us, Some(5_000));
+        }
+    }
+
+    #[test]
+    fn a_drain_probe_needs_new_acknowledgements_before_adopting_a_route() {
+        let mut path = PathQueue::default();
+        path.observe(Some(acked(5_000, FULL, 1)), 0);
+        path.observe(Some(acked(400_000, FULL, 2)), 10_000);
+        path.observe(Some(acked(400_000, 0, 3)), 20_000);
+        assert!(path.probe.is_some());
+        // The peer is silent after its last queued packet was acknowledged.
+        // Repeatedly reading that RTT after two round trips cannot complete
+        // the probe. Starting new traffic must still respect the old baseline.
+        for now in (30_000..=900_000).step_by(10_000) {
+            path.observe(Some(acked(400_000, 0, 3)), now);
+        }
+        path.observe(Some(acked(400_000, FULL, 3)), 910_000);
+        assert!(path.queued());
+        assert_eq!(path.base_us, Some(5_000));
+        // The first new answer from the drained path proves the queue was
+        // transient; no controller needs to undo a fabricated route change.
+        path.observe(Some(acked(6_000, FULL, 4)), 920_000);
+        assert!(!path.queued());
+        assert_eq!(path.base_us, Some(5_000));
+    }
+
+    #[test]
+    fn sparse_new_round_trips_cannot_fill_a_continuous_route_window() {
+        let mut path = PathQueue::default();
+        let mut load = acked(5_000, FULL, 1);
+        path.observe(Some(load), 0);
+        let mut previous_at = 0;
+        for (now, rtt, packets) in [
+            (10_000, 400_000, 2),
+            (5_000_000, 410_000, 3),
+            (10_000_000, 420_000, 4),
+            (15_000_000, 430_000, 5),
+        ] {
+            for repeated_at in (previous_at + 10_000..now).step_by(10_000) {
+                path.observe(Some(load), repeated_at);
+            }
+            load = acked(rtt, FULL, packets);
+            path.observe(Some(load), now);
+            assert_eq!(path.base_us, Some(5_000));
+            assert!(path.queued(), "stale time cannot establish a longer route");
+            previous_at = now;
+        }
+    }
+
+    #[test]
+    fn only_recent_acknowledged_busy_traffic_supplies_clear_headroom() {
+        let mut path = PathQueue::default();
+        assert_eq!(current(&path), PathEvidence::Unknown);
+        path.observe(Some(acked(5_000, 0, 1)), 0);
+        assert_eq!(current(&path), PathEvidence::Idle);
+        // Idle heartbeats carry no evidence that a video bitrate fits.
+        path.observe(Some(acked(5_000, 0, 2)), 10_000);
+        assert_eq!(current(&path), PathEvidence::Idle);
+        path.observe(Some(acked(5_000, FULL, 2)), 20_000);
+        assert_eq!(current(&path), PathEvidence::Idle);
+        path.observe(Some(busy_progress(acked(5_000, 0, 3), 30_000)), 30_000);
+        assert_eq!(current(&path), PathEvidence::Clear);
+        path.observe(Some(acked(5_000, 0, 3)), 30_000 + HEADROOM_EVIDENCE_US);
+        assert_eq!(current(&path), PathEvidence::Clear);
+        path.observe(Some(acked(5_000, 0, 4)), 30_001 + HEADROOM_EVIDENCE_US);
+        assert_eq!(current(&path), PathEvidence::Idle);
+        path.observe(None, 300_000);
+        assert_eq!(current(&path), PathEvidence::Unknown);
+    }
+
+    #[test]
+    fn the_first_high_rtt_after_a_drained_idle_cannot_certify_a_longer_route() {
+        let mut path = PathQueue::default();
+        path.observe(Some(acked(5_000, FULL, 1)), 0);
+        path.observe(Some(acked(400_000, FULL, 2)), 10_000);
+        let drained = acked(400_000, 0, 3);
+        path.observe(Some(drained), 20_000);
+        for now in (50_000..=900_000).step_by(50_000) {
+            path.observe(Some(drained), now);
+        }
+        // A new large burst can be congested even after an idle interval. Its
+        // first ACK is not two observed round trips from an empty path.
+        path.observe(Some(acked(400_000, FULL, 3)), 910_000);
+        path.observe(Some(acked(405_000, FULL, 4)), 1_310_000);
+        assert!(path.queued());
+        assert_eq!(path.base_us, Some(5_000));
+    }
+
+    #[test]
+    fn an_idle_gap_between_fresh_answers_restarts_a_route_probe() {
+        let mut path = PathQueue::default();
+        sample(&mut path, 5_000, FULL, 0);
+        sample(&mut path, 400_000, FULL, 10_000);
+        sample(&mut path, 400_000, 0, 20_000);
+        sample(&mut path, 405_000, FULL, 100_000);
+        let last = acked(405_000, FULL, 4);
+        for now in (150_000..=1_000_000).step_by(50_000) {
+            path.observe(Some(last), now);
+        }
+        sample(&mut path, 406_000, FULL, 1_010_001);
+        assert!(path.queued(), "idle time cannot finish the original probe");
+        assert_eq!(path.base_us, Some(5_000));
+        for now in [1_200_000, 1_500_000, 1_824_002] {
+            sample(&mut path, 407_000, FULL, now);
+        }
+        assert_eq!(path.base_us, Some(406_000));
+        assert!(!path.queued(), "a new continuous observation can finish");
+    }
+
+    #[test]
+    fn a_busy_flight_that_drains_between_path_samples_still_proves_headroom() {
+        let mut path = PathQueue::default();
+        for now in (0..=5_000_000).step_by(50_000) {
+            // The transport sampled the actual busy flight immediately after
+            // flush. Its packets are already ACKed by this subscriber turn.
+            let packets = now / 50_000 + 10;
+            path.observe(Some(busy_progress(acked(5_000, 0, packets), now)), now);
+            assert_eq!(path.evidence(now), PathEvidence::Clear);
+            assert!(!path.queued());
+        }
+        let last = busy_progress(acked(5_000, 0, 111), 5_000_000);
+        path.observe(Some(last), 5_250_001);
+        assert_eq!(current(&path), PathEvidence::Idle);
+    }
+
+    #[test]
+    fn delayed_or_future_native_progress_is_never_retimed_on_receipt() {
+        for at in [1, 1_000_001] {
+            let mut path = PathQueue::default();
+            let progress = busy_progress(acked(5_000, 0, 10), at);
+            path.observe(Some(progress), 1_000_000);
+            assert_eq!(current(&path), PathEvidence::Idle);
+            // A previously future token cannot become newly observed proof
+            // when the consumer catches up, and a late token cannot renew.
+            path.observe(Some(progress), 1_000_002);
+            assert_eq!(current(&path), PathEvidence::Idle);
+        }
+    }
+
+    #[test]
+    fn unavailable_telemetry_cannot_bridge_delivery_or_route_evidence() {
+        let mut path = measured_at_120_kb_per_second();
+        assert_eq!(current(&path), PathEvidence::Clear);
+        path.observe(None, 150_000);
+        assert_eq!(path.delivered_bits_per_second(), 0);
+        path.observe(Some(acked(200_000, FULL, 100)), 200_000);
+        assert_eq!(current(&path), PathEvidence::Idle);
+        assert_eq!(path.delivered_bits_per_second(), 0);
+        assert_eq!(path.base_us, Some(200_000));
+        assert!(path.probe.is_none());
+    }
+
+    #[test]
+    fn a_shared_consumers_reads_cannot_refresh_an_unserviced_viewers_sample() {
+        let mut path = measured_at_120_kb_per_second();
+        assert_eq!(path.evidence(100_000), PathEvidence::Clear);
+        assert_eq!(
+            path.evidence(100_000 + SAMPLE_EVIDENCE_US),
+            PathEvidence::Clear
+        );
+        for now in [99_999, 100_001 + SAMPLE_EVIDENCE_US, 10_000_000] {
+            assert_eq!(path.evidence(now), PathEvidence::Unknown);
+        }
+        path.observe(Some(acked(400_000, FULL, 11)), 110_000);
+        assert!(matches!(
+            path.evidence(110_000),
+            PathEvidence::Queued { .. }
+        ));
+        assert_eq!(
+            path.evidence(110_001 + SAMPLE_EVIDENCE_US),
+            PathEvidence::Unknown
+        );
+    }
+
+    #[test]
+    fn counter_and_clock_discontinuities_discard_advisory_history() {
+        for (now, packets) in [(110_000, 1), (99_999, 11)] {
+            let mut path = measured_at_120_kb_per_second();
+            path.observe(Some(acked(200_000, FULL, packets)), now);
+            assert_eq!(current(&path), PathEvidence::Idle);
+            assert_eq!(path.delivered_bits_per_second(), 0);
+            assert_eq!(path.base_us, Some(200_000));
+            assert!(path.probe.is_none());
+        }
+    }
+
+    #[test]
+    fn an_unobserved_service_gap_cannot_supply_busy_time_or_headroom() {
+        let mut path = measured_at_120_kb_per_second();
+        let resume = 100_001 + RATE_WINDOW_US;
+        path.observe(Some(acked(5_000, FULL, 1_000)), resume);
+        assert_eq!(current(&path), PathEvidence::Idle);
+        assert_eq!(path.delivered_bits_per_second(), 0);
+        assert_eq!(path.base_us, Some(1_000), "known route stays conservative");
+        path.observe(
+            Some(busy_progress(
+                acked(5_000, FULL, 1_010),
+                resume + MIN_BUSY_US,
+            )),
+            resume + MIN_BUSY_US,
+        );
+        assert_eq!(current(&path), PathEvidence::Clear);
+        assert_eq!(path.delivered_bits_per_second(), 120_000 * 8);
     }
 }

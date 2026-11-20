@@ -1168,11 +1168,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
         // the path keeps holding lowers the rate toward what it delivers.
         if let Some(bitrate) = &mut self.bitrate {
             bitrate
-                .observe_path(
-                    current,
-                    self.path.queued(),
-                    self.path.delivered_bits_per_second(),
-                )
+                .observe_path_evidence(current, self.path.evidence(current))
                 .map_err(bitrate_error)?;
         }
         let credit = self.sender.stream_credit(self.capacity);

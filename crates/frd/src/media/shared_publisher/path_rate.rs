@@ -3,13 +3,13 @@
 //! The capture gate (`join.rs`) already skips captures while no viewer with
 //! credit has a clear path. Below about half the encoder's rate that is not
 //! enough: a queue that every viewer's path keeps holding lowers the rate
-//! toward what those paths deliver (`fr_media::bitrate::Controller::observe_path`).
+//! toward what those paths deliver (`fr_media::bitrate::Controller::observe_path_evidence`).
 //! One encoder serves every viewer, so a slow viewer never lowers a healthy
 //! viewer's rate: while some paths are queued and others are clear, the rate
 //! holds. With `--adaptive-capture` the same evidence reaches that pacing's
 //! own rate controller instead.
 use super::{Error, MAX_SUBSCRIBERS, MediaError, Members, ObservationControl, Publisher};
-use fr_media::bitrate;
+use fr_media::bitrate::{self, PathEvidence};
 use fr_wire::decoder::Binding;
 
 /// The rate controller of a source without adaptive pacing.
@@ -22,8 +22,10 @@ pub(super) struct PathRate {
 /// The paths of the viewers a source serves, in one service turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Paths {
-    /// No eligible viewer's path holds a queue.
+    /// Every eligible viewer has recent acknowledged busy delivery, no queue.
     Clear,
+    /// No queue, but idle or missing delivery evidence cannot justify a probe.
+    Unmeasured,
     /// Every eligible viewer's path holds one. The lowest delivery any of them
     /// measured while busy, or 0 when none did.
     Queued(u64),
@@ -31,36 +33,41 @@ enum Paths {
     Split,
 }
 
-/// Each eligible viewer's path: whether it holds a queue, and its busy delivery.
-fn classify(paths: impl Iterator<Item = (bool, u64)>) -> Paths {
-    let (mut queued, mut clear) = (0_usize, 0_usize);
+/// Only a whole measured cohort can raise the shared encoder's rate.
+fn classify(paths: impl Iterator<Item = PathEvidence>) -> Paths {
+    let (mut queued, mut clear, mut unmeasured) = (0_usize, 0_usize, 0_usize);
     let mut delivered: Option<u64> = None;
-    for (is_queued, rate) in paths {
-        if is_queued {
-            queued += 1;
-            if rate > 0 {
-                delivered = Some(delivered.map_or(rate, |lowest| lowest.min(rate)));
+    for evidence in paths {
+        match evidence {
+            PathEvidence::Queued {
+                delivered_bits_per_second: rate,
+            } => {
+                queued += 1;
+                if rate > 0 {
+                    delivered = Some(delivered.map_or(rate, |lowest| lowest.min(rate)));
+                }
             }
-        } else {
-            clear += 1;
+            PathEvidence::Clear => clear += 1,
+            PathEvidence::Unknown | PathEvidence::Idle => unmeasured += 1,
         }
     }
-    match (queued, clear) {
-        (0, 0) => Paths::Split,
-        (_, 0) => Paths::Queued(delivered.unwrap_or(0)),
-        (0, _) => Paths::Clear,
+    match (queued, clear, unmeasured) {
+        (0, 0, 0) => Paths::Split,
+        (_, 0, 0) => Paths::Queued(delivered.unwrap_or(0)),
+        (0, _, 0) => Paths::Clear,
+        (0, _, _) => Paths::Unmeasured,
         _ => Paths::Split,
     }
 }
 
 impl Members {
-    fn paths(&self) -> Paths {
+    fn paths(&self, now: u64) -> Paths {
         classify(
             self.entries
                 .iter()
                 .flatten()
                 .filter(|entry| entry.pacing_eligible())
-                .map(|entry| (entry.path.queued(), entry.path.delivered_bits_per_second())),
+                .map(|entry| entry.path.evidence(now)),
         )
     }
     fn rate_views(&self) -> [Option<Binding>; MAX_SUBSCRIBERS] {
@@ -81,8 +88,14 @@ fn observe(
     paths: Paths,
 ) -> Result<(), bitrate::Error> {
     match paths {
-        Paths::Clear => controller.observe_path(now, false, 0),
-        Paths::Queued(delivered) => controller.observe_path(now, true, delivered),
+        Paths::Clear => controller.observe_path_evidence(now, PathEvidence::Clear),
+        Paths::Unmeasured => controller.observe_path_evidence(now, PathEvidence::Unknown),
+        Paths::Queued(delivered_bits_per_second) => controller.observe_path_evidence(
+            now,
+            PathEvidence::Queued {
+                delivered_bits_per_second,
+            },
+        ),
         Paths::Split => controller.observe_split_path(now),
     }
 }
@@ -179,11 +192,15 @@ impl Publisher {
     /// Once per service turn, after each viewer's own path sample.
     pub(super) fn observe_paths(&mut self, now: u64) -> Result<(), Error> {
         let members = self.members.lock().map_err(|_| Error::Poisoned)?;
+        // A subscriber can sample its path after this publisher turn began.
+        // Judge that snapshot at the owner clock already observed under the
+        // same lock, so a fresh sample cannot appear to come from the future.
+        let now = now.max(members.last);
         if let Some(rate) = &mut self.path_rate {
             rate.observe_views(&members)?;
-            observe(&mut rate.controller, now, members.paths()).map_err(bitrate_error)?;
+            observe(&mut rate.controller, now, members.paths(now)).map_err(bitrate_error)?;
         } else if let Some(controller) = self.adaptive.as_mut().and_then(|a| a.bitrate_mut()) {
-            observe(controller, now, members.paths()).map_err(bitrate_error)?;
+            observe(controller, now, members.paths(now)).map_err(bitrate_error)?;
         }
         Ok(())
     }
@@ -196,20 +213,29 @@ fn bitrate_error(error: bitrate::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::{Paths, classify, observe};
-    use fr_media::bitrate::{Controller, Reason};
+    use fr_media::bitrate::{Controller, PathEvidence, Reason};
+
+    fn queued(delivered_bits_per_second: u64) -> PathEvidence {
+        PathEvidence::Queued {
+            delivered_bits_per_second,
+        }
+    }
 
     #[test]
     fn only_a_whole_queued_cohort_is_queued() {
         assert_eq!(classify([].into_iter()), Paths::Split, "nobody to judge");
-        assert_eq!(classify([(false, 0), (false, 9)].into_iter()), Paths::Clear);
         assert_eq!(
-            classify([(true, 900_000), (true, 0), (true, 700_000)].into_iter()),
+            classify([PathEvidence::Clear, PathEvidence::Clear].into_iter()),
+            Paths::Clear
+        );
+        assert_eq!(
+            classify([queued(900_000), queued(0), queued(700_000)].into_iter()),
             Paths::Queued(700_000),
             "the slowest measured path"
         );
-        assert_eq!(classify([(true, 0)].into_iter()), Paths::Queued(0));
+        assert_eq!(classify([queued(0)].into_iter()), Paths::Queued(0));
         assert_eq!(
-            classify([(true, 700_000), (false, 0)].into_iter()),
+            classify([queued(700_000), PathEvidence::Clear].into_iter()),
             Paths::Split,
             "a healthy viewer keeps the rate"
         );
@@ -240,9 +266,9 @@ mod tests {
     #[test]
     fn a_split_cohort_cancels_an_unsent_probe() {
         let mut c = Controller::new(2_000_000).unwrap();
-        observe(&mut c, 0, Paths::Queued(0)).unwrap();
-        observe(&mut c, 100_000, Paths::Queued(0)).unwrap();
-        observe(&mut c, 200_000, Paths::Queued(0)).unwrap();
+        for now in (0..=200_000).step_by(20_000) {
+            observe(&mut c, now, Paths::Queued(0)).unwrap();
+        }
         let capture = c.begin_capture().unwrap();
         c.complete_capture(capture, capture.bitrate(), true, 200_000)
             .unwrap();
@@ -252,5 +278,32 @@ mod tests {
         assert_eq!(c.pending().unwrap().reason(), Reason::Headroom);
         observe(&mut c, 4_220_000, Paths::Split).unwrap();
         assert_eq!(c.pending(), None);
+    }
+
+    #[test]
+    fn idle_and_unknown_members_never_supply_shared_probe_headroom() {
+        for evidence in [PathEvidence::Idle, PathEvidence::Unknown] {
+            assert_eq!(
+                classify([PathEvidence::Clear, evidence].into_iter()),
+                Paths::Unmeasured
+            );
+            assert_eq!(classify([evidence].into_iter()), Paths::Unmeasured);
+            assert_eq!(
+                classify([queued(800_000), evidence].into_iter()),
+                Paths::Split
+            );
+            let mut c = Controller::new(2_000_000).unwrap();
+            for now in (0..=200_000).step_by(20_000) {
+                observe(&mut c, now, Paths::Queued(800_000)).unwrap();
+            }
+            let capture = c.begin_capture().unwrap();
+            c.complete_capture(capture, capture.bitrate(), true, 200_000)
+                .unwrap();
+            for now in (200_000..10_000_000).step_by(20_000) {
+                let paths = classify([PathEvidence::Clear, evidence].into_iter());
+                observe(&mut c, now, paths).unwrap();
+                assert_eq!(c.pending(), None);
+            }
+        }
     }
 }
