@@ -674,6 +674,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fr-web"
+version = "0.1.0"
+dependencies = [
+ "fr-client",
+ "fr-core",
+ "fr-media",
+ "fr-transport",
+ "fr-wire",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fr-windows"
 version = "0.1.0"
 dependencies = [
