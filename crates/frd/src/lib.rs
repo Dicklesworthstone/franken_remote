@@ -25,6 +25,9 @@
 #[cfg(all(test, unix))]
 mod test_support;
 
+#[cfg(all(test, native_stack))]
+mod test_cell;
+
 #[cfg(native_stack)]
 pub mod worker;
 

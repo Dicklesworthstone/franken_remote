@@ -19,7 +19,7 @@ pub(super) struct Handoff {
 fn is_request(bytes: &[u8]) -> bool {
     bytes.get(6..8) == Some(&0x0036_u16.to_be_bytes())
 }
-impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
+impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send> SharedServices<'_, F> {
     fn discard_feedback(
         &self,
         route: Route,

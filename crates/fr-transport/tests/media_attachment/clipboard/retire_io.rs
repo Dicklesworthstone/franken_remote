@@ -201,7 +201,7 @@ fn pending_payload_empty_io_retires_clipboard_and_preserves_input() {
             let mut tested = false;
             for _ in 0..16 {
                 let checks = Cell::new(0);
-                let mut io = pin!(l.h.drive(&cx, Duration::from_millis(100), || {
+                let mut io = pin!(l.h.drive_local(&cx, Duration::from_millis(100), || {
                     checks.set(checks.get() + 1);
                     true
                 }));

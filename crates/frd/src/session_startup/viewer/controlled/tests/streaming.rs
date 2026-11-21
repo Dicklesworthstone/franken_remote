@@ -31,7 +31,7 @@ fn continuous_control(feedback: bool) {
             video,
             ..
         } = Box::pin(fixture_with_wire_feedback(&c, &h, caps(), true, feedback)).await;
-        let reports = std::cell::Cell::new(0);
+        let reports = crate::test_cell::SendCell::new(0);
         let mut feedback_binding = host_media.binding();
         feedback_binding.parent = viewer.session.opened.binding;
         let feedback_route = Route::Stream(host.io().unwrap().1.inbound);

@@ -1043,7 +1043,7 @@ impl ControlledViewer {
             viewer
                 .session
                 .transport
-                .drive(cx, wait.min(Duration::from_micros(remaining)), || {
+                .drive_local(cx, wait.min(Duration::from_micros(remaining)), || {
                     viewer.microphone.permits_io()
                         && viewer.files.permits_io()
                         && viewer

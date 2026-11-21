@@ -189,9 +189,9 @@ impl NativePublisher {
     pub fn serve_managed_control<'a>(
         &'a mut self,
         seat: Seat,
-        local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + Send + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
     ) -> impl ManagedControlService + 'a {
         self.managed_control(Ok(None), seat, local, nonce, ticket, None)
     }
@@ -205,9 +205,9 @@ impl NativePublisher {
         &'a mut self,
         cleanup: &asupersync::cx::Cx,
         seat: Seat,
-        local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + Send + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
     ) -> impl ManagedControlService + 'a {
         self.serve_managed_control_with_audio(cleanup, seat, local, nonce, ticket, None)
     }
@@ -224,9 +224,9 @@ impl NativePublisher {
         &'a mut self,
         cleanup: &asupersync::cx::Cx,
         seat: Seat,
-        local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + Send + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
         audio: Option<crate::media::shared_publisher::AudioProfile>,
     ) -> impl ManagedControlService + 'a {
         let reporting = self
@@ -242,9 +242,11 @@ impl NativePublisher {
         &'a mut self,
         reporting: Result<Option<fr_transport::quic::RevocationReport>, Error>,
         seat: Seat,
-        mut local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        mut local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError>
+        + Send
+        + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
         audio: Option<crate::media::shared_publisher::AudioProfile>,
     ) -> impl ManagedControlService + 'a {
         let native = Arc::new(Mutex::new(Native::default()));

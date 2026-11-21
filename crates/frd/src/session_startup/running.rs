@@ -27,11 +27,13 @@ pub use streaming::{
 const REFRESH_MARGIN_US: u64 = 500_000;
 const MAX_TURN: Duration = Duration::from_millis(100);
 
-/// Synchronous, bounded application work, serviced during admission refresh as
-/// well as ordinary I/O. No native calls or blocking callbacks belong here.
 mod input_wake;
 
-trait Services {
+/// Synchronous, bounded application work, serviced during admission refresh as
+/// well as ordinary I/O. No native calls or blocking callbacks belong here.
+/// Send: a host session's future is Send, and its transport drive holds
+/// `permitted` across awaits.
+trait Services: Send {
     /// A new locally collected native submission, never packet receipt or renewal.
     fn input_submitted(&mut self, _at_us: u64) {}
 
@@ -47,7 +49,7 @@ trait Services {
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()>;
 }
-impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for F {
+impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send> Services for F {
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
         self(route, bytes)
     }
@@ -270,7 +272,7 @@ impl HostSession {
         &'a mut self,
         wait: Duration,
         mut fresh_nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
+        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let operation = Operation {
             session: self,

@@ -963,7 +963,7 @@ impl Uplink {
             let io = guard.as_mut().expect("bound original connection");
             let first = io.uplink.service(io.q, &mut authorize)?;
             if let Err(error) =
-                io.q.drive(&io.uplink.cx, wait, || {
+                io.q.drive_local(&io.uplink.cx, wait, || {
                     io.uplink.permits_io() && authorize()
                 })
                 .await

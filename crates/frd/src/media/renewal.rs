@@ -385,7 +385,7 @@ impl ObservationRenewal {
     pub(crate) fn reconcile_checked<'a>(
         &'a self,
         connection: &'a mut QuicRecords,
-        mut permitted: impl FnMut() -> bool + 'a,
+        mut permitted: impl FnMut() -> bool + Send + 'a,
     ) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
         let bound = self.bound(connection);
         let guard = bound
@@ -413,7 +413,7 @@ impl ObservationRenewal {
         &'a self,
         connection: &'a mut QuicRecords,
         wait: Duration,
-        mut permitted: impl FnMut() -> bool + 'a,
+        mut permitted: impl FnMut() -> bool + Send + 'a,
     ) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
         let bound = self.bound(connection);
         let guard = bound

@@ -83,13 +83,15 @@ pub(super) async fn recover(
     host: &mut StreamingHost,
     demand: RecoveryDemand,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
-    ticket: &mut impl FnMut() -> Option<InputTicketId>,
+    ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
     other: &mut impl Services,
     acquisition: &mut Option<Box<acquisition::Acquisition>>,
-    local: &mut impl FnMut(
+    local: &mut (
+             impl FnMut(
         acquisition::LocalControl<'_>,
-    )
-        -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>,
+    ) -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>
+             + Send
+         ),
 ) -> Result<(), Error> {
     let media = host.media.take().ok_or(Error::Order)?;
     let media = Box::pin(handoff::replace(

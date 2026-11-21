@@ -38,8 +38,8 @@ async fn exercise(c: Cx, h: Cx, end: End) {
     let seat = Seat::default();
     let effects = Arc::new(Mutex::new(Vec::new()));
     let released = Arc::new(AtomicU64::new(0));
-    let receipts = Cell::new(0);
-    let fenced = Cell::new(false);
+    let receipts = crate::test_cell::SendCell::new(0);
+    let fenced = crate::test_cell::SendCell::new(false);
     let mut since = None;
     let mut action_sent = false;
     let mut nonce = 55_000;

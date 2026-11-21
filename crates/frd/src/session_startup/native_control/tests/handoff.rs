@@ -363,10 +363,10 @@ async fn exercise(c: Cx, h: Cx, case: Case) {
     let released = Arc::new(AtomicU64::new(0));
     let factories = Arc::new(AtomicUsize::new(0));
     let (send_driver, mut receive_driver) = asupersync::channel::mpsc::channel::<Driver>(1);
-    let host_done = Cell::new(false);
-    let viewer_done = Cell::new(false);
-    let receipts = Cell::new(0);
-    let ready = Cell::new(false);
+    let host_done = crate::test_cell::SendCell::new(false);
+    let viewer_done = crate::test_cell::SendCell::new(false);
+    let receipts = crate::test_cell::SendCell::new(0);
+    let ready = crate::test_cell::SendCell::new(false);
     let mut activated = None;
     let mut shown = None;
     let mut actions_sent = 0;

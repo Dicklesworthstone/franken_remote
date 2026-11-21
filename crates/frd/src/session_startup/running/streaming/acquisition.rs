@@ -135,9 +135,9 @@ impl Acquisition {
         host: &mut Host,
         wait: Duration,
         nonce: &mut impl FnMut() -> Result<u128, ()>,
-        ticket: &mut impl FnMut() -> Option<InputTicketId>,
+        ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
         other: &mut impl Services,
-        local: &mut impl FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError>,
+        local: &mut (impl FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError> + Send),
     ) -> Result<(), Error> {
         let result = host
             .drive(
@@ -219,7 +219,7 @@ struct GrantServices<'a, L, S> {
 }
 impl<L, S> Services for GrantServices<'_, L, S>
 where
-    L: FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError>,
+    L: FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError> + Send,
     S: Services,
 {
     fn input_submitted(&mut self, at: u64) {
@@ -336,10 +336,10 @@ impl StreamingHost {
         &'a mut self,
         seat: Seat,
         channels: NegotiatedInput,
-        local: impl FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        local: impl FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError> + Send + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        ticket: impl FnMut() -> Option<InputTicketId> + 'a,
-        other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
+        ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
+        other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         self.serve_control_services(seat, channels, local, nonce, ticket, other)
     }
@@ -350,9 +350,9 @@ impl StreamingHost {
         &'a mut self,
         seat: Seat,
         channels: NegotiatedInput,
-        mut local: impl FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        mut local: impl FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError> + Send + 'a,
         mut nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        mut ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        mut ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
         mut other: impl Services + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let prepared = Acquisition::new(self, seat, channels).map(Box::new);

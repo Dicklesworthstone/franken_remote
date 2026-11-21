@@ -16,7 +16,7 @@ use fr_wire::{
     control::{Request, Target},
     decoder::Binding,
 };
-use std::{cell::Cell, pin::Pin, sync::Mutex, task::Poll};
+use std::{pin::Pin, sync::Mutex, task::Poll};
 
 struct Sink(Arc<Mutex<Vec<Operation>>>);
 impl InputSink for Sink {
@@ -98,11 +98,11 @@ fn pre_request_viewing_recovers_without_authority_then_grants_only_the_current_v
         let seat = Seat::default();
         let effects = Arc::new(Mutex::new(Vec::new()));
         let (drivers, mut incoming) = asupersync::channel::mpsc::channel::<Driver>(1);
-        let host_done = Cell::new(false);
-        let viewer_done = Cell::new(false);
-        let decision = Cell::new(None);
-        let recovered_target = Cell::new(None);
-        let receipts = Cell::new(0);
+        let host_done = crate::test_cell::SendCell::new(false);
+        let viewer_done = crate::test_cell::SendCell::new(false);
+        let decision = crate::test_cell::SendCell::new(None);
+        let recovered_target = crate::test_cell::SendCell::new(None);
+        let receipts = crate::test_cell::SendCell::new(0);
         let native_calls = Arc::new(AtomicU64::new(0));
         let start = now(&c).unwrap();
         let mut entropy = 9000;

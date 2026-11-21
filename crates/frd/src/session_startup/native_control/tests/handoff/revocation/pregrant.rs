@@ -25,7 +25,7 @@ fn a_consumed_pregrant_report_fences_both_consumed_owners_when_the_lease_arrives
         let seat = Seat::default();
         let effects = Arc::new(Mutex::new(Vec::new()));
         let released = Arc::new(AtomicU64::new(0));
-        let approved = Cell::new(false);
+        let approved = crate::test_cell::SendCell::new(false);
         let mut nonce = 75_000;
         let (report, _) = Box::pin(support::both(
             async {

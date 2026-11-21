@@ -270,7 +270,7 @@ impl Viewer {
                     .transport
                     .as_mut()
                     .ok_or(Error::Closed)?
-                    .drive(cx, wait.min(Duration::from_micros(remaining)), || {
+                    .drive_local(cx, wait.min(Duration::from_micros(remaining)), || {
                         let open = now(cx).is_ok_and(|n| n < until);
                         refused.set(!open);
                         open
@@ -763,7 +763,7 @@ impl ViewerSession {
             guard
                 .viewer
                 .transport
-                .drive(cx, wait.min(Duration::from_micros(remaining)), || {
+                .drive_local(cx, wait.min(Duration::from_micros(remaining)), || {
                     live_until(cx, until, &expired)
                 })
                 .await
@@ -801,7 +801,9 @@ impl ViewerSession {
             guard
                 .viewer
                 .transport
-                .reconcile_acknowledgements(cx, || permitted() && live_until(cx, until, &expired))
+                .reconcile_acknowledgements_local(cx, || {
+                    permitted() && live_until(cx, until, &expired)
+                })
                 .await
                 .map_err(|e| expired.get().unwrap_or(Error::Transport(e)))?;
             guard.viewer.check()?;

@@ -21,7 +21,7 @@ use fr_wire::{
     recovery_request,
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -265,9 +265,9 @@ fn exercise(scenario: Scenario) {
         let mut running =
             StreamingViewer::from_test_parts(viewer, vm, presenter, receiver, initial);
         let stop = running.control();
-        let reported = Rc::new(Cell::new(false));
-        let done = Rc::new(Cell::new(false));
-        let reports = Rc::new(Cell::new(0u32));
+        let reported = std::sync::Arc::new(crate::test_cell::SendCell::new(false));
+        let done = std::sync::Arc::new(crate::test_cell::SendCell::new(false));
+        let reports = std::sync::Arc::new(crate::test_cell::SendCell::new(0u32));
         let frames = Rc::new(RefCell::new(vec![first_frame]));
         let client_done = done.clone();
         let report_seen = reported.clone();

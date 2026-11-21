@@ -25,7 +25,31 @@ impl QuicRecords {
     /// mutation. It is NOT a substitute for `tick`/`send`/`receive` authority checks.
     /// Call it before those synchronous checks when servicing a session after
     /// a pause. `drive` also invokes it before ordinary payload work.
+    ///
+    /// The returned future is Send. A caller whose `authorize` is not Send uses
+    /// [`Self::reconcile_acknowledgements_local`], whose future is not.
     pub async fn reconcile_acknowledgements(
+        &mut self,
+        cx: &Cx,
+        mut authorize: impl FnMut() -> bool + Send,
+    ) -> Result<(), Error> {
+        let authorize: &mut (dyn FnMut() -> bool + Send) = &mut authorize;
+        self.reconcile_acknowledgements_erased(cx, authorize).await
+    }
+
+    /// [`Self::reconcile_acknowledgements`] for an `authorize` that is not Send.
+    pub async fn reconcile_acknowledgements_local(
+        &mut self,
+        cx: &Cx,
+        mut authorize: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        let authorize: &mut dyn FnMut() -> bool = &mut authorize;
+        self.reconcile_acknowledgements_erased(cx, authorize).await
+    }
+
+    // Compiled once per trait-object flavour, not once per caller closure
+    // (see QuicRecords::drive_erased).
+    pub(super) async fn reconcile_acknowledgements_erased(
         &mut self,
         cx: &Cx,
         mut authorize: impl FnMut() -> bool,

@@ -601,7 +601,7 @@ impl QuicInput {
         &'a self,
         connection: &'a mut QuicRecords,
         wait: Duration,
-        mut authorize: impl FnMut() -> bool + 'a,
+        mut authorize: impl FnMut() -> bool + Send + 'a,
     ) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
         let bound = self.bound(connection);
         let guard = bound

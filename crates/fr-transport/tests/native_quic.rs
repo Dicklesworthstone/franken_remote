@@ -1692,7 +1692,7 @@ async fn pause_after_native_read(acknowledge: bool) {
     let mut parked = false;
     let mut received = 0;
     for _ in 0..20 {
-        let mut turn = pin!(p.server.drive(&cx, Duration::from_millis(100), || {
+        let mut turn = pin!(p.server.drive_local(&cx, Duration::from_millis(100), || {
             if armed.get() {
                 let count = resumed_checks.get() + 1;
                 resumed_checks.set(count);

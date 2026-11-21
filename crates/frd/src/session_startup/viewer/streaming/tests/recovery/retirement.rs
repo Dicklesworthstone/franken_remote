@@ -6,7 +6,7 @@ use fr_client::input::Action;
 use fr_core::{ids::InputTicketId, input::PhysicalKey};
 use fr_transport::quic::ControlRoutes;
 use fr_wire::{attachment::Ticket, negotiation::ControlBinding};
-use std::{cell::Cell, future::poll_fn, pin::pin, task::Poll};
+use std::{future::poll_fn, pin::pin, task::Poll};
 
 fn retire(
     host: &mut ControlledHost,
@@ -113,7 +113,7 @@ fn peer_retirement_during_controlled_decode_drain_preserves_original_recovery() 
         let charged = receiver.budget_usage();
         assert_ne!(charged, BudgetUsage::default());
 
-        let release = Cell::new(false);
+        let release = crate::test_cell::SendCell::new(false);
         let mut native = pin!(async {
             poll_fn(|_| {
                 if release.get() {
@@ -126,7 +126,7 @@ fn peer_retirement_during_controlled_decode_drain_preserves_original_recovery() 
             Ok::<_, media::Error>(picture)
         });
         let ControlRoutes { inbound, .. } = host.io().unwrap().1;
-        let request_seen = Cell::new(false);
+        let request_seen = crate::test_cell::SendCell::new(false);
         let mut original_deadline = None;
         let mut media = Some(host_media);
         let mut replacement = None;

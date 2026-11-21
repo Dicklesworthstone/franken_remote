@@ -52,9 +52,9 @@ impl NativePublisher {
     pub(super) fn accepting_control_with_audio<'a>(
         &'a mut self,
         seat: Seat,
-        mut local: impl FnMut(HostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        mut local: impl FnMut(HostControlState<'_>) -> Result<Option<Target>, GrantError> + Send + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
         profile: Option<AudioProfile>,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let control = self.control.clone();

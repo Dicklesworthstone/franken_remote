@@ -64,7 +64,7 @@ impl Host {
         &mut self,
         wait: Duration,
         nonce: &mut impl FnMut() -> Result<u128, ()>,
-        ticket: &mut impl FnMut() -> Option<InputTicketId>,
+        ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
         services: &mut impl Services,
     ) -> Result<(), Error> {
         match self {
@@ -487,8 +487,8 @@ impl StreamingHost {
     pub fn serve<'a>(
         &'a mut self,
         mut nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        mut ticket: impl FnMut() -> Option<InputTicketId> + 'a,
-        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
+        mut ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
+        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let fence = Fence {
             control: self.stream.control.clone(),
@@ -519,15 +519,16 @@ impl StreamingHost {
     async fn serve_inner(
         &mut self,
         nonce: &mut impl FnMut() -> Result<u128, ()>,
-        ticket: &mut impl FnMut() -> Option<InputTicketId>,
+        ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
         other: &mut impl Services,
         mut acquisition: Option<Box<acquisition::Acquisition>>,
-        local: &mut impl FnMut(
+        local: &mut (
+                 impl FnMut(
             acquisition::LocalControl<'_>,
-        ) -> Result<
-            Option<fr_wire::control::Target>,
-            crate::input_quic::grant::Error,
-        >,
+        )
+            -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>
+                 + Send
+             ),
     ) -> Result<(), Error> {
         if self.stream.served {
             return Err(Error::Closed);
@@ -570,15 +571,16 @@ impl StreamingHost {
     async fn serve_round(
         &mut self,
         nonce: &mut impl FnMut() -> Result<u128, ()>,
-        ticket: &mut impl FnMut() -> Option<InputTicketId>,
+        ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
         other: &mut impl Services,
         acquisition: &mut Option<Box<acquisition::Acquisition>>,
-        local: &mut impl FnMut(
+        local: &mut (
+                 impl FnMut(
             acquisition::LocalControl<'_>,
-        ) -> Result<
-            Option<fr_wire::control::Target>,
-            crate::input_quic::grant::Error,
-        >,
+        )
+            -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>
+                 + Send
+             ),
         first: bool,
     ) -> Result<fr_media::delivery::RecoveryDemand, Error> {
         let fence = Fence {
@@ -733,13 +735,15 @@ impl StreamingHost {
 async fn turn(
     host: &mut Host,
     acquisition: Option<&mut acquisition::Acquisition>,
-    local: &mut impl FnMut(
+    local: &mut (
+             impl FnMut(
         acquisition::LocalControl<'_>,
-    )
-        -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>,
+    ) -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>
+             + Send
+         ),
     wait: Duration,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
-    ticket: &mut impl FnMut() -> Option<InputTicketId>,
+    ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
     services: &mut impl Services,
 ) -> Result<(), Error> {
     match acquisition {

@@ -13,13 +13,15 @@ pub(super) async fn replace(
     media: NegotiatedMedia,
     demand: RecoveryDemand,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
-    ticket: &mut impl FnMut() -> Option<InputTicketId>,
+    ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
     other: &mut impl Services,
     acquisition: &mut Option<Box<acquisition::Acquisition>>,
-    local: &mut impl FnMut(
+    local: &mut (
+             impl FnMut(
         acquisition::LocalControl<'_>,
-    )
-        -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>,
+    ) -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>
+             + Send
+         ),
 ) -> Result<NegotiatedMedia, Error> {
     let until = demand.deadline_micros();
     let control = host.stream.control.clone();
@@ -262,14 +264,16 @@ impl<S: Services> Services for Attaching<'_, '_, S> {
 async fn during<S: Services>(
     host: &mut Host,
     acquisition: &mut Option<Box<acquisition::Acquisition>>,
-    local: &mut impl FnMut(
+    local: &mut (
+             impl FnMut(
         acquisition::LocalControl<'_>,
-    )
-        -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>,
+    ) -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>
+             + Send
+         ),
     policy: Policy,
     waiting: &mut Waiting<'_, S>,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
-    ticket: &mut impl FnMut() -> Option<InputTicketId>,
+    ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
     native: impl Future<Output = Result<CaptureUpdate, crate::media::Error>>,
 ) -> Result<CaptureUpdate, Error> {
     let mut native = pin!(native);

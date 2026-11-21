@@ -684,7 +684,7 @@ impl Bridge {
         &'a mut self,
         q: &'a mut QuicRecords,
         wait: Duration,
-        mut authorize: impl FnMut() -> bool + 'a,
+        mut authorize: impl FnMut() -> bool + Send + 'a,
     ) -> impl std::future::Future<Output = Result<State, Error>> + 'a {
         let bound = self.bound(q);
         let mut guard = bound.is_ok().then(|| Drive {

@@ -301,9 +301,10 @@ impl NativePublisher {
         ) -> Result<
             Option<fr_wire::control::Target>,
             crate::input_quic::grant::Error,
-        > + 'a,
+        > + Send
+        + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        ticket: impl FnMut() -> Option<fr_core::ids::InputTicketId> + 'a,
+        ticket: impl FnMut() -> Option<fr_core::ids::InputTicketId> + Send + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let control = self.control.clone();
         let display = self.display;

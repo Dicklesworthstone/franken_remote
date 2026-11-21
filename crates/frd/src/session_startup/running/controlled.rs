@@ -223,7 +223,7 @@ impl ControlledHost {
         &mut self,
         wait: Duration,
         fresh_nonce: &mut impl FnMut() -> Result<u128, ()>,
-        fresh_ticket: &mut impl FnMut() -> Option<InputTicketId>,
+        fresh_ticket: &mut (impl FnMut() -> Option<InputTicketId> + Send),
         other: &mut impl Services,
     ) -> Result<(), Error> {
         // A synchronous watchdog/local fence must win over normal transport
@@ -277,8 +277,8 @@ impl ControlledHost {
         &'a mut self,
         wait: Duration,
         mut fresh_nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        mut fresh_ticket: impl FnMut() -> Option<InputTicketId> + 'a,
-        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
+        mut fresh_ticket: impl FnMut() -> Option<InputTicketId> + Send + 'a,
+        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let operation = Operation {
             host: self,
@@ -467,7 +467,7 @@ fn is_input(routes: Routes, route: Route) -> bool {
 }
 impl<T, F> Services for InputServices<'_, T, F>
 where
-    T: FnMut() -> Option<InputTicketId>,
+    T: FnMut() -> Option<InputTicketId> + Send,
     F: Services,
 {
     fn permitted(&mut self) -> bool {

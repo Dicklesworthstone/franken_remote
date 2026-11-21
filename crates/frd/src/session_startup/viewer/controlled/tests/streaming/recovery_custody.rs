@@ -6,7 +6,6 @@ use crate::session_startup::{
     viewer::controlled::events::{CaptureCleanup, CaptureReapError, NativeCapture},
 };
 use std::{
-    cell::Cell,
     future::{Future, poll_fn},
     sync::atomic::{AtomicBool, Ordering},
     task::Poll,
@@ -128,9 +127,9 @@ fn exercise(ending: Ending) {
                     .into_streaming(f.presenter.take().unwrap(), f.receiver)
                     .unwrap();
                 let worker = viewer.worker_id();
-                let recovering = Cell::new(false);
-                let done = Cell::new(false);
-                let reports = Cell::new(0);
+                let recovering = crate::test_cell::SendCell::new(false);
+                let done = crate::test_cell::SendCell::new(false);
+                let reports = crate::test_cell::SendCell::new(0);
                 let after = now(&c).unwrap() + 1_000_000;
                 let repair =
                     Route::Stream(f.host_media.repair_stream(f.host.io().unwrap().0).unwrap());

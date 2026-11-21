@@ -1049,7 +1049,34 @@ impl QuicRecords {
     /// preempted between two polls cannot fail a turn that finishes on its next.
     /// Dropping an active native I/O operation is terminal. The session watchdog
     /// must independently cancel Cx on expiry/revoke, including during silence.
+    ///
+    /// The returned future is Send. A caller whose `authorize` is not Send uses
+    /// [`Self::drive_local`], whose future is not.
     pub async fn drive(
+        &mut self,
+        cx: &Cx,
+        wait: Duration,
+        mut authorize: impl FnMut() -> bool + Send,
+    ) -> Result<(), Error> {
+        let authorize: &mut (dyn FnMut() -> bool + Send) = &mut authorize;
+        self.drive_erased(cx, wait, authorize).await
+    }
+    /// [`Self::drive`] for an `authorize` that is not Send.
+    pub async fn drive_local(
+        &mut self,
+        cx: &Cx,
+        wait: Duration,
+        mut authorize: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        let authorize: &mut dyn FnMut() -> bool = &mut authorize;
+        self.drive_erased(cx, wait, authorize).await
+    }
+    // The turn's futures hold `authorize` across awaits. Each public entry
+    // passes a trait object, so this body, drive_turn, the acknowledgement
+    // read and poll_io_at_boundary are compiled twice (Send and not), not once
+    // per caller closure: frd's library tests had 145,552 copies of
+    // poll_io_at_boundary, and their compile peaked near 28 GB.
+    async fn drive_erased(
         &mut self,
         cx: &Cx,
         wait: Duration,
@@ -1062,7 +1089,8 @@ impl QuicRecords {
         let result = {
             // Dropped at this block's end: a failed turn never outlives it.
             let turn = pin!(async {
-                self.reconcile_acknowledgements(cx, &mut authorize).await?;
+                self.reconcile_acknowledgements_erased(cx, &mut authorize)
+                    .await?;
                 self.check(cx, &mut authorize)?;
                 self.drive_turn(cx, wait, &mut authorize).await
             });

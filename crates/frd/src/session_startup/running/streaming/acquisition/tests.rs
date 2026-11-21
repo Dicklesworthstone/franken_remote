@@ -306,10 +306,10 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
     let view_stop = viewer.control();
     let effects = Arc::new(Mutex::new(Vec::new()));
     let (drivers, mut incoming) = asupersync::channel::mpsc::channel::<Driver>(1);
-    let finished = Cell::new(false);
-    let viewer_done = Cell::new(false);
-    let receipts = Cell::new(0);
-    let active = Cell::new(false);
+    let finished = crate::test_cell::SendCell::new(false);
+    let viewer_done = crate::test_cell::SendCell::new(false);
+    let receipts = crate::test_cell::SendCell::new(0);
+    let active = crate::test_cell::SendCell::new(false);
     let factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut ticket = 1000;
     let mut sampled = 0;

@@ -49,15 +49,14 @@ async fn quiet(state: &mut Fixture, c: &Cx, n: &mut u128, t: &mut u128) {
 async fn revoke_during_pending_receive(viewer: &mut ControlledViewer, c: &Cx, p: &Permission) {
     for _ in 0..16 {
         let checks = Cell::new(0);
-        let mut io = pin!(
-            viewer
-                .session
-                .transport
-                .drive(c, Duration::from_millis(10), || {
-                    checks.set(checks.get() + 1);
-                    viewer.files.permits_io() && permitted(&mut viewer.input, &viewer.control, c)
-                })
-        );
+        let mut io = pin!(viewer.session.transport.drive_local(
+            c,
+            Duration::from_millis(10),
+            || {
+                checks.set(checks.get() + 1);
+                viewer.files.permits_io() && permitted(&mut viewer.input, &viewer.control, c)
+            }
+        ));
         let pending = poll_fn(|task| match io.as_mut().poll(task) {
             Poll::Pending => Poll::Ready(true),
             Poll::Ready(result) => {
@@ -253,7 +252,7 @@ fn revoked_upload_after_native_staging_still_fences_the_parent() {
                 let result = viewer
                     .session
                     .transport
-                    .drive(&c, Duration::ZERO, || {
+                    .drive_local(&c, Duration::ZERO, || {
                         checks.set(checks.get() + 1);
                         if checks.get() == 3 {
                             permission.revoke();

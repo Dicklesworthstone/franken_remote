@@ -211,7 +211,7 @@ impl SharedHost {
         &'a mut self,
         wait: Duration,
         mut fresh_nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
+        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let operation = SharedOperation {
             host: self,
@@ -231,7 +231,7 @@ impl SharedHost {
         &mut self,
         wait: Duration,
         nonce: &mut impl FnMut() -> Result<u128, ()>,
-        other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+        other: &mut (impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send),
     ) -> Result<(), Error> {
         self.session.check()?;
         let mut application = SharedServices {
@@ -259,7 +259,7 @@ impl SharedHost {
     pub fn serve<'a>(
         &'a mut self,
         mut fresh_nonce: impl FnMut() -> Result<u128, ()> + 'a,
-        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
+        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let operation = SharedOperation {
             host: self,
@@ -307,7 +307,7 @@ struct SharedServices<'a, F> {
     statistics: &'a mut SharedStatistics,
     other: &'a mut F,
 }
-impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
+impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send> SharedServices<'_, F> {
     fn presentation_record(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
         if route != Route::Stream(self.routes.inbound) || self.presentation.is_none() {
             return Err(());
@@ -326,7 +326,7 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
         Ok(Disposition::Consumed)
     }
 }
-impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServices<'_, F> {
+impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()> + Send> Services for SharedServices<'_, F> {
     fn permitted(&mut self) -> bool {
         self.control.check().is_ok() && self.subscriber.session_live().is_ok()
     }

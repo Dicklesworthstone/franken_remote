@@ -74,10 +74,10 @@ async fn granted(c: Cx, h: Cx, cleanup: Cx, end: End) {
     let stop = viewer.control();
     let seat = Seat::default();
     let effects = Arc::new(Mutex::new(Vec::new()));
-    let receipts = Cell::new(0);
-    let received_at = Cell::new(None);
-    let closing = Cell::new(false);
-    let requested = Cell::new(false);
+    let receipts = crate::test_cell::SendCell::new(0);
+    let received_at = crate::test_cell::SendCell::new(None);
+    let closing = crate::test_cell::SendCell::new(false);
+    let requested = crate::test_cell::SendCell::new(false);
     let mut viewing_turns = 0;
     let mut approved = false;
     let mut pressed = false;
@@ -320,7 +320,7 @@ fn close_before_a_grant_does_not_fabricate_a_lease_or_send_a_staged_request() {
             let mut nonce = 200_000;
             let mut requested = false;
             let mut closed = false;
-            let host_saw_request = Cell::new(false);
+            let host_saw_request = crate::test_cell::SendCell::new(false);
             let (report, result) = Box::pin(support::both(
                 host.serve_managed_control_with_cleanup(
                     &cleanup,
