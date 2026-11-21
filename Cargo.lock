@@ -684,6 +684,7 @@ dependencies = [
  "fr-wire",
  "serde",
  "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

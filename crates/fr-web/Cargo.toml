@@ -7,6 +7,9 @@ license-file.workspace = true
 repository.workspace = true
 publish = false
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 fr-core.workspace = true
 fr-wire.workspace = true
@@ -15,6 +18,10 @@ fr-client.workspace = true
 fr-transport.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# Match the exact binding generator and version already pinned in Cargo.lock.
+wasm-bindgen = "=0.2.128"
 
 [lints]
 workspace = true

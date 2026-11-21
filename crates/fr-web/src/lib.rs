@@ -21,10 +21,14 @@
 //!   `bfcache` restore, decoder reclamation) immediately suspend/revoke control
 //!   and require fresh usable-view evidence before control may be requested again.
 
+pub mod adapter;
 pub mod credit;
 pub mod hevc;
 pub mod protocol;
 pub mod session;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod wasm;
 
 pub use credit::{BrowserCreditError, BrowserCreditTracker};
 pub use hevc::{

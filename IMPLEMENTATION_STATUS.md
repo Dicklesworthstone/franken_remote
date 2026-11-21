@@ -1,5 +1,40 @@
 # Implementation status
 
+## Executable Rust/WASM browser startup adapter (2026-11-20)
+
+`fr-web` now builds an actual `cdylib` for `wasm32-unknown-unknown`,
+with the exact already-locked `wasm-bindgen 0.2.128` dependency confined to
+that target. Its versioned `BrowserAdapter` exports own bounded bootstrap
+validation, canonical browser `ClientHello` encoding, canonical connection
+refusal decoding, startup expiry, and shared-core lifecycle fencing.
+
+The adapter accepts no JavaScript-created session binding. Bootstrap requires
+the exact WSS profile/version, requested role, bounded nonce lifetime, and an
+explicit desktop capability; missing capability refuses before nonce retention.
+Each local Rust owner allocates non-reused attempt serials. Stale callbacks are
+rejected before their bytes or timestamps can affect a replacement. The nonce
+is issued once, and neither delayed bootstrap nor progress extends the original
+deadline. A DOM snapshot exposes only bounded state and authority facts; it
+contains no nonce or peer-controlled diagnostic text.
+
+Passed before executor loss: exact-pinned release WASM build, wasm-bindgen web
+generation, strict all-target browser Clippy, and all 11 Node tests that load
+the generated JavaScript and instantiate the real WASM. The tests verify the
+104-byte canonical hello against an independent literal fixture, typed host
+refusal, lifecycle/attempt fencing, invalid clocks, malformed records and
+bootstrap bounds. Generated code was 16,545 bytes of JavaScript plus 151,977
+bytes of WASM in that build; these are package sizes, not performance claims.
+
+The full portable Rust run (23 existing tests plus 12 new adapter tests) was
+interrupted by executor disconnection; its result is unknown. Applied source
+patches and lint corrections were preserved through GitHub after that loss.
+Their Rust tokens match the successfully built implementation, but canonical
+formatting of the reconstructed files still needs rechecking.
+
+The served shell and host bundle integration remain in progress under
+`fr-w9jo`. This export does not claim a running browser desktop, native TLS
+listener validation, positive WebCodecs closure, or input/control qualification.
+
 ## Browser HEVC configuration lifetime (2026-11-20)
 
 The JavaScript player now gives each asynchronous HEVC probe/configure operation
