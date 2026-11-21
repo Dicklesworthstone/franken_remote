@@ -18,7 +18,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root" || exit 1
-export RCH_CARGO_WRAPPER_BYPASS=1
+if [ "${RCH_REQUIRE_REMOTE:-0}" != "1" ]; then
+  export RCH_CARGO_WRAPPER_BYPASS=1
+fi
 export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${repo_root}/target}"
 
