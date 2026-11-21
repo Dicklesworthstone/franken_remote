@@ -931,6 +931,7 @@ fn run_events(
                 before,
                 target,
                 display_switch.as_mut(),
+                &mut decoder,
             )?
             else {
                 thread::sleep(TURN);
@@ -1075,6 +1076,7 @@ fn captured_batch(
     before: ClientInstant,
     target: &impl Target,
     mut shortcut: Option<&mut display_switch::Shortcut>,
+    decoder: &mut Decoder,
 ) -> Result<Option<CapturedBatch>, StopReason> {
     let mut captured = CapturedBatch {
         at: [None; MAX_NATIVE_EVENTS],
@@ -1084,6 +1086,14 @@ fn captured_batch(
     let mut request = display_switch::BatchIntent::default();
     for (index, event) in events.iter().enumerate() {
         target.clock()?;
+        // A stable original snapshot already released this exact gesture.
+        // Discard its delayed up before timestamp validation: it may predate
+        // the snapshot's timeline fence and must never become a new action or
+        // advance time. Every new down retires that allowance first, including
+        // within this batch, so a fresh gesture's release cannot be swallowed.
+        if decoder.discard_reconciled_release(*event) {
+            continue;
+        }
         if (1..=5).contains(&event.kind) || event.kind == text::SEND {
             let at = match timeline.sample(event.time, barrier, before) {
                 Ok(at) => at,
@@ -1226,6 +1236,8 @@ struct Decoder {
     names: [[u8; 4]; 256],
     keys: [bool; 256],
     buttons: [bool; 10],
+    released_keys: [bool; 256],
+    released_buttons: [bool; 10],
     caps: Capabilities,
 }
 impl Decoder {
@@ -1234,10 +1246,15 @@ impl Decoder {
             names: *names,
             keys: [false; 256],
             buttons: [false; 10],
+            released_keys: [false; 256],
+            released_buttons: [false; 10],
             caps,
         }
     }
     fn event(&mut self, event: Raw, layout: &Layout) -> Result<Option<Event>, StopReason> {
+        if self.discard_reconciled_release(event) {
+            return Ok(None);
+        }
         match event.kind {
             1 | 2 if self.caps.contains(Capability::Keys) => {
                 let index =

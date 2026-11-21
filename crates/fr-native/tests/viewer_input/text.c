@@ -289,6 +289,74 @@ static void release_only_reconciliation(void) {
     assert(take("") == 1);
     assert(fr_viewer_input_text_offer(capture, 2, 1)); open_editor();
 }
+/* Fault injection retains the actual original X event across the stable
+ * snapshot. Its bytes/time are neither fabricated nor refreshed. This probes
+ * late delivery at the native ownership boundary, not normal X wire ordering. */
+static xcb_generic_event_t *retain_release(unsigned type, unsigned detail) {
+    uint64_t until = now_ms() + 2000;
+    for (;;) {
+        xcb_generic_event_t *event = xcb_poll_for_event(capture->c);
+        if (event) {
+            assert((event->response_type & 0x7f) == type);
+            assert(((xcb_key_release_event_t *)event)->detail == detail);
+            return event;
+        }
+        assert(now_ms() < until); pause_ms();
+    }
+}
+static void deliver_retained_release(xcb_generic_event_t *event, unsigned kind,
+                                     unsigned expected) {
+    const xcb_key_release_event_t *key = (const void *)event;
+    struct fr_viewer_event out = {kind, key->time, key->detail, key->event_x, key->event_y};
+    uint32_t original_time = out.time;
+    text_filter(capture, event, &out);
+    assert(out.kind == expected && out.time == original_time);
+    free(event);
+}
+static void delayed_local_key_release(void) {
+    open_editor(); key(XK_b, 1); tap(XK_Escape); drain();
+    assert(retired == 1 && !capture->text->active && fr_viewer_input_text_held(capture));
+    assert(take("") == 1);
+    key(XK_b, 0);
+    xcb_generic_event_t *release = retain_release(XCB_KEY_RELEASE, code(XK_b));
+    reconcile_released(); assert(!fr_viewer_input_text_held(capture));
+    assert(fr_viewer_input_text_offer(capture, 2, 1));
+    deliver_retained_release(release, KEY_UP, TEXT_KEY_UP);
+    assert(!fr_viewer_input_text_held(capture) && !remote && sends == 0 && retired == 1);
+    // Custody of a retired editor gesture is never a new key press. Fresh
+    // physical typing after that local release must still use both remote edges.
+    tap(XK_b); drain(); assert(remote == 2);
+    open_editor(); tap(XK_c); send_editor(); assert(take("c") == 2);
+}
+static void delayed_local_button_release(void) {
+    move_pointer_inside(); open_editor(); button(1, 1); tap(XK_Escape); drain();
+    assert(retired == 1 && local_buttons == 1 && !remote_buttons);
+    assert(take("") == 1);
+    button(1, 0);
+    xcb_generic_event_t *release = retain_release(XCB_BUTTON_RELEASE, 1);
+    reconcile_released(); assert(!fr_viewer_input_text_held(capture));
+    assert(fr_viewer_input_text_offer(capture, 2, 1));
+    deliver_retained_release(release, BUTTON_UP, TEXT_BUTTON_UP);
+    assert(!fr_viewer_input_text_held(capture) && !remote_buttons);
+    button(1, 1); button(1, 0); drain();
+    assert(remote_buttons == 2 && !fr_viewer_input_text_held(capture));
+}
+static void reconciled_local_new_gesture(void) {
+    open_editor(); key(XK_b, 1); tap(XK_Escape); drain();
+    assert(take("") == 1);
+    key(XK_b, 0); free(retain_release(XCB_KEY_RELEASE, code(XK_b)));
+    reconcile_released(); assert(!fr_viewer_input_text_held(capture));
+    assert(fr_viewer_input_text_offer(capture, 2, 1));
+    tap(XK_b); drain();
+    assert(remote == 2 && !fr_viewer_input_text_held(capture));
+    move_pointer_inside(); open_editor(); button(1, 1); tap(XK_Escape); drain();
+    assert(take("") == 2);
+    button(1, 0); free(retain_release(XCB_BUTTON_RELEASE, 1));
+    reconcile_released(); assert(!fr_viewer_input_text_held(capture));
+    assert(fr_viewer_input_text_offer(capture, 3, 1));
+    button(1, 1); button(1, 0); drain();
+    assert(remote_buttons == 2 && !fr_viewer_input_text_held(capture));
+}
 int main(int argc, char **argv) {
     assert(argc >= 2);
     if (!strcmp(argv[1], "error-isolation")) {
@@ -313,6 +381,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "same-batch-pointer")) same_batch_pointer_hold();
     else if (!strcmp(argv[1], "local-pointer-release")) local_pointer_release();
     else if (!strcmp(argv[1], "release-only-reconcile")) release_only_reconciliation();
+    else if (!strcmp(argv[1], "delayed-local-key-release")) delayed_local_key_release();
+    else if (!strcmp(argv[1], "delayed-local-button-release")) delayed_local_button_release();
+    else if (!strcmp(argv[1], "reconciled-local-new-gesture")) reconciled_local_new_gesture();
     else assert(0);
     fr_viewer_input_close(capture);
     if (window) XDestroyWindow(peer, window);

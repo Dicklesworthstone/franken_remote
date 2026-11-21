@@ -101,6 +101,21 @@ fn bit(bits: &[u8; 32], index: usize) -> bool {
     bits[index / 8] & (1 << (index % 8)) != 0
 }
 impl Decoder {
+    /// One release-only allowance per gesture positively cleared by an original
+    /// stable snapshot. It is not held input and does not keep sampling alive.
+    /// A new physical press consumes old history before any batch dispatch;
+    /// otherwise a later up could be mistaken for that new gesture's cleanup.
+    pub(super) fn discard_reconciled_release(&mut self, event: Raw) -> bool {
+        let Ok(index) = usize::try_from(event.detail) else {
+            return false;
+        };
+        let (released, down) = match event.kind {
+            1 | 2 => (self.released_keys.get_mut(index), event.kind == 1),
+            3 | 4 => (self.released_buttons.get_mut(index), event.kind == 3),
+            _ => return false,
+        };
+        released.is_some_and(|released| std::mem::replace(released, false) && !down)
+    }
     pub(super) fn has_held(&self) -> bool {
         self.keys.iter().any(|down| *down) || self.buttons.iter().any(|down| *down)
     }
@@ -118,6 +133,7 @@ impl Decoder {
     pub(super) fn reconcile(&mut self, actual: &Snapshot) -> Result<Event, StopReason> {
         let mut observed = HeldState::empty();
         for index in 0..self.keys.len() {
+            self.released_keys[index] |= self.keys[index] && !bit(&actual.keys, index);
             self.keys[index] &= bit(&actual.keys, index);
             if self.keys[index] {
                 observed.set_key(self.physical_key(index)?, true);
@@ -130,6 +146,7 @@ impl Decoder {
             (8, PointerButton::Back),
             (9, PointerButton::Forward),
         ] {
+            self.released_buttons[index] |= self.buttons[index] && !bit(&actual.buttons, index);
             self.buttons[index] &= bit(&actual.buttons, index);
             observed.set_button(button, self.buttons[index]);
         }

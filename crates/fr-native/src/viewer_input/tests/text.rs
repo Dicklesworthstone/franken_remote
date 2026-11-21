@@ -26,6 +26,7 @@ fn native_send_retains_the_x_event_age_before_dequeue() {
         ClientInstant(1_030_000),
         &target(),
         None,
+        &mut Decoder::new(&[[0; 4]; 256], capabilities()),
     )
     .unwrap()
     .unwrap();
@@ -57,6 +58,7 @@ fn expired_send_is_refused_without_retimestamping_or_hiding_later_input() {
         ClientInstant(1_100_000),
         &target(),
         None,
+        &mut Decoder::new(&[[0; 4]; 256], capabilities()),
     )
     .unwrap()
     .unwrap();

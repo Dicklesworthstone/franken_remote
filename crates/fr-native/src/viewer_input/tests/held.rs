@@ -203,6 +203,452 @@ fn missing_releases_clear_native_and_remote_held_state_but_extra_bits_never_pres
         })
     ));
 }
+
+#[test]
+fn delayed_reconciled_releases_do_not_end_control_or_emit_another_release() {
+    let (_, layout) = viewport();
+    let mut names = [[0; 4]; 256];
+    names[38] = *b"AC01";
+    for (down, up, detail) in [
+        (1, 2, 38),
+        (3, 4, 1),
+        (3, 4, 2),
+        (3, 4, 3),
+        (3, 4, 8),
+        (3, 4, 9),
+    ] {
+        let mut decoder = Decoder::new(&names, capabilities());
+        let press = Raw {
+            kind: down,
+            detail,
+            ..Raw::default()
+        };
+        let release = Raw { kind: up, ..press };
+        assert!(decoder.event(press, &layout).unwrap().is_some());
+        let Event::HeldState(state) = decoder.reconcile(&Snapshot::default()).unwrap() else {
+            panic!("expected release-only snapshot");
+        };
+        assert_eq!(state, HeldState::empty());
+        assert!(!decoder.has_held());
+        // Retain only the known missing release, without inventing held input
+        // or needing another native query during idle. A later actual up is
+        // already accounted for by the original snapshot.
+        let sampler = held::Sampler::new(ClientInstant(1)).unwrap();
+        assert!(!sampler.due(&decoder, ClientInstant(u64::MAX)));
+        decoder.reconcile(&Snapshot::default()).unwrap();
+        assert!(decoder.event(release, &layout).unwrap().is_none());
+        // One reconciled gesture cannot authorize arbitrary unmatched ups.
+        assert!(matches!(
+            decoder.event(release, &layout),
+            Err(StopReason::InitialHeld)
+        ));
+    }
+}
+
+#[test]
+fn fresh_key_and_button_presses_retire_only_their_own_reconciled_release() {
+    let (_, layout) = viewport();
+    let mut names = [[0; 4]; 256];
+    names[38] = *b"AC01";
+    names[50] = *b"LFSH";
+    for (down, up, detail) in [(1, 2, 38), (3, 4, 1), (3, 4, 8), (3, 4, 9)] {
+        let mut decoder = Decoder::new(&names, capabilities());
+        let press = Raw {
+            kind: down,
+            detail,
+            ..Raw::default()
+        };
+        let release = Raw { kind: up, ..press };
+        decoder.event(press, &layout).unwrap();
+        decoder.reconcile(&Snapshot::default()).unwrap();
+        // Unknown snapshot bits cannot create a press or release allowance.
+        decoder
+            .reconcile(&Snapshot {
+                keys: [255; 32],
+                buttons: [255; 32],
+            })
+            .unwrap();
+        assert!(!decoder.has_held());
+        assert!(matches!(
+            decoder.event(
+                Raw {
+                    kind: 2,
+                    detail: 50,
+                    ..Raw::default()
+                },
+                &layout
+            ),
+            Err(StopReason::InitialHeld)
+        ));
+        // A fresh physical gesture uses the normal decoder on both edges;
+        // old cleanup must never swallow its release and strand remote input.
+        assert!(decoder.event(press, &layout).unwrap().is_some());
+        assert!(decoder.has_held());
+        assert!(decoder.event(release, &layout).unwrap().is_some());
+        assert!(!decoder.has_held());
+        assert!(matches!(
+            decoder.event(release, &layout),
+            Err(StopReason::InitialHeld)
+        ));
+    }
+}
+
+#[test]
+fn fresh_presses_preserve_other_reconciled_gestures_but_not_a_new_capture() {
+    let mut names = [[0; 4]; 256];
+    names[38] = *b"AC01";
+    names[50] = *b"LFSH";
+    let (_, layout) = viewport();
+    let mut decoder = Decoder::new(&names, capabilities());
+    for (kind, detail) in [(1, 38), (1, 50), (3, 1), (3, 8)] {
+        assert!(
+            decoder
+                .event(
+                    Raw {
+                        kind,
+                        detail,
+                        ..Raw::default()
+                    },
+                    &layout
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+    decoder.reconcile(&held::Snapshot::default()).unwrap();
+    for (kind, detail) in [(1, 38), (3, 1)] {
+        assert!(
+            decoder
+                .event(
+                    Raw {
+                        kind,
+                        detail,
+                        ..Raw::default()
+                    },
+                    &layout
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+    for (kind, detail) in [(2, 50), (4, 8)] {
+        assert!(matches!(
+            decoder.event(
+                Raw {
+                    kind,
+                    detail,
+                    ..Raw::default()
+                },
+                &layout
+            ),
+            Ok(None)
+        ));
+    }
+    assert!(decoder.has_held());
+    for (kind, detail) in [(2, 38), (4, 1)] {
+        assert!(
+            decoder
+                .event(
+                    Raw {
+                        kind,
+                        detail,
+                        ..Raw::default()
+                    },
+                    &layout
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert!(!decoder.has_held());
+
+    let mut replacement = Decoder::new(&names, capabilities());
+    for (kind, detail) in [(2, 50), (4, 8)] {
+        assert!(matches!(
+            replacement.event(
+                Raw {
+                    kind,
+                    detail,
+                    ..Raw::default()
+                },
+                &layout
+            ),
+            Err(StopReason::InitialHeld)
+        ));
+    }
+}
+
+fn capture_after_reconciliation(
+    decoder: &mut Decoder,
+    events: &[Raw],
+) -> Result<Option<CapturedBatch>, StopReason> {
+    let mut timeline = Timeline::new(1000, ClientInstant(1_000_000));
+    timeline.barrier(1010)?;
+    let target = Recording {
+        start: Instant::now(),
+        probe: Arc::new(Probe::default()),
+        caps: capabilities(),
+    };
+    captured_batch(
+        events,
+        &mut timeline,
+        1010,
+        ClientInstant(1_010_000),
+        &target,
+        None,
+        decoder,
+    )
+}
+
+#[test]
+fn reconciled_releases_before_the_snapshot_time_fence_do_not_advance_input_time() {
+    let (_, layout) = viewport();
+    let mut names = [[0; 4]; 256];
+    names[38] = *b"AC01";
+    let mut decoder = Decoder::new(&names, capabilities());
+    for (kind, detail) in [(1, 38), (3, 8)] {
+        decoder
+            .event(
+                Raw {
+                    kind,
+                    detail,
+                    time: 990,
+                    ..Raw::default()
+                },
+                &layout,
+            )
+            .unwrap();
+    }
+    decoder.reconcile(&Snapshot::default()).unwrap();
+    let events = [
+        Raw {
+            kind: 2,
+            detail: 38,
+            time: 999,
+            ..Raw::default()
+        },
+        Raw {
+            kind: 4,
+            detail: 8,
+            time: 999,
+            ..Raw::default()
+        },
+        Raw {
+            kind: 5,
+            time: 1009,
+            ..Raw::default()
+        },
+    ];
+    let captured = capture_after_reconciliation(&mut decoder, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(captured.at[0], None);
+    assert_eq!(captured.at[1], None);
+    assert_eq!(captured.at[2], Some(ClientInstant(1_008_000)));
+    assert!(!decoder.has_held());
+    // Keep the original raw events for snapshot-stability and escape/lifecycle
+    // inspection; ignoring an up must not turn a crossing batch into evidence.
+    assert!(!held::stable(&events));
+}
+
+#[test]
+fn fresh_down_and_up_in_one_batch_cannot_consume_retired_gesture_custody() {
+    let (_, layout) = viewport();
+    let mut names = [[0; 4]; 256];
+    names[38] = *b"AC01";
+    for (down, up, detail) in [(1, 2, 38), (3, 4, 1), (3, 4, 8)] {
+        let mut decoder = Decoder::new(&names, capabilities());
+        decoder
+            .event(
+                Raw {
+                    kind: down,
+                    detail,
+                    ..Raw::default()
+                },
+                &layout,
+            )
+            .unwrap();
+        decoder.reconcile(&Snapshot::default()).unwrap();
+        let events = [
+            Raw {
+                kind: down,
+                detail,
+                time: 1001,
+                ..Raw::default()
+            },
+            Raw {
+                kind: up,
+                detail,
+                time: 1002,
+                ..Raw::default()
+            },
+        ];
+        let captured = capture_after_reconciliation(&mut decoder, &events)
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured.at[0], Some(ClientInstant(1_000_000)));
+        assert_eq!(captured.at[1], Some(ClientInstant(1_001_000)));
+        assert!(matches!(
+            decoder.event(events[0], &layout).unwrap(),
+            Some(
+                Event::Key {
+                    transition: KeyTransition::Press,
+                    ..
+                } | Event::Positioned {
+                    action: PositionedAction::Button { pressed: true, .. },
+                    ..
+                }
+            )
+        ));
+        assert!(decoder.has_held());
+        assert!(matches!(
+            decoder.event(events[1], &layout).unwrap(),
+            Some(
+                Event::Key {
+                    transition: KeyTransition::Release,
+                    ..
+                } | Event::Positioned {
+                    action: PositionedAction::Button { pressed: false, .. },
+                    ..
+                }
+            )
+        ));
+        assert!(!decoder.has_held());
+    }
+}
+
+#[test]
+fn stale_unowned_and_wheel_releases_cannot_bypass_the_native_time_fence() {
+    let (_, layout) = viewport();
+    let mut names = [[0; 4]; 256];
+    names[38] = *b"AC01";
+    names[50] = *b"LFSH";
+    for (kind, detail) in [(2, 50), (4, 1), (4, 4), (4, 5), (4, 6), (4, 7)] {
+        let mut decoder = Decoder::new(&names, capabilities());
+        // A different known key and genuine wheel activity do not authorize
+        // an unowned key/button up, or either edge of a scroll command.
+        decoder
+            .event(
+                Raw {
+                    kind: 1,
+                    detail: 38,
+                    ..Raw::default()
+                },
+                &layout,
+            )
+            .unwrap();
+        decoder
+            .event(
+                Raw {
+                    kind: 3,
+                    detail: 4,
+                    ..Raw::default()
+                },
+                &layout,
+            )
+            .unwrap();
+        decoder.reconcile(&Snapshot::default()).unwrap();
+        let event = Raw {
+            kind,
+            detail,
+            time: 999,
+            ..Raw::default()
+        };
+        assert!(matches!(
+            capture_after_reconciliation(&mut decoder, &[event]),
+            Err(StopReason::Clock)
+        ));
+        assert!(decoder.released_keys[38]);
+    }
+    // Even with old cleanup history, an old up arriving after a fresh down is
+    // an ambiguous reordered gesture, never permission to release that down.
+    let mut decoder = Decoder::new(&names, capabilities());
+    decoder
+        .event(
+            Raw {
+                kind: 1,
+                detail: 38,
+                ..Raw::default()
+            },
+            &layout,
+        )
+        .unwrap();
+    decoder.reconcile(&Snapshot::default()).unwrap();
+    let reordered = [
+        Raw {
+            kind: 1,
+            detail: 38,
+            time: 1001,
+            ..Raw::default()
+        },
+        Raw {
+            kind: 2,
+            detail: 38,
+            time: 999,
+            ..Raw::default()
+        },
+    ];
+    assert!(matches!(
+        capture_after_reconciliation(&mut decoder, &reordered),
+        Err(StopReason::Clock)
+    ));
+    assert!(!decoder.has_held()); // No part of the refused batch was dispatched.
+}
+
+#[test]
+fn old_release_then_fresh_gesture_in_one_batch_keeps_both_new_edges() {
+    let (_, layout) = viewport();
+    let mut names = [[0; 4]; 256];
+    names[38] = *b"AC01";
+    for (down, up, detail) in [(1, 2, 38), (3, 4, 1), (3, 4, 8)] {
+        let mut decoder = Decoder::new(&names, capabilities());
+        let press = Raw {
+            kind: down,
+            detail,
+            time: 990,
+            ..Raw::default()
+        };
+        decoder.event(press, &layout).unwrap();
+        decoder.reconcile(&Snapshot::default()).unwrap();
+        let events = [
+            Raw {
+                kind: up,
+                time: 999,
+                ..press
+            },
+            Raw {
+                time: 1001,
+                ..press
+            },
+            Raw {
+                kind: up,
+                time: 1002,
+                ..press
+            },
+        ];
+        let captured = capture_after_reconciliation(&mut decoder, &events)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            captured.at[..3],
+            [
+                None,
+                Some(ClientInstant(1_000_000)),
+                Some(ClientInstant(1_001_000))
+            ]
+        );
+        // Follow the real dispatch rule: the proved old up has no timestamp
+        // and never reaches the decoder; the new gesture retains both edges.
+        for (index, event) in events.into_iter().enumerate() {
+            if captured.at[index].is_some() {
+                assert!(decoder.event(event, &layout).unwrap().is_some());
+            }
+        }
+        assert!(!decoder.has_held());
+        assert!(!held::stable(&events));
+    }
+}
+
 #[test]
 fn snapshots_crossing_any_transition_are_discarded_and_barriers_keep_timestamps_ordered() {
     for kind in [1, 2, 3, 4, 13, 14, 15, 16, 17, 18] {

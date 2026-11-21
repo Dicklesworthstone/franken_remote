@@ -1,5 +1,25 @@
 # Implementation status
 
+## Linux/X11 delayed release reconciliation (2026-11-21)
+
+Release-only native snapshots now preserve bounded ownership of the key/button
+releases they already cleared. A matching delayed release is consumed once,
+before timestamp validation, without issuing another remote action or advancing
+input time. A fresh press clears only its own previous allowance; unknown
+releases, wheel input, replacement captures, lifecycle and emergency escape
+retain their existing checks. The local Send Text editor retains the same
+release custody across cancellation without treating retired gestures as held.
+
+Passed: all 21 shipping-C text-composer scenarios on cookie-authenticated TCP
+Xvfb with actual XTest/XIM; the two new delayed local key/button release cases
+both failed against the original implementation. Strict C11 compilation,
+pinned Rust formatting, independent source review and whitespace checks passed.
+The retained-event fixtures demonstrate the failure schedule; they do not
+establish a live-session incidence rate. The added Rust decoder/timeline
+regressions and full native/workspace gates remain pending at this checkpoint.
+This is a focused continuation of `fr-linux-x11-send-text-z14z` and plan §§7.3,
+15.1; physical desktop and complete viewer-to-host qualification remain open.
+
 ## Bounded native application completion (2026-11-21)
 
 The actual `fr app` launcher now continuously drains its original picker/viewer

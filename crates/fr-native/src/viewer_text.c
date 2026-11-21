@@ -29,6 +29,7 @@ struct fr_viewer_text {
     int ready, active, armed, invalid, selected;
     uint8_t f7, enter, escape;
     uint8_t local_keys[32], local_buttons[32];
+    uint8_t released_local_keys[32], released_local_buttons[32];
     uint8_t forwarded_keys[32], forwarded_buttons[32];
     size_t length, cursor, pending_length;
     char draft[FR_TEXT_BYTES], pending[FR_TEXT_BYTES];
@@ -111,6 +112,11 @@ void fr_viewer_input_text_reconcile(struct fr_viewer_input *h,
     for (size_t i = 0; i < 32; i++) {
         t->forwarded_keys[i] &= actual->keys[i];
         t->forwarded_buttons[i] &= actual->buttons[i];
+        /* Retain only negative gesture custody. A delayed old up stays local
+         * after the editor closes, but this does not count as a held key or
+         * prevent a fresh editor. A new down retires its old allowance. */
+        t->released_local_keys[i] |= t->local_keys[i] & (uint8_t)~actual->keys[i];
+        t->released_local_buttons[i] |= t->local_buttons[i] & (uint8_t)~actual->buttons[i];
         t->local_keys[i] &= actual->keys[i];
         t->local_buttons[i] &= actual->buttons[i];
     }
@@ -427,6 +433,12 @@ static void text_filter(struct fr_viewer_input *h, const xcb_generic_event_t *ev
         return;
     }
     if (out->kind == BUTTON_DOWN || out->kind == BUTTON_UP || out->kind == MOTION) {
+        if (out->kind != MOTION) {
+            int down = out->kind == BUTTON_DOWN;
+            int released = text_bit(t->released_local_buttons, out->detail);
+            text_set(t->released_local_buttons, out->detail, 0);
+            if (!down && released) { out->kind = TEXT_BUTTON_UP; return; }
+        }
         if (out->kind != MOTION && text_bit(t->forwarded_buttons, out->detail)) {
             text_set(t->forwarded_buttons, out->detail, out->kind == BUTTON_DOWN);
             return;
@@ -445,6 +457,9 @@ static void text_filter(struct fr_viewer_input *h, const xcb_generic_event_t *ev
     if (out->kind != KEY_DOWN && out->kind != KEY_UP) return;
     const xcb_key_press_event_t *key = (const void *)event;
     int down = out->kind == KEY_DOWN, was_local = text_bit(t->local_keys, key->detail);
+    int released = text_bit(t->released_local_keys, key->detail);
+    text_set(t->released_local_keys, key->detail, 0);
+    if (!down && released) { out->kind = TEXT_KEY_UP; return; }
     if (text_bit(t->forwarded_keys, key->detail)) {
         text_set(t->forwarded_keys, key->detail, down);
         return;

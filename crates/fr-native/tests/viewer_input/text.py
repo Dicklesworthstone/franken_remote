@@ -19,6 +19,8 @@ CASES = (
     "error-isolation", "synthetic", "escape",
     "unavailable-ime", "small-surface",
     "same-batch-key", "same-batch-pointer", "local-pointer-release", "release-only-reconcile",
+    "delayed-local-key-release", "delayed-local-button-release",
+    "reconciled-local-new-gesture",
 )
 
 
