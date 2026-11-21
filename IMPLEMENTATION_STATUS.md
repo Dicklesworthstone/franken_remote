@@ -1,5 +1,37 @@
 # Implementation status
 
+## Bounded native application completion (2026-11-21)
+
+The actual `fr app` launcher now continuously drains its original picker/viewer
+output through shared bounded completion capture. Windows preserves its 256 KiB
+document allowance, while native commands preserve the producer's 2 MiB limit.
+Only a complete final nonempty UTF-8 document can select a host or report an end;
+malformed/truncated tails and read failures cannot reuse earlier success.
+Picker selection also requires successful original-process completion.
+
+Direct-child stdout drainage is bounded after process exit or pipe closure,
+including inherited writers. The macOS Launch Services route uses a private
+FIFO with a bounded missing-writer wait instead of an accumulating output file.
+`open` success does not establish viewer success. Explicit uncertain outcomes,
+incomplete cleanup and missing/contradictory viewer completion stop the app
+before another viewer can start, retaining `unknown_external_effect` in JSON.
+Known refused/cancelled/revoked failures remain retryable with their guidance.
+
+Passed: 31 exact-source component tests (10 completion, eight real subprocess,
+six FIFO and seven report/application-decision cases), strict component Clippy,
+28 portable Windows session-output tests, and Windows all-target check/Clippy.
+The shared completion code also passed the full `fr-client` suite. Real
+`x86_64-apple-darwin` component check/Clippy covers the final report/decision
+code and production child/FIFO/open-arguments branch with the pinned compiler.
+These counts overlap; they are not a combined unique-test total.
+
+Whole native CLI test compilation and an all-target metadata-only check were
+both killed by `SIGKILL` in the unchanged pinned Asupersync dependency before
+the modified native app was checked. Whole-native Clippy was consequently not
+reached. No full native CLI, live Launch Services or desktop-session
+qualification is claimed. `fr-y4fp` remains in progress for those gates. See
+[application completion behavior](docs/native-client-cli.md#desktop-application-fr-app).
+
 ## Linux/X11 original-view Send Text composer (2026-11-21)
 
 Ordinary Linux control sessions now negotiate optional committed Unicode.

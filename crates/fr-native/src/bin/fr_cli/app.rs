@@ -16,11 +16,16 @@
 //! `~/Applications/FrankenRemote.app` on macOS, and an XDG desktop entry
 //! (`~/.local/share/applications/frankenremote.desktop`) on Linux.
 use crate::{Failure, options::MAX_APP_NOTICE};
+use fr_client::completion::CompletionCapture;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
+
+#[path = "app/child.rs"]
+mod child;
+use child::Finished;
 
 const USAGE: &str = "fr app [--install | --uninstall]\n\n\
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
@@ -200,7 +205,7 @@ fn save(path: &Path, settings: &Settings) {
     }
 }
 
-/// One child command's result, from the last JSON object it printed.
+/// One child command's result, from its complete final nonempty line only.
 #[derive(Debug, PartialEq, Eq)]
 enum Report {
     Selected {
@@ -213,33 +218,42 @@ enum Report {
     Failed {
         code: String,
         next: String,
+        unknown_effect: bool,
     },
-    /// A JSON line with neither a selection nor an error (a session's end).
-    Other,
+    /// A native session end with positive local cleanup evidence.
+    Ended,
 }
 
-fn last_report(stdout: &[u8]) -> Option<Report> {
-    let text = String::from_utf8_lossy(stdout);
-    let value = text
-        .lines()
-        .rev()
-        .map(str::trim)
-        .filter(|line| line.starts_with('{'))
-        .find_map(|line| serde_json::from_str::<Value>(line).ok())?;
+fn last_report(stdout: &CompletionCapture) -> Option<Report> {
+    let value = serde_json::from_str::<Value>(stdout.completion().ok()?).ok()?;
     if let Some(error) = value.get("error") {
-        let field = |name: &str| {
-            error
-                .get(name)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
+        if value.get("schema_version").and_then(Value::as_u64) != Some(1) {
+            return None;
+        }
+        let unknown_effect = match value.get("outcome").and_then(Value::as_str)? {
+            "unknown_external_effect" => true,
+            "refused" | "cancelled" | "revoked" => false,
+            _ => return None,
         };
         return Some(Report::Failed {
-            code: field("code"),
-            next: field("next_action"),
+            code: error
+                .get("code")?
+                .as_str()
+                .filter(|code| valid_id(code))?
+                .to_owned(),
+            next: error.get("next_action")?.as_str()?.to_owned(),
+            unknown_effect,
         });
     }
     if value.get("event").and_then(Value::as_str) == Some("host_selected") {
+        if value.get("schema_version").and_then(Value::as_u64) != Some(1)
+            || value.get("selection_only").and_then(Value::as_bool) != Some(true)
+            || value.get("fresh_lookup_required").and_then(Value::as_bool) != Some(true)
+            || value.get("remote_session_started").and_then(Value::as_bool) != Some(false)
+            || value.get("input_requested").and_then(Value::as_bool) != Some(false)
+        {
+            return None;
+        }
         let text = |name: &str| value.get(name).and_then(Value::as_str).map(str::to_owned);
         let flag = |name: &str| value.get(name).and_then(Value::as_bool);
         let (Some(node), Some(name), Some(control), Some(clipboard), Some(choose_display)) = (
@@ -259,7 +273,37 @@ fn last_report(stdout: &[u8]) -> Option<Report> {
             choose_display,
         });
     }
-    Some(Report::Other)
+    // These are the actual Linux and macOS connect completion formats. A
+    // discovery/doctor success, arbitrary JSON, or an unconfirmed cleanup is
+    // not a completed desktop session. macOS currently has no schema field.
+    let linux_end = value.get("schema_version").and_then(Value::as_u64) == Some(1)
+        && value.get("outcome").and_then(Value::as_str) == Some("stopped")
+        && matches!(
+            value.get("role").and_then(Value::as_str),
+            Some("observe" | "control")
+        )
+        && value.get("cleanup_confirmed").and_then(Value::as_bool) == Some(true);
+    let macos_end = value.get("platform").and_then(Value::as_str) == Some("macos")
+        && value
+            .get("schema_version")
+            .is_none_or(|version| version.as_u64() == Some(1))
+        && value.get("outcome").and_then(Value::as_str) == Some("success")
+        && value
+            .get("ended")
+            .and_then(Value::as_str)
+            .is_some_and(|end| !end.is_empty())
+        && value
+            .get("local_cleanup_confirmed")
+            .and_then(Value::as_bool)
+            == Some(true);
+    (linux_end || macos_end).then_some(Report::Ended)
+}
+
+fn picker_report(picked: &Finished) -> Option<Report> {
+    match last_report(&picked.stdout) {
+        Some(Report::Selected { .. }) if !picked.status.success() => None,
+        report => report,
+    }
 }
 
 /// Printable ASCII within the pickers' label bound.
@@ -355,16 +399,50 @@ fn session_args(node: &str, settings: &Settings) -> Vec<String> {
     args
 }
 
-fn outcome(report: Option<Report>, name: &str, success: bool) -> String {
+/// Only a terminal report can return the app to its picker. A launcher exit
+/// alone cannot prove the viewer's outcome or cleanup, especially on macOS.
+fn session_notice(report: Option<Report>, name: &str, success: bool) -> Result<String, Failure> {
+    refuse_uncertain_report(report.as_ref())?;
     match report {
-        Some(Report::Failed { next, .. }) if !next.is_empty() => {
-            notice_text(&format!("{name}: {next}"))
-        }
-        _ if success => notice_text(&format!("The session with {name} ended.")),
-        _ => notice_text(&format!(
-            "The session with {name} ended without a report; run fr connect in a terminal to see why."
-        )),
+        Some(Report::Failed { next, .. }) => Ok(notice_text(&format!("{name}: {next}"))),
+        Some(Report::Ended) if success => Ok(notice_text(&format!(
+            "The session with {name} ended; local cleanup was confirmed."
+        ))),
+        _ => Err(Failure::new(
+            "app_session_outcome_unknown",
+            "The viewer did not confirm a terminal outcome and local cleanup. Inspect the original command before starting another connection.",
+            1,
+        )
+        .uncertain()),
     }
+}
+
+fn refuse_uncertain_report(report: Option<&Report>) -> Result<(), Failure> {
+    if let Some(Report::Failed {
+        code,
+        next,
+        unknown_effect,
+    }) = report
+    {
+        let failure = if *unknown_effect {
+            Failure::new(
+                "app_child_outcome_unknown",
+                "The previous picker or viewer reported an uncertain outcome. Inspect the original command before starting another connection.",
+                1,
+            )
+        } else if code.ends_with("_cleanup_incomplete") {
+            Failure::new(
+                "app_cleanup_unconfirmed",
+                "The previous picker or viewer did not confirm cleanup. Inspect the original command before starting another connection.",
+                1,
+            )
+        } else {
+            return Ok(());
+        };
+        eprintln!("fr app: {}", notice_text(next));
+        return Err(failure.uncertain());
+    }
+    Ok(())
 }
 
 fn spawn_failed() -> Failure {
@@ -387,12 +465,6 @@ struct Launcher {
     exe: PathBuf,
     #[cfg(target_os = "macos")]
     bundle: Option<PathBuf>,
-}
-
-/// One child command's standard output and whether it reported success.
-struct Finished {
-    stdout: Vec<u8>,
-    success: bool,
 }
 
 /// `open` arguments that start `bundle` as a new instance with `args`, wait
@@ -446,40 +518,30 @@ impl Launcher {
     fn run(&self, args: &[String], foreground: bool) -> Result<Finished, Failure> {
         #[cfg(target_os = "macos")]
         if let Some(bundle) = &self.bundle {
-            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let out = std::env::temp_dir().join(format!(
-                "fr-app-{}-{}.out",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            let status = Command::new("/usr/bin/open")
-                .args(open_args(bundle, &out, foreground, args))
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map_err(|_| spawn_failed())?;
-            let stdout = std::fs::read(&out).unwrap_or_default();
-            let _ = std::fs::remove_file(&out);
-            // `open` reports its own start, not the command's exit code; the
-            // command's JSON report carries the outcome.
-            return Ok(Finished {
-                stdout,
-                success: status.success(),
-            });
+            return child::run_bundle(bundle, args, foreground).map_err(child_failed);
         }
         let _ = foreground;
-        let output = Command::new(&self.exe)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::inherit())
-            .output()
-            .map_err(|_| spawn_failed())?;
-        Ok(Finished {
-            stdout: output.stdout,
-            success: output.status.success(),
-        })
+        child::run(Command::new(&self.exe).args(args)).map_err(child_failed)
     }
+}
+
+fn child_failed(error: child::Error) -> Failure {
+    let (code, next) = match error {
+        child::Error::Start => return spawn_failed(),
+        child::Error::Capture => (
+            "app_child_output_incomplete",
+            "The picker or viewer output could not be followed completely. Its outcome and cleanup may be unknown; inspect the original command before restarting fr app.",
+        ),
+        child::Error::Wait => (
+            "app_child_wait_failed",
+            "The picker or viewer process exit could not be confirmed. Inspect the original command before restarting fr app.",
+        ),
+        child::Error::Cleanup => (
+            "app_child_cleanup_unconfirmed",
+            "The original picker or viewer command could not be reaped. Check that it has stopped before restarting fr app.",
+        ),
+    };
+    Failure::new(code, next, 1).uncertain()
 }
 
 fn application() -> Result<String, Failure> {
@@ -493,7 +555,9 @@ fn application() -> Result<String, Failure> {
         // A picker reopened only because the last one expired unused stays
         // behind whatever the user is doing.
         let picked = launcher.run(&pick_args(&settings, notice.as_deref()), idle_expiries == 0)?;
-        let (node, name) = match last_report(&picked.stdout) {
+        let report = picker_report(&picked);
+        refuse_uncertain_report(report.as_ref())?;
+        let (node, name) = match report {
             Some(Report::Selected {
                 node,
                 name,
@@ -544,11 +608,12 @@ fn application() -> Result<String, Failure> {
         picker_failures = 0;
         idle_expiries = 0;
         let session = launcher.run(&session_args(&node, &settings), true)?;
-        notice = Some(outcome(
-            last_report(&session.stdout),
+        let report = last_report(&session.stdout);
+        notice = Some(session_notice(
+            report,
             short_name(&name),
-            session.success,
-        ));
+            session.status.success(),
+        )?);
     }
 }
 
@@ -828,7 +893,7 @@ mod tests {
 
     #[test]
     fn child_reports_become_selections_exits_and_notices() {
-        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false}
+        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
 "#;
         assert_eq!(
             last_report(selected),
@@ -845,26 +910,249 @@ mod tests {
             last_report(br#"{"event":"host_selected","node_id":"nMAC","certificate_name":"m"}"#),
             None
         );
-        let failed = b"progress\n{\"outcome\":\"failure\",\"error\":{\"code\":\"host_not_answering\",\"next_action\":\"Check that frd run is running there.\"}}\n";
+        let failed = b"progress\n{\"schema_version\":1,\"outcome\":\"refused\",\"error\":{\"code\":\"host_not_answering\",\"next_action\":\"Check that frd run is running there.\"}}\n";
         let report = last_report(failed);
         assert_eq!(
             report,
             Some(Report::Failed {
                 code: "host_not_answering".into(),
                 next: "Check that frd run is running there.".into(),
+                unknown_effect: false,
             })
         );
         assert_eq!(
-            outcome(report, "mac", false),
+            session_notice(report, "mac", false).unwrap(),
             "mac: Check that frd run is running there."
         );
         assert_eq!(
-            outcome(Some(Report::Other), "mac", true),
-            "The session with mac ended."
+            session_notice(Some(Report::Ended), "mac", true).unwrap(),
+            "The session with mac ended; local cleanup was confirmed."
         );
-        assert!(outcome(None, "mac", false).contains("without a report"));
+        assert!(
+            session_notice(None, "mac", false)
+                .unwrap_err()
+                .unknown_effect
+        );
         assert_eq!(last_report(b"no json at all\n"), None);
         assert_eq!(short_name("mac-mini-max.tail1f21e.ts.net"), "mac-mini-max");
+    }
+
+    fn last_report(bytes: &[u8]) -> Option<Report> {
+        super::last_report(&fr_client::completion::capture_completion_with_limit(
+            bytes,
+            fr_client::completion::CompletionLimit::NativeCommand,
+        ))
+    }
+
+    #[test]
+    fn only_native_terminal_cleanup_reports_support_a_normal_notice() {
+        for document in [
+            r#"{"schema_version":1,"outcome":"stopped","role":"observe","cleanup_confirmed":true}"#,
+            r#"{"schema_version":1,"outcome":"stopped","role":"control","cleanup_confirmed":true}"#,
+            r#"{"outcome":"success","platform":"macos","ended":"window_closed","local_cleanup_confirmed":true}"#,
+        ] {
+            assert_eq!(last_report(document.as_bytes()), Some(Report::Ended));
+            assert!(
+                session_notice(last_report(document.as_bytes()), "mac", true)
+                    .unwrap()
+                    .contains("local cleanup was confirmed")
+            );
+            assert!(
+                session_notice(last_report(document.as_bytes()), "mac", false)
+                    .unwrap_err()
+                    .unknown_effect
+            );
+        }
+        for document in [
+            "{}",
+            "{broken",
+            "null",
+            "[]",
+            "",
+            r#"{"outcome":"success"}"#,
+            r#"{"schema_version":1,"outcome":"success","snapshot_only":true}"#,
+            r#"{"schema_version":2,"outcome":"stopped","role":"observe","cleanup_confirmed":true}"#,
+            r#"{"schema_version":1,"outcome":"stopped","role":"observe","cleanup_confirmed":false}"#,
+            r#"{"outcome":"success","platform":"macos","ended":"window_closed","local_cleanup_confirmed":false}"#,
+            r#"{"outcome":"success","platform":"macos","local_cleanup_confirmed":true}"#,
+            r#"{"schema_version":2,"outcome":"success","platform":"macos","ended":"window_closed","local_cleanup_confirmed":true}"#,
+        ] {
+            assert_eq!(last_report(document.as_bytes()), None, "{document}");
+            assert!(
+                session_notice(last_report(document.as_bytes()), "mac", true)
+                    .unwrap_err()
+                    .unknown_effect
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_errors_cannot_be_replaced_by_earlier_completion() {
+        let end =
+            r#"{"schema_version":1,"outcome":"stopped","role":"observe","cleanup_confirmed":true}"#;
+        for tail in ["{broken", "viewer failed", "{}"] {
+            assert_eq!(last_report(format!("{end}\n{tail}\n").as_bytes()), None);
+        }
+        let error = r#"{"schema_version":1,"outcome":"unknown_external_effect","error":{"code":"disconnect_outcome_unknown","next_action":"Inspect outstanding effects before continuing."}}"#;
+        assert!(
+            session_notice(
+                last_report(format!("{end}\n{error}\n").as_bytes()),
+                "mac",
+                true
+            )
+            .unwrap_err()
+            .unknown_effect
+        );
+        for code in [
+            "host_picker_cleanup_incomplete",
+            "native_cleanup_incomplete",
+            "microphone_cleanup_incomplete",
+            "host_cleanup_incomplete",
+        ] {
+            let report = Report::Failed {
+                code: code.into(),
+                next: "Inspect the original worker.".into(),
+                unknown_effect: false,
+            };
+            assert!(refuse_uncertain_report(Some(&report)).is_err());
+        }
+    }
+
+    #[test]
+    fn incomplete_child_outcomes_remain_unknown_in_the_json_envelope() {
+        for error in [
+            child::Error::Capture,
+            child::Error::Wait,
+            child::Error::Cleanup,
+        ] {
+            let document = crate::output::failure(child_failed(error), true);
+            let value: Value = serde_json::from_str(&document).unwrap();
+            assert_eq!(value["outcome"], "unknown_external_effect");
+        }
+        assert!(!child_failed(child::Error::Start).unknown_effect);
+        let report = Report::Failed {
+            code: "native_cleanup_incomplete".into(),
+            next: "Inspect the original worker.".into(),
+            unknown_effect: false,
+        };
+        assert!(
+            refuse_uncertain_report(Some(&report))
+                .unwrap_err()
+                .unknown_effect
+        );
+    }
+
+    #[test]
+    fn uncertain_reports_stop_before_picker_retry_or_cancel_handling() {
+        for code in [
+            "disconnect_outcome_unknown",
+            "host_choice_cancelled",
+            "host_choice_expired",
+        ] {
+            let document = json!({
+                "schema_version": 1,
+                "outcome": "unknown_external_effect",
+                "error": {"code": code, "next_action": "Inspect the original command."},
+            })
+            .to_string();
+            let report = last_report(document.as_bytes());
+            assert!(matches!(
+                report,
+                Some(Report::Failed {
+                    unknown_effect: true,
+                    ..
+                })
+            ));
+            let picker_error = refuse_uncertain_report(report.as_ref()).unwrap_err();
+            assert!(picker_error.unknown_effect);
+            for success in [true, false] {
+                let viewer_error =
+                    session_notice(last_report(document.as_bytes()), "mac", success).unwrap_err();
+                assert_eq!(viewer_error, picker_error);
+                let output = crate::output::failure(viewer_error, true);
+                let value: Value = serde_json::from_str(&output).unwrap();
+                assert_eq!(value["outcome"], "unknown_external_effect");
+                assert_eq!(value["error"]["code"], "app_child_outcome_unknown");
+            }
+        }
+    }
+
+    #[test]
+    fn a_nonterminal_viewer_report_cannot_start_another_session() {
+        let selected = json!({
+            "schema_version": 1,
+            "event": "host_selected",
+            "node_id": "nMAC",
+            "certificate_name": "mac.tail.ts.net",
+            "control": false,
+            "clipboard": false,
+            "choose_display": false,
+            "selection_only": true,
+            "fresh_lookup_required": true,
+            "remote_session_started": false,
+            "input_requested": false,
+        })
+        .to_string();
+        assert!(matches!(
+            last_report(selected.as_bytes()),
+            Some(Report::Selected { .. })
+        ));
+        for document in [
+            selected.as_bytes(),
+            b"",
+            b"{}",
+            b"{broken",
+            b"{\"outcome\":\"success\"}",
+            b"\xff\n",
+        ] {
+            for success in [true, false] {
+                let failure = session_notice(last_report(document), "mac", success).unwrap_err();
+                let output = crate::output::failure(failure, true);
+                let value: Value = serde_json::from_str(&output).unwrap();
+                assert_eq!(value["outcome"], "unknown_external_effect");
+                assert_eq!(value["error"]["code"], "app_session_outcome_unknown");
+            }
+        }
+    }
+
+    #[test]
+    fn known_terminal_refusals_remain_retryable() {
+        for (outcome, code) in [
+            ("refused", "host_not_answering"),
+            ("cancelled", "host_choice_cancelled"),
+            ("refused", "host_choice_expired"),
+            ("revoked", "host_control_revoked"),
+        ] {
+            let document = json!({
+                "schema_version": 1,
+                "outcome": outcome,
+                "error": {"code": code, "next_action": "Check the original command."},
+            })
+            .to_string();
+            assert!(refuse_uncertain_report(last_report(document.as_bytes()).as_ref()).is_ok());
+            for success in [true, false] {
+                assert_eq!(
+                    session_notice(last_report(document.as_bytes()), "mac", success).unwrap(),
+                    "mac: Check the original command."
+                );
+            }
+        }
+        // An error-shaped object without a known terminal outcome is no
+        // stronger evidence than an arbitrary JSON document.
+        for outcome in [Value::Null, json!("success"), json!("other")] {
+            let document = json!({
+                "schema_version": 1,
+                "outcome": outcome,
+                "error": {"code": "host_not_answering", "next_action": "Inspect the command."},
+            })
+            .to_string();
+            assert_eq!(last_report(document.as_bytes()), None);
+            assert!(
+                session_notice(last_report(document.as_bytes()), "mac", true)
+                    .unwrap_err()
+                    .unknown_effect
+            );
+        }
     }
 
     #[test]

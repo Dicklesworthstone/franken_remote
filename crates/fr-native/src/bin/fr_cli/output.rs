@@ -121,7 +121,7 @@ pub fn failure(error: Failure, json: bool) -> String {
 }
 pub fn write(text: &str) -> io::Result<()> {
     // The producer has finished; slow stdout never runs inside session callbacks.
-    if text.len() > 2 * 1024 * 1024 {
+    if text.len() > fr_client::completion::NATIVE_COMPLETION_LINE_LIMIT {
         return Err(io::Error::other("output bound"));
     }
     let mut out = io::stdout().lock();

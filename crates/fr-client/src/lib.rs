@@ -7,6 +7,7 @@ pub mod authority;
 /// Fixed-memory compositor-submission timing, shared by native viewers.
 pub mod cadence;
 pub mod clock;
+pub mod completion;
 pub mod cursor;
 pub mod input;
 

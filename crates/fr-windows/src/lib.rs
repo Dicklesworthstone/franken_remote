@@ -73,6 +73,8 @@ mod options;
 mod outcome;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod receive_choice;
+// Shared completion capture uses the same Windows/dev-only core as the picker.
+#[cfg(any(windows, test))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod session_output;
 #[cfg_attr(not(windows), allow(dead_code))]

@@ -50,6 +50,37 @@ omitted candidates stay explicit. This opens no observation, media or input.
 The advertisement does not qualify the current desktop or codec; see
 [bounded capability discovery](../NATIVE_CAPABILITY_INSPECTION.md#bounded-tailnet-discovery).
 
+## Desktop application (`fr app`)
+
+With the appropriate desktop build, `fr app` opens the native machine picker
+and follows the selected viewer through its terminal outcome. A picker choice
+is applied only after its original command exits successfully and reports the
+selection-only, fresh-lookup-required result. Each viewer still resolves the
+selected identity again before connecting.
+
+The application continuously drains bounded completion output. Native commands
+retain their existing 2 MiB document allowance; the shared Windows capture
+keeps its 256 KiB allowance. Only the complete final nonempty UTF-8 JSON line
+owns the result. A malformed or oversized tail, failed read, or arbitrary JSON
+cannot recover an earlier success. Direct-child drainage has a five-second
+deadline after original process exit or pipe closure, including inherited
+writers. On macOS, Launch Services writes into a private 0600 FIFO inside a
+create-new 0700 directory, with a fifteen-second missing-writer startup budget.
+The `open -n -W` activation route remains in use.
+
+A normal session-end notice requires the native viewer's recognized completion
+and positive cleanup evidence. Successful `open` exit alone proves neither.
+Known refused, cancelled or revoked attempts retain their guidance and can
+return to the picker. Explicit uncertainty, incomplete cleanup, missing or
+nonterminal viewer completion, and a failed process paired with a claimed
+normal end stop the app before another viewer can start. In JSON output those
+stops remain `unknown_external_effect`; inspect the original command before
+starting another connection.
+
+The current component and cross-target evidence is recorded in
+[implementation status](../IMPLEMENTATION_STATUS.md). Whole-native CLI and
+live Launch Services qualification remain separate from those checks.
+
 ## macOS discovery
 
 ### Default-build identity inspection
