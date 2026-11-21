@@ -72,6 +72,8 @@ mod options;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod outcome;
 #[cfg_attr(not(windows), allow(dead_code))]
+mod receive_choice;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod settings;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod text;

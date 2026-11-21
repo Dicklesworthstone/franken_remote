@@ -89,7 +89,11 @@ impl Settings {
 impl Settings {
     /// The command-line viewer arguments for one chosen machine with these
     /// options (the desktop application runs each session this way).
-    pub(crate) fn viewer_args(&self, stable_id: &str) -> Vec<String> {
+    pub(crate) fn viewer_args(
+        &self,
+        stable_id: &str,
+        receive: Option<crate::receive_choice::Destination>,
+    ) -> Vec<String> {
         let mut args = vec!["view".to_owned(), stable_id.to_owned()];
         if self.control {
             args.push("--control".to_owned());
@@ -98,6 +102,9 @@ impl Settings {
             }
             if !self.shortcuts {
                 args.push("--no-shortcuts".to_owned());
+            }
+            if let Some(receive) = receive {
+                args.extend(receive.into_arguments());
             }
         }
         if self.choose_display {
@@ -139,7 +146,7 @@ mod tests {
     fn viewer_args_are_the_command_lines_own_options() {
         use crate::options::{ConnectionCommand, DisplayChoice};
         let parse = |settings: &Settings| {
-            let args = settings.viewer_args("nSTABLE1CNTRL");
+            let args = settings.viewer_args("nSTABLE1CNTRL", None);
             let command = ConnectionCommand::parse(&args, 8443).expect("viewer arguments parse");
             assert!(command.view);
             assert_eq!(command.selection, Some("nSTABLE1CNTRL"));
@@ -155,7 +162,7 @@ mod tests {
         // Clipboard sharing and shortcuts only exist with control, so a
         // view-only session carries neither flag.
         assert_eq!(
-            view_only.viewer_args("nSTABLE1CNTRL"),
+            view_only.viewer_args("nSTABLE1CNTRL", None),
             ["view", "nSTABLE1CNTRL"]
         );
         let options = parse(&view_only);
@@ -195,5 +202,53 @@ mod tests {
         assert_eq!(Settings::from_json(long.as_bytes()).last_machine, None);
         let control = "{\"last_machine\": \"n\\u0007x\"}";
         assert_eq!(Settings::from_json(control.as_bytes()).last_machine, None);
+    }
+
+    #[test]
+    fn receive_consent_is_one_connection_argument_and_never_a_saved_setting() {
+        use crate::options::{ConnectionCommand, ReceiveConflict};
+        use crate::receive_choice::Choice;
+
+        let path = r"C:\Receive here\日本語";
+        let units: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        let mut choice = Choice::default();
+        let request = choice.begin(10).unwrap();
+        choice.finish(request, Some(&units), 20).unwrap();
+        let settings = Settings::default();
+        let args = settings.viewer_args("nSTABLE1CNTRL", choice.take(true));
+        let parsed = ConnectionCommand::parse(&args, 8443).unwrap();
+        let receive = parsed.options.receive.unwrap();
+        assert_eq!(receive.directory, std::path::PathBuf::from(path));
+        assert_eq!(receive.conflict, ReceiveConflict::Reject);
+        assert!(receive.max_file_bytes.is_none());
+        assert!(receive.max_session_bytes.is_none());
+        assert!(choice.take(true).is_none());
+
+        let saved = settings.to_json();
+        assert!(!saved.contains("receive"));
+        assert!(!saved.contains("日本語"));
+        let fresh_args = Settings::from_json(saved.as_bytes()).viewer_args("nSTABLE1CNTRL", None);
+        assert!(
+            ConnectionCommand::parse(&fresh_args, 8443)
+                .unwrap()
+                .options
+                .receive
+                .is_none()
+        );
+
+        let request = choice.begin(30).unwrap();
+        choice.finish(request, Some(&units), 40).unwrap();
+        let view_only = Settings {
+            control: false,
+            ..settings
+        };
+        let args = view_only.viewer_args("nSTABLE1CNTRL", choice.take(true));
+        assert!(
+            ConnectionCommand::parse(&args, 8443)
+                .unwrap()
+                .options
+                .receive
+                .is_none()
+        );
     }
 }

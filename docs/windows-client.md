@@ -118,6 +118,10 @@ running FrankenRemote, and a listing does not mean it will admit this viewer.
 - Choose **View only** or **View and control**. **Share clipboard text**
   applies to control sessions. **Ask which display to show** opens the
   remote display picker after connecting.
+- To receive files selected by the host, choose **View and control**, then
+  **Receive files…** and select a private local folder. The folder appears
+  beside the button for this connection. **Clear** turns receiving off;
+  choosing **View only** also clears it.
 - Press Enter, double-click the machine or choose **Connect**.
 
 The viewer opens in its own window and runs as a child process of the app,
@@ -128,9 +132,10 @@ it could not start. Starting a view-only session leaves control requests
 disabled in the viewer. Its control status names the app's **View and
 control** choice instead of F8.
 
-The last machine and the three options are saved in
+The last machine and connection preferences are saved in
 `%LOCALAPPDATA%\FrankenRemote\settings.json`. That file holds only the
-machine's stable ID and the option values.
+machine's stable ID and the option values. A receive-folder choice is never
+saved: returning to the machine list requires choosing a folder again.
 
 The status area's second line names the decoder this PC offers (see
 [Decoder selection](#decoder-selection)). When Windows has no HEVC decoder, a
@@ -718,6 +723,27 @@ when its actual worker returns. Later collection cannot repair the earlier
 failure or supply a new transfer deadline.
 
 ## Receive files selected by the host
+
+In the desktop app, choose **View and control**, then **Receive files…** in
+the machine picker. Select an existing private folder in the native Windows
+folder dialog, verify the destination shown beside the button, and choose
+**Connect**. The machine list is refreshed after the dialog closes, so a
+Connect gesture always uses a fresh list. Selecting a folder starts no
+remote connection and grants no control.
+
+The choice belongs to that one picker and is consumed by its next controlling
+connection. **Clear**, **View only**, closing the picker, or cancelling a
+replacement folder dialog clears it. A new machine-picker window, session
+retry, display change, resize, or reconnect cannot inherit the destination.
+If the folder cannot be validated, the viewer refuses before opening a
+remote session; it does not silently connect with file receiving disabled.
+The local folder label is not written into settings or session logs.
+
+The app uses the same receive owner, default quotas and no-overwrite policy
+as the command line below. Once connected, the viewer's **Receive files**
+menu reports progress and provides **Cancel receiving**, which stops this
+file direction while ordinary desktop viewing can continue. The host operator
+still chooses the files separately; this feature never browses remote paths.
 
 Select an existing private directory on this Windows machine when starting a
 controlling viewer:

@@ -12,6 +12,7 @@ use crate::host_picker::Choice;
 pub(super) use crate::host_picker::Error;
 use crate::machines::{self, Platform, Row};
 use crate::outcome;
+use crate::receive_choice::{Choice as ReceiveChoice, Destination};
 use crate::settings::Settings;
 use fr_client::discovery::picker::{Candidate, Catalog};
 use fr_mobile_ffi::session::connection;
@@ -92,6 +93,8 @@ const ID_INSTALL: usize = 10;
 const ID_DECODER: usize = 11;
 const ID_FULLSCREEN: usize = 12;
 const ID_SHORTCUTS: usize = 13;
+const ID_RECEIVE: usize = 14;
+const ID_CLEAR_RECEIVE: usize = 15;
 
 /// Who opened the picker: the command line keeps its explicit options; the
 /// application also shows connection options and remembers them.
@@ -124,6 +127,8 @@ pub(super) struct Chosen {
     pub snapshot: Discovery,
     pub peer: Candidate,
     pub settings: Settings,
+    /// One explicit local choice from this picker, never remembered settings.
+    pub receive: Option<Destination>,
 }
 
 pub(super) enum Picked {
@@ -159,6 +164,9 @@ struct Controls {
     display: HWND,
     fullscreen: HWND,
     shortcuts: HWND,
+    receive: HWND,
+    receive_path: HWND,
+    clear_receive: HWND,
     status: HWND,
     install: HWND,
     connect: HWND,
@@ -166,7 +174,7 @@ struct Controls {
 }
 
 impl Controls {
-    fn all(&self) -> [HWND; 17] {
+    fn all(&self) -> [HWND; 20] {
         [
             self.heading,
             self.subtitle,
@@ -181,6 +189,9 @@ impl Controls {
             self.display,
             self.fullscreen,
             self.shortcuts,
+            self.receive,
+            self.receive_path,
+            self.clear_receive,
             self.status,
             self.install,
             self.connect,
@@ -198,6 +209,8 @@ enum Action {
     Cancel,
     Install,
     Store,
+    Receive,
+    ClearReceive,
 }
 
 struct Snapshot {
@@ -223,6 +236,8 @@ struct State {
     offer_install: bool,
     /// The selected row's stable ID (UI state only; never a choice).
     selected: RefCell<Option<String>>,
+    receive: RefCell<ReceiveChoice>,
+    choosing_receive: Cell<bool>,
     filling: Cell<bool>,
     action: Cell<Action>,
     retiring: Cell<bool>,
@@ -244,6 +259,7 @@ impl State {
 
     fn cancel(&self) {
         self.action.set(Action::Cancel);
+        self.receive.borrow_mut().clear();
         if let Some(snapshot) = self.snapshot.borrow_mut().as_mut() {
             snapshot.choice.refuse(Error::Cancelled);
         }
@@ -288,6 +304,9 @@ impl State {
     }
 
     fn connect(&self, queued: u32) {
+        if self.choosing_receive.get() || self.action.get() != Action::None {
+            return;
+        }
         let Some(index) = self.selected_index() else {
             return;
         };
@@ -323,6 +342,82 @@ impl State {
             settings.shortcuts = checked(controls.shortcuts);
         }
         settings
+    }
+
+    fn show_receive(&self) {
+        if self.mode != Mode::Application {
+            return;
+        }
+        let controls = self.controls.get();
+        let control = checked(controls.control);
+        let (label, selected) = {
+            let receive = self.receive.borrow();
+            match receive.path() {
+                Some(path) => (format!("Receive into: {path}"), true),
+                None => (
+                    "Off. Choose a folder for this connection.".to_owned(),
+                    false,
+                ),
+            }
+        };
+        // SAFETY: the path is copied only into this local UI control. No
+        // receive policy borrow spans these reentrant native messages.
+        unsafe {
+            let _ = SetWindowTextW(controls.receive_path, &HSTRING::from(label));
+            let _ = EnableWindow(controls.receive, control && !self.choosing_receive.get());
+            let _ = EnableWindow(controls.clear_receive, control && selected);
+        }
+    }
+
+    fn clear_receive(&self) {
+        self.receive.borrow_mut().clear();
+        self.show_receive();
+    }
+
+    fn choose_receive(&self) {
+        if self.mode != Mode::Application
+            || !checked(self.controls.get().control)
+            || self.choosing_receive.replace(true)
+        {
+            return;
+        }
+        let request = self.receive.borrow_mut().begin(ticks());
+        let Ok(request) = request else {
+            self.choosing_receive.set(false);
+            self.clear_receive();
+            return;
+        };
+        self.show_receive();
+        let selected = super::receive_folder::choose(self.hwnd);
+        self.choosing_receive.set(false);
+        if self.action.get() == Action::Cancel
+            || self.closed.get()
+            || self.retiring.get()
+            || !checked(self.controls.get().control)
+        {
+            self.clear_receive();
+            return;
+        }
+        let result = match selected {
+            Ok(path) => self
+                .receive
+                .borrow_mut()
+                .finish(request, path.as_deref(), ticks()),
+            Err(error) => {
+                self.receive.borrow_mut().clear();
+                Err(error)
+            }
+        };
+        self.show_receive();
+        // Native dialogs can outlive a discovery snapshot and pump queued
+        // messages. Drop every old row/gesture before another Connect choice.
+        let notice = result.err().map(|_| Notice {
+            text: "The receive folder could not be selected. Choose it again, or connect without file receiving."
+                .to_owned(),
+            warning: true,
+            sticky: false,
+        });
+        self.refresh(notice);
     }
 
     /// Replace the snapshot and its choice; an error clears the list.
@@ -599,20 +694,30 @@ impl State {
         place(c.refresh, margin + inner - s(100), y, s(100), s(28));
         y += s(38);
         let footer = if self.mode == Mode::Application {
-            s(130)
+            s(160)
         } else {
             s(64)
         };
         place(c.list, margin, y, inner, (height - y - footer).max(s(80)));
         if self.mode == Mode::Application {
-            let row = height - s(122);
+            let row = height - s(152);
             place(c.view, margin, row, s(110), s(24));
             place(c.control, margin + s(116), row, s(150), s(24));
             place(c.clipboard, margin + s(280), row, s(180), s(24));
             place(c.display, margin + s(470), row, s(200), s(24));
-            let row = height - s(92);
+            let row = height - s(122);
             place(c.fullscreen, margin, row, s(266), s(24));
             place(c.shortcuts, margin + s(280), row, s(390), s(24));
+            let row = height - s(92);
+            place(c.receive, margin, row, s(150), s(28));
+            place(c.clear_receive, margin + s(158), row, s(64), s(28));
+            place(
+                c.receive_path,
+                margin + s(232),
+                row + s(4),
+                inner - s(232),
+                s(24),
+            );
         }
         let bottom = height - s(50);
         let buttons = s(232) + if self.offer_install { s(170) } else { 0 };
@@ -870,6 +975,7 @@ impl Picker {
 
 impl Drop for Picker {
     fn drop(&mut self) {
+        self.0.receive.borrow_mut().clear();
         if let Some(snapshot) = self.0.snapshot.borrow_mut().as_mut() {
             snapshot.choice.refuse(Error::Cancelled);
         }
@@ -946,6 +1052,8 @@ pub(super) fn pick(request: &Request) -> Result<Picked, PickError> {
                 return Ok(Picked::Install);
             }
             Action::Refresh => picker.0.refresh(None),
+            Action::Receive => picker.0.choose_receive(),
+            Action::ClearReceive => picker.0.clear_receive(),
             Action::Store => {
                 // SAFETY: a fixed Store URI handed to the shell for this window.
                 unsafe {
@@ -1012,10 +1120,12 @@ pub(super) fn pick(request: &Request) -> Result<Picked, PickError> {
         Ok(peer) => {
             let mut settings = chosen_settings;
             settings.last_machine = Some(peer.stable_id().to_owned());
+            let receive = picker.0.receive.borrow_mut().take(settings.control);
             Ok(Picked::Machine(Chosen {
                 snapshot: snapshot.discovery,
                 peer,
                 settings,
+                receive,
             }))
         }
         Err(Error::Cancelled) => Ok(Picked::Closed),
@@ -1046,6 +1156,10 @@ fn pretranslate(state: &State, message: &MSG) -> bool {
             state.request(Action::Install);
         } else if focus == controls.decoder {
             state.request(Action::Store);
+        } else if focus == controls.receive {
+            state.request(Action::Receive);
+        } else if focus == controls.clear_receive {
+            state.request(Action::ClearReceive);
         } else {
             state.connect(message.time);
         }
@@ -1161,6 +1275,8 @@ fn open(request: &Request) -> windows::core::Result<Picker> {
             decoder_missing,
             offer_install: request.offer_install && request.mode == Mode::Application,
             selected: RefCell::new(None),
+            receive: RefCell::new(ReceiveChoice::default()),
+            choosing_receive: Cell::new(false),
             filling: Cell::new(false),
             action: Cell::new(Action::None),
             retiring: Cell::new(false),
@@ -1275,6 +1391,16 @@ fn open(request: &Request) -> windows::core::Result<Picker> {
                 none,
                 ID_SHORTCUTS,
             )?;
+            controls.receive = child(
+                w!("BUTTON"),
+                w!("Receive files\u{2026}"),
+                button,
+                none,
+                ID_RECEIVE,
+            )?;
+            controls.clear_receive =
+                child(w!("BUTTON"), w!("Clear"), button, none, ID_CLEAR_RECEIVE)?;
+            controls.receive_path = child(w!("STATIC"), w!(""), static_style, none, 0)?;
         }
         // Two short lines (counts, decode path) that may wrap: no ellipsis.
         controls.status = child(w!("STATIC"), w!(""), WINDOW_STYLE(0x0080), none, 0)?;
@@ -1359,6 +1485,7 @@ fn open(request: &Request) -> windows::core::Result<Picker> {
             set(controls.shortcuts, settings.shortcuts);
             let _ = EnableWindow(controls.clipboard, settings.control);
             let _ = EnableWindow(controls.shortcuts, settings.control);
+            picker.0.show_receive();
         }
         picker.0.apply_fonts();
         picker.0.show_notice();
@@ -1382,6 +1509,9 @@ unsafe extern "system" fn window_proc(
                 return LRESULT(0);
             }
             WM_DESTROY => {
+                if !state.retiring.get() {
+                    state.receive.borrow_mut().clear();
+                }
                 if !state.retiring.get()
                     && let Some(snapshot) = state.snapshot.borrow_mut().as_mut()
                 {
@@ -1448,12 +1578,21 @@ unsafe extern "system" fn window_proc(
                         ID_REFRESH if source == controls.refresh => state.request(Action::Refresh),
                         ID_INSTALL if source == controls.install => state.request(Action::Install),
                         ID_DECODER if source == controls.decoder => state.request(Action::Store),
+                        ID_RECEIVE if source == controls.receive => state.request(Action::Receive),
+                        ID_CLEAR_RECEIVE if source == controls.clear_receive => {
+                            state.request(Action::ClearReceive);
+                        }
                         ID_VIEW | ID_CONTROL => {
                             let control = checked(controls.control);
                             // SAFETY: enabling this thread's own checkbox.
                             let _ = unsafe { EnableWindow(controls.clipboard, control) };
                             // SAFETY: as above; shortcuts only reach a controlled host.
                             let _ = unsafe { EnableWindow(controls.shortcuts, control) };
+                            if !control {
+                                state.clear_receive();
+                            } else {
+                                state.show_receive();
+                            }
                         }
                         _ => {}
                     }

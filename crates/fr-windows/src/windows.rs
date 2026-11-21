@@ -2,6 +2,7 @@ pub mod app;
 mod hosts;
 mod install;
 mod probe;
+mod receive_folder;
 mod render;
 mod viewer;
 

@@ -232,7 +232,7 @@ fn application() -> ExitCode {
             Ok(Picked::Machine(chosen)) => {
                 settings = chosen.settings.clone();
                 save_settings(settings_path.as_deref(), &settings);
-                notice = Some(session(&chosen));
+                notice = Some(session(chosen));
             }
             Err(PickError::Choice(
                 error @ (Error::NativeUnavailable | Error::CleanupIncomplete),
@@ -327,7 +327,7 @@ impl SessionLog {
     }
 }
 
-fn session(chosen: &Chosen) -> Notice {
+fn session(chosen: Chosen) -> Notice {
     let name = machines::short_name(chosen.peer.certificate_name()).to_owned();
     let failed = |text: String| Notice {
         text,
@@ -337,7 +337,12 @@ fn session(chosen: &Chosen) -> Notice {
     let Ok(exe) = std::env::current_exe() else {
         return failed("FrankenRemote could not find its own program file.".to_owned());
     };
-    let args = chosen.settings.viewer_args(chosen.peer.stable_id());
+    // The locally selected receive path belongs only to this child. Keep it
+    // out of the content-free session log and the remembered settings.
+    let log_args = chosen.settings.viewer_args(chosen.peer.stable_id(), None);
+    let args = chosen
+        .settings
+        .viewer_args(chosen.peer.stable_id(), chosen.receive);
     let child = Command::new(exe)
         .arg("--session")
         .args(&args)
@@ -352,7 +357,7 @@ fn session(chosen: &Chosen) -> Notice {
     };
     // SAFETY: a scalar foreground-permission grant for the new viewer.
     let _ = unsafe { AllowSetForegroundWindow(child.id()) };
-    let log = std::sync::Arc::new(SessionLog::begin(&args));
+    let log = std::sync::Arc::new(SessionLog::begin(&log_args));
     // Status lines go to the log as they arrive. Draining stderr on its own
     // thread also keeps the viewer from ever blocking on a full pipe.
     let lines = child.stderr.take().and_then(|stderr| {
