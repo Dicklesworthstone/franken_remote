@@ -4,7 +4,9 @@ This implements PROTOCOL.md sections 1–4 and the six startup kinds below. It i
 not Tailscale identity, local approval, a codec probe, a control lease, browser
 bootstrap, or a frozen interoperability specification. Native profile ID 1,
 profile version 0, and application version 0 are independent values. Other
-transport profiles explicitly refuse; no missing-Origin authentication exists.
+transport profiles explicitly refuse in this native codec; no missing-Origin
+authentication exists. The separately bounded WSS ClientHello is defined in
+[PROTOCOL_BROWSER_BOOTSTRAP.md](PROTOCOL_BROWSER_BOOTSTRAP.md).
 
 ## Bounded encoding
 

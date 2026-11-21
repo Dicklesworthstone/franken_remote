@@ -11,6 +11,11 @@ use fr_core::{
     limits::{LimitOverrides, ProtocolLimits},
 };
 
+/// Browser WSS bootstrap uses the same bounded offer fields with its own
+/// transport profile and mandatory, one-use nonce. Native negotiation remains
+/// native-only; decoding a browser hello never authorizes an observation.
+pub mod browser;
+
 pub const MAX_RECORD: usize = 4096;
 /// A code-level bound (PROTOCOL.md fixes no count). 24 fits the host's fullest
 /// offer (control, clipboard, files, audio and reference recovery) with room,
@@ -420,6 +425,12 @@ fn selection_bytes(s: &Selection) -> usize {
     6 + LIMIT_BYTES + caps_bytes(&s.capabilities) + if s.picture.is_some() { 8 } else { 0 }
 }
 fn write_offer(w: &mut Writer<'_>, o: &Offer) -> Result<(), Error> {
+    write_offer_fields(w, o)?;
+    // Native QUIC has no Origin bootstrap nonce. Browser profiles are refused.
+    w.u8(0)?;
+    Ok(())
+}
+fn write_offer_fields(w: &mut Writer<'_>, o: &Offer) -> Result<(), Error> {
     w.u32(u32::try_from(o.versions.len()).map_err(|_| Error::Version)?)?;
     for &v in &o.versions {
         w.u16(v)?;
@@ -429,11 +440,17 @@ fn write_offer(w: &mut Writer<'_>, o: &Offer) -> Result<(), Error> {
     w.u8(o.role.byte())?;
     write_limits(w, o.limits)?;
     write_caps(w, &o.capabilities)?;
-    // Native QUIC has no Origin bootstrap nonce. Browser profiles are refused.
-    w.u8(0)?;
     Ok(())
 }
 fn read_offer(r: &mut Reader<'_>) -> Result<Offer, Error> {
+    let offer = read_offer_fields(r)?;
+    if r.u8()? != 0 {
+        return Err(Error::Profile);
+    }
+    offer.validate()?;
+    Ok(offer)
+}
+fn read_offer_fields(r: &mut Reader<'_>) -> Result<Offer, Error> {
     let n = usize::try_from(r.u32()?).map_err(|_| Error::Version)?;
     if n == 0 || n > MAX_VERSIONS || n > r.remaining.len() / 2 {
         return Err(Error::Version);
@@ -453,10 +470,6 @@ fn read_offer(r: &mut Reader<'_>) -> Result<Offer, Error> {
         limits: read_limits(r)?,
         capabilities: read_caps(r)?,
     };
-    if r.u8()? != 0 {
-        return Err(Error::Profile);
-    }
-    offer.validate()?;
     Ok(offer)
 }
 fn write_selection(w: &mut Writer<'_>, s: &Selection) -> Result<(), Error> {
