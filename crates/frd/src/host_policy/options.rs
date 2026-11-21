@@ -23,6 +23,8 @@ pub struct Effective {
 #[derive(Debug, Default)]
 pub struct RunOptions {
     pub port: Option<u16>,
+    /// Optional opt-in HTTPS/WSS browser workstation ingress port (degraded TCP HoL profile).
+    pub browser_port: Option<u16>,
     pub socket: Option<PathBuf>,
     pub config: Option<PathBuf>,
     pub approval: Option<Approval>,
@@ -191,6 +193,13 @@ impl RunOptions {
                         return Err(Error::InvalidArgument);
                     }
                     set(&mut options.port, port)?;
+                }
+                "--browser-port" => {
+                    let port = value.parse::<u16>().map_err(|_| Error::InvalidArgument)?;
+                    if port == 0 {
+                        return Err(Error::InvalidArgument);
+                    }
+                    set(&mut options.browser_port, port)?;
                 }
                 "--socket" => set(&mut options.socket, PathBuf::from(value))?,
                 "--config" => set(&mut options.config, PathBuf::from(value))?,

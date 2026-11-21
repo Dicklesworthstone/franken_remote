@@ -102,6 +102,9 @@ pub mod local_approval;
 #[cfg(native_stack)]
 pub mod broker;
 
+#[cfg(native_stack)]
+pub mod browser_ingress;
+
 #[cfg(host_stack)]
 pub mod host_policy;
 

@@ -87,7 +87,9 @@ impl fmt::Display for WsFrameError {
                 f.write_str("WebSocket RSV bits nonzero: compression forbidden")
             }
             Self::UnmaskedClientFrame => f.write_str("client WebSocket frame must be masked"),
-            Self::TextFrameForbidden => f.write_str("text WebSocket frames forbidden on WSS channel"),
+            Self::TextFrameForbidden => {
+                f.write_str("text WebSocket frames forbidden on WSS channel")
+            }
             Self::FragmentedFrameUnsupported => f.write_str("fragmented WebSocket frame refused"),
             Self::UnsupportedOpcode(op) => write!(f, "unsupported WebSocket opcode 0x{op:02x}"),
             Self::PayloadTooLarge => f.write_str("WebSocket frame exceeds bounded ceiling"),

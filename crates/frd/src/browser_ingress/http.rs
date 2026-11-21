@@ -175,8 +175,13 @@ pub async fn read_http_request<R: AsyncRead + Unpin>(
         if line.starts_with(' ') || line.starts_with('\t') {
             return Err(HttpParseError::SmugglingRejected);
         }
-        let (name, value) = line.split_once(':').ok_or(HttpParseError::MalformedHeader)?;
-        if name.is_empty() || name.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        let (name, value) = line
+            .split_once(':')
+            .ok_or(HttpParseError::MalformedHeader)?;
+        if name.is_empty()
+            || name
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
         {
             return Err(HttpParseError::MalformedHeader);
         }
