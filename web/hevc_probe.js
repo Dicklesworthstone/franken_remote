@@ -14,6 +14,32 @@
 (function (global) {
     const MAX_DECODE_QUEUE_SIZE = 4;
 
+    function cancelledConfiguration() {
+        return {
+            supported: false,
+            cancelled: true,
+            code: "decoder_configuration_cancelled",
+        };
+    }
+
+    function failedConfiguration() {
+        return {
+            supported: false,
+            code: "hevc_decoder_configuration_failed",
+            reason: "Browser could not create or configure the negotiated HEVC decoder.",
+        };
+    }
+
+    function closeDecoder(decoder) {
+        if (decoder) {
+            try {
+                if (decoder.state !== "closed") decoder.close();
+            } catch (_) {
+                // Teardown cannot turn a typed configuration refusal into a rejection.
+            }
+        }
+    }
+
     async function probeHevcWebCodecs(codecString, hvccBytes, width, height) {
         if (typeof global.VideoDecoder !== "function" || typeof global.EncodedVideoChunk !== "function") {
             return {
@@ -23,36 +49,40 @@
             };
         }
 
-        const config = {
-            codec: codecString,
-            codedWidth: width,
-            codedHeight: height,
-            hardwareAcceleration: "prefer-hardware",
-            optimizeForLatency: true,
-        };
-        if (hvccBytes && hvccBytes.byteLength >= 23) {
-            config.description = hvccBytes;
-        }
-
         try {
+            const config = {
+                codec: codecString,
+                codedWidth: width,
+                codedHeight: height,
+                hardwareAcceleration: "prefer-hardware",
+                optimizeForLatency: true,
+            };
+            if (hvccBytes && hvccBytes.byteLength >= 23) {
+                // Keep the exact negotiated description independent of the caller
+                // while the browser's asynchronous support probe is outstanding.
+                const bytes = ArrayBuffer.isView(hvccBytes)
+                    ? new Uint8Array(hvccBytes.buffer, hvccBytes.byteOffset, hvccBytes.byteLength)
+                    : new Uint8Array(hvccBytes);
+                config.description = bytes.slice();
+            }
             const support = await global.VideoDecoder.isConfigSupported(config);
             if (!support || !support.supported) {
                 return {
                     supported: false,
                     code: "no_supported_hevc_decoder",
-                    reason: "Browser VideoDecoder refused the negotiated HEVC Main 8-bit configuration (" + codecString + ").",
+                    reason: "Browser VideoDecoder refused the negotiated HEVC Main 8-bit configuration.",
                 };
             }
             return {
                 supported: true,
                 code: "hevc_webcodecs_ready",
-                config: support.config || config,
+                config: config,
             };
-        } catch (err) {
+        } catch (_) {
             return {
                 supported: false,
                 code: "hevc_probe_failed",
-                reason: "HEVC WebCodecs probe raised an error: " + (err && err.message ? err.message : String(err)),
+                reason: "Browser could not probe the negotiated HEVC configuration.",
             };
         }
     }
@@ -74,6 +104,7 @@
             this.closedFrames = 0;
             this.closedBytes = 0;
             this.activeGeneration = 0;
+            this.configurationOwner = null;
         }
 
         setVisible(isVisible) {
@@ -84,38 +115,77 @@
         }
 
         async configure(params) {
+            // A wire generation can be retried: only this local object identifies
+            // one probe/configure operation, including same-generation recovery.
+            const owner = {};
+            this.configurationOwner = owner;
+            let requested;
+            try {
+                requested = {
+                    generation: params.generation >>> 0,
+                    codec: String(params.codec),
+                    codedWidth: Number(params.codedWidth),
+                    codedHeight: Number(params.codedHeight),
+                    hvcc: params.hvcc,
+                };
+            } catch (_) {
+                return this._refuseConfiguration(owner, failedConfiguration());
+            }
             const probe = await probeHevcWebCodecs(
-                params.codec,
-                params.hvcc,
-                params.codedWidth,
-                params.codedHeight
+                requested.codec,
+                requested.hvcc,
+                requested.codedWidth,
+                requested.codedHeight
             );
+            if (this.configurationOwner !== owner) return cancelledConfiguration();
             if (!probe.supported) {
-                this.reset();
-                return probe;
+                return this._refuseConfiguration(owner, probe);
             }
 
-            this.reset();
-            this.activeGeneration = params.generation >>> 0;
-            this.canvas.width = params.codedWidth;
-            this.canvas.height = params.codedHeight;
+            this._resetDecoder();
+            // Closing a pending frame can invoke application callbacks that reset
+            // the player or start a replacement configuration synchronously.
+            if (this.configurationOwner !== owner) return cancelledConfiguration();
+            let decoder = null;
+            try {
+                decoder = new global.VideoDecoder({
+                    output: (frame) => this._onDecodedFrame(frame),
+                    error: (err) => this._onDecoderError(err),
+                });
+                decoder.configure(probe.config);
+            } catch (_) {
+                closeDecoder(decoder);
+                return this._refuseConfiguration(owner, failedConfiguration());
+            }
+            if (this.configurationOwner !== owner) {
+                closeDecoder(decoder);
+                return cancelledConfiguration();
+            }
 
-            this.decoder = new global.VideoDecoder({
-                output: (frame) => this._onDecodedFrame(frame),
-                error: (err) => this._onDecoderError(err),
-            });
-
-            this.decoder.configure(probe.config);
+            this.decoder = decoder;
+            this.activeGeneration = requested.generation;
+            this.canvas.width = requested.codedWidth;
+            this.canvas.height = requested.codedHeight;
             this.configured = true;
             this.awaitingKeyFrame = true;
 
             if (typeof this.callbacks.onConfigured === "function") {
                 this.callbacks.onConfigured({
                     generation: this.activeGeneration,
-                    codec: params.codec,
+                    codec: requested.codec,
                 });
             }
             return probe;
+        }
+
+        _refuseConfiguration(owner, refusal) {
+            if (this.configurationOwner !== owner) return cancelledConfiguration();
+            this._resetDecoder();
+            // A replacement started by a cleanup callback also owns the result:
+            // an old refusal must not make the application disconnect it.
+            if (this.configurationOwner !== owner) return cancelledConfiguration();
+            this.configurationOwner = null;
+            return refusal;
         }
 
         submitAccessUnit(unit) {
@@ -257,22 +327,24 @@
         }
 
         reset() {
-            this._closePendingFrame();
+            // Invalidate the async owner before cleanup can invoke any callback.
+            this.configurationOwner = null;
+            this._resetDecoder();
+        }
+
+        _resetDecoder() {
+            // Detach original resources before callbacks can install a successor.
+            const decoder = this.decoder;
+            const pending = this.pendingFrame;
+            this.decoder = null;
+            this.pendingFrame = null;
             this.inFlightByTimestamp.clear();
             this.configured = false;
             this.awaitingKeyFrame = true;
             this.decodedCount = 0;
             this.presentedCount = 0;
-            if (this.decoder) {
-                try {
-                    if (this.decoder.state !== "closed") {
-                        this.decoder.close();
-                    }
-                } catch (_) {
-                    // Ignore close errors during teardown.
-                }
-                this.decoder = null;
-            }
+            if (pending) this._closeAndRelease(pending.frame, pending.meta, false);
+            closeDecoder(decoder);
         }
     }
 

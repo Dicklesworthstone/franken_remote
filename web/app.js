@@ -157,6 +157,7 @@
                     hvcc: hvcc,
                 }).then((probe) => {
                     if (connectionAttempt !== attempt || wssClient.closed) return;
+                    if (probe.cancelled) return;
                     if (!probe.supported) {
                         closeConnection(probe.code);
                         showRefusal("HEVC Unavailable (" + probe.code + ")", probe.reason);

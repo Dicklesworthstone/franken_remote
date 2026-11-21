@@ -1,11 +1,39 @@
 # Implementation status
 
+## Browser HEVC configuration lifetime (2026-11-20)
+
+The JavaScript player now gives each asynchronous HEVC probe/configure operation
+its own local owner, including retries of the same wire generation. Reset and
+disconnect invalidate that owner before cleanup. A superseded success or refusal
+cannot replace the current decoder, resize the canvas or publish `onConfigured`.
+Cleanup callbacks are checked for synchronous replacement before either success
+or failure is published. The application ignores explicit cancellation results
+within the same connection as well as results from a retired connection.
+
+Generation, codec and dimensions are captured before awaiting the probe; the
+negotiated hvcC bytes are copied from the caller's original view. Actual decoder
+construction/configuration errors resolve to a typed refusal with a static,
+bounded diagnostic, and partial decoder cleanup is attempted. Probe failures
+also omit arbitrary platform exception details.
+
+Evidence: all 28 `node --test web/tests/*.test.cjs` regressions passed: 13 bootstrap
+and application ownership tests and 15 configuration ownership tests. Syntax
+checks passed for every `web/*.js` and `web/tests/*.test.cjs` file. Coverage includes
+reset during pending success/refusal, same-generation out-of-order completion,
+caller mutation, reentrant cleanup, constructor/configure failures and a close
+attempt that itself throws. These tests use simulated browser objects. They do
+not establish native decoder closure, escaped-frame custody, original-channel
+credit release or a working browser desktop. The Rust/WASM adapter must connect
+the Rust ownership core to actual WebCodecs output and close callbacks; that
+integration and live browser qualification remain open under
+`fr-p3-web-client-skk`.
+
 ## Browser connection cancellation and capability refusal (2026-11-20)
 
 The browser shell now gives each connection attempt its own cancellation and
 callback identity. Disconnect, pagehide and bfcache restoration abort bootstrap,
-settle pending socket opens and fence queued continuations. Old fetch, socket,
-decoder-configuration and UI results cannot mutate a replacement connection.
+settle pending socket opens and fence queued continuations. Old fetch, socket
+and connection UI results cannot mutate a replacement connection.
 
 Bootstrap requires same-origin HTTPS and an explicit `desktop_available: true`
 capability before any socket is opened. An unavailable or older host without

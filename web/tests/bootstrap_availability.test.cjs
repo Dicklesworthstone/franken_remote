@@ -83,7 +83,7 @@ function nextTurn() {
     return new Promise((resolve) => setImmediate(resolve));
 }
 
-function uiFixture(response) {
+function uiFixture(response, options = {}) {
     const f = fixture(response, "https:", { allowSockets: true });
     const elements = new Map();
     const events = new Map();
@@ -114,7 +114,18 @@ function uiFixture(response) {
         WebCodecsHevcPlayer: class {
             reset() {}
             setVisible() {}
+            configure(params) {
+                return options.configure ? options.configure(params) : Promise.resolve({ supported: true });
+            }
         },
+    };
+    let uiClient;
+    const WssClient = f.window.FrankenWss.FrankenWssClient;
+    f.window.FrankenWss.FrankenWssClient = class extends WssClient {
+        constructor(callbacks) {
+            super(callbacks);
+            uiClient = this;
+        }
     };
     vm.runInNewContext(appSource, { ...f.context, document });
     return {
@@ -122,7 +133,21 @@ function uiFixture(response) {
         element: (id) => document.getElementById(id),
         click: (id) => document.getElementById(id).listeners.get("click")(),
         event: (name, detail = {}) => events.get(name)(detail),
+        video: (bytes) => uiClient.callbacks.onVideoBinary(bytes),
     };
+}
+
+function decoderConfiguration(generation) {
+    const codec = new TextEncoder().encode("hvc1.1.6.L93.B0");
+    const bytes = new Uint8Array(15 + codec.length + 23);
+    const view = new DataView(bytes.buffer);
+    view.setUint8(0, 1);
+    view.setUint32(1, generation, false);
+    view.setUint32(5, 640, false);
+    view.setUint32(9, 480, false);
+    view.setUint16(13, codec.length, false);
+    bytes.set(codec, 15);
+    return bytes;
 }
 
 test("bootstrap availability is required before any socket or observation", async () => {
@@ -339,4 +364,68 @@ test("WebSocket open remains awaiting authorization and cannot enable observatio
     ui.socketInstances[0].peerClose();
     assert.equal(ui.element("btn-connect").disabled, false);
     assert.equal(ui.element("btn-disconnect").disabled, true);
+});
+
+test("a superseded decoder configuration cannot disconnect its replacement in the same connection", async () => {
+    const firstProbe = deferred();
+    const secondProbe = deferred();
+    let configurations = 0;
+    const ui = uiFixture(available(), {
+        configure: () => (++configurations === 1 ? firstProbe.promise : secondProbe.promise),
+    });
+    const pending = ui.click("btn-connect");
+    await nextTurn();
+    ui.socketInstances[0].open();
+    await pending;
+    // Reused wire generations still represent distinct local configuration attempts.
+    ui.video(decoderConfiguration(37));
+    ui.video(decoderConfiguration(37));
+    secondProbe.resolve({ supported: true });
+    await nextTurn();
+    firstProbe.resolve({ supported: false, cancelled: true, code: "decoder_configuration_cancelled" });
+    await nextTurn();
+    assert.equal(configurations, 2);
+    assert.equal(ui.socketInstances[0].closeCalls.length, 0);
+    assert.equal(ui.element("connection-state").textContent, "Awaiting session authorization");
+    assert.equal(ui.element("refusal-overlay").classList.contains("hidden"), true);
+    assert.equal(ui.element("btn-disconnect").disabled, false);
+    ui.click("btn-disconnect");
+});
+
+test("a retired connection's decoder refusal cannot close a replacement connection", async () => {
+    const probe = deferred();
+    const ui = uiFixture(available(), { configure: () => probe.promise });
+    const first = ui.click("btn-connect");
+    await nextTurn();
+    ui.socketInstances[0].open();
+    await first;
+    ui.video(decoderConfiguration(1));
+    ui.click("btn-disconnect");
+    const second = ui.click("btn-connect");
+    await nextTurn();
+    ui.socketInstances[1].open();
+    await second;
+    probe.resolve({ supported: false, code: "no_supported_hevc_decoder", reason: "Retired probe" });
+    await nextTurn();
+    assert.equal(ui.socketInstances[1].closeCalls.length, 0);
+    assert.equal(ui.element("connection-state").textContent, "Awaiting session authorization");
+    assert.equal(ui.element("refusal-overlay").classList.contains("hidden"), true);
+    ui.click("btn-disconnect");
+});
+
+test("a current decoder configuration refusal still closes the connection and reports its code", async () => {
+    const ui = uiFixture(available(), {
+        configure: async () => ({ supported: false, code: "hevc_configuration_failed", reason: "HEVC configuration was refused." }),
+    });
+    const pending = ui.click("btn-connect");
+    await nextTurn();
+    ui.socketInstances[0].open();
+    await pending;
+    ui.video(decoderConfiguration(1));
+    await nextTurn();
+    assert.equal(ui.socketInstances[0].closeCalls.length, 1);
+    assert.equal(ui.element("connection-state").textContent, "Disconnected (hevc_configuration_failed)");
+    assert.equal(ui.element("refusal-title").textContent, "HEVC Unavailable (hevc_configuration_failed)");
+    assert.equal(ui.element("refusal-overlay").classList.contains("hidden"), false);
+    assert.equal(ui.element("btn-connect").disabled, false);
 });
