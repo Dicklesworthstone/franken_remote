@@ -144,6 +144,7 @@ struct InFlightFrame {
     source_timestamp_us: u64,
     charged_bytes: u64,
     decoded: bool,
+    escaped: bool,
     idr: bool,
 }
 
@@ -397,6 +398,7 @@ impl BrowserHevcPipeline {
             source_timestamp_us,
             charged_bytes,
             decoded: false,
+            escaped: false,
             idr: prepared.picture().idr,
         });
         self.inflight_bytes = next_bytes;
@@ -432,12 +434,34 @@ impl BrowserHevcPipeline {
             return Err(BrowserHevcError::AwaitingIdr);
         }
         frame.decoded = true;
+        frame.escaped = true;
         if matches!(self.stage, BrowserDecoderStage::Configured { .. }) {
             self.stage = BrowserDecoderStage::FirstFrameDecoded {
                 generation: decoder.generation.as_raw(),
                 frame_id,
             };
         }
+        Ok(())
+    }
+
+    /// Retain a native output immediately, before deciding whether its original
+    /// decoder is still eligible to present. A retired decoder can still deliver
+    /// a queued output; even a refused output must survive decoder shutdown in
+    /// the accounting until its own `VideoFrame.close()` actually succeeds.
+    pub fn retain_output(
+        &mut self,
+        decoder: DecoderInstance,
+        frame_id: u64,
+    ) -> Result<(), BrowserHevcError> {
+        let frame = self
+            .inflight
+            .iter_mut()
+            .find(|frame| frame.decoder == decoder && frame.frame_id == frame_id)
+            .ok_or(BrowserHevcError::UnknownFrameId)?;
+        if frame.escaped {
+            return Err(BrowserHevcError::AlreadyDecoded);
+        }
+        frame.escaped = true;
         Ok(())
     }
 
@@ -556,7 +580,7 @@ impl BrowserHevcPipeline {
         while let Some(pos) = self
             .inflight
             .iter()
-            .position(|f| f.decoder == decoder && !f.decoded)
+            .position(|f| f.decoder == decoder && !f.escaped)
         {
             let entry = self
                 .inflight

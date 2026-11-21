@@ -1,4 +1,4 @@
-# Browser Rust/WASM startup
+# Browser Rust/WASM startup and media ownership
 
 The served browser shell loads the real `fr-web` Rust/WASM adapter. Rust owns
 bootstrap validation, canonical `FRD0` ClientHello encoding, refusal decoding,
@@ -28,7 +28,8 @@ FR_WEB_ASSET_DIR="$PWD/target/browser-wasm" cargo build -p frd --release --locke
 ```
 
 The first command builds the release WASM module, generates its matching web
-JavaScript, and runs the real-WASM adapter and transport integration tests.
+JavaScript, and runs the actual-WASM adapter, transport and media tests together
+with the loader and capability-probe boundary tests.
 It preserves existing output directories and refuses to overwrite one. Use the
 appropriate existing host feature flags when building a macOS or Windows host.
 The generated package and build artifacts stay outside version control.
@@ -96,6 +97,45 @@ These are local ingress tests: `frd run` still needs installed-tailnet listener
 composition and authenticated host-session/media integration before browser
 viewing is available.
 
+## Rust-owned WebCodecs media boundary
+
+The generated package also exports a media-only `BrowserMediaAdapter`. The
+production player receives that owner through the same bounded package loader:
+
+```javascript
+const media = await FrankenRust.createMediaAdapter(signal, {
+    frames: 4,
+    bytes: 33554432n,
+});
+const player = new FrankenHevc.WebCodecsHevcPlayer(canvas, callbacks, media);
+```
+
+`configure` takes the original negotiated generation, coded and crop dimensions,
+frame rate, color fields, decoded-picture bound, canonical `hev1` codec, and
+exact `hvcc` bytes. Rust validates their consistency and derives the matching
+`hvc1` configuration for WebCodecs. `submitAccessUnit` takes the original
+`generation`, `frameId`, `sourceTimestampUs`, `isKey`, and length-prefixed `data`
+as a `Uint8Array`. Rust validates admission and retains the original frame and
+source identities; WebCodecs callback timestamps are separate, non-reused local
+identities that remain exactly representable in JavaScript.
+
+The configured count and byte allowance covers admitted access units and
+escaped output reservations across current and retired decoders. Capability
+probes that cannot be cancelled retain their original decoder slot until they
+settle. Late output, replacement, background presentation, drawing failures,
+and callback reentrancy cannot move an old charge to a new decoder. Native
+decoder closure and Rust acknowledgment are separate cleanup steps; an escaped
+`VideoFrame` retains its reservation until its own positive closure.
+
+`onFrameClosed` delivers one original decoder's resource receipt. It creates no
+session authority or `ReceiverPressure` record. The authenticated outer channel
+owner must account for that receipt on its original channel and credit epoch.
+A false result from `reset()` means original custody remains, so keep the owner
+alive. `browser_media_cleanup_incomplete` is terminal quarantine: admission and
+release receipts stop, and reset cannot claim clean teardown. Diagnostic custody
+stays bounded even if a broken native decoder emits unowned handles; this does
+not claim to bound arbitrary allocations inside that native implementation.
+
 ## Validation and remaining integration
 
 The portable Rust suite tests policy and ownership. The actual-WASM suite loads
@@ -109,12 +149,15 @@ They do not change the shipping host capability.
 node --test web/tests/*.test.cjs
 node --experimental-vm-modules --test web/tests/wasm_loader.cjs
 FR_WEB_WASM_PACKAGE="$PWD/target/browser-wasm" node --test \
-  crates/fr-web/tests/wasm_adapter.test.cjs web/tests/wasm_transport.cjs
+  crates/fr-web/tests/wasm_adapter.test.cjs web/tests/wasm_transport.cjs \
+  web/tests/wasm_media_configuration.cjs web/tests/wasm_media.cjs
 ```
 
 The remaining browser path must connect authenticated native HTTPS/WSS ingress
-to `SessionOpened` and the real host session, then connect decoder/output
-custody, receiver credit, presentation freshness, and control leases through the
-Rust boundary. H3/WebTransport and real-browser/tailnet qualification are
+to `SessionOpened` and the real host session, then compose the implemented media
+owner with original-channel receiver credit, presentation freshness, and control
+leases through the Rust boundary. The media tests execute the actual Rust/WASM
+owner with simulated native WebCodecs handles; they do not qualify browser/OS/GPU
+HEVC support or physical presentation. H3/WebTransport and real-browser/tailnet qualification are
 separate outstanding gates. The current page keeps desktop controls disabled
 while those capabilities are unavailable.

@@ -36,6 +36,32 @@ complete live Linux-viewer-to-host text delivery remain unqualified under
 a viewer producer, not Text capability to host executors that lack it. Usage
 and limits are in [the native client guide](docs/native-client-cli.md#unicode-text-on-linuxx11).
 
+## Rust-owned browser WebCodecs media (2026-11-21)
+
+The generated WASM package now exports `BrowserMediaAdapter`, and the production
+WebCodecs player consumes that Rust owner. Rust validates the canonical HEVC
+configuration and access units, derives the exact `hvc1` configuration, and owns
+count/byte reservations across decoder replacement. The shared package loader
+provides `createMediaAdapter` without creating an observation or control session.
+
+Original decoder and frame identities survive late callbacks, non-cancellable
+support probes, hidden presentation, reentrant callbacks, and native close
+failures. Escaped output remains charged after decoder closure until its own
+positive frame close. Native cleanup and Rust reconciliation remain distinct.
+An unknown output that cannot close triggers terminal quarantine: no new
+admission, release receipt or clean reset is fabricated, and JavaScript retains
+bounded diagnostic metadata. Resource receipts are not receiver-credit records.
+
+The final pinned release package passes 82 package-lane tests: 66 execute the
+actual generated Rust/WASM bindings (40 media, 11 adapter, 15 transport), with
+11 loader and five capability-probe boundary cases. All 40 portable `fr-web`
+Rust tests executed under WASI and 37 ordinary Node tests pass. Strict all-target
+WASM Clippy and pinned formatting also pass. These native WebCodecs handles are
+simulated; real browser/OS/GPU support, physical presentation, authenticated
+host-session/media/control composition and live tailnet execution remain open.
+The host still reports `desktop_available: false`. See
+[browser ownership and integration](docs/browser-client.md). Tracked by `fr-j4ra`.
+
 ## Canonical native browser startup boundary (2026-11-21)
 
 The native HTTPS/WSS ingress now matches the served Rust/WASM adapter's

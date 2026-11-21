@@ -14,7 +14,7 @@ const { deferred, nextTurn, ioFixture } = require("./browser_fixture.cjs");
 const source = fs.readFileSync(path.join(__dirname, "..", "wasm_client.js"), "utf8");
 
 function fixture(options = {}) {
-    const imports = [], initializations = [], adapters = [];
+    const imports = [], initializations = [], adapters = [], media = [];
     const window = { location: { protocol: options.protocol || "https:" } };
     const context = vm.createContext({ window });
     const script = new vm.Script(source, {
@@ -37,6 +37,16 @@ function fixture(options = {}) {
                     }
                     free() { this.freed += 1; assert.equal(this.freed, 1); }
                 },
+                BrowserMediaAdapter: class {
+                    constructor(frames, bytes) {
+                        this.frames = frames; this.bytes = bytes;
+                        this.retired = 0; this.freed = 0; media.push(this);
+                        if (options.mediaConstructor) options.mediaConstructor();
+                    }
+                    retire() { this.retired++; }
+                    free() { this.freed++; assert.equal(this.freed, 1); }
+                },
+                browserMediaAbiVersion: () => options.mediaAbi === undefined ? 1 : options.mediaAbi,
                 browserAbiVersion: () => options.abi === undefined ? 1 : options.abi,
                 maxBootstrapBytes: () => options.bootstrapLimit === undefined ? 4096 : options.bootstrapLimit,
                 maxControlRecordBytes: () => options.controlLimit === undefined ? 4096 : options.controlLimit,
@@ -50,7 +60,7 @@ function fixture(options = {}) {
         },
     });
     script.runInContext(context);
-    return { api: window.FrankenRust, imports, initializations, adapters, options };
+    return { api: window.FrankenRust, imports, initializations, adapters, media, options };
 }
 
 function noListener(controller) {
@@ -224,4 +234,51 @@ test("a cached package still checks cancellation and sanitizes constructor failu
     assert.equal(f.imports.length, 1);
     assert.equal(f.adapters.length, 2);
     second.core.free();
+});
+
+
+test("media and startup subscribers share one bounded load without constructing cancelled owners", async () => {
+    const gate = deferred();
+    const f = fixture({ importHook: () => gate.promise });
+    const cancelled = new AbortController();
+    const old = f.api.createMediaAdapter(cancelled.signal);
+    const rejected = assert.rejects(old, { code: "browser_connection_cancelled" });
+    const startup = f.api.createAdapter();
+    const active = f.api.createMediaAdapter(undefined, { frames: 2, bytes: 1234n });
+    cancelled.abort();
+    await rejected;
+    gate.resolve();
+    const [connection, media] = await Promise.all([startup, active]);
+    assert.equal(f.imports.length, 1);
+    assert.equal(f.adapters.length, 1);
+    assert.equal(f.media.length, 1);
+    assert.equal(media.frames, 2);
+    assert.equal(media.bytes, 1234n);
+    connection.core.free();
+    media.free();
+});
+
+test("a just-created media owner is retired and freed when construction reenters cancellation", async () => {
+    const controller = new AbortController();
+    const f = fixture({ mediaConstructor: () => controller.abort() });
+    await assert.rejects(f.api.createMediaAdapter(controller.signal), { code: "browser_connection_cancelled" });
+    assert.equal(f.media.length, 1);
+    assert.equal(f.media[0].retired, 1);
+    assert.equal(f.media[0].freed, 1);
+});
+
+test("cached media creation checks cancellation before allocation and refuses invalid limits", async () => {
+    const f = fixture();
+    (await f.api.createAdapter()).core.free();
+    const controller = new AbortController();
+    const pending = f.api.createMediaAdapter(controller.signal);
+    controller.abort();
+    await assert.rejects(pending, { code: "browser_connection_cancelled" });
+    assert.equal(f.media.length, 0);
+    for (const limits of [{ frames: 5, bytes: 1n }, { frames: 1, bytes: -1n }, { frames: 1, bytes: 33554433n }]) {
+        await assert.rejects(f.api.createMediaAdapter(undefined, limits), { code: "browser_client_version_mismatch" });
+    }
+    const wrong = fixture({ mediaAbi: 2 });
+    await assert.rejects(wrong.api.createMediaAdapter(), { code: "browser_client_version_mismatch" });
+    assert.equal(wrong.media.length, 0);
 });

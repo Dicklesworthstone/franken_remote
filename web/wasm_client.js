@@ -46,7 +46,21 @@
         return { module, maxBootstrapBytes, maxControlRecordBytes };
     }
 
-    function makeAdapter(loaded) {
+    function makeAdapter(loaded, kind, limits, signal) {
+        if (signal && signal.aborted) throw unavailable("browser_connection_cancelled");
+        if (kind === "media") {
+            if (typeof loaded.module.browserMediaAbiVersion !== "function"
+                || loaded.module.browserMediaAbiVersion() !== 1
+                || typeof loaded.module.BrowserMediaAdapter !== "function") {
+                throw unavailable("browser_client_version_mismatch");
+            }
+            const core = new loaded.module.BrowserMediaAdapter(limits.frames, limits.bytes);
+            if (signal && signal.aborted) {
+                try { core.retire(); } finally { core.free(); }
+                throw unavailable("browser_connection_cancelled");
+            }
+            return core;
+        }
         return {
             core: new loaded.module.BrowserAdapter(),
             maxBootstrapBytes: loaded.maxBootstrapBytes,
@@ -62,6 +76,12 @@
         return true;
     }
 
+    function creationError(error) {
+        return unavailable(error && (error.code === "browser_connection_cancelled"
+            || error.code === "browser_client_version_mismatch")
+            ? error.code : "browser_client_unavailable");
+    }
+
     function finishSubscriber(subscriber, loaded, error) {
         if (!removeSubscriber(subscriber)) return;
         if (subscriber.signal && subscriber.signal.aborted) {
@@ -69,8 +89,8 @@
         } else if (error) {
             subscriber.reject(error);
         } else {
-            try { subscriber.resolve(makeAdapter(loaded)); }
-            catch (_) { subscriber.reject(unavailable("browser_client_unavailable")); }
+            try { subscriber.resolve(makeAdapter(loaded, subscriber.kind, subscriber.limits, subscriber.signal)); }
+            catch (error) { subscriber.reject(creationError(error)); }
         }
     }
 
@@ -101,35 +121,51 @@
         });
     }
 
-    global.FrankenRust = Object.freeze({
-        createAdapter(signal) {
-            if (global.location.protocol !== "https:") {
-                return Promise.reject(unavailable("browser_https_required"));
-            }
-            if (signal && signal.aborted) {
-                return Promise.reject(unavailable("browser_connection_cancelled"));
-            }
-            if (readyModule) {
-                try { return Promise.resolve(makeAdapter(readyModule)); }
-                catch (_) { return Promise.reject(unavailable("browser_client_unavailable")); }
-            }
-            if (subscribers.size >= MAX_PENDING_ADAPTERS) {
-                return Promise.reject(unavailable("browser_client_busy"));
-            }
-            return new Promise((resolve, reject) => {
-                const subscriber = { signal, resolve, reject, aborted: null };
-                subscriber.aborted = () => {
-                    if (removeSubscriber(subscriber)) {
-                        reject(unavailable("browser_connection_cancelled"));
-                    }
-                };
-                subscribers.add(subscriber);
-                if (signal) {
-                    signal.addEventListener("abort", subscriber.aborted, { once: true });
-                    if (signal.aborted) subscriber.aborted();
-                }
-                if (subscribers.has(subscriber)) startLoading();
+    function createAdapter(kind, signal, limits) {
+        if (global.location.protocol !== "https:") {
+            return Promise.reject(unavailable("browser_https_required"));
+        }
+        if (signal && signal.aborted) {
+            return Promise.reject(unavailable("browser_connection_cancelled"));
+        }
+        if (readyModule) {
+            // Allocate only when delivery's microtask runs; an abort while
+            // waiting cannot strand a newly allocated Rust owner.
+            return Promise.resolve().then(() => {
+                try { return makeAdapter(readyModule, kind, limits, signal); }
+                catch (error) { throw creationError(error); }
             });
+        }
+        if (subscribers.size >= MAX_PENDING_ADAPTERS) {
+            return Promise.reject(unavailable("browser_client_busy"));
+        }
+        return new Promise((resolve, reject) => {
+            const subscriber = { signal, resolve, reject, aborted: null, kind, limits };
+            subscriber.aborted = () => {
+                if (removeSubscriber(subscriber)) {
+                    reject(unavailable("browser_connection_cancelled"));
+                }
+            };
+            subscribers.add(subscriber);
+            if (signal) {
+                signal.addEventListener("abort", subscriber.aborted, { once: true });
+                if (signal.aborted) subscriber.aborted();
+            }
+            if (subscribers.has(subscriber)) startLoading();
+        });
+    }
+
+    global.FrankenRust = Object.freeze({
+        createAdapter(signal) { return createAdapter("connection", signal, null); },
+        createMediaAdapter(signal, requested) {
+            const limits = requested || { frames: 4, bytes: 33554432n };
+            if (!Number.isInteger(limits.frames) || limits.frames < 0 || limits.frames > 4
+                || typeof limits.bytes !== "bigint" || limits.bytes < 0n || limits.bytes > 33554432n) {
+                return Promise.reject(unavailable("browser_client_version_mismatch"));
+            }
+            // Same bounded module-load subscriber owner as startup. No browser
+            // session or observation is created by allocating this media owner.
+            return createAdapter("media", signal, { frames: limits.frames, bytes: limits.bytes });
         },
     });
 })(window);

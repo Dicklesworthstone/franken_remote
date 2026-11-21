@@ -7,12 +7,13 @@
 //   exact negotiated hvcC description and SPS-derived codec identifier supplied
 //   by the Rust HevcGuard / host DecoderConfiguration record.
 // - Zero per-frame flush(): flush stalls hardware decoders and destroys freshness.
-// - Strict bounded decode queue and renderer retention: VideoFrame objects are
-//   closed immediately after presentation or replacement, and receive credit is
-//   returned ONLY after VideoFrame.close() completes.
+// - Rust bounds admitted inputs and retained native output. Original resource
+//   receipts follow positive closure; this media boundary grants no authority
+//   and cannot generate a session's receiver-credit record itself.
 
 (function (global) {
     const MAX_DECODE_QUEUE_SIZE = 4;
+    const MAX_NATIVE_OWNERS = 4;
 
     function cancelledConfiguration() {
         return {
@@ -30,22 +31,21 @@
         };
     }
 
-    function closeDecoder(decoder) {
-        if (decoder) {
-            try {
-                if (decoder.state !== "closed") decoder.close();
-            } catch (_) {
-                // Teardown cannot turn a typed configuration refusal into a rejection.
-            }
-        }
-    }
-
     async function probeHevcWebCodecs(codecString, hvccBytes, width, height) {
+        if (typeof codecString !== "string" || codecString.length > 64
+            || !/^hvc1\.[A-Za-z0-9.]+$/.test(codecString)
+            || !Number.isInteger(width) || !Number.isInteger(height)
+            || width <= 0 || height <= 0 || width > 8192 || height > 8192
+            || width * height > 16777216
+            || !(ArrayBuffer.isView(hvccBytes) || hvccBytes instanceof ArrayBuffer)
+            || hvccBytes.byteLength < 23 || hvccBytes.byteLength > 12326) {
+            return refusal("browser_media_configuration_invalid");
+        }
         if (typeof global.VideoDecoder !== "function" || typeof global.EncodedVideoChunk !== "function") {
             return {
                 supported: false,
                 code: "webcodecs_unavailable",
-                reason: "Browser does not expose WebCodecs VideoDecoder; HEVC playback cannot proceed without fallback.",
+                reason: "Browser does not expose WebCodecs VideoDecoder; HEVC playback cannot proceed.",
             };
         }
 
@@ -87,264 +87,409 @@
         }
     }
 
+    function integer(value) {
+        if (typeof value === "number") {
+            if (!Number.isSafeInteger(value) || value < 0) throw "browser_media_owner_invalid";
+            return BigInt(value);
+        }
+        if (typeof value === "string" && !/^(0|[1-9][0-9]{0,19})$/.test(value)) {
+            throw "browser_media_owner_invalid";
+        }
+        if (typeof value !== "string" && typeof value !== "bigint") throw "browser_media_owner_invalid";
+        const number = BigInt(value);
+        if (number < 0n || number > 18446744073709551615n) throw "browser_media_owner_invalid";
+        return number;
+    }
+
+    function refusal(code) {
+        return { supported: false, code, reason: "The browser media operation could not complete safely." };
+    }
+
+    // A player receives one actual BrowserMediaAdapter from the generated WASM
+    // package. There is no JavaScript protocol, HEVC guard, charge ledger or
+    // authority fallback. The owner must outlive its native decoder/frame handles.
     class WebCodecsHevcPlayer {
-        constructor(canvas, callbacks) {
+        constructor(canvas, callbacks, media, options) {
             this.canvas = canvas;
             this.ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
             this.callbacks = callbacks || {};
+            this.media = media;
+            this.nowMs = options && options.nowMs || (() => global.performance.now());
+            this.visible = !document.hidden;
+            this.current = null;
+            this.owners = new Set();
+            this.pendingFrame = null;
+            this.configurationOwner = null;
             this.decoder = null;
             this.configured = false;
-            this.awaitingKeyFrame = true;
-            this.visible = !document.hidden;
-            this.pendingFrame = null;
-            this.rafScheduled = false;
-            this.inFlightByTimestamp = new Map();
-            this.decodedCount = 0;
-            this.presentedCount = 0;
-            this.closedFrames = 0;
-            this.closedBytes = 0;
-            this.activeGeneration = 0;
-            this.configurationOwner = null;
+            this.activeGeneration = null;
+            this.unknownOutput = false;
+            this.quarantineFrame = null;
+            this.unclosedUnownedOutputs = 0;
         }
 
-        setVisible(isVisible) {
-            this.visible = Boolean(isVisible);
-            if (!this.visible && this.pendingFrame) {
-                this._closePendingFrame();
-            }
+        _owns(owner) {
+            return this.current === owner && !owner.retired;
+        }
+
+        _notify(name, detail) {
+            // Application notification failures cannot skip native cleanup.
+            // A listener also cannot rewrite the receipt used later to close
+            // its original frame. All ABI notification fields are primitives.
+            try {
+                if (typeof this.callbacks[name] === "function") {
+                    this.callbacks[name](detail && typeof detail === "object" ? Object.assign({}, detail) : detail);
+                }
+            } catch (_) {}
+        }
+
+        _release(receipt) {
+            // This is one original decoder's resource receipt, NOT a cumulative
+            // ReceiverPressure record. Only the authenticated channel owner can
+            // turn it into credit on its original channel/epoch.
+            // Quarantine is also a JS boundary fence: its Rust binding may
+            // throw, or a callback may quarantine midway through a release batch.
+            if (!this.unknownOutput) this._notify("onFrameClosed", receipt);
+        }
+
+        setVisible(visible) {
+            this.visible = Boolean(visible);
+            if (!this.visible && this.pendingFrame) this._closeFrame(this.pendingFrame);
         }
 
         async configure(params) {
-            // A wire generation can be retried: only this local object identifies
-            // one probe/configure operation, including same-generation recovery.
-            const owner = {};
-            this.configurationOwner = owner;
-            let requested;
+            const request = {};
+            this.configurationOwner = request;
+            if (!this.media || typeof this.media.prepareConfiguration !== "function") {
+                return refusal("browser_media_owner_unavailable");
+            }
+            if (this.unknownOutput) return refusal("browser_media_cleanup_incomplete");
+            // Fence before browser cleanup, which may invoke callbacks/reenter.
+            this.media.retire();
+            this.current = null;
+            this.decoder = null;
+            this.configured = false;
+            for (const owner of Array.from(this.owners)) this._retire(owner);
+            if (this.configurationOwner !== request) return cancelledConfiguration();
+            // Also bound JS handle metadata if a binding acknowledgment fails
+            // after Rust has already applied it. Rust remains the admission owner.
+            if (this.owners.size >= MAX_NATIVE_OWNERS) return refusal("browser_decoder_capacity");
+            let prepared;
             try {
-                requested = {
-                    generation: params.generation >>> 0,
-                    codec: String(params.codec),
-                    codedWidth: Number(params.codedWidth),
-                    codedHeight: Number(params.codedHeight),
-                    hvcc: params.hvcc,
+                if (!params || !(params.hvcc instanceof Uint8Array)
+                    || params.hvcc.byteLength > this.media.maxConfigurationBytes()
+                    || typeof params.codec !== "string" || params.codec.length > 64
+                    || typeof params.fullRange !== "boolean"
+                    || ![params.codedWidth, params.codedHeight, params.cropWidth, params.cropHeight,
+                        params.fps, params.primaries, params.transfer, params.matrix,
+                        params.decodedPictures].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+                    return refusal("browser_media_configuration_invalid");
+                }
+                const metadata = {
+                    generation: integer(params.generation).toString(),
+                    codedWidth: params.codedWidth, codedHeight: params.codedHeight,
+                    cropWidth: params.cropWidth, cropHeight: params.cropHeight,
+                    fps: params.fps, primaries: params.primaries, transfer: params.transfer,
+                    matrix: params.matrix, fullRange: params.fullRange,
+                    decodedPictures: params.decodedPictures, codec: params.codec,
                 };
-            } catch (_) {
-                return this._refuseConfiguration(owner, failedConfiguration());
-            }
+                prepared = JSON.parse(this.media.prepareConfiguration(JSON.stringify(metadata), params.hvcc));
+            } catch (_) { return refusal("browser_media_configuration_invalid"); }
+            const owner = {
+                id: integer(prepared.decoder), generation: prepared.generation,
+                decoder: null, retired: false, nativeClosed: false, reconciled: false, probing: true,
+                closeFailed: false, closing: false, nativeBusy: 0, frames: new Set(),
+                raf: false, rafHandle: null,
+                width: prepared.cropWidth, height: prepared.cropHeight,
+            };
+            this.owners.add(owner);
+            this.current = owner;
             const probe = await probeHevcWebCodecs(
-                requested.codec,
-                requested.hvcc,
-                requested.codedWidth,
-                requested.codedHeight
+                prepared.codec, Uint8Array.from(prepared.hvcc), prepared.codedWidth, prepared.codedHeight
             );
-            if (this.configurationOwner !== owner) return cancelledConfiguration();
-            if (!probe.supported) {
-                return this._refuseConfiguration(owner, probe);
-            }
-
-            this._resetDecoder();
-            // Closing a pending frame can invoke application callbacks that reset
-            // the player or start a replacement configuration synchronously.
-            if (this.configurationOwner !== owner) return cancelledConfiguration();
-            let decoder = null;
-            try {
-                decoder = new global.VideoDecoder({
-                    output: (frame) => this._onDecodedFrame(frame),
-                    error: (err) => this._onDecoderError(err),
-                });
-                decoder.configure(probe.config);
-            } catch (_) {
-                closeDecoder(decoder);
-                return this._refuseConfiguration(owner, failedConfiguration());
-            }
-            if (this.configurationOwner !== owner) {
-                closeDecoder(decoder);
+            owner.probing = false;
+            if (this.configurationOwner !== request || !this._owns(owner)) {
+                this._retire(owner);
                 return cancelledConfiguration();
             }
-
-            this.decoder = decoder;
-            this.activeGeneration = requested.generation;
-            this.canvas.width = requested.codedWidth;
-            this.canvas.height = requested.codedHeight;
-            this.configured = true;
-            this.awaitingKeyFrame = true;
-
-            if (typeof this.callbacks.onConfigured === "function") {
-                this.callbacks.onConfigured({
-                    generation: this.activeGeneration,
-                    codec: requested.codec,
-                });
+            if (!probe.supported) {
+                this._retire(owner);
+                return this.configurationOwner === request ? probe : cancelledConfiguration();
             }
-            return probe;
-        }
-
-        _refuseConfiguration(owner, refusal) {
-            if (this.configurationOwner !== owner) return cancelledConfiguration();
-            this._resetDecoder();
-            // A replacement started by a cleanup callback also owns the result:
-            // an old refusal must not make the application disconnect it.
-            if (this.configurationOwner !== owner) return cancelledConfiguration();
-            this.configurationOwner = null;
-            return refusal;
+            try {
+                owner.nativeBusy += 1;
+                try {
+                    owner.decoder = new global.VideoDecoder({
+                        output: (frame) => this._output(owner, frame),
+                        error: () => this._error(owner),
+                    });
+                    if (this.configurationOwner === request && this._owns(owner)) {
+                        owner.decoder.configure(probe.config);
+                    }
+                } finally { owner.nativeBusy -= 1; }
+                if (this.configurationOwner !== request || !this._owns(owner)) {
+                    this._retire(owner);
+                    return cancelledConfiguration();
+                }
+                this.media.decoderConfigured(owner.id);
+            } catch (_) {
+                this._retire(owner);
+                return this.configurationOwner === request ? failedConfiguration() : cancelledConfiguration();
+            }
+            this.decoder = owner.decoder;
+            this.configured = true;
+            this.activeGeneration = owner.generation;
+            this.canvas.width = owner.width;
+            if (!this._owns(owner)) return cancelledConfiguration();
+            this.canvas.height = owner.height;
+            if (!this._owns(owner)) return cancelledConfiguration();
+            this._notify("onConfigured", {
+                decoder: owner.id.toString(), generation: owner.generation, codec: prepared.codec,
+            });
+            return this._owns(owner) ? probe : cancelledConfiguration();
         }
 
         submitAccessUnit(unit) {
-            if (!this.configured || !this.decoder || this.decoder.state !== "configured") {
+            const owner = this.current;
+            if (!owner || !this._owns(owner) || !this.configured || !owner.decoder
+                || owner.decoder.state !== "configured" || this.unknownOutput) {
                 return { admitted: false, reason: "decoder_not_configured" };
             }
-            if ((unit.generation >>> 0) !== this.activeGeneration) {
-                return { admitted: false, reason: "stale_codec_generation" };
-            }
-            if (this.awaitingKeyFrame && !unit.isKey) {
-                // Never feed broken dependencies or delta frames before an IDR.
-                return { admitted: false, reason: "awaiting_idr" };
-            }
-            if (this.decoder.decodeQueueSize >= MAX_DECODE_QUEUE_SIZE) {
-                // Bounded decode queue: refuse over-submission without corrupting reference chain.
-                return { admitted: false, reason: "decode_queue_full" };
-            }
-
-            const timestampUs = unit.timestampUs;
-            this.inFlightByTimestamp.set(timestampUs, {
-                frameId: unit.frameId,
-                chargedBytes: unit.chargedBytes,
-                sourceTimestampUs: unit.sourceTimestampUs,
-            });
-
-            const chunk = new global.EncodedVideoChunk({
-                type: unit.isKey ? "key" : "delta",
-                timestamp: timestampUs,
-                data: unit.data,
-            });
+            let chunk;
             try {
-                // Deliberately NO decoder.flush(): flush stalls hardware pipelines.
-                this.decoder.decode(chunk);
-                if (unit.isKey) {
-                    this.awaitingKeyFrame = false;
+                if (integer(unit.generation).toString() !== owner.generation) {
+                    return { admitted: false, reason: "stale_codec_generation" };
                 }
-                return { admitted: true };
-            } catch (err) {
-                this.inFlightByTimestamp.delete(timestampUs);
-                this._onDecoderError(err);
-                return { admitted: false, reason: "decode_submit_failed" };
+                if (!(unit.data instanceof Uint8Array)
+                    || unit.data.byteLength > this.media.maxAccessUnitBytes()
+                    || typeof unit.isKey !== "boolean") {
+                    return { admitted: false, reason: "browser_media_bounds_exceeded" };
+                }
+                // decodeQueueSize is an additional browser preflight only. The
+                // Rust owner bounds all admitted inputs and escaped outputs.
+                if (owner.decoder.decodeQueueSize >= MAX_DECODE_QUEUE_SIZE) {
+                    return { admitted: false, reason: "decode_queue_full" };
+                }
+                chunk = this.media.prepareChunk(owner.id, integer(unit.frameId),
+                    integer(unit.sourceTimestampUs), unit.isKey, unit.data);
+            } catch (error) {
+                const reason = typeof error === "string" && /^browser_[a-z_]{1,64}$/.test(error)
+                    ? error : "browser_hevc_admission_refused";
+                return { admitted: false, reason };
             }
-        }
-
-        _onDecodedFrame(videoFrame) {
-            const meta = this.inFlightByTimestamp.get(videoFrame.timestamp) || {
-                frameId: 0,
-                chargedBytes: 0,
-                sourceTimestampUs: videoFrame.timestamp,
-            };
-            this.inFlightByTimestamp.delete(videoFrame.timestamp);
-            this.decodedCount += 1;
-
-            if (this.decodedCount === 1 && typeof this.callbacks.onFirstFrameDecoded === "function") {
-                this.callbacks.onFirstFrameDecoded({
-                    generation: this.activeGeneration,
-                    frameId: meta.frameId,
-                });
-            }
-
-            // Hidden/background tabs MUST NOT present frames or claim fresh presentation,
-            // and MUST close decoded VideoFrames promptly to release GPU surfaces and credit.
-            if (!this.visible) {
-                this._closeAndRelease(videoFrame, meta, false);
-                return;
-            }
-
-            // Newest ready frame wins: replace any unpresented frame and close it immediately.
-            if (this.pendingFrame) {
-                this._closePendingFrame();
-            }
-            this.pendingFrame = { frame: videoFrame, meta: meta };
-
-            if (!this.rafScheduled) {
-                this.rafScheduled = true;
-                global.requestAnimationFrame(() => this._presentLatest());
-            }
-        }
-
-        _presentLatest() {
-            this.rafScheduled = false;
-            const entry = this.pendingFrame;
-            this.pendingFrame = null;
-            if (!entry) {
-                return;
-            }
-
-            let presented = false;
-            if (this.visible && this.ctx) {
-                this.ctx.drawImage(entry.frame, 0, 0, this.canvas.width, this.canvas.height);
-                this.presentedCount += 1;
-                presented = true;
-            }
-            this._closeAndRelease(entry.frame, entry.meta, presented);
-        }
-
-        _closePendingFrame() {
-            const entry = this.pendingFrame;
-            this.pendingFrame = null;
-            if (entry) {
-                this._closeAndRelease(entry.frame, entry.meta, false);
-            }
-        }
-
-        _closeAndRelease(videoFrame, meta, presented) {
             try {
-                videoFrame.close();
+                owner.nativeBusy += 1;
+                // The generated callback timestamp is an exact local identity;
+                // source/frame timestamps remain in Rust and cannot be rebound.
+                const nativeChunk = new global.EncodedVideoChunk({
+                    type: chunk.isKey() ? "key" : "delta",
+                    timestamp: Number(chunk.timestamp()), data: chunk.takeBytes(),
+                });
+                if (!this._owns(owner) || !this.configured || this.unknownOutput) {
+                    return { admitted: false, reason: "decoder_not_configured" };
+                }
+                owner.decoder.decode(nativeChunk);
+                return { admitted: true };
             } catch (_) {
-                // Ensure credit accounting only runs after explicit close attempt.
-            }
-            this.closedFrames += 1;
-            this.closedBytes += meta.chargedBytes >>> 0;
-
-            if (presented && typeof this.callbacks.onFramePresented === "function") {
-                this.callbacks.onFramePresented({
-                    generation: this.activeGeneration,
-                    frameId: meta.frameId,
-                    sourceTimestampUs: meta.sourceTimestampUs,
-                    presentedCount: this.presentedCount,
-                });
-            }
-            // Credit is returned ONLY AFTER VideoFrame.close() frees receive/GPU budget.
-            if (meta.chargedBytes > 0 && typeof this.callbacks.onFrameClosed === "function") {
-                this.callbacks.onFrameClosed({
-                    releasedBytes: this.closedBytes,
-                    releasedFrames: this.closedFrames,
-                    decodeQueueSize: this.decoder ? this.decoder.decodeQueueSize : 0,
-                });
+                this._error(owner);
+                return { admitted: false, reason: "decode_submit_failed" };
+            } finally {
+                owner.nativeBusy -= 1;
+                chunk.free();
+                if (owner.retired) this._retire(owner);
             }
         }
 
-        _onDecoderError(err) {
-            this.awaitingKeyFrame = true;
-            this.configured = false;
-            this._closePendingFrame();
-            if (typeof this.callbacks.onDecoderReclaimed === "function") {
-                this.callbacks.onDecoderReclaimed(err ? String(err) : "decoder_error");
+        _output(owner, frame) {
+            let receipt;
+            try { receipt = JSON.parse(this.media.output(owner.id, integer(frame.timestamp))); }
+            catch (_) {
+                // Unknown/duplicate/native post-close output never borrows a
+                // replacement charge or becomes a visible frame.
+                try { frame.close(); }
+                catch (_) { this._quarantine(frame); }
+                this._error(owner);
+                return;
             }
+            const entry = { owner, frame, receipt, closing: false, nativeClosed: false };
+            owner.frames.add(entry);
+            if (receipt.firstDecoded && this._owns(owner)) {
+                this._notify("onFirstFrameDecoded", receipt);
+            }
+            if (!receipt.canPresent || !this.visible || !this._owns(owner)) {
+                this._closeFrame(entry);
+                return;
+            }
+            if (this.pendingFrame) this._closeFrame(this.pendingFrame);
+            // A previous frame's close notification may have reset/replaced us.
+            if (!this.visible || !this._owns(owner)) {
+                this._closeFrame(entry);
+                return;
+            }
+            this.pendingFrame = entry;
+            if (!owner.raf) {
+                owner.raf = true;
+                try { owner.rafHandle = global.requestAnimationFrame(() => this._present(owner)); }
+                catch (_) {
+                    owner.raf = false;
+                    owner.rafHandle = null;
+                    this._error(owner);
+                }
+            }
+        }
+
+        _present(owner) {
+            owner.raf = false;
+            owner.rafHandle = null;
+            const entry = this.pendingFrame;
+            if (!entry || entry.owner !== owner) return;
+            this.pendingFrame = null;
+            try {
+                if (this.visible && this.ctx && this._owns(owner)) {
+                    this.ctx.drawImage(entry.frame, 0, 0, owner.width, owner.height);
+                    if (this.visible && this._owns(owner)) {
+                        this.media.presented(owner.id, integer(entry.receipt.callback), this.nowMs(), true);
+                        this._notify("onFramePresented", entry.receipt);
+                    }
+                }
+            } catch (_) { this._error(owner); }
+            finally { this._closeFrame(entry); }
+        }
+
+        _closeFrame(entry) {
+            if (entry.closing || !entry.owner.frames.has(entry)) return;
+            entry.closing = true;
+            if (this.pendingFrame === entry) this.pendingFrame = null;
+            try {
+                if (!entry.nativeClosed) entry.frame.close();
+                entry.nativeClosed = true;
+            }
+            catch (_) {
+                entry.closing = false;
+                // Retain both native handle and Rust charge. Decoder closure
+                // cannot release an escaped output's charge, even after reset.
+                this._error(entry.owner, false);
+                return;
+            }
+            if (this.unknownOutput) {
+                entry.closing = false;
+                return;
+            }
+            try {
+                const receipt = JSON.parse(this.media.frameClosed(
+                    entry.owner.id, integer(entry.receipt.callback)));
+                entry.owner.frames.delete(entry);
+                this._release(receipt);
+            } catch (_) {
+                entry.closing = false;
+                this._quarantine(null);
+            }
+            this._forget(entry.owner);
+        }
+
+        _quarantine(frame) {
+            if (frame) {
+                // A broken native implementation can produce arbitrarily many
+                // unowned handles. Keep bounded diagnostic custody, never a
+                // growing Set or a false zero-resource claim. No later media
+                // admission/credit is possible; outer owner teardown is needed.
+                if (!this.quarantineFrame) this.quarantineFrame = frame;
+                this.unclosedUnownedOutputs = Math.min(65535, this.unclosedUnownedOutputs + 1);
+            }
+            if (this.unknownOutput) return;
+            this.unknownOutput = true;
+            this.configurationOwner = null;
+            this.current = null;
+            this.decoder = null;
+            this.configured = false;
+            try { this.media.quarantine(); } catch (_) {}
+            for (const owner of Array.from(this.owners)) this._retire(owner);
+            this._notify("onDecoderReclaimed", "browser_media_cleanup_incomplete");
+        }
+
+        _error(owner, closeFrames = true) {
+            const current = this._owns(owner);
+            if (current) {
+                this.current = null;
+                this.decoder = null;
+                this.configured = false;
+                try { this.media.reclaim(owner.id); } catch (_) {}
+            }
+            this._retire(owner, closeFrames);
+            if (current) this._notify("onDecoderReclaimed", "browser_hevc_decoder_failed");
+        }
+
+        _retire(owner, closeFrames = true) {
+            owner.retired = true;
+            if (this.current === owner) {
+                this.current = null;
+                this.decoder = null;
+                this.configured = false;
+            }
+            try { this.media.reclaim(owner.id); } catch (_) {}
+            if (owner.closing) return;
+            owner.closing = true;
+            if (owner.raf) {
+                owner.raf = false;
+                const handle = owner.rafHandle;
+                owner.rafHandle = null;
+                try { global.cancelAnimationFrame(handle); }
+                catch (_) { this._quarantine(null); }
+            }
+            if (closeFrames) {
+                for (const entry of Array.from(owner.frames)) this._closeFrame(entry);
+            }
+            // isConfigSupported cannot be cancelled. Its metadata/native work
+            // retains the original Rust decoder slot until the promise settles;
+            // repeated cancelled probes cannot accumulate outside the bound.
+            if (!owner.nativeClosed && !owner.probing && owner.nativeBusy === 0) {
+                try {
+                    if (owner.decoder && (owner.decoder.state !== "closed" || owner.closeFailed)) {
+                        owner.decoder.close();
+                    }
+                    owner.nativeClosed = true;
+                } catch (_) { owner.closeFailed = true; }
+            }
+            if (!this.unknownOutput && owner.nativeClosed && !owner.reconciled) {
+                try {
+                    const releases = JSON.parse(this.media.decoderClosed(owner.id));
+                    owner.reconciled = true;
+                    for (const receipt of releases) this._release(receipt);
+                } catch (_) {
+                    // Native close and Rust reconciliation are separate proof
+                    // steps. Keep the original owner and retry acknowledgment;
+                    // a binding failure cannot make it disappear from cleanup.
+                }
+            }
+            owner.closing = false;
+            this._forget(owner);
+        }
+
+        _forget(owner) {
+            if (owner.nativeClosed && owner.reconciled && owner.frames.size === 0) this.owners.delete(owner);
         }
 
         reset() {
-            // Invalidate the async owner before cleanup can invoke any callback.
             this.configurationOwner = null;
-            this._resetDecoder();
+            this.current = null;
+            this.decoder = null;
+            this.configured = false;
+            if (this.media) this.media.retire();
+            for (const owner of Array.from(this.owners)) this._retire(owner);
+            return this.owners.size === 0 && !this.unknownOutput;
         }
 
-        _resetDecoder() {
-            // Detach original resources before callbacks can install a successor.
-            const decoder = this.decoder;
-            const pending = this.pendingFrame;
-            this.decoder = null;
-            this.pendingFrame = null;
-            this.inFlightByTimestamp.clear();
-            this.configured = false;
-            this.awaitingKeyFrame = true;
-            this.decodedCount = 0;
-            this.presentedCount = 0;
-            if (pending) this._closeAndRelease(pending.frame, pending.meta, false);
-            closeDecoder(decoder);
+        snapshot() {
+            const snapshot = JSON.parse(this.media.snapshot());
+            if (this.unknownOutput) {
+                snapshot.quarantined = true;
+                snapshot.activeDecoder = null;
+                snapshot.stage = "quarantined";
+            }
+            return Object.assign(snapshot, {
+                unclosedUnownedOutputs: this.unclosedUnownedOutputs,
+                unownedOutputCountSaturated: this.unclosedUnownedOutputs === 65535,
+            });
         }
     }
 
