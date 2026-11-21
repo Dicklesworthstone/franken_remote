@@ -12,6 +12,8 @@
 //! still decide whether a session may start.
 //!
 //! Commands:
+//!   fr-windows app [--port N]
+//!       open the packaged desktop app's machine picker on this service port.
 //!   fr-windows
 //!       choose a machine from the installed Tailscale snapshot, then view it.
 //!   fr-windows hosts
@@ -115,7 +117,7 @@ mod upload_selection_budget;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: fr-windows\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
+const USAGE: &str = "usage: fr-windows\n       fr-windows app [--port N]\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
      [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--no-clipboard] [--seconds N] \
      [--fullscreen] [--no-shortcuts] [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE]... [--receive DIR] \
      [--receive-max-file-bytes N] [--receive-max-session-bytes N] \
@@ -137,7 +139,8 @@ pub fn cli(args: &[String]) -> ExitCode {
 }
 
 /// The `FrankenRemote` desktop application. It reads its own arguments:
-/// none (the picker), `--install`, or `--uninstall` (Apps & features).
+/// `--port N` (the picker, default 8443), `--install`, or `--uninstall`
+/// (Apps & features). An explicit port belongs only to this launch.
 pub fn app() -> ExitCode {
     #[cfg(windows)]
     return windows::app::run();

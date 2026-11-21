@@ -1,7 +1,70 @@
 //! Bounded command-line options shared by Windows and portable regression tests.
 #![forbid(unsafe_code)]
 
-use std::{net::IpAddr, path::PathBuf};
+use std::{net::IpAddr, num::NonZeroU16, path::PathBuf};
+
+/// The desktop app's launch-scoped command. A port is an endpoint choice, not
+/// a remembered preference or authority to connect before a machine is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppCommand {
+    Picker { port: NonZeroU16 },
+    Install { quiet: bool },
+    Uninstall { quiet: bool },
+}
+
+impl AppCommand {
+    pub(crate) fn parse(mut args: &[String], default_port: u16) -> Option<Self> {
+        let mut port = None;
+        let mut quiet = false;
+        let mut installation = None;
+        loop {
+            match args {
+                [] => break,
+                [flag, tail @ ..] if flag == "--quiet" && !quiet => {
+                    quiet = true;
+                    args = tail;
+                }
+                [flag, value, tail @ ..] if flag == "--port" && port.is_none() => {
+                    port = Some(parse_port(value)?);
+                    args = tail;
+                }
+                [flag, tail @ ..]
+                    if (flag == "--install" || flag == "--uninstall") && installation.is_none() =>
+                {
+                    installation = Some(flag == "--install");
+                    args = tail;
+                }
+                _ => return None,
+            }
+        }
+        match installation {
+            Some(_) if port.is_some() => None,
+            Some(true) => Some(Self::Install { quiet }),
+            Some(false) => Some(Self::Uninstall { quiet }),
+            None => Some(Self::Picker {
+                port: port.or_else(|| NonZeroU16::new(default_port))?,
+            }),
+        }
+    }
+
+    /// Relaunching the installed GUI preserves this invocation's endpoint;
+    /// the Start menu shortcut and later launches retain their usual default.
+    pub(crate) fn picker_args(port: NonZeroU16) -> [String; 2] {
+        ["--port".to_owned(), port.to_string()]
+    }
+}
+
+/// One bounded decimal service-port grammar shared by the GUI and the CLI.
+fn parse_port(value: &str) -> Option<NonZeroU16> {
+    if value.is_empty() || value.len() > 5 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    NonZeroU16::new(value.parse().ok()?)
+}
+
+#[cfg(test)]
+#[path = "options/app_tests.rs"]
+mod app_tests;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
@@ -219,7 +282,7 @@ impl Options {
                 [flag, value, tail @ ..] => {
                     match flag.as_str() {
                         "--port" if !port_set => {
-                            options.port = value.parse().ok().filter(|port| *port != 0)?;
+                            options.port = parse_port(value)?.get();
                             port_set = true;
                         }
                         "--address" if options.addresses.len() < 8 => {

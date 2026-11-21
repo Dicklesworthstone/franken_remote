@@ -115,6 +115,8 @@ pub(super) struct Notice {
 
 pub(super) struct Request {
     pub mode: Mode,
+    /// The validated endpoint port of this original app or viewing command.
+    pub port: u16,
     pub settings: Settings,
     pub notice: Option<Notice>,
     pub support: Option<DecoderSupport>,
@@ -1303,12 +1305,22 @@ fn open(request: &Request) -> windows::core::Result<Picker> {
         let none = WINDOW_EX_STYLE(0);
         let static_style = WINDOW_STYLE(STATIC_STYLE);
         let button = WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32);
-        let heading = match request.mode {
-            Mode::Application => w!("Connect to a machine on your tailnet"),
-            Mode::Command => w!("Choose a machine to view"),
-        };
+        let heading = HSTRING::from(format!(
+            "{} (port {})",
+            match request.mode {
+                Mode::Application => "Connect to a machine on your tailnet",
+                Mode::Command => "Choose a machine to view",
+            },
+            request.port,
+        ));
         let mut controls = Controls {
-            heading: child(w!("STATIC"), heading, static_style, none, 0)?,
+            heading: child(
+                w!("STATIC"),
+                PCWSTR(heading.as_ptr()),
+                static_style,
+                none,
+                0,
+            )?,
             subtitle: child(
                 w!("STATIC"),
                 w!(

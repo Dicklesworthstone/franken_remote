@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 use serde_json::{Value, json};
+use std::num::NonZeroU16;
 
 /// Settings files larger than this are ignored (defaults are used).
 pub(crate) const MAX_BYTES: usize = 16 * 1024;
@@ -92,9 +93,17 @@ impl Settings {
     pub(crate) fn viewer_args(
         &self,
         stable_id: &str,
+        port: NonZeroU16,
         receive: Option<crate::receive_choice::Destination>,
     ) -> Vec<String> {
-        let mut args = vec!["view".to_owned(), stable_id.to_owned()];
+        // Always pass the original launch port, including the default. A child
+        // or a later machine choice must not replace it with its own default.
+        let mut args = vec![
+            "view".to_owned(),
+            stable_id.to_owned(),
+            "--port".to_owned(),
+            port.to_string(),
+        ];
         if self.control {
             args.push("--control".to_owned());
             if !self.clipboard {
@@ -125,6 +134,10 @@ fn valid_id(id: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn port() -> NonZeroU16 {
+        NonZeroU16::new(8443).unwrap()
+    }
+
     #[test]
     fn settings_round_trip_and_default_to_control_with_clipboard() {
         let defaults = Settings::default();
@@ -146,7 +159,7 @@ mod tests {
     fn viewer_args_are_the_command_lines_own_options() {
         use crate::options::{ConnectionCommand, DisplayChoice};
         let parse = |settings: &Settings| {
-            let args = settings.viewer_args("nSTABLE1CNTRL", None);
+            let args = settings.viewer_args("nSTABLE1CNTRL", port(), None);
             let command = ConnectionCommand::parse(&args, 8443).expect("viewer arguments parse");
             assert!(command.view);
             assert_eq!(command.selection, Some("nSTABLE1CNTRL"));
@@ -162,8 +175,8 @@ mod tests {
         // Clipboard sharing and shortcuts only exist with control, so a
         // view-only session carries neither flag.
         assert_eq!(
-            view_only.viewer_args("nSTABLE1CNTRL", None),
-            ["view", "nSTABLE1CNTRL"]
+            view_only.viewer_args("nSTABLE1CNTRL", port(), None),
+            ["view", "nSTABLE1CNTRL", "--port", "8443"]
         );
         let options = parse(&view_only);
         assert!(!options.control && !options.fullscreen);
@@ -215,7 +228,7 @@ mod tests {
         let request = choice.begin(10).unwrap();
         choice.finish(request, Some(&units), 20).unwrap();
         let settings = Settings::default();
-        let args = settings.viewer_args("nSTABLE1CNTRL", choice.take(true));
+        let args = settings.viewer_args("nSTABLE1CNTRL", port(), choice.take(true));
         let parsed = ConnectionCommand::parse(&args, 8443).unwrap();
         let receive = parsed.options.receive.unwrap();
         assert_eq!(receive.directory, std::path::PathBuf::from(path));
@@ -227,7 +240,8 @@ mod tests {
         let saved = settings.to_json();
         assert!(!saved.contains("receive"));
         assert!(!saved.contains("日本語"));
-        let fresh_args = Settings::from_json(saved.as_bytes()).viewer_args("nSTABLE1CNTRL", None);
+        let fresh_args =
+            Settings::from_json(saved.as_bytes()).viewer_args("nSTABLE1CNTRL", port(), None);
         assert!(
             ConnectionCommand::parse(&fresh_args, 8443)
                 .unwrap()
@@ -242,7 +256,7 @@ mod tests {
             control: false,
             ..settings
         };
-        let args = view_only.viewer_args("nSTABLE1CNTRL", choice.take(true));
+        let args = view_only.viewer_args("nSTABLE1CNTRL", port(), choice.take(true));
         assert!(
             ConnectionCommand::parse(&args, 8443)
                 .unwrap()
@@ -250,5 +264,73 @@ mod tests {
                 .receive
                 .is_none()
         );
+    }
+
+    #[test]
+    fn every_selected_child_keeps_the_launch_port_with_its_own_viewer_choices() {
+        use crate::options::{AppCommand, ConnectionCommand, DisplayChoice};
+
+        for value in [1, 8443, 47819, 65535] {
+            let invocation = ["--port".to_owned(), value.to_string()];
+            let AppCommand::Picker { port } = AppCommand::parse(&invocation, 8443).unwrap() else {
+                panic!("viewing invocation");
+            };
+            for control in [false, true] {
+                for choose_display in [false, true] {
+                    let settings = Settings {
+                        control,
+                        choose_display,
+                        ..Settings::default()
+                    };
+                    // Each return to the picker uses the original app port,
+                    // even if the selected host or display preference changes.
+                    for selected in ["nFIRST1", "nSECOND2"] {
+                        let arguments = settings.viewer_args(selected, port, None);
+                        let command = ConnectionCommand::parse(&arguments, 443).unwrap();
+                        assert_eq!(command.selection, Some(selected));
+                        assert_eq!(command.options.port, value);
+                        assert_eq!(command.options.control, control);
+                        assert_eq!(
+                            command.options.display,
+                            if choose_display {
+                                DisplayChoice::Choose
+                            } else {
+                                DisplayChoice::Primary
+                            }
+                        );
+                        assert_eq!(
+                            arguments.iter().filter(|value| *value == "--port").count(),
+                            1
+                        );
+                    }
+                    // Saving ordinary preferences cannot change a later
+                    // Start-menu launch's default endpoint.
+                    let saved = settings.to_json();
+                    assert!(!saved.contains("port"));
+                    assert_eq!(Settings::from_json(saved.as_bytes()), settings);
+                    assert_eq!(
+                        AppCommand::parse(&[], 8443),
+                        Some(AppCommand::Picker {
+                            port: NonZeroU16::new(8443).unwrap(),
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_receive_choice_keeps_the_port_without_adding_file_consent() {
+        use crate::options::ConnectionCommand;
+        use crate::receive_choice::Choice;
+
+        let port = NonZeroU16::new(47819).unwrap();
+        let mut choice = Choice::default();
+        let request = choice.begin(10).unwrap();
+        choice.finish(request, None, 20).unwrap();
+        let arguments = Settings::default().viewer_args("nHOST1", port, choice.take(true));
+        let command = ConnectionCommand::parse(&arguments, 8443).unwrap();
+        assert_eq!(command.options.port, 47819);
+        assert!(command.options.receive.is_none());
     }
 }

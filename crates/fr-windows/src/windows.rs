@@ -24,6 +24,11 @@ use std::{io::Write, process::ExitCode};
 )]
 pub fn run(args: &[String]) -> ExitCode {
     if let [command, rest @ ..] = args
+        && command == "app"
+    {
+        return app::launch(rest);
+    }
+    if let [command, rest @ ..] = args
         && command == "capture-probe"
     {
         return probe::run(rest);
@@ -60,6 +65,7 @@ pub fn run(args: &[String]) -> ExitCode {
     } else {
         let request = hosts::Request {
             mode: hosts::Mode::Command,
+            port: options.port,
             settings: crate::settings::Settings::default(),
             notice: None,
             support: None,

@@ -8,8 +8,10 @@
 //! The child's content-free completion document becomes the picker notice.
 use super::hosts::{self, Chosen, Error, Mode, Notice, PickError, Picked, Request};
 use super::install;
-use crate::{machines, session_output, settings::Settings};
+use crate::{machines, options::AppCommand, session_output, settings::Settings};
+use fr_tailnet::DEFAULT_SERVICE_PORT;
 use std::{
+    num::NonZeroU16,
     os::windows::process::CommandExt,
     path::Path,
     process::{Command, ExitCode, Stdio},
@@ -30,6 +32,32 @@ use windows::{
 
 /// `ASFW_ANY`: let the next window to open take the foreground.
 const ASFW_ANY: u32 = u32::MAX;
+const USAGE: &str = "Usage: FrankenRemote [--port N] [--quiet]\n       FrankenRemote [--install | --uninstall] [--quiet]\n\nChoose a machine from your tailnet. The port must be 1-65535 and applies only to this app launch. The command-line viewer is fr-windows.exe.";
+
+/// Open the packaged GUI from `fr-windows app`. Launch the real windowed
+/// executable so its own viewer children and per-user installer keep their
+/// existing executable identity; never copy or run the CLI as the GUI.
+pub(super) fn launch(args: &[String]) -> ExitCode {
+    if AppCommand::parse(args, DEFAULT_SERVICE_PORT).is_none() {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("fr-windows: could not locate the packaged desktop application.");
+        return ExitCode::from(1);
+    };
+    let app = exe.with_file_name(crate::install_plan::APP_EXE);
+    match Command::new(app).args(args).status() {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(1),
+        Err(_) => {
+            eprintln!(
+                "fr-windows: could not open FrankenRemote.exe. Keep it beside fr-windows.exe or reinstall the complete package."
+            );
+            ExitCode::from(1)
+        }
+    }
+}
 
 pub fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,21 +74,13 @@ pub fn run() -> ExitCode {
         return code;
     }
     let quiet = args.iter().any(|arg| arg == "--quiet");
-    let rest: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .filter(|arg| *arg != "--quiet")
-        .collect();
-    match rest.as_slice() {
-        [] => application(),
-        ["--install"] => install_command(quiet),
-        ["--uninstall"] => uninstall_command(quiet),
-        _ => {
+    match AppCommand::parse(&args, DEFAULT_SERVICE_PORT) {
+        Some(AppCommand::Picker { port }) => application(port),
+        Some(AppCommand::Install { quiet }) => install_command(quiet),
+        Some(AppCommand::Uninstall { quiet }) => uninstall_command(quiet),
+        None => {
             if !quiet {
-                message(
-                    "Usage: FrankenRemote [--install | --uninstall] [--quiet]\n\nRun without arguments to choose a machine. The command-line viewer is fr-windows.exe.",
-                    MB_ICONINFORMATION,
-                );
+                message(USAGE, MB_ICONINFORMATION);
             }
             ExitCode::from(2)
         }
@@ -174,7 +194,7 @@ fn save_settings(path: Option<&Path>, settings: &Settings) {
     }
 }
 
-fn application() -> ExitCode {
+fn application(port: NonZeroU16) -> ExitCode {
     // SAFETY: process-wide setup before any window exists; a manifest that
     // already set the same awareness makes the call fail harmlessly.
     unsafe {
@@ -197,6 +217,7 @@ fn application() -> ExitCode {
     loop {
         let request = Request {
             mode: Mode::Application,
+            port: port.get(),
             settings: settings.clone(),
             notice: notice.take(),
             support: support.clone(),
@@ -209,7 +230,7 @@ fn application() -> ExitCode {
                     installed = true;
                     // SAFETY: a scalar foreground-permission grant.
                     let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
-                    if install::launch(&app) {
+                    if install::launch(&app, port) {
                         return ExitCode::SUCCESS;
                     }
                     notice = Some(Notice {
@@ -232,7 +253,7 @@ fn application() -> ExitCode {
             Ok(Picked::Machine(chosen)) => {
                 settings = chosen.settings.clone();
                 save_settings(settings_path.as_deref(), &settings);
-                notice = Some(session(chosen));
+                notice = Some(session(chosen, port));
             }
             Err(PickError::Choice(
                 error @ (Error::NativeUnavailable | Error::CleanupIncomplete),
@@ -331,7 +352,7 @@ fn finish_session_log(output: &mut session_output::ChildOutput) -> bool {
     failed || write_failed
 }
 
-fn session(chosen: Chosen) -> Notice {
+fn session(chosen: Chosen, port: NonZeroU16) -> Notice {
     let name = machines::short_name(chosen.peer.certificate_name()).to_owned();
     let failed = |text: String| Notice {
         text,
@@ -345,7 +366,7 @@ fn session(chosen: Chosen) -> Notice {
     // out of the content-free session log and the remembered settings.
     let args = chosen
         .settings
-        .viewer_args(chosen.peer.stable_id(), chosen.receive);
+        .viewer_args(chosen.peer.stable_id(), port, chosen.receive);
     let child = Command::new(exe)
         .arg("--session")
         .args(&args)

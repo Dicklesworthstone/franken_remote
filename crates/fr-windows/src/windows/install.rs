@@ -5,6 +5,7 @@
 //! profile and `HKEY_CURRENT_USER`.
 use crate::install_plan::{self, APP_EXE, CLI_EXE, PRODUCT, SETTINGS_FILE, UNINSTALL_KEY, Value};
 use std::{
+    num::NonZeroU16,
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::Command,
@@ -128,8 +129,11 @@ fn copy(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Start the installed copy (after installing from elsewhere).
-pub(super) fn launch(app: &Path) -> bool {
-    Command::new(app).spawn().is_ok()
+pub(super) fn launch(app: &Path, port: NonZeroU16) -> bool {
+    Command::new(app)
+        .args(crate::options::AppCommand::picker_args(port))
+        .spawn()
+        .is_ok()
 }
 
 /// Remove everything this installation created. The running installed copy

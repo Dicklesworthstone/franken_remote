@@ -102,6 +102,27 @@ deleted a moment after it exits. Tailscale is not changed.
 
 ### Choose a machine in the app
 
+The app connects to host port 8443 by default. To choose another configured
+host port, start the app with `--port` or open it through the command-line
+launcher:
+
+```powershell
+.\FrankenRemote.exe --port 47819
+fr-windows app --port 47819
+```
+
+The port is shown in the machine picker's heading. It applies to every machine
+chosen during that app launch, to reconnects and display changes within each
+viewer, and to the installed copy opened by **Install for this user**. Closing
+the picker ends that launch. A later Start-menu launch uses 8443 again; the
+port is not saved in `settings.json`. The value must be decimal 1–65535;
+missing, duplicate or invalid values are refused before discovery or a viewer
+opens. A port cannot be combined with `--install` or `--uninstall`.
+
+`fr-windows app` opens the packaged `FrankenRemote.exe` beside the command-line
+program and waits for that application to close. Keep both executables together
+when running an unpacked release.
+
 The app opens a list of machines read from the installed Tailscale service.
 Its columns are machine, status, system, connection path and Tailscale
 address. Online machines that can host a desktop come first, then machines
