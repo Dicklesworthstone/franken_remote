@@ -1,7 +1,7 @@
 //! One native common-file dialog on its own thread. The viewer keeps drawing
 //! while the modal OS picker owns local input. The worker holds no authority;
-//! it only pins one explicitly selected descriptor after native cleanup.
-use crate::file_choice::{Choice, Error, Focus as FocusPolicy, MAX_PATH_UNITS, path_units};
+//! it only pins one explicitly selected batch after native cleanup.
+use crate::file_choice::{Choice, Error, Focus as FocusPolicy, MAX_PATH_UNITS, selected_paths};
 use fr_mobile_ffi::session::{FileChoiceContext, PreparedUpload, Shared, Upload};
 use std::{
     cell::{Cell, RefCell},
@@ -22,9 +22,10 @@ use windows::{
         UI::{
             Controls::{
                 Dialogs::{
-                    CDN_FILEOK, CommDlgExtendedError, GetOpenFileNameW, OFN_DONTADDTORECENT,
-                    OFN_ENABLEHOOK, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
-                    OFN_NOCHANGEDIR, OFN_NODEREFERENCELINKS, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+                    CDN_FILEOK, CommDlgExtendedError, GetOpenFileNameW, OFN_ALLOWMULTISELECT,
+                    OFN_DONTADDTORECENT, OFN_ENABLEHOOK, OFN_EXPLORER, OFN_FILEMUSTEXIST,
+                    OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_NODEREFERENCELINKS, OFN_PATHMUSTEXIST,
+                    OPENFILENAMEW,
                 },
                 NMHDR,
             },
@@ -340,8 +341,9 @@ fn choose(choice: Choice, focus: Arc<Focus>) -> Result<Selected, Error> {
         lStructSize: u32::try_from(size_of::<OPENFILENAMEW>()).map_err(|_| Error::Native)?,
         lpstrFile: PWSTR(path.as_mut_ptr()),
         nMaxFile: u32::try_from(path.len()).map_err(|_| Error::Native)?,
-        lpstrTitle: w!("Choose one file to send to the current remote host"),
+        lpstrTitle: w!("Choose up to 8 files to send to the current remote host"),
         Flags: OFN_EXPLORER
+            | OFN_ALLOWMULTISELECT
             | OFN_ENABLEHOOK
             | OFN_FILEMUSTEXIST
             | OFN_PATHMUSTEXIST
@@ -385,10 +387,13 @@ fn choose(choice: Choice, focus: Arc<Focus>) -> Result<Selected, Error> {
     if !native.choice.borrow().selected() {
         return Err(Error::InvalidPath);
     }
-    let path = PathBuf::from(OsString::from_wide(path_units(&path)?));
+    let paths: Vec<PathBuf> = selected_paths(&path, usize::from(dialog.nFileOffset))?
+        .iter()
+        .map(|path| PathBuf::from(OsString::from_wide(path)))
+        .collect();
     // The existing Windows custody boundary denies reparse leaves, alternate
     // streams and conflicting writers; it duplicates this actual disk handle.
-    let prepared = Upload::prepare(&path).map_err(|_| Error::Selection)?;
+    let prepared = Upload::prepare_many(&paths).map_err(|_| Error::Selection)?;
     native.check()?;
     Ok(Selected {
         choice: native.choice.into_inner(),

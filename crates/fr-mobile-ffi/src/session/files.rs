@@ -1,6 +1,6 @@
 //! Explicit local uploads owned by one original native session. The existing
 //! observer owns ATP, authority, disk work and publication receipts. Every new
-//! batch consumes a newly selected descriptor; no earlier selection is replayed.
+//! batch consumes newly selected descriptors; no earlier selection is replayed.
 #![forbid(unsafe_code)]
 
 use fr_wire::negotiation::Offer;
@@ -12,9 +12,12 @@ use frd::{
     session_startup::{FileSendError, FileSendOutcome, FileSendReceipt, NativeObserver},
 };
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
 };
+
+#[path = "files/selection_budget.rs"]
+mod selection_budget;
 
 /// Content-free evidence from the original upload. Queued bytes are not host
 /// publication; only the original snapshot's actual receipt says that. Local
@@ -23,6 +26,8 @@ use std::{
 pub struct Report {
     /// Monotonic original-owner batch; zero means no local file selected.
     pub batch: u8,
+    /// Explicit regular files in this original batch; zero for an empty lane.
+    pub selected_files: u8,
     pub selected_bytes: u64,
     pub configured: bool,
     pub cancel_requested: bool,
@@ -35,6 +40,9 @@ pub struct Report {
 
 impl Report {
     fn receipt(&self) -> Option<FileSendReceipt> {
+        if self.selected_files != 1 {
+            return None;
+        }
         let report = self.snapshot?.status.report?;
         let mut receipts = report.receipts();
         if report.total != 1 || receipts.len() != 1 {
@@ -44,7 +52,25 @@ impl Report {
     }
 
     pub fn receipt_name(&self) -> &'static str {
-        receipt_name(self.receipt())
+        if self.selected_files > 1 && self.receipts().next().is_some() {
+            "batch"
+        } else {
+            receipt_name(self.receipt())
+        }
+    }
+
+    /// Every retained original receipt, in selection order. A missing receipt
+    /// remains missing; admission, queued bytes and cleanup never invent one.
+    pub fn receipts(&self) -> impl Iterator<Item = FileSendReceipt> + '_ {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.status.report.as_ref())
+            .into_iter()
+            .flat_map(frd::native_files::Report::receipts)
+    }
+
+    pub fn receipt_counts(&self) -> ReceiptCounts {
+        ReceiptCounts::from_receipts(self.receipts())
     }
 
     /// The original receipt's typed refusal/interruption reason. These enums
@@ -53,32 +79,44 @@ impl Report {
         receipt_detail(self.receipt())
     }
 
-    /// Only the original host's publication receipt supplies these bytes.
-    /// Even a complete transport queue cannot establish this value.
+    /// Sum of bytes named by actual host publication receipts, including a
+    /// partially completed batch. None means no host publication is known (or
+    /// an invalid sum); this never includes queued or uncertain publication.
     pub fn published_bytes(&self) -> Option<u64> {
-        match self.receipt()?.outcome {
-            FileSendOutcome::HostPublished { bytes, .. } => Some(bytes),
-            _ => None,
+        let mut total = None;
+        for receipt in self.receipts() {
+            if let FileSendOutcome::HostPublished { bytes, .. } = receipt.outcome {
+                total = Some(total.unwrap_or(0_u64).checked_add(bytes)?);
+            }
         }
+        total
     }
 
-    /// The one selected file has a durable host publication receipt and the
+    /// Every selected file has its own durable host publication receipt and the
     /// original source completed without a batch/cleanup failure. This is
     /// independent of, and can never repair, the containing session's outcome.
     pub fn is_success(&self) -> bool {
         if self.batch == 0 {
-            return true; // no local file request; says nothing about capability
+            return self.selected_files == 0; // no request; not a capability claim
+        }
+        let selected = usize::from(self.selected_files);
+        if selected == 0 || selected > frd::native_files::MAX_SENDS {
+            return false;
         }
         let completed = self.snapshot.is_some_and(|snapshot| {
             snapshot.status.report.is_some_and(|report| {
-                report.total == 1 && report.started == 1 && report.complete && report.stop.is_none()
+                report.total == selected
+                    && report.started == selected
+                    && report.receipts().len() == selected
+                    && report.complete
+                    && report.stop.is_none()
             })
         });
         let cleanup_ok = self.cleanup.is_none_or(|result| result.is_ok())
             && self
                 .snapshot
                 .is_none_or(|snapshot| snapshot.cleanup.is_none_or(|result| result.is_ok()));
-        completed_upload_succeeded(completed, cleanup_ok, self.receipt())
+        completed_batch_succeeded(selected, completed, cleanup_ok, self.receipts())
     }
 
     pub fn phase_name(&self) -> &'static str {
@@ -97,9 +135,8 @@ impl Report {
         }
     }
 
-    /// Bounded content-free UI evidence. Byte progress never stands in for
-    /// the original host's publication receipt or the source's cleanup.
-    #[cfg(any(test, target_os = "ios", target_os = "macos"))]
+    /// Version-1 single-file UI evidence. Keep this shape for the existing
+    /// Apple C ABI's 16 KiB history budget; Windows uses the batch document.
     pub(crate) fn document(&self) -> serde_json::Value {
         let snapshot = self.snapshot;
         let progress = snapshot.and_then(|value| value.current);
@@ -126,6 +163,35 @@ impl Report {
         })
     }
 
+    /// Every original batch receipt within the Windows completion byte budget.
+    /// Progress and missing reports never synthesize a publication outcome.
+    pub fn batch_document(&self) -> serde_json::Value {
+        let mut document = self.document();
+        let counts = self.receipt_counts();
+        let report = self.snapshot.and_then(|snapshot| snapshot.status.report);
+        let receipts: Vec<_> = self
+            .receipts()
+            .enumerate()
+            .map(|(index, receipt)| receipt_document(index, receipt))
+            .collect();
+        document["requested"] = serde_json::json!(self.batch != 0);
+        document["configured"] = serde_json::json!(self.configured);
+        document["selected_files"] = serde_json::json!(self.selected_files);
+        document["receipts"] = serde_json::json!(receipts);
+        document["published_files"] = serde_json::json!(counts.published);
+        document["refused_files"] = serde_json::json!(counts.refused);
+        document["interrupted_files"] = serde_json::json!(counts.interrupted);
+        document["publication_unknown_files"] = serde_json::json!(counts.publication_unknown);
+        document["durability_unknown_files"] = serde_json::json!(counts.durability_unknown);
+        document["unexpected_direction_files"] = serde_json::json!(counts.unexpected_direction);
+        document["started_files"] = serde_json::json!(report.map(|report| report.started));
+        document["not_started_files"] =
+            serde_json::json!(report.map(|report| report.not_started()));
+        document["succeeded"] = serde_json::json!(self.is_success());
+        document["reason"] = serde_json::json!(self.absence.map(|reason| format!("{reason:?}")));
+        document
+    }
+
     pub fn cleanup_name(&self) -> &'static str {
         match self
             .cleanup
@@ -145,7 +211,77 @@ impl Report {
     }
 }
 
-#[cfg(any(test, target_os = "ios", target_os = "macos"))]
+/// Disjoint receipt outcomes, except durability uncertainty is a subset of
+/// known publication. Unstarted selections do not contribute to any count.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiptCounts {
+    pub reported: usize,
+    pub published: usize,
+    pub refused: usize,
+    pub interrupted: usize,
+    pub publication_unknown: usize,
+    pub durability_unknown: usize,
+    pub unexpected_direction: usize,
+}
+
+impl ReceiptCounts {
+    fn from_receipts(receipts: impl Iterator<Item = FileSendReceipt>) -> Self {
+        let mut counts = Self::default();
+        for receipt in receipts {
+            counts.reported += 1;
+            match receipt.outcome {
+                FileSendOutcome::HostPublished { publication, .. } => {
+                    counts.published += 1;
+                    counts.durability_unknown +=
+                        usize::from(publication == Publication::DurabilityUnknown);
+                }
+                FileSendOutcome::HostRefused(_) | FileSendOutcome::ControllerRefused(_) => {
+                    counts.refused += 1;
+                }
+                FileSendOutcome::InterruptedBeforePublication(_) => counts.interrupted += 1,
+                FileSendOutcome::PublicationUnknown => counts.publication_unknown += 1,
+                FileSendOutcome::ControllerPublished { .. } => counts.unexpected_direction += 1,
+            }
+        }
+        counts
+    }
+}
+
+fn receipt_document(index: usize, receipt: FileSendReceipt) -> serde_json::Value {
+    let publication = match receipt.outcome {
+        FileSendOutcome::HostPublished { bytes, publication } => {
+            Some((bytes, publication == Publication::Durable))
+        }
+        _ => None,
+    };
+    serde_json::json!({
+        "index": index, "id": receipt.id,
+        "outcome": receipt_name(Some(receipt)),
+        "detail": receipt_detail(Some(receipt)),
+        "published_bytes": publication.map(|(bytes, _)| bytes),
+        "durable": publication.map(|(_, durable)| durable),
+    })
+}
+
+fn completed_batch_succeeded(
+    selected: usize,
+    completed: bool,
+    cleanup_ok: bool,
+    receipts: impl Iterator<Item = FileSendReceipt>,
+) -> bool {
+    if selected == 0 || selected > frd::native_files::MAX_SENDS || !completed || !cleanup_ok {
+        return false;
+    }
+    let mut received = 0;
+    for receipt in receipts {
+        received += 1;
+        if received > selected || !completed_upload_succeeded(true, true, Some(receipt)) {
+            return false;
+        }
+    }
+    received == selected
+}
+
 fn stage_name(stage: fr_files::sender::Stage) -> &'static str {
     use fr_files::sender::Stage;
     match stage {
@@ -224,7 +360,7 @@ pub(super) fn offer(original: &Offer, upload: bool, download: bool) -> Result<Of
     super::file_offer::retain(original, upload, download)
 }
 
-/// One command retains at most nine explicit files and their original receipts.
+/// One command retains at most nine explicit batches and their original receipts.
 pub const MAX_UPLOADS: usize = 9;
 
 /// A pinned descriptor prepared off the UI/session threads. No public path or
@@ -232,6 +368,7 @@ pub const MAX_UPLOADS: usize = 9;
 pub struct PreparedUpload {
     request: SendRequest,
     bytes: u64,
+    files: u8,
 }
 
 #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -287,22 +424,46 @@ pub struct Upload(Mutex<State>);
 
 impl Upload {
     pub fn prepare(path: &Path) -> Result<PreparedUpload, SelectRefusal> {
-        let selected = Selection::select(&[path.to_path_buf()])?;
-        let selected_bytes = selected.sizes().next().flatten().ok_or(SelectRefusal {
-            index: 0,
-            reason: SelectReason::Directory,
-        })?;
+        Self::prepare_many(&[path.to_path_buf()])
+    }
+
+    /// Pin one explicit bounded batch atomically. No partial selection survives
+    /// a refused item, and no contents are read before original control admission.
+    pub fn prepare_many(paths: &[PathBuf]) -> Result<PreparedUpload, SelectRefusal> {
+        let selected = Selection::select(paths)?;
+        let (files, selected_bytes) =
+            selection_budget::check(selected.sizes(), frd::native_files::MAX_SENDS).map_err(
+                |error| match error {
+                    selection_budget::Error::Count => SelectRefusal {
+                        index: paths.len().min(frd::native_files::MAX_SENDS),
+                        reason: SelectReason::TooMany,
+                    },
+                    selection_budget::Error::Directory(index) => SelectRefusal {
+                        index,
+                        reason: SelectReason::Directory,
+                    },
+                    selection_budget::Error::Bytes(index) => SelectRefusal {
+                        index,
+                        reason: SelectReason::TooMany,
+                    },
+                },
+            )?;
         // Duplicates the selected descriptor, never reopens its pathname. Only
         // the original observer can start the bounded disk source after grant.
         let request = selected.request()?;
         Ok(PreparedUpload {
             request,
             bytes: selected_bytes,
+            files,
         })
     }
 
     pub fn select(path: &Path) -> Result<Arc<Self>, SelectRefusal> {
         Ok(Self::new(Some(Self::prepare(path)?)))
+    }
+
+    pub fn select_many(paths: &[PathBuf]) -> Result<Arc<Self>, SelectRefusal> {
+        Ok(Self::new(Some(Self::prepare_many(paths)?)))
     }
 
     /// Negotiate one optional original upload lane without opening any source.
@@ -312,8 +473,8 @@ impl Upload {
     }
 
     fn new(selected: Option<PreparedUpload>) -> Arc<Self> {
-        let (request, batch, bytes) = selected.map_or((None, 0, 0), |prepared| {
-            (Some(prepared.request), 1, prepared.bytes)
+        let (request, batch, bytes, files) = selected.map_or((None, 0, 0, 0), |prepared| {
+            (Some(prepared.request), 1, prepared.bytes, prepared.files)
         });
         Arc::new(Self(Mutex::new(State {
             request,
@@ -321,6 +482,7 @@ impl Upload {
             attempted: false,
             report: Report {
                 batch,
+                selected_files: files,
                 selected_bytes: bytes,
                 configured: false,
                 cancel_requested: false,
@@ -450,7 +612,7 @@ impl Upload {
         state.collect();
     }
 
-    /// The original lane has capacity for one newly selected file. This is
+    /// The original lane has capacity for one newly selected batch. This is
     /// never an authority guarantee; the original controller rechecks it.
     pub fn ready(&self) -> bool {
         let mut state = self.lock();
@@ -495,6 +657,7 @@ impl Upload {
         }
         state.report = Report {
             batch,
+            selected_files: prepared.files,
             selected_bytes: prepared.bytes,
             configured: true,
             cancel_requested: false,
@@ -558,6 +721,10 @@ impl Drop for Upload {
         self.finish();
     }
 }
+
+#[cfg(test)]
+#[path = "files/batch_tests.rs"]
+mod batch_tests;
 
 #[cfg(test)]
 mod tests {
@@ -840,7 +1007,11 @@ mod tests {
         let upload = Upload::interactive();
         upload.finish();
         assert_eq!(
-            upload.submit(PreparedUpload { request, bytes: 13 }),
+            upload.submit(PreparedUpload {
+                request,
+                bytes: 13,
+                files: 1
+            }),
             Err(FileSendError::Closed),
         );
         assert_eq!(upload.reports(), [] as [Report; 0]);
@@ -848,7 +1019,11 @@ mod tests {
         let source = selected();
         let request = source.lock().request.take().unwrap();
         assert_eq!(
-            Upload::interactive().submit(PreparedUpload { request, bytes: 13 }),
+            Upload::interactive().submit(PreparedUpload {
+                request,
+                bytes: 13,
+                files: 1
+            }),
             Err(FileSendError::Closed),
         );
     }
@@ -868,7 +1043,11 @@ mod tests {
         let source = selected();
         let request = source.lock().request.take().unwrap();
         assert_eq!(
-            upload.submit(PreparedUpload { request, bytes: 13 }),
+            upload.submit(PreparedUpload {
+                request,
+                bytes: 13,
+                files: 1
+            }),
             Err(FileSendError::Limits),
         );
         assert_eq!(

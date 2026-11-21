@@ -641,8 +641,10 @@ completion cannot change the earlier failure into success.
 ## Send files from the connected desktop
 
 Start a controlling viewer with `--control`, then open **File transfer → Pick
-and send one file…** after the host grants control. Choose one regular file in the
-native Windows dialog. The original session negotiates an optional file lane
+and send files…** after the host grants control. Choose up to eight regular files
+in the native Windows dialog. The whole selection is accepted or refused together;
+its files then use one ordered ATP batch with one active disk source at a time.
+The original session negotiates an optional file lane
 even without `--send`; no file is opened or read merely by connecting. A host
 that does not offer files leaves this action unavailable without preventing
 ordinary viewing and control.
@@ -670,23 +672,25 @@ cleanup is checked separately from file selection. Closing the viewer gives
 that original cancelled worker a bounded collection interval; an unresolved
 or failed cleanup cannot count as successful completion or permit replacement.
 
-### Select the first file on the command line
+### Select the first batch on the command line
 
 ```powershell
 fr-windows view remote.example.ts.net --control --send 'C:\Users\me\Documents\draft.txt'
-fr-windows view --control --send 'C:\Users\me\Documents\Résumé final.txt'
+fr-windows view --control --send 'C:\Users\me\Documents\Résumé final.txt' --send 'C:\Users\me\Documents\notes.txt'
 ```
 
-`--send FILE` selects one regular file before the remote session starts. It
-requires `--control`, may appear once, and also works with the native machine
-chooser. The host must separately enable its existing file receiver with
+`--send FILE` selects a regular file before the remote session starts. Repeat it
+up to eight times for one ordered batch. It requires `--control` and also works
+with the native machine chooser. Duplicate basenames, an invalid member, or an
+over-budget selection refuse the entire batch before a remote connection opens.
+The host must separately enable its existing file receiver with
 `frd run ... --files DIR`, alongside the host's normal control configuration.
 Linux, macOS and Windows hosts can enable regular-file receiving through that
 existing option. Directory uploads and drag-and-drop remain separate workflows.
 For files selected by the host operator, explicitly choose a local destination
 with `--receive DIR` as described below.
 
-The sender retains the selected read-only Windows handle and its actual file
+The sender retains each selected read-only Windows handle and its actual file
 identity. It never reopens the source pathname during transfer. Conflicting
 writes and renames are denied while that original handle or its duplicates
 remain open. Directories, leaf reparse points, device namespaces, alternate
@@ -702,8 +706,14 @@ a conflicting name is a refusal. The transfer does not open the received file.
 If the host does not negotiate files, ordinary viewing and control can still
 continue, and the upload reports that refusal.
 
-The native **File transfer** menu shows the current upload's state, queued
-bytes, host receipt and source-cleanup state. **Pause** and **Resume** change
+The native **File transfer** menu shows the current batch's state, current-file
+queued bytes, published/refused/interrupted counts, publication and durability
+uncertainty, and source-cleanup state. Final JSON retains each actual receipt in
+selection order, including earlier publication when a later file fails. A missing
+receipt is never filled in from progress. The batch stops at its first failure;
+remaining files are reported as not started. Success requires a durable host
+receipt for every selected file and confirmed source cleanup. **Pause** and
+**Resume** change
 only that original upload's pacing; they do not extend its transfer deadline.
 **Cancel this upload** requests file-only cancellation and leaves the desktop
 connection running. Every command names the exact batch shown when its popup
@@ -712,9 +722,11 @@ cannot retract a file the host already published, erase its receipt, or turn an
 uncertain result into success. A transport or authority failure can still end
 the containing session under its existing rules.
 
-A command admits at most nine explicit single-file selections, including an
-initial `--send`. After a batch finishes, **Pick and send one file…** becomes
-available again only if the original lane remains ready. Earlier publication
+A command retains at most nine explicit batches of up to eight files, including
+an initial `--send` batch. The host's existing cumulative byte and 64-transfer
+session limits still apply, including failed attempts. After a batch finishes,
+**Pick and send files…** becomes available again only if the original lane
+remains ready. Earlier publication
 receipts and failures remain in bounded history. A cancelled or failed batch
 is never silently repeated.
 
@@ -729,9 +741,18 @@ running with the paused control grant.
 The completion JSON includes `upload` for a configured original upload owner
 and `null` for an observation-only command. It retains the current batch,
 bounded `batches` history, chooser result and chooser-cleanup outcome.
-Per-file fields include `selected_bytes`, `configured`, `phase`,
+Batch fields include `selected_files`, `selected_bytes`, `configured`, `phase`,
 `cancel_requested`, `queued_bytes`, `total_bytes`, `receipt`, `receipt_detail`,
-`published_bytes`, `cleanup`, `reason`, and `succeeded`.
+`published_bytes`, `cleanup`, `reason`, and `succeeded`. `published_bytes` sums
+only known host publication receipts, including when the batch stopped later.
+`receipts` retains each actual original receipt with its selection `index`,
+transfer `id`, `outcome`, typed `detail`, `published_bytes`, and `durable` state.
+Missing receipts remain absent. `started_files` and `not_started_files` come
+from the original batch report and remain null before that report exists.
+Aggregate publication, refusal, interruption, and uncertainty counts are
+reported separately. The legacy scalar `receipt` is `batch` after a multi-file
+selection has any receipt; it never substitutes its first successful receipt
+for the batch's result.
 These fields contain no path, filename or contents. Queued bytes are not proof
 of host publication. Receipts distinguish durable host publication, publication
 with unknown durability, refusal, interruption before publication, and unknown

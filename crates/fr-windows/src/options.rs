@@ -93,8 +93,8 @@ pub(crate) struct Options {
     pub clipboard: bool,
     pub seconds: Option<u64>,
     pub display: DisplayChoice,
-    /// One explicit regular file; consumed once by the original control grant.
-    pub send: Option<PathBuf>,
+    /// Explicit regular files; one bounded batch on the original control grant.
+    pub send: Vec<PathBuf>,
     /// Receive host-selected files only under this command's original grant.
     pub receive: Option<ReceiveOptions>,
     /// Local decode path (`--decoder auto|hardware|software`).
@@ -150,7 +150,7 @@ impl Options {
             clipboard: true,
             seconds: None,
             display: DisplayChoice::Primary,
-            send: None,
+            send: Vec::new(),
             receive: None,
             decoder: Decoder::Automatic,
             fullscreen: false,
@@ -185,7 +185,7 @@ impl Options {
                     {
                         return None;
                     }
-                    return ((options.send.is_none() && options.receive.is_none())
+                    return ((options.send.is_empty() && options.receive.is_none())
                         || options.control)
                         .then_some(options);
                 }
@@ -245,8 +245,16 @@ impl Options {
                             options.decoder = Decoder::parse(value)?;
                             decoder_set = true;
                         }
-                        "--send" if view && options.send.is_none() && !value.is_empty() => {
-                            options.send = Some(PathBuf::from(value));
+                        "--send"
+                            if view
+                                && options.send.len() < crate::file_choice::MAX_SELECTED_FILES
+                                && !value.is_empty() =>
+                        {
+                            let path = PathBuf::from(value);
+                            if options.send.contains(&path) {
+                                return None;
+                            }
+                            options.send.push(path);
                         }
                         "--receive" if view && receive_directory.is_none() && !value.is_empty() => {
                             receive_directory = Some(PathBuf::from(value));
@@ -388,7 +396,7 @@ mod tests {
                 seconds: None,
                 display: DisplayChoice::Primary,
                 decoder: Decoder::Automatic,
-                send: None,
+                send: Vec::new(),
                 receive: None,
                 fullscreen: false,
                 shortcuts: true,
@@ -440,23 +448,44 @@ mod tests {
             assert!(options.control);
             assert_eq!(
                 options.send,
-                Some(PathBuf::from("C:\\Users\\me\\draft.txt"))
+                vec![PathBuf::from("C:\\Users\\me\\draft.txt")]
             );
         }
         let unicode = "C:\\Users\\me\\Résumé final.txt";
         assert_eq!(
             parse(&["--control", "--send", unicode], true).unwrap().send,
-            Some(PathBuf::from(unicode))
+            vec![PathBuf::from(unicode)]
         );
         for args in [
             vec!["--send", "file.txt"],
             vec!["--control", "--send"],
             vec!["--control", "--send", ""],
-            vec!["--control", "--send", "a", "--send", "b"],
+            vec!["--control", "--send", "a", "--send", "a"],
         ] {
             assert!(parse(&args, true).is_none());
         }
         assert!(parse(&["--send", "file.txt"], false).is_none());
+    }
+
+    #[test]
+    fn repeated_sends_form_one_bounded_explicit_selection() {
+        let paths: Vec<_> = (0..crate::file_choice::MAX_SELECTED_FILES)
+            .map(|index| format!("C:\\Users\\me\\item-{index}.txt"))
+            .collect();
+        let mut args = vec!["--control".to_owned()];
+        for path in &paths {
+            args.extend(["--send".to_owned(), path.clone()]);
+        }
+        let options = Options::parse(&args, true, 8443).unwrap();
+        assert_eq!(
+            options.send,
+            paths.iter().map(PathBuf::from).collect::<Vec<_>>()
+        );
+        assert!(options.control);
+        assert!(Options::parse(&args, false, 8443).is_none());
+        assert!(Options::parse(&args[1..], true, 8443).is_none());
+        args.extend(["--send".to_owned(), "C:\\Users\\me\\ninth.txt".to_owned()]);
+        assert!(Options::parse(&args, true, 8443).is_none());
     }
 
     #[test]
@@ -468,7 +497,7 @@ mod tests {
         ] {
             let options = parse(&args, true).unwrap();
             assert!(options.control);
-            assert!(options.send.is_none());
+            assert!(options.send.is_empty());
             assert_eq!(
                 options.receive,
                 Some(ReceiveOptions {
@@ -498,7 +527,7 @@ mod tests {
         let command = ConnectionCommand::parse(&args, 8443).unwrap();
         assert_eq!(command.selection, None);
         assert!(!command.options.clipboard);
-        assert!(command.options.send.is_some());
+        assert!(!command.options.send.is_empty());
         assert_eq!(
             command.options.receive,
             Some(ReceiveOptions {

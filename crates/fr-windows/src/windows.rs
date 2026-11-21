@@ -99,12 +99,12 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let upload = if let Some(path) = &options.send {
-        match fr_mobile_ffi::session::Upload::select(path) {
+    let upload = if !options.send.is_empty() {
+        match fr_mobile_ffi::session::Upload::select_many(&options.send) {
             Ok(upload) => Some(upload),
             Err(error) => {
                 eprintln!(
-                    "fr-windows: file_selection_refused ({error:?}). Select one regular file; no remote session was opened."
+                    "fr-windows: file_selection_refused ({error:?}). Select up to eight distinct regular files; no remote session was opened."
                 );
                 return ExitCode::from(2);
             }

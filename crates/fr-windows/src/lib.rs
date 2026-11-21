@@ -20,7 +20,7 @@
 //!       [--address IP]... [--control] [--no-clipboard] [--seconds N]
 //!       [--fullscreen] [--no-shortcuts]
 //!       [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software]
-//!       [--send FILE] (requires --control; one regular file, sent once)
+//!       [--send FILE]... (requires --control; up to eight regular files, sent once)
 //!       [--receive DIR] [--receive-max-file-bytes N] [--receive-max-session-bytes N]
 //!       [--receive-conflict reject|keep-both] (requires --control and local consent)
 //!       one session in a native window: Media Foundation decode (DXVA on the
@@ -105,11 +105,17 @@ mod control_request_policy;
 #[path = "../../fr-mobile-ffi/src/session/focus_close.rs"]
 mod focus_close_policy;
 
+// Check the actual shared upload batch accounting without substituting its
+// retained-handle selection or compiling the platform session and decoder.
+#[cfg(test)]
+#[path = "../../fr-mobile-ffi/src/session/files/selection_budget.rs"]
+mod upload_selection_budget;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
      [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--no-clipboard] [--seconds N] \
-     [--fullscreen] [--no-shortcuts] [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE] [--receive DIR] \
+     [--fullscreen] [--no-shortcuts] [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE]... [--receive DIR] \
      [--receive-max-file-bytes N] [--receive-max-session-bytes N] \
      [--receive-conflict reject|keep-both]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \

@@ -2,6 +2,12 @@
 //! gesture age survive native cleanup, descriptor opening and UI delivery.
 #![forbid(unsafe_code)]
 
+#[path = "file_choice/selection.rs"]
+mod selection;
+pub use selection::MAX_SELECTED_FILES;
+#[cfg(any(windows, test))]
+pub use selection::selected_paths;
+
 pub const CHOICE_MS: u64 = 120_000;
 pub const ACCEPTED_MS: u64 = 2_000;
 pub const MAX_PATH_UNITS: usize = 32_768;

@@ -1,5 +1,5 @@
 //! Explicit native file choices on one original controlled upload lane.
-//! Every choice pins one descriptor and consumes its own bounded batch result.
+//! Every choice pins up to eight descriptors and retains every original receipt.
 #[path = "file_picker.rs"]
 mod file_picker;
 use crate::{change_display, control::Choice};
@@ -142,7 +142,7 @@ impl Menu {
                 popup,
                 MF_STRING | MF_GRAYED,
                 OPEN,
-                w!("&Pick and send one file…"),
+                w!("&Pick and send files…"),
             )
             .and_then(|()| AppendMenuW(popup, MF_SEPARATOR, 0, w!("")))
             .and_then(|()| AppendMenuW(popup, MF_STRING | MF_GRAYED, PHASE, w!("No file selected")))
@@ -349,16 +349,19 @@ impl Menu {
         let bytes = progress.map_or_else(
             || {
                 format!(
-                    "Selected: {} bytes; no active source",
-                    report.selected_bytes
+                    "Selected: {} files, {} bytes; no active source",
+                    report.selected_files, report.selected_bytes
                 )
             },
-            |progress| {
-                format!(
-                    "Queued: {} / {} bytes (await host receipt)",
+            |progress| match progress.total_bytes {
+                Some(total) => format!(
+                    "Current file: {} / {total} bytes queued (await host receipt)",
                     progress.queued_bytes,
-                    progress.total_bytes.unwrap_or(report.selected_bytes),
-                )
+                ),
+                None => format!(
+                    "Current file: {} bytes queued; total not yet known",
+                    progress.queued_bytes,
+                ),
             },
         );
         let phase = report.absence.map_or_else(
@@ -370,10 +373,23 @@ impl Menu {
                 )
             },
         );
-        let receipt = report.receipt_detail().map_or_else(
-            || report.receipt_name().replace('_', " "),
-            |reason| format!("{} ({reason})", report.receipt_name().replace('_', " ")),
-        );
+        let counts = report.receipt_counts();
+        let receipt = if report.selected_files > 1 {
+            format!(
+                "{} / {} published; {} refused; {} interrupted; {} publication unknown; {} durability unknown",
+                counts.published,
+                report.selected_files,
+                counts.refused,
+                counts.interrupted,
+                counts.publication_unknown,
+                counts.durability_unknown,
+            )
+        } else {
+            report.receipt_detail().map_or_else(
+                || report.receipt_name().replace('_', " "),
+                |reason| format!("{} ({reason})", report.receipt_name().replace('_', " ")),
+            )
+        };
         let entries = [
             (PHASE, phase),
             (BYTES, bytes),
@@ -486,23 +502,5 @@ pub(super) fn document(menu: Option<&Menu>) -> serde_json::Value {
 }
 
 fn report_document(report: &UploadReport) -> serde_json::Value {
-    let progress = report.snapshot.and_then(|snapshot| snapshot.current);
-    serde_json::json!({
-        "batch": report.batch,
-        "requested": report.batch != 0,
-        "selected_bytes": report.selected_bytes,
-        "configured": report.configured,
-        "phase": report.phase_name(),
-        "cancel_requested": report.cancel_requested,
-        "pause_requested": report.snapshot.map(|s| s.pause_requested),
-        "paused": report.snapshot.and_then(|s| s.paused),
-        "queued_bytes": progress.map(|progress| progress.queued_bytes),
-        "total_bytes": progress.and_then(|progress| progress.total_bytes),
-        "receipt": report.receipt_name(),
-        "receipt_detail": report.receipt_detail(),
-        "published_bytes": report.published_bytes(),
-        "cleanup": report.cleanup_name(),
-        "reason": report.absence.map(|reason| format!("{reason:?}")),
-        "succeeded": report.is_success(),
-    })
+    report.batch_document()
 }
