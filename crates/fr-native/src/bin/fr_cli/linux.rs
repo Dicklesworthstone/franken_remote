@@ -1710,6 +1710,12 @@ mod tests {
         assert!(route.next.contains("Tailscale connection and routing"));
     }
     #[test]
+    fn host_busy_maps_to_typed_host_busy_refusal() {
+        let direct = tailnet(TailnetError::HostBusy);
+        assert_eq!(direct.code, "host_busy");
+        assert_eq!(direct.exit, 1);
+    }
+    #[test]
     fn a_rejected_host_certificate_is_named_apart_from_other_tls_failures() {
         let rejected = tailnet(TailnetError::PeerCertificateRejected);
         assert_eq!(rejected.code, "tls_certificate_rejected");
@@ -1959,6 +1965,51 @@ mod tests {
             assert!(progress.automation_focus_stop.is_none());
             assert_eq!(progress.before_cleanup(None), Ok(()));
         }
+        #[test]
+        fn connect_retry_exhaustion_on_host_busy_preserves_host_busy_code() {
+            let busy = reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(
+                TailnetError::HostBusy,
+            ));
+            assert!(reconnect::retryable(busy));
+
+            let mut ui = Interface {
+                display: DisplayChoice::Only,
+                progress: Rc::new(RefCell::new(Progress::default())),
+                attempt: None,
+                clipboard: None,
+                audio: None,
+            };
+            ui.status(Status::Connecting { attempt: 1 }).unwrap();
+            ui.status(Status::Cleaning {
+                attempt: 1,
+                failure: Some(busy),
+            })
+            .unwrap();
+            ui.status(Status::Reconnecting {
+                attempt: 2,
+                delay: Duration::from_millis(250),
+                failure: busy,
+            })
+            .unwrap();
+            ui.status(Status::Connecting { attempt: 2 }).unwrap();
+            ui.status(Status::Cleaning {
+                attempt: 2,
+                failure: Some(busy),
+            })
+            .unwrap();
+            ui.status(Status::Stopped {
+                attempt: 2,
+                failure: busy,
+            })
+            .unwrap();
+
+            let progress = ui.progress.borrow();
+            assert_eq!(progress.attempts, 2);
+            let err = completed(&unused_session(), Err(busy), false, &progress, true).unwrap_err();
+            assert_eq!(err.code, "host_busy");
+            assert_eq!(err.exit, 1);
+        }
+
         #[test]
         fn cleanup_stopping_a_window_is_not_evidence_of_a_user_close() {
             let mut progress = Progress::default();
