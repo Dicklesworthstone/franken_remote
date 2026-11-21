@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 // Other platforms retain shared grammar/output; only implemented paths dispatch.
 // The macOS desktop client (fr-5a4w) runs hosts, status, connect and the
-// authenticated local close owner; robot automation and screenshots stay Linux-only.
+// authenticated local close/observation owner. Native robot input and screenshot
+// acquisition still require their separately implemented Linux paths.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
 // `fr app`: the desktop application (machine picker, then a viewer) and its

@@ -1,5 +1,5 @@
 
-Explicit one-shot native observation (separate read-only connection):
+Explicit one-shot native observation (Linux desktop, separate read-only connection):
 fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|only
     [--by-name] [--worker /absolute/fr-media-worker] [--x-display :0]
     [--trust-roots /absolute/ca-roots.pem] [--socket /absolute/tailscaled.sock]
@@ -19,22 +19,36 @@ from the selected host display. Capture times and source freshness stay unknown.
 Compositor submission is not physical visibility. This requires a local X11
 display, not headless capture. No screenshot is retained unless requested.
 
-Reusable foreground view-only observation publisher:
+Reusable foreground view-only observation publisher (Linux desktop / macOS macos-desktop):
 fr robot session open NODE_ID --foreground --role view --publish-observations
-    --experimental-native --display HANDLE|only [read-only options above]
+    --experimental-native --display HANDLE|only
+    [--by-name] [--trust-roots /absolute/ca-roots.pem] [--socket /absolute/tailscaled.sock]
+    [--port 8443] [--ipv6] [--fit WIDTHxHEIGHT]
+    [--evidence-level decoded|submitted_to_compositor] [--json]
 fr robot session status NODE_ID --json
 fr robot observe NODE_ID --connection-id HEX32 [--max-receipt-age-ms 1..60000]
-    [--screenshot /path/new-screen.png] [--evidence-level decoded|submitted_to_compositor] [--json]
+    [--evidence-level decoded|submitted_to_compositor] [--json]
 The opt-in owner stays foreground with one attempt; status supplies its public
 comparison ID. Reads authenticate that existing local owner and never dial,
 capture, reconnect or grant input. Receipt age is local metadata age, NOT host
-source freshness. With --screenshot, the original worker copies one retained
+source freshness. On macOS, the first receipt keeps its original local timestamp
+across bootstrap acknowledgement waits; duplicate callbacks do not refresh it.
+No frame is reported before a real receipt, or after retirement. Old callbacks
+cannot republish a retired attempt. macOS needs a local graphical session and
+publishes metadata only: --native-once, --screenshot and robot input refuse.
+Display changes and resizes that need a new Mac native view end the original
+observation without another dial; start a new explicit publisher for that view.
+Linux also accepts --worker and --x-display to select its installed media worker
+and local X11 display. Those Linux-only options are explicitly refused on macOS.
+
+Linux image export additionally accepts --screenshot /path/new-screen.png.
+With --screenshot, the original worker copies one retained
 presented viewport; this does not recapture or decode a new frame. The same
 32 MiB raw-pixel, PNG, cursor and new-file rules above apply. The owner stays
 connected. Only one export is in flight, including a slow reader; no recording
 or automatic pixel publication is enabled by opening an owner.
 
-A foreground control owner explicitly opened with --accept-input also accepts
+A Linux foreground control owner explicitly opened with --accept-input also accepts
 --connection-id ID --screenshot PATH. Its result includes control_authority with
 the ORIGINAL lease comparison handle, observation_id, next_request_id, all view
 generations, frame and bounded source age. Use those same handles for input;

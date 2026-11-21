@@ -2,6 +2,8 @@ FrankenRemote robot commands
 
 fr robot session open NODE_ID --foreground --role view|control
     --experimental-native --display HANDLE|only|choose [native connect options]
+fr robot session open NODE_ID --foreground --role view --publish-observations
+    --experimental-native --display HANDLE|only [read-only native options]
 fr robot session status NODE_ID [--json]
 fr robot session close NODE_ID [--connection-id ID] [--lease LEASE] [--json]
 fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|only
@@ -20,5 +22,8 @@ Session open stays in the foreground and requires a local native desktop.
 View-only publication requires --publish-observations; robot control requires
 --accept-input. These are explicit owner modes, not grants from a printed handle.
 Local connection IDs compare original owners; they are not remote input leases.
+Live view-only metadata publication and reads work in Linux desktop and macOS
+macos-desktop builds. macOS does not implement --native-once, screenshot export
+or robot input. Linux retains the one-shot, screenshot and input commands above.
 Input requires the original lease, observation and deadline. Submitted input is
 not proof of an application's result, and uncertain effects are never retried.

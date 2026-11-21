@@ -341,13 +341,14 @@ once a second during a session) use the status/WhoIs/status sequence above over
 the loopback `LocalAPI`, about 12 ms of CPU per lookup. The signed-CLI
 transport it replaced used 60-80 ms of CPU per read.
 
-Not implemented on macOS yet, and refused by name before any network I/O:
-`--capture-system-shortcuts`, `--microphone` and
-`fr robot session open`. The Mac client offers the controlling text clipboard
-by default; the host must independently enable it. A Mac host still has no
-clipboard backend and returns a typed absence without disabling control.
-Local status identifies the foreground invocation; optional quality and
-automation observations remain unavailable on macOS.
+System-shortcut capture remains unavailable on macOS and is refused before
+network I/O. Explicit foreground view publishers now expose
+[live observation metadata](#macos-live-observation-metadata) through the
+original authenticated local owner. Robot input, one-shot native observations
+and screenshot export remain unavailable on macOS. Local status identifies the
+foreground invocation; it does not infer a remote grant or host quality.
+The controlling text clipboard is default-on; microphone forwarding requires
+its explicit [macOS microphone build and local enable](macos-microphone.md).
 
 **Evidence (2026-11-08):** from the owner's Mac to a Linux NVENC host (ts2), the
 window showed the host's live desktop and typed keys reached the host. A build
@@ -366,6 +367,91 @@ compilation of the unchanged pinned Asupersync dependency was killed by
 SIGKILL. Native AppKit event delivery, Metal repaint, the macOS pathname owner
 and a full live reconnect/close sequence still require execution on a Mac;
 Linux-side policy tests are not hardware qualification.
+
+### macOS live observation metadata
+
+A `macos-desktop` build can publish metadata from its actual AppKit/Metal
+viewing session. Start this explicit view-only owner in one terminal and leave
+it running:
+
+```sh
+fr robot session open NODE_ID --foreground --role view --publish-observations \
+  --experimental-native --display only
+```
+
+Use a display handle instead of `only` when the approved host catalog contains
+more than one display. Publication requires an explicit display; it does not
+open an interactive chooser. The existing installed-Tailscale identity, strict
+TLS, host approval, VideoToolbox decoder and native cleanup path still apply.
+This is one foreground attempt in a local graphical session, with no automatic
+reconnect or input grant.
+
+Display changes and resizes that require rebuilding the native view end the
+original observation without a fresh dial. Start a new explicit publisher for
+the new view. The completion report preserves the original cleanup outcome and
+any close receipts. The Linux-only `--worker` and `--x-display` options are
+explicitly refused on macOS.
+
+In another terminal, obtain its `connection_id` and read that exact owner:
+
+```sh
+fr robot session status NODE_ID --json
+fr robot observe NODE_ID --connection-id CONNECTION_ID \
+  --evidence-level submitted_to_compositor --max-receipt-age-ms 1000 --json
+```
+
+Replace `CONNECTION_ID` with the complete identifier returned by status.
+The local kernel authenticates the same-user caller; the identifier compares
+the original invocation and is not a credential. Reads use that invocation's
+existing local endpoint. They do not dial the host, capture another frame,
+acquire a lease, or enable publication on an ordinary `fr connect` owner.
+
+The response reports the selected display's geometry and scale, geometry
+generation, frame serial, actual decoder/compositor evidence and local receipt
+age. `decoded` is the default minimum evidence; request
+`submitted_to_compositor` to refuse decode-only receipts. Neither level proves
+physical visibility. Host source freshness, host capture/presentation wall
+times, codec configuration generation and control authority remain explicitly
+unknown or absent.
+
+`receipt_age_upper_ms` includes the original local receipt's age and the local
+query round trip. The first receipt retains its timestamp from before the
+remaining bootstrap acknowledgements; registering the opened viewer does not
+make it younger. Repeated callbacks for the same receipt do not refresh it.
+An idle desktop's receipt age therefore continues to grow. The optional
+`--max-receipt-age-ms` bound, from 1 to 60000 milliseconds, limits that receipt
+age; it does not measure the age of the host's source observation.
+
+Approval and connection status alone expose no frame. Before the first real
+receipt, or after retirement, reads refuse rather than returning prior geometry.
+Publication is fenced before native teardown, and delayed callbacks from a
+retired attempt cannot update another attempt's metadata. Stop the exact
+original owner with:
+
+```sh
+fr robot session close NODE_ID --connection-id CONNECTION_ID --json
+```
+
+Close waits for the original cleanup outcome. A missing reply leaves that
+outcome unknown. Closing the native window or pressing Ctrl-C also ends the
+foreground owner.
+
+This macOS feature publishes metadata only. `--screenshot`, `--native-once` and
+robot input remain refused; use the [Linux screenshot paths](#one-shot-native-screenshots)
+for those existing artifact operations. A receipt does not establish an input
+precondition or an application-level result.
+
+**Verification scope:** nine tests of the actual production publication adapter
+and eleven tests of the authenticated publisher's retirement owner passed with
+the repository-pinned nightly, real shared client/wire/core crates and
+repository-locked dependencies. Strict focused Clippy and independent source
+reviews passed. These tests cover delayed and duplicate receipts, attempt
+replacement, retirement under lock contention, callback failure including
+reentrancy, bounds and clock refusal. Three macOS CLI preflight regressions and
+one regression using the actual Session's reopen hooks are authored but have
+not run. The complete macOS CLI/AppKit integration build and a live
+publication/read/close session remain unverified; these are source and portable
+component results, not new native-device or tailnet qualification.
 
 ### macOS playback audio
 
@@ -1586,6 +1672,10 @@ device, desktop PipeWire session and live-tailnet qualification remain untested.
 
 ## Bounded robot shortcuts on the original foreground owner
 
+These robot input commands use the Linux native desktop. On macOS,
+[live observation metadata](#macos-live-observation-metadata) is read-only and
+does not enable this automation owner.
+
 Open an explicit automation owner in one foreground process:
 
 ```sh
@@ -1641,6 +1731,10 @@ are not a new live network or desktop qualification claim.
 
 ## One-shot native screenshots
 
+This path requires the Linux native desktop and its media worker. macOS
+publishes [live metadata](#macos-live-observation-metadata); it does not implement
+`--native-once` or screenshot export.
+
 ```sh
 fr robot observe NODE_ID --native-once --experimental-native --display only \
   --screenshot /absolute/new-screen.png --json
@@ -1687,6 +1781,10 @@ full-session regression has not run. These checks do not qualify a live tailnet,
 GPU compositor or physical display.
 
 ## Screenshots from an existing foreground owner
+
+Image export in this section uses the Linux native desktop. The equivalent
+macOS view publisher supports
+[metadata reads without `--screenshot`](#macos-live-observation-metadata).
 
 Open one explicit view publisher, then leave that process running:
 

@@ -29,6 +29,7 @@ use super::{
 };
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
+use crate::macos_live_observation;
 use crate::macos_resize::{Intent as ResizeIntent, Placement};
 use crate::macos_scroll::{CaptureClock, Refusal as ScrollRefusal, Scroll};
 use crate::macos_switch::{Action as ReopenAction, Intent as ReopenIntent, Mode as ReopenMode};
@@ -37,6 +38,7 @@ use asupersync::{
     time::{Sleep, sleep},
 };
 use fr_client::input::{ClientInstant, viewport::SurfaceRect};
+use fr_client::robot::live::{Evidence, Phase};
 use fr_core::input::{DesktopPoint, InputBounds, KeyTransition, PhysicalKey, PointerButton};
 use fr_core::input_submission::{Capabilities, Capability};
 use fr_media::{
@@ -77,7 +79,7 @@ use std::{
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
     task::Poll,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// How often `AppKit` is serviced while the network is idle.
@@ -771,6 +773,7 @@ pub struct Session {
     /// The started observer, reaped in `cleanup`. `run` and `cleanup` both
     /// take `&mut self`, so `run`'s borrow has ended before cleanup starts.
     observer: Option<NativeObserver>,
+    observations: Option<macos_live_observation::Publisher>,
     input: Rc<RefCell<Option<Input>>>,
     files: Rc<RefCell<files::Files>>,
     clipboard: Rc<RefCell<clipboard::Clipboard>>,
@@ -794,6 +797,9 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Fence before field destruction can free a native window or enter IME
         // teardown. This does not claim that mandatory cleanup completed.
+        if let Some(observations) = &self.observations {
+            let _ = observations.retire(Phase::Stopped);
+        }
         if let Some(observer) = &self.observer {
             observer.control().stop();
         }
@@ -836,6 +842,7 @@ impl Session {
             resize: Rc::default(),
             window: Rc::default(),
             observer: None,
+            observations: None,
             input: Rc::default(),
             files: Rc::default(),
             clipboard: Rc::default(),
@@ -861,6 +868,25 @@ impl Session {
             .borrow_mut()
             .request(enabled && self.control.is_some());
         self
+    }
+    /// Explicit read-only metadata publication from this original invocation.
+    /// Install before any attempt. A control-capable session cannot acquire
+    /// this view-only interface, and it never supplies a screenshot handle.
+    pub fn with_observations(
+        mut self,
+        publish: impl FnMut(macos_live_observation::Event) -> Result<(), ()> + 'static,
+    ) -> Result<Self, CallbackError> {
+        if self.control.is_some()
+            || self.started
+            || self.native_started.get()
+            || self.observer.is_some()
+            || self.observations.is_some()
+            || self.report.borrow().attempts != 0
+        {
+            return Err(CallbackError);
+        }
+        self.observations = Some(macos_live_observation::Publisher::new(publish));
+        Ok(self)
     }
     /// Supply an explicitly requested local output for each fresh original
     /// observer, before serving it. The installer handles an unselected audio
@@ -1754,6 +1780,13 @@ fn submitted(frame: Presentation) -> Option<u64> {
     (frame.stage == PresentationStage::SubmittedToCompositor).then(|| frame.frame.as_raw())
 }
 
+fn observation_evidence(stage: PresentationStage) -> Evidence {
+    match stage {
+        PresentationStage::DecodedOnly => Evidence::Decoded,
+        PresentationStage::SubmittedToCompositor => Evidence::SubmittedToCompositor,
+    }
+}
+
 /// Record the answer to a visibility report for `frame`, which [`shown`] has
 /// just taken out of `pending`.
 ///
@@ -1910,6 +1943,12 @@ impl Application for Session {
         {
             return Err(ObserverError::Order);
         }
+        let observation = self
+            .observations
+            .as_ref()
+            .map(|publisher| publisher.original(attempt))
+            .transpose()
+            .map_err(|()| ObserverError::Application)?;
         self.started = true;
         self.service_succeeded = false;
         self.service_failure = None;
@@ -1985,6 +2024,7 @@ impl Application for Session {
         let file_ui = files.clone();
         let decoder_hardware = hardware.clone();
         let approval_report = report.clone();
+        let approval_observation = observation.clone();
         let native_started = self.native_started.clone();
         let opening = viewer.observe_with_renderer(
             move |display, _original| async move {
@@ -2068,6 +2108,9 @@ impl Application for Session {
                 result.map_err(|error| picker_error.set(Some(error)))
             },
             move |_notice| {
+                if let Some(observation) = &approval_observation {
+                    observation.approval()?;
+                }
                 approval_report.borrow_mut().approval_requested = true;
                 Ok(())
             },
@@ -2116,6 +2159,19 @@ impl Application for Session {
         // callbacks carry only later pictures (see `take_shown`).
         let opening_picture = submitted(opened.initial_presentation());
         let observer = self.observer.insert(opened);
+        if let Some(observation) = &observation {
+            let initial = observer.initial_presentation();
+            // The first receipt predates bootstrap acknowledgement waits. Keep
+            // its actual local timestamp; registration cannot renew its age.
+            observation
+                .ready(
+                    display,
+                    initial.frame.as_raw(),
+                    observation_evidence(initial.stage),
+                    observer.initial_presentation_received_at(),
+                )
+                .map_err(|()| ObserverError::Application)?;
+        }
         if let Some(install) = &mut self.audio_install {
             *self.audio_owner.borrow_mut() = Some(Rc::from(install(observer)));
         }
@@ -2133,8 +2189,15 @@ impl Application for Session {
         // not a frame interval.
         let mut previous: Option<std::time::Instant> = None;
         let mut frames = move |frame: Option<Presentation>| {
-            if frame.is_some() {
-                let now = std::time::Instant::now();
+            if let Some(frame) = frame {
+                let now = Instant::now();
+                if let Some(observation) = &observation {
+                    observation.presented(
+                        frame.frame.as_raw(),
+                        observation_evidence(frame.stage),
+                        now,
+                    )?;
+                }
                 let mut report = count.borrow_mut();
                 report.presented += 1;
                 if let Some(previous) = previous.replace(now) {
@@ -2144,6 +2207,7 @@ impl Application for Session {
                         .record(u64::try_from(gap).unwrap_or(u64::MAX));
                 }
             }
+            Ok::<(), ()>(())
         };
         let outcome = match control {
             None => {
@@ -2151,7 +2215,7 @@ impl Application for Session {
                 let switching = reopen_intent.clone();
                 let ui_window = window.clone();
                 let served = observer.serve_until(move |frame| {
-                    frames(frame);
+                    frames(frame)?;
                     let eligible = ui_window
                         .borrow()
                         .as_ref()
@@ -2191,7 +2255,7 @@ impl Application for Session {
                 let ui_resize = resize.clone();
                 let ui_microphone = self.microphone.clone();
                 let mut ui = move |state: InteractiveViewerState<'_>, frame| {
-                    frames(frame);
+                    frames(frame)?;
                     let eligible = switchable
                         && ui_window
                             .borrow()
@@ -2330,6 +2394,10 @@ impl Application for Session {
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>> {
         // Fence at call time, before any AppKit/IME cleanup can block.
+        let observations_retired = self
+            .observations
+            .as_ref()
+            .is_none_or(|publisher| publisher.retire(Phase::Cleaning).is_ok());
         self.input.borrow_mut().take();
         if let Some(observer) = &self.observer {
             observer.control().stop();
@@ -2409,6 +2477,7 @@ impl Application for Session {
             let audio = reap_audio(audio_owner.as_deref(), cx, deadline).await;
             let microphone = reap_microphone(&self.microphone, cx, deadline).await;
             if !result
+                || !observations_retired
                 || !text_retired
                 || !picker_closed
                 || !commands
@@ -2465,10 +2534,28 @@ impl Application for Session {
                 Err(CallbackError)
             }
             _ => Ok(()),
+        }?;
+        if let Some(publisher) = &self.observations {
+            match status {
+                Status::Connecting { attempt } => publisher.begin(attempt),
+                Status::Authenticated { attempt } => publisher.authenticated(attempt),
+                Status::Cleaning { .. } => publisher.retire(Phase::Cleaning),
+                Status::Reconnecting { .. } | Status::Reopening { .. } => {
+                    publisher.retire(Phase::Reconnecting)
+                }
+                Status::Completed { .. } | Status::Stopped { .. } => {
+                    publisher.retire(Phase::Stopped)
+                }
+            }
+            .map_err(|()| CallbackError)?;
         }
+        Ok(())
     }
     fn completion_action(&mut self) -> Result<CompletionAction, CallbackError> {
-        if !self.reopen_intent.borrow().pending() {
+        // The explicit robot publisher owns one attempt. A successful local
+        // display choice must not spend the supervisor's separate reopen path
+        // or clear the original receipt/cleanup evidence in a new Connecting.
+        if self.observations.is_some() || !self.reopen_intent.borrow().pending() {
             return Ok(CompletionAction::Finish);
         }
         let report = self.report.borrow();
@@ -2526,6 +2613,9 @@ impl Application for Session {
         &mut self,
         failure: reconnect::Failure,
     ) -> Result<Option<LocalLayoutChange>, CallbackError> {
+        if self.observations.is_some() {
+            return Ok(None);
+        }
         Ok(self.window_resize_action(failure, super::event_time()))
     }
 
@@ -2834,6 +2924,37 @@ mod tests {
             ..changed
         }));
         session
+    }
+
+    #[test]
+    fn observation_publication_keeps_one_attempt_and_its_original_cleanup_evidence() {
+        // Use the actual Session hooks with the existing policy fixtures. No
+        // native window, remote grant or cleanup execution is claimed here.
+        let mut display = selected_close();
+        display.observations = Some(macos_live_observation::Publisher::new(|_| Ok(())));
+        let original = display.report();
+        assert_eq!(display.completion_action(), Ok(CompletionAction::Finish));
+        assert!(display.cleanup_confirmed());
+        assert_eq!(display.report().attempts, original.attempts);
+        assert_eq!(display.report().close_exchange, original.close_exchange);
+        assert_eq!(display.report().lease_revocation, original.lease_revocation);
+        assert_eq!(display.report().display_changes, 0);
+        assert!(!display.display_picker);
+
+        let mut resize = resized_session();
+        resize.observations = Some(macos_live_observation::Publisher::new(|_| Ok(())));
+        resize.report.borrow_mut().close_exchange = original.close_exchange;
+        let original = resize.report();
+        assert_eq!(
+            resize.local_layout_change(reconnect::Failure::Cancelled),
+            Ok(None)
+        );
+        assert!(resize.cleanup_confirmed());
+        assert_eq!(resize.report().attempts, original.attempts);
+        assert_eq!(resize.report().close_exchange, original.close_exchange);
+        assert_eq!(resize.report().local_stop, original.local_stop);
+        assert_eq!(resize.report().window_resizes, 0);
+        assert!(resize.fit_window.is_none());
     }
 
     #[test]

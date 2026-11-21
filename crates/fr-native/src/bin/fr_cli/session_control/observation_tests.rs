@@ -47,7 +47,7 @@ fn successive_reads_reuse_the_original_owner_and_see_lifecycle_changes() {
             .await
             .unwrap();
         assert_eq!(first.snapshot.phase, Phase::Starting);
-        publisher.update(|state| state.begin(1)).unwrap();
+        publisher.begin(1).unwrap();
         publisher.update(Observation::authenticated).unwrap();
         publisher.update(Observation::approval).unwrap();
         let second = beside(&mut owner, &cx, read(&cx, &target, &id))

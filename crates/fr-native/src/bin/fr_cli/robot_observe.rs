@@ -24,7 +24,10 @@ pub(super) enum Minimum {
     SubmittedToCompositor,
 }
 #[cfg_attr(
-    not(all(target_os = "linux", feature = "linux-desktop")),
+    not(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    )),
     allow(dead_code)
 )]
 struct Request {
@@ -207,7 +210,36 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
     {
         linux::run(&request)
     }
-    #[cfg(not(all(target_os = "linux", feature = "linux-desktop")))]
+    #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+    {
+        if !request.live {
+            return Err(Failure::new(
+                "platform_unavailable",
+                "One-shot native observation and screenshot acquisition are not implemented on macOS. Open an explicit foreground view with --publish-observations, then read its metadata with --connection-id. No connection or output file was opened.",
+                2,
+            ));
+        }
+        if args
+            .iter()
+            .any(|arg| arg == "--worker" || arg == "--x-display")
+        {
+            return Err(Failure::new(
+                "platform_unavailable",
+                "--worker and --x-display configure the Linux desktop path. The macOS publisher uses its native decoder and local AppKit session; omit these options. No connection was opened.",
+                2,
+            ));
+        }
+        let options = options::Options {
+            command: options::Command::Connect(request.connection),
+            socket: request.socket,
+            json: request.json,
+        };
+        crate::linux::run_observation(&options, request.minimum)
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    )))]
     {
         let _ = request;
         Err(Failure::new(

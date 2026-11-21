@@ -497,7 +497,7 @@ mod tests {
         ] {
             let options = parse(&args, true).unwrap();
             assert!(options.control);
-            assert!(options.send.is_empty());
+            assert_eq!(options.send, [] as [PathBuf; 0]);
             assert_eq!(
                 options.receive,
                 Some(ReceiveOptions {
@@ -527,7 +527,7 @@ mod tests {
         let command = ConnectionCommand::parse(&args, 8443).unwrap();
         assert_eq!(command.selection, None);
         assert!(!command.options.clipboard);
-        assert!(!command.options.send.is_empty());
+        assert_ne!(command.options.send, [] as [PathBuf; 0]);
         assert_eq!(
             command.options.receive,
             Some(ReceiveOptions {

@@ -39,6 +39,8 @@ fr connect --choose-host --view-only|--control --experimental-native
     --display HANDLE|only|choose [connect options except --by-name/--saved]
 fr robot session open NODE_ID --foreground --role view|control
     --experimental-native --display HANDLE|only|choose [connect options]
+fr robot session open NODE_ID --foreground --role view --publish-observations
+    --experimental-native --display HANDLE|only [read-only native options]
 fr robot session status NODE_ID [--json]
 fr robot session close NODE_ID [--connection-id ID] [--lease LEASE]
     [--socket PATH] [--json]
@@ -216,6 +218,16 @@ TLS, approval and display selection. It requires a local desktop and runs until
 shutdown, reporting completion, never an opened lease. Inspect/close from another
 process; detached opens are unavailable. Robot input requires --accept-input and
 original connection/lease/observation handles.
+Linux desktop and macOS macos-desktop builds can publish live view-only metadata
+with --publish-observations. Use session status to obtain connection_id, then
+robot observe TARGET --connection-id ID [--max-receipt-age-ms 1..60000] [--json].
+Reads authenticate the original owner and never open another connection. Receipt
+age is not host source freshness; decoder/compositor evidence is not visibility.
+Publication has one attempt and retires before native cleanup. On macOS,
+--native-once, screenshot export and robot input remain unavailable. Linux
+retains those commands; see fr help robot observe and fr help robot input.
+Mac display changes and resizes requiring a new view end the original publisher
+without another dial. --worker and --x-display are Linux-only and refuse on Mac.
 
 Saved local hosts:
 fr hosts save ALIAS NODE_ID [--port PORT] [--hosts-file PATH] [--socket PATH] [--json]

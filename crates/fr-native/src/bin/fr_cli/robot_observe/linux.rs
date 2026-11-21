@@ -385,24 +385,25 @@ impl Ui for Interface {
         let Some(publisher) = &self.publisher else {
             return Ok(());
         };
-        publisher
-            .update(|state| match status {
-                Status::Connecting { attempt } => state.begin(attempt),
-                Status::Authenticated { .. } => state.authenticated(),
-                Status::Cleaning { .. } => {
-                    state.retire(Phase::Cleaning);
-                    Ok(())
-                }
-                Status::Reconnecting { .. } | Status::Reopening { .. } => {
-                    state.retire(Phase::Reconnecting);
-                    Ok(())
-                }
-                Status::Completed { .. } | Status::Stopped { .. } => {
-                    state.retire(Phase::Stopped);
-                    Ok(())
-                }
-            })
-            .map_err(|()| CallbackError)
+        match status {
+            Status::Connecting { attempt } => publisher.begin(attempt),
+            Status::Authenticated { .. } => {
+                publisher.update(fr_client::robot::live::Observation::authenticated)
+            }
+            Status::Cleaning { .. } => {
+                publisher.retire(Phase::Cleaning);
+                Ok(())
+            }
+            Status::Reconnecting { .. } | Status::Reopening { .. } => {
+                publisher.retire(Phase::Reconnecting);
+                Ok(())
+            }
+            Status::Completed { .. } | Status::Stopped { .. } => {
+                publisher.retire(Phase::Stopped);
+                Ok(())
+            }
+        }
+        .map_err(|()| CallbackError)
     }
 }
 

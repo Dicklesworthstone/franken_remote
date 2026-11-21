@@ -2,14 +2,9 @@
 use super::{Phase, Publisher};
 use crate::session_control::screenshot::{Metadata, Refusal};
 use fr_client::robot::live::Evidence;
-use fr_client::robot::snapshot::{Handle, Image};
+use fr_client::robot::snapshot::Image;
 
 impl Publisher {
-    pub fn bind_snapshot(&self, handle: Handle) -> Result<(), ()> {
-        let old = self.1.try_lock().map_err(|_| ())?.replace(handle);
-        drop(old);
-        Ok(())
-    }
     pub(crate) async fn capture(&self) -> Result<(Metadata, Image), Refusal> {
         let original = self.read().ok_or(Refusal::Unavailable)?;
         let frame = original.frame.as_ref().ok_or(Refusal::NotReady)?;

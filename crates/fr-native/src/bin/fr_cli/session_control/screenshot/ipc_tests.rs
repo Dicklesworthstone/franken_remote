@@ -43,12 +43,9 @@ fn original_owner_transfers_one_sealed_image_without_stop_or_new_session() {
         let publisher = observation::Publisher::default();
         let (channel, handle) = fr_client::robot::snapshot::Channel::new();
         channel.publish(Some(image().stamp()));
+        publisher.begin(1).unwrap();
         publisher
-            .update(|state| {
-                state.begin(1)?;
-                state.authenticated()?;
-                Ok(())
-            })
+            .update(fr_client::robot::live::Observation::authenticated)
             .unwrap();
         let source = metadata(false).observation.frame.unwrap();
         publisher

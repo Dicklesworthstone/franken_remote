@@ -268,6 +268,37 @@ pub fn probe_native(options: &Options) -> Option<Result<(String, u8), Failure>> 
 pub(super) fn run_automation(options: &Options) -> Result<String, Failure> {
     run_mode(options, true)
 }
+/// The same foreground Mac connection owner, with explicit read-only metadata.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+pub(super) fn run_observation(
+    options: &Options,
+    minimum: crate::robot_observe::Minimum,
+) -> Result<String, Failure> {
+    let Command::Connect(connection) = &options.command else {
+        return Err(Failure::new(
+            "invalid_arguments",
+            "Observation publication requires an explicit foreground view.",
+            2,
+        ));
+    };
+    let mut shutdown = Shutdown::new()?;
+    let (runtime, cx) = runtime::create()?;
+    let stopped = Cell::new(false);
+    let api = match &options.socket {
+        Some(path) => LocalApi::new(path).map_err(tailnet)?,
+        None => LocalApi::installed(),
+    };
+    macos::observe(
+        &runtime,
+        &cx,
+        &mut shutdown,
+        &stopped,
+        api,
+        connection,
+        options.json,
+        minimum,
+    )
+}
 #[allow(clippy::too_many_lines)]
 fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
     #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]

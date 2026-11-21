@@ -8,19 +8,15 @@
 use super::UnixStream;
 use super::{Cx, Deadline, Error, HANDSHAKE, Info, bounded, identified};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(test)]
+use fr_client::robot::live::Observation;
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
+use fr_client::robot::live::Phase;
 use fr_client::robot::live::Snapshot;
-#[cfg(any(
-    feature = "linux-desktop",
-    all(target_os = "macos", feature = "macos-desktop"),
-    test
-))]
-use fr_client::robot::live::{Observation, Phase};
-#[cfg(any(
-    feature = "linux-desktop",
-    all(target_os = "macos", feature = "macos-desktop"),
-    test
-))]
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub(super) const REQUEST: [u8; 8] = *b"FRSC1OB\0";
@@ -45,38 +41,14 @@ pub(crate) enum ReadError {
     all(target_os = "macos", feature = "macos-desktop"),
     test
 ))]
-#[derive(Clone, Default)]
-pub(crate) struct Publisher(
-    Arc<Mutex<Observation>>,
-    Arc<Mutex<Option<fr_client::robot::snapshot::Handle>>>,
-);
+#[path = "observation/publisher.rs"]
+mod publisher;
 #[cfg(any(
     feature = "linux-desktop",
     all(target_os = "macos", feature = "macos-desktop"),
     test
 ))]
-impl Publisher {
-    /// Session-thread work is bounded and never waits for a reader-held lock.
-    pub fn update(
-        &self,
-        action: impl FnOnce(&mut Observation) -> Result<(), fr_client::robot::live::Error>,
-    ) -> Result<(), ()> {
-        let mut value = self.0.try_lock().map_err(|_| ())?;
-        action(&mut value).map_err(|_| ())
-    }
-    pub fn retire(&self, phase: Phase) {
-        let _ = self.update(|value| {
-            value.retire(phase);
-            Ok(())
-        });
-        // Drop a handle outside the shared lock; no image work happens here.
-        let old = self.1.try_lock().ok().and_then(|mut handle| handle.take());
-        drop(old);
-    }
-    fn read(&self) -> Option<Snapshot> {
-        self.0.try_lock().ok()?.snapshot(Instant::now()).ok()
-    }
-}
+pub(crate) use publisher::Publisher;
 
 /// No retry, no new tailnet connection, and no STOP on this stream. Validate
 /// the pin before I/O, then compare the identity and request on the SAME socket.

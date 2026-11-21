@@ -26,7 +26,7 @@ use std::{
     future::{Future, poll_fn},
     pin::{Pin, pin},
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +138,9 @@ pub struct NativeObserver {
     selected: SelectedDisplay,
     display: Display,
     initial: streaming::Presentation,
+    // Captured as soon as the actual first decoder receipt reaches this owner,
+    // before the bootstrap's remaining network acknowledgements can wait.
+    initial_received_at: Instant,
     // Keep the large receiver/transport owner out of nested bootstrap Poll results.
     // One stable allocation moves the same session; it does not clone its state.
     viewer: Box<streaming::StreamingViewer>,
@@ -287,6 +290,11 @@ impl NativeObserver {
     }
     pub const fn initial_presentation(&self) -> streaming::Presentation {
         self.initial
+    }
+    /// Original local receipt time, before the remaining bootstrap work. This
+    /// is neither a host capture timestamp nor proof of physical visibility.
+    pub const fn initial_presentation_received_at(&self) -> Instant {
+        self.initial_received_at
     }
     /// Explicit one-shot export of the initial presented viewport. This is
     /// bounded local worker IPC beside the original network service, never a
@@ -1037,7 +1045,7 @@ async fn bootstrap<F: Future<Output = Result<Launch, ()>>>(
         .check_transport(session.io().map_err(Error::Session)?.0)
         .map_err(Error::Decoder)?;
     send_decoder(&mut session, budget, &mut decoder).await?;
-    let initial: PresentationReceipt = loop {
+    let (initial, initial_received_at): (PresentationReceipt, Instant) = loop {
         let mut failure = None;
         media
             .receive_ready(
@@ -1052,12 +1060,14 @@ async fn bootstrap<F: Future<Output = Result<Launch, ()>>>(
                 },
             )
             .map_err(|e| failure.map_or(Error::Media(e), Error::Decoder))?;
-        let completion = Box::pin(during(&mut session, budget, decoder.present_first())).await?;
+        let completion = Box::pin(during(&mut session, budget, decoder.present_first()))
+            .await?
+            .map(|receipt| (receipt, Instant::now()));
         decoder
             .check_transport(session.io().map_err(Error::Session)?.0)
             .map_err(Error::Decoder)?;
-        if let Some(receipt) = completion {
-            break receipt;
+        if let Some(completion) = completion {
+            break completion;
         }
     };
     send_decoder(&mut session, budget, &mut decoder).await?;
@@ -1078,6 +1088,7 @@ async fn bootstrap<F: Future<Output = Result<Launch, ()>>>(
         selected,
         display,
         initial: presentation,
+        initial_received_at,
         viewer: Box::new(viewer),
         cx: budget.cx.clone(),
         input,

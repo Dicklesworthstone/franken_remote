@@ -199,3 +199,41 @@ fn explicit_screenshot_is_local_output_and_does_not_change_connection_authority(
     assert_eq!(error.code, "observation_artifact_unavailable");
     assert!(!format!("{error:?}").contains("/private/"));
 }
+
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[test]
+fn macos_one_shot_refuses_before_runtime_connection_or_artifact_creation() {
+    let error = run(&args(
+        "robot observe n-host --native-once --experimental-native --display only --socket /unavailable/local.sock --trust-roots /unavailable/roots.pem --screenshot /unavailable/screen.png",
+    ))
+    .expect_err("macOS does not acquire one-shot screenshots");
+    assert_eq!(error.code, "platform_unavailable");
+    assert_eq!(error.exit, 2);
+    assert!(!format!("{error:?}").contains("/unavailable/"));
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[test]
+fn macos_local_screenshot_refuses_before_connecting_to_any_owner() {
+    let error = local::run(&args(
+        "robot observe n-host --connection-id 11111111111111111111111111111111 --screenshot /unavailable/screen.png",
+    ))
+    .expect_err("macOS live publication has no screenshot handle");
+    assert_eq!(error.code, "observation_artifact_unavailable");
+    assert_eq!(error.exit, 2);
+    assert!(!format!("{error:?}").contains("/unavailable/"));
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[test]
+fn macos_live_publication_refuses_linux_only_configuration_before_setup() {
+    for option in ["--worker /unavailable/worker", "--x-display :99"] {
+        let error = run(&args(&format!(
+            "robot session open n-host --foreground --role view --publish-observations --experimental-native --display only {option}",
+        )))
+        .expect_err("Linux-only settings must not be silently ignored on macOS");
+        assert_eq!(error.code, "platform_unavailable");
+        assert_eq!(error.exit, 2);
+        assert!(!format!("{error:?}").contains("/unavailable/"));
+    }
+}

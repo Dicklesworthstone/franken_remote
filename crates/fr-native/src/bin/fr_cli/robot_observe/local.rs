@@ -90,7 +90,18 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
 
 pub(super) fn run(args: &[String]) -> Result<String, Failure> {
     let request = parse(args)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+    if request.screenshot.is_some() {
+        return Err(Failure::new(
+            "observation_artifact_unavailable",
+            "The macOS live owner publishes metadata only; screenshot acquisition is not implemented. No output file, local IPC request, or remote connection was opened.",
+            2,
+        ));
+    }
+    #[cfg(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     {
         use crate::session_control::observation;
         use asupersync::{runtime::RuntimeBuilder, types::Budget};
@@ -106,6 +117,7 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
             .map_err(|_| {
                 Failure::new("runtime_unavailable", "Check local runtime resources.", 1)
             })?;
+        #[cfg(target_os = "linux")]
         if request.screenshot.is_some() {
             let observed = runtime
                 .block_on(crate::session_control::screenshot::read(
@@ -136,12 +148,15 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
         };
         render(&request, &observed.snapshot, observed.round_trip_ms)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop")
+    )))]
     {
         let _ = request;
         Err(Failure::new(
             "platform_unavailable",
-            "Authenticated local observation is available on Linux.",
+            "Authenticated local observation requires Linux or the macOS desktop build.",
             2,
         ))
     }
@@ -221,7 +236,10 @@ fn render(request: &Request, snapshot: &Snapshot, round_trip_ms: u64) -> Result<
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 fn read_failure(error: crate::session_control::observation::ReadError) -> Failure {
     use crate::session_control::{Error, observation::ReadError};
     let code = match error {

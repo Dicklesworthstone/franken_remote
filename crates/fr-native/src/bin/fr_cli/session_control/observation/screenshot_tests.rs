@@ -1,5 +1,5 @@
 use super::*;
-use fr_client::robot::snapshot::Channel;
+use fr_client::robot::snapshot::{Channel, Handle};
 use fr_core::ids::{CodecConfigurationGeneration, DisplayGeometryGeneration, RecoveryGeneration};
 use fr_media::{
     access_unit::FrameId,
@@ -24,9 +24,9 @@ fn image() -> Snapshot {
 }
 fn ready() -> (Publisher, Channel, Handle) {
     let publisher = Publisher::default();
+    publisher.begin(1).unwrap();
     publisher
         .update(|state| {
-            state.begin(1)?;
             state.authenticated()?;
             state.ready(
                 Display {

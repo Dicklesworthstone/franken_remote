@@ -25,17 +25,129 @@ use super::{
     Failure, Shutdown, failure, lapse, macos_audio as playback, read_roots, refusal, robot,
     session_control, tailnet,
 };
-use crate::options::{Connection, DisplayChoice};
+use crate::{
+    options::{Connection, DisplayChoice},
+    robot_observe::Minimum,
+};
 use asupersync::{cx::Cx, runtime::Runtime, types::Budget};
-use fr_native::macos::session::{ClipboardReport, ControlPolicy, LocalStop, Report, Session};
+use fr_native::{
+    macos::session::{ClipboardReport, ControlPolicy, LocalStop, Report, Session},
+    macos_live_observation::Event,
+};
 use frd::{
     native_connection::{AddressFamily, Client, Configuration, LocalApi, reconnect},
     session_startup::ObserverPolicy,
 };
-use std::{cell::Cell, fmt::Write as _, time::Duration};
+use std::{cell::Cell, fmt::Write as _, rc::Rc, time::Duration};
 
 fn unsupported(option: &'static str) -> Failure {
     Failure::new("platform_unavailable", option, 2)
+}
+
+/// One explicit view publishes through its existing authenticated IPC owner.
+/// This contains no screenshot handle, input authority, or replacement session.
+#[derive(Clone)]
+struct Publication {
+    publisher: session_control::observation::Publisher,
+    minimum: Minimum,
+    insufficient: Rc<Cell<bool>>,
+    reopen_refused: Rc<Cell<bool>>,
+}
+impl Publication {
+    fn publish(&self, event: Event) -> Result<(), ()> {
+        match event {
+            Event::Begin(1) => self.publisher.begin(1),
+            Event::Begin(_) => {
+                // The supervisor's retry budget does not count explicit
+                // display choices or resize reopens. Connecting is notified
+                // before lookup/dial: refuse any second owner here as well.
+                self.reopen_refused.set(true);
+                self.publisher
+                    .retire(fr_client::robot::live::Phase::Stopped);
+                Err(())
+            }
+            Event::Retire(phase) => {
+                self.publisher.retire(phase);
+                Ok(())
+            }
+            Event::Ready { evidence, .. }
+                if self.minimum == Minimum::SubmittedToCompositor
+                    && evidence != fr_client::robot::live::Evidence::SubmittedToCompositor =>
+            {
+                self.insufficient.set(true);
+                self.publisher
+                    .retire(fr_client::robot::live::Phase::Stopped);
+                Err(())
+            }
+            event => self.publisher.update(|state| event.apply(state)),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn observe(
+    runtime: &Runtime,
+    cx: &Cx,
+    shutdown: &mut Shutdown,
+    stopped: &Cell<bool>,
+    api: LocalApi,
+    connection: &Connection,
+    json: bool,
+    minimum: Minimum,
+) -> Result<String, Failure> {
+    // The public grammar already fixes this profile; keep the owner boundary
+    // explicit so a future caller cannot add authority or implicit selections.
+    if connection.control
+        || connection.attempts != 1
+        || connection.choose_host
+        || connection.display == DisplayChoice::Choose
+        || connection.audio.is_some()
+        || connection.microphone.is_some()
+        || connection.receive.is_some()
+        || !connection.upload.paths.is_empty()
+        || connection.upload.choose_files
+        || connection.upload.file_commands
+        || connection.upload.file_drop
+    {
+        return Err(Failure::new(
+            "observation_profile_invalid",
+            "Publish observations only from an explicit foreground view of one selected display, with one attempt and no auxiliary sharing.",
+            2,
+        ));
+    }
+    let publication = Publication {
+        publisher: session_control::observation::Publisher::default(),
+        minimum,
+        insufficient: Rc::new(Cell::new(false)),
+        reopen_refused: Rc::new(Cell::new(false)),
+    };
+    connect_profile(
+        runtime,
+        cx,
+        shutdown,
+        stopped,
+        api,
+        connection,
+        json,
+        Some(&publication),
+    )
+    .map_err(|mut error| {
+        // Preserve actual cleanup, host refusal and closure evidence. Only the
+        // otherwise generic native failure is refined by this exact callback.
+        if publication.insufficient.get() && error.code == "native_session_failed" {
+            error.code = "observation_evidence_insufficient";
+            error.next = "The actual native receipt proved decoding only, below the requested compositor-submission minimum. The original view ended; no stronger evidence or retry was inferred.";
+        } else if publication.reopen_refused.get()
+            && matches!(
+                error.code,
+                "native_session_failed" | "control_window_resized"
+            )
+        {
+            error.code = "observation_attempt_limit";
+            error.next = "The original observation ended after a display or window change. This explicit publisher permits one attempt; open a new foreground view for the new selection. No replacement connection was opened.";
+        }
+        error
+    })
 }
 
 /// Refuse every option this path does not implement, before any network I/O.
@@ -141,9 +253,23 @@ pub(super) fn connect(
 ) -> Result<String, Failure> {
     if automation {
         return Err(unsupported(
-            "Foreground automation (fr robot session open) is not implemented on macOS yet.",
+            "Native robot input is not implemented on macOS. A foreground view may explicitly publish read-only observation metadata.",
         ));
     }
+    connect_profile(runtime, cx, shutdown, stopped, api, connection, json, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn connect_profile(
+    runtime: &Runtime,
+    cx: &Cx,
+    shutdown: &mut Shutdown,
+    stopped: &Cell<bool>,
+    api: LocalApi,
+    connection: &Connection,
+    json: bool,
+    publication: Option<&Publication>,
+) -> Result<String, Failure> {
     check(connection)?;
     let audio = playback::prepare(connection.audio.as_ref())?;
     let microphone = microphone::prepare(connection.microphone.as_ref())?;
@@ -174,6 +300,7 @@ pub(super) fn connect(
         selected_files,
         audio.as_ref(),
         microphone,
+        publication,
     )
     .map_err(|mut error| {
         pending.preserve(&mut error);
@@ -196,6 +323,7 @@ fn connect_selected(
     selected_files: fr_native::macos::files::Files,
     audio: Option<&playback::Report>,
     microphone: Option<microphone::Prepared>,
+    publication: Option<&Publication>,
 ) -> Result<String, Failure> {
     fr_native::macos::initialize_application().map_err(|_| {
         failure(
@@ -276,6 +404,18 @@ fn connect_selected(
     let mut owner = runtime
         .block_on(session_control::Owner::bind(&local, &selected.node))
         .map_err(robot::local_failure)?;
+    if let Some(publication) = publication {
+        owner = owner.with_observations(publication.publisher.clone());
+        let sink = publication.clone();
+        session = session
+            .with_observations(move |event| sink.publish(event))
+            .map_err(|_| {
+                failure(
+                    "observation_owner_unavailable",
+                    "The original view could not install its observation publisher. No replacement connection was opened.",
+                )
+            })?;
+    }
     session
         .file_command_connection(&owner.info().instance)
         .map_err(crate::file_commands::local_failure)?;
