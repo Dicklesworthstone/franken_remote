@@ -29,31 +29,45 @@ pub const MAX_IDLE_ENCODERS: usize = 0;
 pub const MAX_IDLE_GPU_SURFACES: usize = 0;
 
 /// Trait implemented by broker state components to inspect media allocation counts.
+///
+/// Returns `Some(count)` only when the count is measured or proven by construction
+/// (for example `Some(0)` when no sessions exist). Returns `None` when media workers
+/// are active and their allocation counts have not been measured.
 pub trait BrokerStateInspect {
-    /// Count of active desktop capture pipelines.
-    fn active_captures(&self) -> usize;
-    /// Count of active hardware/software HEVC encoders.
-    fn active_encoders(&self) -> usize;
-    /// Count of resident GPU surfaces.
-    fn gpu_surfaces(&self) -> usize;
+    /// Count of active desktop capture pipelines (`None` when unmeasured).
+    fn active_captures(&self) -> Option<usize>;
+    /// Count of active hardware/software HEVC encoders (`None` when unmeasured).
+    fn active_encoders(&self) -> Option<usize>;
+    /// Count of resident GPU surfaces (`None` when unmeasured).
+    fn gpu_surfaces(&self) -> Option<usize>;
 }
 
 /// A default zero-allocation inspector for a quiet idle broker.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct IdleStateInspector {
-    pub active_captures: usize,
-    pub active_encoders: usize,
-    pub gpu_surfaces: usize,
+    pub active_captures: Option<usize>,
+    pub active_encoders: Option<usize>,
+    pub gpu_surfaces: Option<usize>,
+}
+
+impl Default for IdleStateInspector {
+    fn default() -> Self {
+        Self {
+            active_captures: Some(0),
+            active_encoders: Some(0),
+            gpu_surfaces: Some(0),
+        }
+    }
 }
 
 impl BrokerStateInspect for IdleStateInspector {
-    fn active_captures(&self) -> usize {
+    fn active_captures(&self) -> Option<usize> {
         self.active_captures
     }
-    fn active_encoders(&self) -> usize {
+    fn active_encoders(&self) -> Option<usize> {
         self.active_encoders
     }
-    fn gpu_surfaces(&self) -> usize {
+    fn gpu_surfaces(&self) -> Option<usize> {
         self.gpu_surfaces
     }
 }
@@ -65,12 +79,12 @@ pub struct IdleMeasurementReport {
     pub rss_bytes: u64,
     /// Percentage of one CPU core used (0.0 to 100.0).
     pub cpu_percent: f64,
-    /// Active capture pipeline count.
-    pub active_captures: usize,
-    /// Active encoder instance count.
-    pub active_encoders: usize,
-    /// Allocated GPU surfaces count.
-    pub gpu_surfaces: usize,
+    /// Active capture pipeline count (`None` when unmeasured).
+    pub active_captures: Option<usize>,
+    /// Active encoder instance count (`None` when unmeasured).
+    pub active_encoders: Option<usize>,
+    /// Allocated GPU surfaces count (`None` when unmeasured).
+    pub gpu_surfaces: Option<usize>,
     /// Duration over which CPU utilization was measured.
     pub quiet_interval: Duration,
     /// Whether all metrics satisfy the operating envelope.
@@ -93,6 +107,8 @@ pub enum IdleEnvelopeViolation {
     ActiveEncodersResident(usize),
     /// GPU surfaces held while idle.
     GpuSurfacesResident(usize),
+    /// Media allocation counts were unknown/unmeasured (fail-closed).
+    UnmeasuredMediaState,
 }
 
 impl fmt::Display for IdleEnvelopeViolation {
@@ -121,6 +137,12 @@ impl fmt::Display for IdleEnvelopeViolation {
             Self::GpuSurfacesResident(count) => {
                 write!(f, "GPU surfaces resident while idle: {count} (limit: 0)")
             }
+            Self::UnmeasuredMediaState => {
+                write!(
+                    f,
+                    "media allocation state unmeasured (cannot confirm idle envelope)"
+                )
+            }
         }
     }
 }
@@ -142,20 +164,26 @@ impl IdleMeasurementReport {
                 limit_percent: MAX_IDLE_CPU_PERCENT,
             });
         }
-        if self.active_captures > MAX_IDLE_CAPTURES {
-            return Err(IdleEnvelopeViolation::ActiveCapturesResident(
-                self.active_captures,
-            ));
+        match self.active_captures {
+            None => return Err(IdleEnvelopeViolation::UnmeasuredMediaState),
+            Some(n) if n > MAX_IDLE_CAPTURES => {
+                return Err(IdleEnvelopeViolation::ActiveCapturesResident(n));
+            }
+            Some(_) => {}
         }
-        if self.active_encoders > MAX_IDLE_ENCODERS {
-            return Err(IdleEnvelopeViolation::ActiveEncodersResident(
-                self.active_encoders,
-            ));
+        match self.active_encoders {
+            None => return Err(IdleEnvelopeViolation::UnmeasuredMediaState),
+            Some(n) if n > MAX_IDLE_ENCODERS => {
+                return Err(IdleEnvelopeViolation::ActiveEncodersResident(n));
+            }
+            Some(_) => {}
         }
-        if self.gpu_surfaces > MAX_IDLE_GPU_SURFACES {
-            return Err(IdleEnvelopeViolation::GpuSurfacesResident(
-                self.gpu_surfaces,
-            ));
+        match self.gpu_surfaces {
+            None => return Err(IdleEnvelopeViolation::UnmeasuredMediaState),
+            Some(n) if n > MAX_IDLE_GPU_SURFACES => {
+                return Err(IdleEnvelopeViolation::GpuSurfacesResident(n));
+            }
+            Some(_) => {}
         }
         Ok(())
     }
@@ -261,9 +289,9 @@ mod tests {
         let report = IdleMeasurementReport {
             rss_bytes: 15 * 1024 * 1024, // 15 MiB < 25 MiB
             cpu_percent: 0.02,           // 0.02% < 0.1%
-            active_captures: 0,
-            active_encoders: 0,
-            gpu_surfaces: 0,
+            active_captures: Some(0),
+            active_encoders: Some(0),
+            gpu_surfaces: Some(0),
             quiet_interval: Duration::from_millis(50),
             passed: true,
         };
@@ -275,9 +303,9 @@ mod tests {
         let report = IdleMeasurementReport {
             rss_bytes: 26 * 1024 * 1024, // 26 MiB > 25 MiB
             cpu_percent: 0.01,
-            active_captures: 0,
-            active_encoders: 0,
-            gpu_surfaces: 0,
+            active_captures: Some(0),
+            active_encoders: Some(0),
+            gpu_surfaces: Some(0),
             quiet_interval: Duration::from_millis(50),
             passed: false,
         };
@@ -295,9 +323,9 @@ mod tests {
         let report = IdleMeasurementReport {
             rss_bytes: 10 * 1024 * 1024,
             cpu_percent: 0.25, // 0.25% > 0.1%
-            active_captures: 0,
-            active_encoders: 0,
-            gpu_surfaces: 0,
+            active_captures: Some(0),
+            active_encoders: Some(0),
+            gpu_surfaces: Some(0),
             quiet_interval: Duration::from_millis(50),
             passed: false,
         };
@@ -315,9 +343,9 @@ mod tests {
         let report = IdleMeasurementReport {
             rss_bytes: 10 * 1024 * 1024,
             cpu_percent: 0.01,
-            active_captures: 0,
-            active_encoders: 0,
-            gpu_surfaces: 1, // Must be 0 while idle!
+            active_captures: Some(0),
+            active_encoders: Some(0),
+            gpu_surfaces: Some(1), // Must be 0 while idle!
             quiet_interval: Duration::from_millis(50),
             passed: false,
         };
@@ -328,13 +356,30 @@ mod tests {
     }
 
     #[test]
+    fn unmeasured_media_state_fails_closed() {
+        let report = IdleMeasurementReport {
+            rss_bytes: 10 * 1024 * 1024,
+            cpu_percent: 0.01,
+            active_captures: None,
+            active_encoders: None,
+            gpu_surfaces: None,
+            quiet_interval: Duration::from_millis(50),
+            passed: false,
+        };
+        assert_eq!(
+            report.verify_envelope(),
+            Err(IdleEnvelopeViolation::UnmeasuredMediaState)
+        );
+    }
+
+    #[test]
     fn live_measurement_harness_runs_and_records_envelope() {
         let inspect = IdleStateInspector::default();
         let report = IdleHarness::measure(Duration::from_millis(20), &inspect);
         // On test runner, verify structure fields are populated
         assert!(report.quiet_interval >= Duration::from_millis(20));
-        assert_eq!(report.active_captures, 0);
-        assert_eq!(report.active_encoders, 0);
-        assert_eq!(report.gpu_surfaces, 0);
+        assert_eq!(report.active_captures, Some(0));
+        assert_eq!(report.active_encoders, Some(0));
+        assert_eq!(report.gpu_surfaces, Some(0));
     }
 }

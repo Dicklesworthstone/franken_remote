@@ -247,21 +247,21 @@ impl BrokerService {
 }
 
 impl BrokerStateInspect for BrokerService {
-    fn active_captures(&self) -> usize {
-        usize::from(!self.is_idle())
+    fn active_captures(&self) -> Option<usize> {
+        // Zero captures while idle by construction; unknown until measured from live workers.
+        self.is_idle().then_some(0)
     }
 
-    fn active_encoders(&self) -> usize {
-        usize::from(!self.is_idle())
+    fn active_encoders(&self) -> Option<usize> {
+        // Zero encoders while idle by construction; unknown until measured from live workers.
+        self.is_idle().then_some(0)
     }
 
-    fn gpu_surfaces(&self) -> usize {
+    fn gpu_surfaces(&self) -> Option<usize> {
         // While idle, NO GPU surfaces are held resident by construction.
-        if self.is_idle() {
-            0
-        } else {
-            3 // e.g. double-buffered capture + encoder surface
-        }
+        // Active sessions own GPU surfaces in separate media worker processes;
+        // report unknown (`None`) until measured rather than inventing a count.
+        self.is_idle().then_some(0)
     }
 }
 
@@ -283,9 +283,49 @@ mod tests {
         );
 
         assert!(service.is_idle());
-        assert_eq!(service.active_captures(), 0);
-        assert_eq!(service.active_encoders(), 0);
-        assert_eq!(service.gpu_surfaces(), 0);
+        assert_eq!(service.active_captures(), Some(0));
+        assert_eq!(service.active_encoders(), Some(0));
+        assert_eq!(service.gpu_surfaces(), Some(0));
+    }
+
+    #[test]
+    fn active_broker_reports_unmeasured_media_counts_instead_of_fabricated_values() {
+        use crate::broker::idle_harness::{IdleEnvelopeViolation, IdleHarness};
+        use fr_core::ids::RemoteSessionId;
+        use std::time::Duration;
+
+        let config = DaemonConfig::default();
+        let ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
+        let mut service = BrokerService::new(
+            config,
+            HostBootId::from_raw(1),
+            OsSessionId::from_raw(1),
+            "host.example.ts.net".into(),
+            vec![ip],
+        );
+
+        service
+            .registry
+            .admit_viewer(
+                RemoteSessionId::from_raw(42),
+                IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)),
+                "alice@example.com".into(),
+                true,
+                1_000,
+            )
+            .expect("viewer admitted");
+
+        assert!(!service.is_idle());
+        assert_eq!(service.active_captures(), None);
+        assert_eq!(service.active_encoders(), None);
+        assert_eq!(service.gpu_surfaces(), None);
+
+        let report = IdleHarness::measure(Duration::from_millis(1), &service);
+        assert!(!report.passed);
+        assert_eq!(
+            report.verify_envelope(),
+            Err(IdleEnvelopeViolation::UnmeasuredMediaState)
+        );
     }
 
     #[test]

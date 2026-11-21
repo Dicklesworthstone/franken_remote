@@ -503,9 +503,9 @@ fn idle_broker_conforms_to_operating_envelope() {
 
     // Idle daemon invariant: 0 captures, 0 encoders, 0 GPU surfaces
     assert!(service.is_idle());
-    assert_eq!(service.active_captures(), 0);
-    assert_eq!(service.active_encoders(), 0);
-    assert_eq!(service.gpu_surfaces(), 0);
+    assert_eq!(service.active_captures(), Some(0));
+    assert_eq!(service.active_encoders(), Some(0));
+    assert_eq!(service.gpu_surfaces(), Some(0));
 
     // Run idle quiet interval measurement
     let report = IdleHarness::measure(Duration::from_millis(50), &service);
@@ -522,9 +522,9 @@ fn idle_broker_conforms_to_operating_envelope() {
         "Idle CPU {:.4}% exceeds 0.1% ceiling",
         report.cpu_percent
     );
-    assert_eq!(report.active_captures, 0);
-    assert_eq!(report.active_encoders, 0);
-    assert_eq!(report.gpu_surfaces, 0);
+    assert_eq!(report.active_captures, Some(0));
+    assert_eq!(report.active_encoders, Some(0));
+    assert_eq!(report.gpu_surfaces, Some(0));
     assert!(report.passed, "Idle report did not pass envelope check");
     assert!(report.verify_envelope().is_ok());
 }
