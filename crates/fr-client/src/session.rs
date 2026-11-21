@@ -598,6 +598,32 @@ impl ClientSession {
         }
     }
 
+    /// Retire the local input grant and any pending control request while
+    /// retaining observation. A later fresh frame permits a new explicit
+    /// request; it cannot resurrect the previous lease or ticket.
+    ///
+    /// The connection owner must separately send the host's release/close
+    /// record. This local fence does not claim host cleanup has completed.
+    pub fn invalidate_control(&mut self) {
+        self.active_lease = None;
+        self.active_ticket = None;
+        self.view_fresh = false;
+        if matches!(
+            self.state,
+            SessionState::Viewing { .. }
+                | SessionState::RequestingControl { .. }
+                | SessionState::Controlling { .. }
+                | SessionState::Suspended { .. }
+        ) && let Some(binding) = self.active_binding
+        {
+            self.state = SessionState::Viewing {
+                session: binding.remote_session,
+                binding,
+                view_fresh: false,
+            };
+        }
+    }
+
     /// Validate coordinate mapping generation before submitting coordinate input.
     /// Stale generations are rejected immediately per Section 7.2 of the plan.
     pub fn validate_coordinate_mapping(

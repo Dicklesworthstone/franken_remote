@@ -29,11 +29,13 @@ pub mod session;
 pub use credit::{BrowserCreditError, BrowserCreditTracker};
 pub use hevc::{
     BrowserDecoderStage, BrowserHevcError, BrowserHevcPipeline, DecodedFrameRelease,
-    PreparedWebCodecsChunk, WebCodecsConfig,
+    DecoderInstance, PreparedWebCodecsChunk, WebCodecsConfig,
 };
 pub use protocol::{
     ATTACH_MAGIC, AUTH_MAGIC, BrowserChannelKind, BrowserProtocolError, BrowserTransportProfile,
     TICKET_GRANT_MAGIC, encode_attach_message, encode_auth_message, encode_ticket_grant,
     parse_attach_message, parse_auth_message, parse_ticket_grant,
 };
-pub use session::{BrowserLifecycleEvent, BrowserSessionCore, BrowserSessionSnapshot};
+pub use session::{
+    BrowserControlGrant, BrowserLifecycleEvent, BrowserSessionCore, BrowserSessionSnapshot,
+};

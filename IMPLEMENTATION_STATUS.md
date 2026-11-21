@@ -1,5 +1,31 @@
 # Implementation status
 
+## Browser decoder custody and local input fences (2026-11-20)
+
+`fr-web` now retains every decoder instance and compressed-input/output charge
+through reconfiguration, channel replacement, recovery and teardown. Callbacks
+carry a non-reusable local decoder serial in addition to the wire configuration
+generation. Actual decoder closure releases canceled input; escaped `VideoFrame`
+outputs stay charged until their own close callback. Credit returns to the
+original channel and epoch, with both frame and byte bounds retained across old
+and new decoders. Reconnection requires positive cleanup of the original owners.
+
+Visible presentation requires a decoded frame from the current owner. Source age
+uses the shared authenticated clock-correlation protocol and its uncertainty;
+presentation time cannot make old or future source evidence fresh. Hidden tabs,
+focus loss, mapping changes, decoder loss and channel replacement retire pending
+control requests and existing grants. A fresh view permits a new explicit request.
+Host-monotonic ticket deadlines expire locally even while the view remains fresh,
+and a late grant for an older request cannot restore control (`fr-57sb`).
+
+Evidence: the pinned nightly browser target (`wasm32-unknown-unknown`) passed
+`cargo check -p fr-web --all-targets --locked`. All 23 browser-core and ownership
+regressions passed on `wasm32-wasip1` with Node's WASI runner. These are portable
+Rust tests, not WebCodecs, live browser, GPU or tailnet qualification. The browser
+Rust/WASM adapter, sustained ticket renewal and authenticated unchanged-source
+progress remain integration work; this core alone does not provide a browser
+desktop session.
+
 ## Late ACK reconciliation reads the socket again (2026-11-19 UTC)
 
 The workspace now pins Asupersync 0f955f9d8. Before it, the ACK-only step

@@ -1,33 +1,31 @@
-//! Unified browser workstation session core over `fr-client`, `fr-media`, and `fr-transport`.
-//!
-//! Coordinates:
-//! - `fr_client::ClientSession` (strict observation/readiness/control separation)
-//! - `fr_client::ShortcutCaptureController` (`PlatformId::Browser` reserved-shortcut truth)
-//! - `BrowserHevcPipeline` (non-circular WebCodecs startup + `HevcGuard`)
-//! - `BrowserCreditTracker` (cumulative `0x0081 ReceiverPressure` on `VideoFrame.close()`)
-//! - `fr_transport::wss::ChannelSupervisor` (generation fencing across channel resets)
+//! Browser coordination over the shared Rust session, clock and HEVC owners.
+//! Authentication, observation, visible source freshness and input permission
+//! are distinct. Every decoder callback and receive-credit release keeps its
+//! original decoder instance and channel epoch, including during teardown.
 
 use crate::{
     credit::{BrowserCreditError, BrowserCreditTracker},
     hevc::{
-        BrowserDecoderStage, BrowserHevcError, BrowserHevcPipeline, PreparedWebCodecsChunk,
-        WebCodecsConfig,
+        BrowserDecoderStage, BrowserHevcError, BrowserHevcPipeline, DecodedFrameRelease,
+        DecoderInstance, PreparedWebCodecsChunk, WebCodecsConfig,
     },
     protocol::BrowserTransportProfile,
 };
 use fr_client::{
     ClientSession, ReconnectPolicy, SessionError, SessionState, ShortcutCaptureController,
+    clock::ClockExchange,
     input::ClientInstant,
+    session::CloseReason,
     shortcut::{PlatformCapabilityRow, PlatformId},
 };
 use fr_core::{
-    ids::{
-        CodecConfigurationGeneration, DisplayGeometryGeneration, InputLeaseId, InputTicketId,
-        ViewportMappingGeneration,
-    },
+    ids::{DisplayGeometryGeneration, InputLeaseId, InputTicketId, ViewportMappingGeneration},
     limits::ProtocolLimits,
 };
-use fr_media::config::CodecConfiguration;
+use fr_media::{
+    config::CodecConfiguration,
+    freshness::{ClockCorrelation, ClockPolicy},
+};
 use fr_transport::wss::{ChannelGeneration, ChannelSupervisor, WssChannelRole, WssError};
 use fr_wire::{
     negotiation::ControlBinding,
@@ -35,25 +33,31 @@ use fr_wire::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Browser DOM / page lifecycle events that MUST fence input authority immediately.
+/// Browser events are input fences, independent of socket liveness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrowserLifecycleEvent {
-    /// `document.visibilitychange` transitioned to hidden.
     TabHidden,
-    /// `document.visibilitychange` transitioned back to visible (still requires fresh frame!).
     TabVisible,
-    /// Window blur / focus loss.
     FocusLost,
-    /// `pagehide` event (navigation away or tab discard).
+    FocusGained,
     PageHide,
-    /// `pageshow` with `event.persisted === true` (bfcache restoration).
     BfcacheRestore,
-    /// Browser reclaimed the WebCodecs `VideoDecoder` hardware context.
-    DecoderReclaimed,
 }
 
-/// Serializable status snapshot exposed to the thin browser UI shell.
+/// A host grant parsed on the original admitted control channel. Deadlines are
+/// HOST monotonic timestamps, never durations starting at receipt. This local
+/// check supplements the host's independent submission-time authority check.
+#[derive(Debug, Clone, Copy)]
+pub struct BrowserControlGrant {
+    pub request_sequence: u64,
+    pub lease: InputLeaseId,
+    pub ticket: InputTicketId,
+    pub lease_deadline_host_us: u64,
+    pub ticket_deadline_host_us: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Independent serialized UI facts, derived from the state machine.
 pub struct BrowserSessionSnapshot {
     pub state_label: String,
     pub transport_profile: BrowserTransportProfile,
@@ -61,6 +65,7 @@ pub struct BrowserSessionSnapshot {
     pub is_degraded_transport: bool,
     pub decoder_stage: BrowserDecoderStage,
     pub visible: bool,
+    pub focused: bool,
     pub view_fresh: bool,
     pub can_request_control: bool,
     pub is_controlling: bool,
@@ -72,20 +77,43 @@ pub struct BrowserSessionSnapshot {
     pub browser_shortcut_mode: String,
 }
 
-/// Complete browser workstation client core compiled cleanly for `wasm32` and host tests.
+struct ChannelCredit {
+    generation: ChannelGeneration,
+    tracker: BrowserCreditTracker,
+}
+struct DecoderCredit {
+    decoder: DecoderInstance,
+    channel: ChannelGeneration,
+    frames: usize,
+}
+
+/// One browser connection. Call `tick` from the monotonic browser timer; all
+/// control operations also tick immediately before checking permission. Reuse
+/// after closure requires disposal of every old decoder/output first.
 pub struct BrowserSessionCore {
     session: ClientSession,
     shortcuts: ShortcutCaptureController,
     transport: BrowserTransportProfile,
     hevc: BrowserHevcPipeline,
     video_supervisor: ChannelSupervisor,
-    credit: Option<BrowserCreditTracker>,
+    credits: Vec<ChannelCredit>,
+    decoder_credits: Vec<DecoderCredit>,
+    active_credit: Option<ChannelGeneration>,
+    clock: Option<ClockExchange>,
+    binding: Option<ControlBinding>,
+    last_credit_epoch: u64,
+    mapping: (DisplayGeometryGeneration, ViewportMappingGeneration),
     limits: ProtocolLimits,
     visible: bool,
+    focused: bool,
+    last_now_us: u64,
+    last_admitted: Option<(u64, u64)>,
+    presentation_floor: Option<(u64, u64)>,
+    presented_source_us: Option<u64>,
+    control_until_us: Option<u64>,
 }
 
 impl BrowserSessionCore {
-    /// Create a new disconnected browser session core.
     #[must_use]
     pub fn new(transport: BrowserTransportProfile, limits: ProtocolLimits) -> Self {
         Self {
@@ -96,18 +124,58 @@ impl BrowserSessionCore {
             transport,
             hevc: BrowserHevcPipeline::new(4, limits.per_viewer_compressed_bytes()),
             video_supervisor: ChannelSupervisor::new(WssChannelRole::Video, 4),
-            credit: None,
+            credits: Vec::new(),
+            decoder_credits: Vec::new(),
+            active_credit: None,
+            clock: None,
+            binding: None,
+            last_credit_epoch: 0,
+            mapping: (
+                DisplayGeometryGeneration::INITIAL,
+                ViewportMappingGeneration::INITIAL,
+            ),
             limits,
             visible: true,
+            focused: true,
+            last_now_us: 0,
+            last_admitted: None,
+            presentation_floor: None,
+            presented_source_us: None,
+            control_until_us: None,
         }
     }
 
-    /// Begin connecting to the host over the authenticated same-origin transport.
     pub fn begin_connect(&mut self, now_us: u64) -> Result<(), SessionError> {
-        self.session.connect(ClientInstant(now_us))
+        if !matches!(
+            self.session.state(),
+            SessionState::Disconnected | SessionState::Closed { .. }
+        ) || self.hevc.retained_decoders() != 0
+            || self.hevc.inflight_frames() != 0
+            || now_us < self.last_now_us
+        {
+            return Err(SessionError::InvalidState);
+        }
+        self.hevc
+            .reset_session()
+            .map_err(|_| SessionError::InvalidState)?;
+        self.session.connect(ClientInstant(now_us))?;
+        self.video_supervisor = ChannelSupervisor::new(WssChannelRole::Video, 4);
+        self.credits.clear();
+        self.decoder_credits.clear();
+        self.active_credit = None;
+        self.clock = None;
+        self.binding = None;
+        self.last_credit_epoch = 0;
+        self.last_admitted = None;
+        self.presentation_floor = None;
+        self.presented_source_us = None;
+        self.control_until_us = None;
+        self.last_now_us = now_us;
+        Ok(())
     }
 
-    /// Enter observation-only `Viewing` after host `SessionOpened` (never grants control!).
+    /// Install credit and clock owners atomically with host `SessionOpened`.
+    /// Bootstrap transport authentication alone must never call this method.
     pub fn on_session_opened(
         &mut self,
         binding: ControlBinding,
@@ -115,222 +183,519 @@ impl BrowserSessionCore {
         credit_epoch: u64,
         now_us: u64,
     ) -> Result<(), BrowserCreditError> {
-        self.session
-            .on_session_opened(binding, ClientInstant(now_us))
-            .map_err(|_| BrowserCreditError::InvalidBindingOrEpoch)?;
-        self.credit = Some(BrowserCreditTracker::new(
+        let tracker = BrowserCreditTracker::new(
             binding,
             video_channel_binding,
             ChannelRole::Video,
             credit_epoch,
             self.limits,
-        )?);
+        )?;
+        let clock = ClockExchange::new(
+            binding,
+            self.limits,
+            ClockPolicy::default(),
+            ClientInstant(now_us),
+        )
+        .map_err(|_| BrowserCreditError::InvalidBindingOrEpoch)?;
+        if now_us < self.last_now_us {
+            return Err(BrowserCreditError::InvalidBindingOrEpoch);
+        }
+        self.session
+            .on_session_opened(binding, ClientInstant(now_us))
+            .map_err(|_| BrowserCreditError::InvalidBindingOrEpoch)?;
+        let generation = self.active_video_generation();
+        self.credits.push(ChannelCredit {
+            generation,
+            tracker,
+        });
+        self.active_credit = Some(generation);
+        self.clock = Some(clock);
+        self.binding = Some(binding);
+        self.last_credit_epoch = credit_epoch;
+        self.last_now_us = now_us;
         Ok(())
     }
 
-    /// Admit a host `DecoderConfiguration` `hvcC` record and return the exact WebCodecs config.
+    /// Begin the shared correlated clock protocol. Mark it queued only after
+    /// these exact bytes enter the authenticated bounded control transport.
+    pub fn begin_clock_probe(&mut self, now_us: u64) -> Result<Vec<u8>, fr_client::clock::Error> {
+        let clock = self
+            .clock
+            .as_mut()
+            .ok_or(fr_client::clock::Error::Configuration)?;
+        clock.begin(ClientInstant(now_us))?;
+        clock
+            .pending(ClientInstant(now_us))?
+            .map(|(bytes, _)| bytes.to_vec())
+            .ok_or(fr_client::clock::Error::Expired)
+    }
+    pub fn clock_probe_queued(&mut self, now_us: u64) -> Result<(), fr_client::clock::Error> {
+        self.clock
+            .as_mut()
+            .ok_or(fr_client::clock::Error::Configuration)?
+            .queued(ClientInstant(now_us))
+    }
+    pub fn on_clock_reply(
+        &mut self,
+        bytes: &[u8],
+        now_us: u64,
+    ) -> Result<(), fr_client::clock::Error> {
+        let result = self
+            .clock
+            .as_mut()
+            .ok_or(fr_client::clock::Error::Configuration)?
+            .accept(bytes, ClientInstant(now_us));
+        if result
+            .as_ref()
+            .is_err_and(|error| *error != fr_client::clock::Error::LateReply)
+        {
+            self.fence_view();
+        }
+        result.map(|_| ())
+    }
+
+    fn observing(&self) -> bool {
+        matches!(
+            self.session.state(),
+            SessionState::Viewing { .. }
+                | SessionState::RequestingControl { .. }
+                | SessionState::Controlling { .. }
+                | SessionState::Suspended { .. }
+        )
+    }
+    fn fence_view(&mut self) {
+        self.session.invalidate_control();
+        self.control_until_us = None;
+        self.presented_source_us = None;
+        self.presentation_floor = self.last_admitted;
+    }
+    fn correlation(&mut self, now_us: u64) -> Option<ClockCorrelation> {
+        self.clock
+            .as_mut()?
+            .correlation(ClientInstant(now_us))
+            .ok()
+            .flatten()
+    }
+
+    /// Reevaluate source age with the full authenticated clock uncertainty.
+    /// Socket traffic and delayed presentation never restart the freshness TTL.
+    pub fn tick(&mut self, now_us: u64) -> Result<(), SessionError> {
+        if now_us < self.last_now_us {
+            self.close();
+            return Err(SessionError::ArithmeticOverflow);
+        }
+        self.last_now_us = now_us;
+        let source = self.presented_source_us;
+        let correlation = self.correlation(now_us);
+        let fresh = self.visible
+            && self.focused
+            && self.observing()
+            && source.zip(correlation).is_some_and(|(source, clock)| {
+                clock
+                    .age_upper_us(source, now_us)
+                    .is_ok_and(|age| age < fr_client::input::Policy::default().view_age_us)
+            });
+        if fresh {
+            self.session
+                .update_view_freshness(true, ClientInstant(now_us))?;
+        } else {
+            // Preserve the last source observation for later clock correlation,
+            // but retire control permanently; fresh evidence is a new request.
+            self.session.invalidate_control();
+            self.control_until_us = None;
+        }
+        if self.control_until_us.is_some_and(|until| now_us >= until) {
+            self.session.invalidate_control();
+            self.control_until_us = None;
+            if fresh {
+                self.session
+                    .update_view_freshness(true, ClientInstant(now_us))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn admit_decoder_configuration(
         &mut self,
         config: CodecConfiguration,
         max_decoded_pictures: u8,
         hvcc_bytes: &[u8],
     ) -> Result<WebCodecsConfig, BrowserHevcError> {
-        self.hevc
-            .admit_decoder_configuration(config, self.limits, max_decoded_pictures, hvcc_bytes)
+        if !self.observing() {
+            return Err(BrowserHevcError::NotConfigured);
+        }
+        let channel = self.active_credit.ok_or(BrowserHevcError::NotConfigured)?;
+        let result = self.hevc.admit_decoder_configuration(
+            config,
+            self.limits,
+            max_decoded_pictures,
+            hvcc_bytes,
+        )?;
+        self.fence_view();
+        self.decoder_credits
+            .retain(|owner| self.hevc.contains_decoder(owner.decoder));
+        self.decoder_credits.push(DecoderCredit {
+            decoder: result.decoder,
+            channel,
+            frames: 0,
+        });
+        Ok(result)
     }
-
-    /// Confirm `VideoDecoder.configure()` succeeded (distinct from first decoded/presented frame).
     pub fn on_decoder_configured(
         &mut self,
-        generation: CodecConfigurationGeneration,
+        decoder: DecoderInstance,
     ) -> Result<(), BrowserHevcError> {
-        self.hevc.on_decoder_configured(generation)
+        self.hevc.on_decoder_configured(decoder)
     }
 
-    /// Admit an incoming video access unit on `channel_gen`, checking generation fencing,
-    /// `HevcGuard` parameter/reference integrity, and bounded queue ceilings.
+    /// A native decoder error belongs to the instance that registered its
+    /// callback. Reject obsolete owners before observing their callback time or
+    /// fencing view/control, so a delayed error cannot retire a replacement.
+    pub fn on_decoder_reclaimed(
+        &mut self,
+        decoder: DecoderInstance,
+        now_us: u64,
+    ) -> Result<(), BrowserHevcError> {
+        if self.hevc.active_decoder() != Some(decoder) || !self.hevc.contains_decoder(decoder) {
+            return Err(BrowserHevcError::StaleGeneration);
+        }
+        if now_us < self.last_now_us {
+            self.close();
+            return Err(BrowserHevcError::StaleGeneration);
+        }
+        self.hevc.on_decoder_reclaimed(decoder)?;
+        self.last_now_us = now_us;
+        self.fence_view();
+        Ok(())
+    }
+    pub fn active_decoder(&self) -> Option<DecoderInstance> {
+        self.hevc.active_decoder()
+    }
+
     pub fn admit_video_chunk(
         &mut self,
         channel_gen: ChannelGeneration,
-        codec_gen: CodecConfigurationGeneration,
+        decoder: DecoderInstance,
         frame_id: u64,
         source_timestamp_us: u64,
         declared_idr: bool,
         length_prefixed_au: &[u8],
     ) -> Result<PreparedWebCodecsChunk, BrowserHevcError> {
-        if self.video_supervisor.check_admission(channel_gen).is_err() {
+        if !self.observing()
+            || self.video_supervisor.check_admission(channel_gen).is_err()
+            || self.active_credit != Some(channel_gen)
+        {
             return Err(BrowserHevcError::StaleGeneration);
         }
+        let credit = self
+            .credits
+            .iter_mut()
+            .find(|owner| owner.generation == channel_gen)
+            .ok_or(BrowserHevcError::NotConfigured)?;
+        let decoder_owner = self
+            .decoder_credits
+            .iter_mut()
+            .find(|owner| owner.decoder == decoder && owner.channel == channel_gen)
+            .ok_or(BrowserHevcError::StaleGeneration)?;
+        credit
+            .tracker
+            .can_record_received(length_prefixed_au.len() as u64)
+            .map_err(BrowserHevcError::Credit)?;
         let chunk = self.hevc.admit_access_unit(
-            codec_gen,
+            decoder,
             frame_id,
             source_timestamp_us,
             declared_idr,
             length_prefixed_au,
         )?;
-        if let Some(credit) = self.credit.as_mut() {
-            let _ = credit.record_received(chunk.charged_bytes);
-        }
+        // The preflight above and this mutation have one exclusive owner.
+        credit
+            .tracker
+            .record_received(chunk.charged_bytes)
+            .map_err(BrowserHevcError::Credit)?;
+        decoder_owner.frames += 1;
+        self.last_admitted = Some((decoder.serial, frame_id));
         Ok(chunk)
     }
-
-    /// Record WebCodecs decode completion. Does NOT grant control and does NOT release credit.
     pub fn on_frame_decoded(
         &mut self,
-        generation: CodecConfigurationGeneration,
+        decoder: DecoderInstance,
         frame_id: u64,
     ) -> Result<(), BrowserHevcError> {
-        self.hevc.on_frame_decoded(generation, frame_id)
+        self.hevc.on_frame_decoded(decoder, frame_id)
     }
-
-    /// Record visible presentation on canvas. Updates `ClientSession` view freshness ONLY when visible;
-    /// still NEVER grants control or releases credit before `VideoFrame.close()`.
     pub fn on_frame_presented(
         &mut self,
-        generation: CodecConfigurationGeneration,
+        decoder: DecoderInstance,
         frame_id: u64,
         now_us: u64,
     ) -> Result<(), BrowserHevcError> {
+        if self.hevc.active_decoder() != Some(decoder)
+            || !self.hevc.contains_decoder(decoder)
+            || !self.observing()
+            || self
+                .presentation_floor
+                .is_some_and(|floor| (decoder.serial, frame_id) <= floor)
+        {
+            return Err(BrowserHevcError::StaleGeneration);
+        }
+        if now_us < self.last_now_us {
+            self.close();
+            return Err(BrowserHevcError::StaleGeneration);
+        }
         self.hevc
-            .on_frame_presented(generation, frame_id, now_us, self.visible)?;
-        let _ = self
-            .session
-            .update_view_freshness(true, ClientInstant(now_us));
-        Ok(())
+            .on_frame_presented(decoder, frame_id, now_us, self.visible)?;
+        if let BrowserDecoderStage::Presented { last_source_us, .. } = self.hevc.stage() {
+            self.presented_source_us = Some(last_source_us);
+        }
+        // Presentation is an observed rendering event. Freshness remains false
+        // if source age is unknown, old, or from an expired clock correlation.
+        self.tick(now_us)
+            .map_err(|_| BrowserHevcError::StaleGeneration)
     }
 
-    /// Record `VideoFrame.close()` completion and emit the encoded `0x0081 ReceiverPressure` record.
-    pub fn on_video_frame_closed(
+    fn release_credit(
         &mut self,
-        frame_id: u64,
+        release: DecodedFrameRelease,
     ) -> Result<Option<[u8; RECEIVER_PRESSURE_BYTES]>, BrowserHevcError> {
-        let release = self.hevc.on_video_frame_closed(frame_id)?;
-        let Some(credit) = self.credit.as_mut() else {
-            return Ok(None);
-        };
-        let queued_items = u32::try_from(release.remaining_inflight_frames).unwrap_or(u32::MAX);
+        let decoder = self
+            .decoder_credits
+            .iter_mut()
+            .find(|owner| owner.decoder == release.decoder)
+            .ok_or(BrowserHevcError::UnknownFrameId)?;
+        let credit = self
+            .credits
+            .iter_mut()
+            .find(|owner| owner.generation == decoder.channel)
+            .ok_or(BrowserHevcError::UnknownFrameId)?;
         let record = credit
+            .tracker
             .record_freed_and_encode(
                 release.freed_bytes,
-                release.remaining_inflight_bytes,
-                queued_items,
+                credit
+                    .tracker
+                    .outstanding_bytes()
+                    .saturating_sub(release.freed_bytes),
+                u32::try_from(credit.tracker.outstanding_frames().saturating_sub(1))
+                    .unwrap_or(u32::MAX),
             )
-            .map_err(|_| BrowserHevcError::UnknownFrameId)?;
-        Ok(Some(record))
+            .map_err(BrowserHevcError::Credit)?;
+        decoder.frames = decoder
+            .frames
+            .checked_sub(1)
+            .ok_or(BrowserHevcError::UnknownFrameId)?;
+        self.credits.retain(|owner| {
+            Some(owner.generation) == self.active_credit || owner.tracker.outstanding_frames() != 0
+        });
+        self.decoder_credits
+            .retain(|owner| owner.frames != 0 || self.hevc.contains_decoder(owner.decoder));
+        Ok(self.observing().then_some(record))
+    }
+    pub fn on_video_frame_closed(
+        &mut self,
+        decoder: DecoderInstance,
+        frame_id: u64,
+    ) -> Result<Option<[u8; RECEIVER_PRESSURE_BYTES]>, BrowserHevcError> {
+        let release = self.hevc.on_video_frame_closed(decoder, frame_id)?;
+        self.release_credit(release)
+    }
+    /// Confirm decoder.close/reset has actually completed. Outstanding decoded
+    /// `VideoFrame` outputs still require their individual close callbacks.
+    pub fn on_decoder_closed(
+        &mut self,
+        decoder: DecoderInstance,
+    ) -> Result<Vec<[u8; RECEIVER_PRESSURE_BYTES]>, BrowserHevcError> {
+        let active = self.hevc.active_decoder() == Some(decoder);
+        let releases = self.hevc.on_decoder_closed(decoder)?;
+        if active {
+            self.fence_view();
+        }
+        let mut records = Vec::with_capacity(releases.len());
+        for release in releases {
+            if let Some(record) = self.release_credit(release)? {
+                records.push(record);
+            }
+        }
+        self.decoder_credits
+            .retain(|owner| owner.frames != 0 || self.hevc.contains_decoder(owner.decoder));
+        Ok(records)
     }
 
-    /// Explicitly request input control (only succeeds after visible fresh presentation!).
     pub fn request_control(&mut self, now_us: u64) -> Result<u64, SessionError> {
-        if !self.visible {
+        self.tick(now_us)?;
+        if !self.visible || !self.focused {
             return Err(SessionError::InputSuspended);
         }
         self.session.request_control(ClientInstant(now_us))
     }
-
-    /// Record host-granted control lease and validity ticket.
     pub fn on_control_granted(
         &mut self,
-        lease: InputLeaseId,
-        ticket: InputTicketId,
+        grant: BrowserControlGrant,
+        now_us: u64,
     ) -> Result<(), SessionError> {
-        self.session.on_control_granted(lease, ticket)
+        if !matches!(self.state(), SessionState::RequestingControl { request_sequence, .. } if *request_sequence == grant.request_sequence)
+        {
+            return Err(SessionError::InvalidState);
+        }
+        self.tick(now_us)?;
+        if !matches!(self.state(), SessionState::RequestingControl { request_sequence, .. } if *request_sequence == grant.request_sequence)
+        {
+            return Err(SessionError::InvalidState);
+        }
+        let clock = self.correlation(now_us).ok_or(SessionError::ViewNotFresh)?;
+        if grant.lease.as_raw() == 0
+            || grant.ticket.as_raw() == 0
+            || grant.ticket_deadline_host_us > grant.lease_deadline_host_us
+        {
+            return Err(SessionError::LeaseRevoked);
+        }
+        let until = clock
+            .deadline_lower_us(grant.ticket_deadline_host_us, now_us)
+            .map_err(|_| SessionError::LeaseRevoked)?;
+        if now_us >= until {
+            return Err(SessionError::LeaseRevoked);
+        }
+        self.session.on_control_granted(grant.lease, grant.ticket)?;
+        self.control_until_us = Some(until);
+        Ok(())
     }
-
-    /// Validate that pointer/key input is currently permitted for the given display/viewport generations.
     pub fn authorize_input(
         &mut self,
         display_gen: DisplayGeometryGeneration,
         viewport_gen: ViewportMappingGeneration,
+        now_us: u64,
     ) -> Result<(), SessionError> {
-        if !self.visible {
+        self.tick(now_us)?;
+        if !self.visible
+            || !self.focused
+            || self.control_until_us.is_none_or(|until| now_us >= until)
+        {
             return Err(SessionError::InputSuspended);
         }
         self.session
             .validate_coordinate_mapping(display_gen, viewport_gen)
     }
-
-    /// Update active display/viewport generations after geometry confirmation.
     pub fn update_mapping(
         &mut self,
         display_gen: DisplayGeometryGeneration,
         viewport_gen: ViewportMappingGeneration,
     ) {
+        if self.mapping != (display_gen, viewport_gen) {
+            self.fence_view();
+            self.mapping = (display_gen, viewport_gen);
+        }
         self.session.update_mapping(display_gen, viewport_gen);
     }
 
-    /// Handle browser lifecycle events: hidden tabs, pagehide, bfcache restore, or decoder
-    /// reclamation immediately suspend/invalidate control and require fresh view evidence.
     pub fn on_lifecycle_event(&mut self, event: BrowserLifecycleEvent, now_us: u64) {
+        if now_us < self.last_now_us {
+            self.close();
+            return;
+        }
+        self.last_now_us = now_us;
+        self.fence_view();
         match event {
             BrowserLifecycleEvent::TabHidden => {
                 self.visible = false;
-                self.session.set_window_visible(false);
-                let _ = self
-                    .session
-                    .update_view_freshness(false, ClientInstant(now_us));
             }
             BrowserLifecycleEvent::TabVisible => {
                 self.visible = true;
-                // Becoming visible again does NOT restore freshness until a fresh frame presents!
-                self.session.set_window_visible(true);
             }
             BrowserLifecycleEvent::FocusLost => {
-                self.session.on_focus_loss();
+                self.focused = false;
+            }
+            BrowserLifecycleEvent::FocusGained => {
+                self.focused = true;
             }
             BrowserLifecycleEvent::PageHide | BrowserLifecycleEvent::BfcacheRestore => {
                 self.visible = false;
-                self.session.set_window_visible(false);
-                let _ = self
-                    .session
-                    .update_view_freshness(false, ClientInstant(now_us));
-                self.hevc.on_decoder_reclaimed();
-            }
-            BrowserLifecycleEvent::DecoderReclaimed => {
-                self.hevc.on_decoder_reclaimed();
-                let _ = self
-                    .session
-                    .update_view_freshness(false, ClientInstant(now_us));
+                self.close();
             }
         }
+        self.session.set_window_visible(self.visible);
+    }
+    pub fn close(&mut self) {
+        self.fence_view();
+        self.hevc.fence_active_decoder();
+        self.active_credit = None;
+        if let Some(clock) = self.clock.as_mut() {
+            clock.stop();
+        }
+        self.session.close(CloseReason::UserRequested);
     }
 
-    /// Replace the video WSS channel with a newer generation, immediately fencing the old one.
+    /// Replacement fences old decode/presentation and input first. A new
+    /// attachment must install a strictly newer credit epoch on this channel
+    /// generation before use. A compact binding may repeat only under that new
+    /// epoch; queued releases retain their original epoch and channel owner.
     pub fn replace_video_channel(&mut self) -> Result<ChannelGeneration, WssError> {
-        self.video_supervisor.replace_channel()
+        let generation = self.video_supervisor.replace_channel()?;
+        self.fence_view();
+        self.hevc.fence_active_decoder();
+        self.active_credit = None;
+        self.credits
+            .retain(|owner| owner.tracker.outstanding_frames() != 0);
+        Ok(generation)
     }
-
-    /// Complete teardown of a previously fenced video channel generation.
+    pub fn attach_video_channel(
+        &mut self,
+        binding: ControlBinding,
+        channel_binding: u32,
+        credit_epoch: u64,
+    ) -> Result<(), BrowserCreditError> {
+        if !self.observing()
+            || self.active_credit.is_some()
+            || credit_epoch <= self.last_credit_epoch
+        {
+            return Err(BrowserCreditError::InvalidBindingOrEpoch);
+        }
+        // Replacing a channel never replaces its parent session authority.
+        if self.binding != Some(binding) {
+            return Err(BrowserCreditError::InvalidBindingOrEpoch);
+        }
+        let tracker = BrowserCreditTracker::new(
+            binding,
+            channel_binding,
+            ChannelRole::Video,
+            credit_epoch,
+            self.limits,
+        )?;
+        let generation = self.active_video_generation();
+        self.credits.push(ChannelCredit {
+            generation,
+            tracker,
+        });
+        self.active_credit = Some(generation);
+        self.last_credit_epoch = credit_epoch;
+        Ok(())
+    }
     pub fn complete_video_channel_close(&mut self, generation: ChannelGeneration) {
         self.video_supervisor.complete_close(generation);
     }
-
-    /// Current active video channel generation.
-    #[must_use]
-    pub const fn active_video_generation(&self) -> ChannelGeneration {
+    pub fn active_video_generation(&self) -> ChannelGeneration {
         self.video_supervisor.active_generation()
     }
-
-    /// Current underlying `ClientSession` state.
-    #[must_use]
     pub fn state(&self) -> &SessionState {
         self.session.state()
     }
-
-    /// Current shortcut capture controller exposing honest browser-reserved-shortcut rows.
-    #[must_use]
-    pub const fn shortcuts(&self) -> &ShortcutCaptureController {
+    pub fn shortcuts(&self) -> &ShortcutCaptureController {
         &self.shortcuts
     }
 
-    /// Build a serializable UI/diagnostic snapshot.
+    /// Last checked state; call tick with current monotonic time before rendering.
     #[must_use]
     pub fn snapshot(&self) -> BrowserSessionSnapshot {
         let diag = self.session.diagnostics();
         let (released_frames, released_bytes) = self
-            .credit
-            .as_ref()
-            .map_or((0, 0), |c| (c.released_frames(), c.released_bytes()));
-        let shortcut_mode = self.shortcuts.mode().label();
+            .credits
+            .iter()
+            .find(|owner| Some(owner.generation) == self.active_credit)
+            .map_or((0, 0), |owner| {
+                (
+                    owner.tracker.released_frames(),
+                    owner.tracker.released_bytes(),
+                )
+            });
         BrowserSessionSnapshot {
             state_label: diag.state_label.to_owned(),
             transport_profile: self.transport,
@@ -338,15 +703,16 @@ impl BrowserSessionCore {
             is_degraded_transport: self.transport.is_degraded(),
             decoder_stage: self.hevc.stage(),
             visible: self.visible,
+            focused: self.focused,
             view_fresh: diag.view_fresh,
-            can_request_control: self.visible && self.session.can_request_control(),
+            can_request_control: self.visible && self.focused && self.session.can_request_control(),
             is_controlling: diag.is_controlling,
-            video_generation: self.video_supervisor.active_generation().0,
+            video_generation: self.active_video_generation().0,
             inflight_frames: self.hevc.inflight_frames(),
             inflight_bytes: self.hevc.inflight_bytes(),
             released_frames,
             released_bytes,
-            browser_shortcut_mode: shortcut_mode.to_owned(),
+            browser_shortcut_mode: self.shortcuts.mode().label().to_owned(),
         }
     }
 }
