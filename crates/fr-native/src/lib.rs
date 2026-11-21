@@ -280,7 +280,11 @@ mod keyboard;
 pub mod input_agent;
 #[cfg(all(
     target_os = "linux",
-    any(feature = "linux-media", feature = "linux-input")
+    any(
+        feature = "linux-media",
+        feature = "linux-input",
+        feature = "linux-viewer-input"
+    )
 ))]
 pub mod xlib;
 

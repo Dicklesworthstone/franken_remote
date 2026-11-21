@@ -1,5 +1,41 @@
 # Implementation status
 
+## Linux/X11 original-view Send Text composer (2026-11-21)
+
+Ordinary Linux control sessions now negotiate optional committed Unicode.
+After a host Text grant, F7 opens a local XIM-backed draft, Ctrl+Enter sends one
+whole value up to 4096 UTF-8 bytes, and Esc/F7 cancels. Physical forwarding
+continues outside the editor and when the optional input method is unavailable.
+The original Source/view and non-reused editor serial fence every Send; its
+original X timestamp and exclusive 100 ms deadline reach the existing shared
+text queue without retiming, splitting, clipboard fallback, or replay.
+
+Editor keys and buttons remain local through their releases. A bounded native
+ownership ledger prevents same-batch F7 from swallowing an already-forwarded
+release, and stable native snapshots reconcile only missing releases. Emergency
+escape and complete-batch lifecycle checks run before text admission. Fresh XICs
+fence delayed compose callbacks; queued XIM completion is consumed before a
+later Send. A registered-display Xlib error dispatcher contains parent/window
+destruction races without changing error handling for unrelated displays.
+
+Passed: all 18 exact shipping-C cases on separate cookie-authenticated TCP Xvfb
+servers using actual XTest input and the built-in XIM compose method; strict
+C11 compilation with `-Wall -Wextra -Werror`; pinned formatting and diff checks.
+Coverage includes Latin/CJK/supplementary Unicode, compose ordering, editing,
+cancel/reopen, readiness/context changes, malformed/oversized values, focus
+loss, redraw/cleanup after destruction, unrelated-display error isolation,
+synthetic input, emergency escape, unavailable IME/surface, key/button routing,
+and release-only reconciliation. The TCP fixture is used because this executor
+denies Unix-domain socket binds; no user's display or keymap is touched.
+
+Thirteen focused Rust regressions were added, including an actual native-loop
+FFI text handoff. Rust compilation and execution remain pending the dependency
+build at this checkpoint. External IME daemons, physical desktop input, and
+complete live Linux-viewer-to-host text delivery remain unqualified under
+`fr-linux-x11-send-text-z14z`. This adds
+a viewer producer, not Text capability to host executors that lack it. Usage
+and limits are in [the native client guide](docs/native-client-cli.md#unicode-text-on-linuxx11).
+
 ## Canonical native browser startup boundary (2026-11-21)
 
 The native HTTPS/WSS ingress now matches the served Rust/WASM adapter's

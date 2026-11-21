@@ -1,4 +1,4 @@
-/* Local viewer input boundary. Owns ONE XCB connection and an InputOnly clock
+/* Local viewer input boundary. Owns ONE XCB capture connection and an InputOnly clock
  * window, never the renderer's window. An explicit initialization-only keyboard
  * grab may route system shortcuts to that same renderer; no pointer grab,
  * injection, callbacks or Rust pointers. XKB requests use the system protocol
@@ -17,8 +17,10 @@
 
 /* Fixed output only; no native allocation or names escape this boundary. */
 struct fr_viewer_held { uint8_t keys[32], buttons[32]; };
+struct fr_viewer_text;
 #define FR_KEYMAP_BYTES (64u * 1024u)
 struct fr_viewer_input {
+    struct fr_viewer_text *text;
     xcb_connection_t *c;
     xcb_window_t window, clock;
     xcb_atom_t barrier, net_name, utf8;
@@ -45,6 +47,10 @@ struct fr_viewer_input {
 struct fr_viewer_event { uint32_t kind, time, detail; int32_t x, y; };
 enum { IGNORE, KEY_DOWN, KEY_UP, BUTTON_DOWN, BUTTON_UP, MOTION, BARRIER,
        FOCUS_LOST, WINDOW_LOST, GEOMETRY, KEYMAP_CHANGED, SYNTHETIC, DEVICES_CHANGED };
+static void text_destroy(struct fr_viewer_input *h);
+static void text_filter(struct fr_viewer_input *h, const xcb_generic_event_t *event,
+                        struct fr_viewer_event *out);
+static int text_poll(struct fr_viewer_input *h, struct fr_viewer_event *out);
 static xcb_extension_t xkb = { "XKEYBOARD", 0 };
 static xcb_extension_t xi = { "XInputExtension", 0 };
 static uint32_t extension_request(struct fr_viewer_input *h, xcb_extension_t *ext,
@@ -100,6 +106,7 @@ int fr_viewer_input_display_switch(struct fr_viewer_input *h, int enabled) {
 }
 void fr_viewer_input_close(struct fr_viewer_input *h) {
     if (!h) return;
+    text_destroy(h);
     if (h->c) {
         /* Ungrab cannot release another client's grab. Disconnect also releases
          * ours if acquisition succeeded before its reply was consumed. */
@@ -485,7 +492,9 @@ int fr_viewer_input_held_poll(struct fr_viewer_input *h, struct fr_viewer_held *
  * of reporting a generic native failure. Nothing is captured on any refusal. */
 enum { OPEN_NATIVE = 0, OPEN_NOT_FOCUSED = 1, OPEN_HELD = 2, OPEN_WINDOW = 3 };
 
-/* Setup only. Native event processing uses no synchronous X request/reply. */
+/* Setup only. Physical event processing uses no synchronous X request/reply.
+ * The optional local text editor's XIM work stays on this separate native
+ * producer; Rust preserves its original turn/gesture deadlines before Send. */
 struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t window,
                                            uint32_t width, uint32_t height,
                                            uint8_t names[256][4], int *refusal) {
@@ -555,6 +564,11 @@ int fr_viewer_input_barrier(struct fr_viewer_input *h) {
 int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out) {
     if (!h || !out || xcb_connection_has_error(h->c)) return -1;
     memset(out, 0, sizeof(*out));
+    /* XFilterEvent can queue an already-committed local IME result. Consume it
+     * before a later physical Send; each event still counts toward Rust's
+     * bounded batch, whose complete lifecycle/escape veto precedes admission. */
+    int text_event = text_poll(h, out);
+    if (text_event) return text_event;
     if (h->map_failed) { out->kind = KEYMAP_CHANGED; return 1; }
     if (h->map_query || h->names_query) {
         int verified = keyboard_unchanged(h);
@@ -624,5 +638,8 @@ int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out)
         break;
     default: break;
     }
+    text_filter(h, e, out);
     free(e); return 1;
 }
+
+#include "viewer_text.c"

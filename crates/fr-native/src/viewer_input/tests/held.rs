@@ -205,7 +205,7 @@ fn missing_releases_clear_native_and_remote_held_state_but_extra_bits_never_pres
 }
 #[test]
 fn snapshots_crossing_any_transition_are_discarded_and_barriers_keep_timestamps_ordered() {
-    for kind in 1..=4 {
+    for kind in [1, 2, 3, 4, 13, 14, 15, 16, 17, 18] {
         assert!(!held::stable(&[Raw {
             kind,
             ..Raw::default()

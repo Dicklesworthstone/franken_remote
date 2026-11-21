@@ -185,6 +185,50 @@ and [fixed-point scroll-field](https://developer.apple.com/documentation/coregra
 documentation. Fixed-point event-field retention is distinct from proving that
 every target application consumes subpixel fractions.
 
+### Unicode text on Linux/X11
+
+A Linux controlling viewer now has an explicit local **Send Text** composer.
+The host must first select and grant `native-input-text`; physical keyboard
+input remains the default. Release forwarded keys and mouse buttons, then press
+**F7** without modifiers to open the composer in the original viewer. Keyboard
+focus stays on that viewer. Type using the configured XIM input method, finish
+composition, and press **Ctrl+Enter** to send one complete value, limited to
+4096 UTF-8 bytes. **Esc** or **F7** cancels the draft.
+
+**Enter** inserts a newline; **Left/Right**, **Home/End**, **Backspace/Delete**
+edit complete Unicode scalars, and **Ctrl+A** selects all. An invalid or
+oversized commit disables Send until the value is cleared or cancelled; the
+editor never sends a truncated prefix. Editor keys and pointer actions stay
+local, including releases that arrive after the editor closes. Keys or buttons
+already forwarded to the host keep their physical release route and prevent
+opening the editor, even when their presses and F7 occur in one native batch.
+**Ctrl+Alt+Shift+Escape** remains the local emergency stop in editing mode.
+
+The draft retains the original controlled source and uninterrupted input view.
+Display/view changes, input suspension, focus loss, hiding or destroying the
+viewer cancel it. A temporary readiness gap disables Send without replacing a
+still-valid draft. Each opening gets a fresh input-method context and a
+non-reused local serial. An explicit Send retains its original X timestamp and
+exclusive 100 ms local-input deadline through the shared Source queue; stale
+or refused values never retry on a later view. The title **Text queued (host
+result pending)** means local admission only, not OS submission or application
+delivery. Existing validated host input receipts remain the delivery evidence.
+
+The composer does not read the clipboard or emulate text with physical keys.
+An unavailable configured input method reports `text_input_method_unavailable`;
+a viewer too small for the local editor reports `text_input_surface_unavailable`.
+Both retain ordinary physical control. Hosts without a negotiated Text grant
+keep F7 on the physical-input path. This does not add a Unicode injection
+capability to a host executor that lacks one.
+
+The native producer tests use the shipping C implementation, isolated
+cookie-authenticated Xvfb servers, XTest input, and the built-in XIM compose
+method. They cover Unicode/compose ordering, cancellation, bounds, readiness,
+destruction races, emergency stop, held-key/button routing, and release-only
+reconciliation. External IME daemons, a physical desktop, and a complete live
+Linux-viewer-to-host text session remain separate qualification work. Full
+Rust runtime validation is recorded in `IMPLEMENTATION_STATUS.md`.
+
 ### Unicode text and Mac input methods
 
 A controlling Mac window reserves a local **Edit Text** composer. Once the host

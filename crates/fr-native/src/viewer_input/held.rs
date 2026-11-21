@@ -91,7 +91,11 @@ pub(super) fn complete(
     }
 }
 pub(super) fn stable(events: &[Raw]) -> bool {
-    !events.iter().any(|e| (1..=4).contains(&e.kind))
+    !events
+        .iter()
+        // Send/cancel also replace a physical editor key-down record. Neither
+        // those gestures nor local pointer transitions may cross a snapshot.
+        .any(|e| (1..=4).contains(&e.kind) || (13..=18).contains(&e.kind))
 }
 fn bit(bits: &[u8; 32], index: usize) -> bool {
     bits[index / 8] & (1 << (index % 8)) != 0

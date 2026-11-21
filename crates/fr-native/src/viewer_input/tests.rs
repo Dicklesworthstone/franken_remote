@@ -563,3 +563,6 @@ fn capture_never_focused_ends_as_focus_lost() {
 mod file_keys_tests;
 
 mod system_shortcuts;
+
+#[path = "tests/text.rs"]
+mod text_tests;

@@ -316,6 +316,7 @@ fn build_indicator() {
 
 fn build_viewer_input() {
     println!("cargo:rerun-if-changed=src/viewer_input.c");
+    println!("cargo:rerun-if-changed=src/viewer_text.c");
     println!("cargo:rerun-if-changed=src/viewer_cursor.c");
     if env::var_os("CARGO_FEATURE_LINUX_VIEWER_INPUT").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
@@ -334,6 +335,7 @@ fn build_viewer_input() {
                 "-std=c11",
                 "-O2",
                 "-fPIC",
+                "-pthread",
                 "-Wall",
                 "-Wextra",
                 "-Werror",
@@ -380,6 +382,8 @@ fn build_viewer_input() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=frviewerinput");
+    println!("cargo:rustc-link-lib=pthread");
+    println!("cargo:rustc-link-lib=X11");
     println!("cargo:rustc-link-lib=xcb-render");
     println!("cargo:rustc-link-lib=xcb");
 }

@@ -1,8 +1,10 @@
 //! X11 logical input from an explicitly selected local renderer window into the
 //! original granted viewer's bounded queue. An explicit connection-time mode
 //! can grab the keyboard on that same focused local window for system shortcuts.
-//! No root/raw capture, key injection, text/IME guessing, window creation or
-//! replacement authority. The default mode leaves system shortcuts local.
+//! No root/raw capture, key injection, text/IME guessing or replacement
+//! authority. An explicitly opened local editor can send one whole committed
+//! Unicode value under its original view; preedit and editor keys stay local.
+//! The default mode leaves system shortcuts local.
 //! Native work has one thread/connection owner, separate from codecs and QUIC.
 //! Requires XI2 and exactly one enabled master pointer/keyboard pair. Held input
 //! is sampled at most four times per second, never adopted from another device.
@@ -18,6 +20,7 @@ mod status;
 mod system_shortcuts;
 #[cfg(test)]
 mod tests;
+mod text;
 mod timing;
 use fr_core::{
     input::{KeyTransition, PointerButton, ScrollUnit},
@@ -25,7 +28,9 @@ use fr_core::{
 };
 use frd::session_startup::{
     ViewerControl,
-    viewer_events::{ClientInstant, Event, Layout, LocalPoint, PositionedAction, Source},
+    viewer_events::{
+        ClientInstant, Event, Layout, LocalPoint, PositionedAction, Source, TextContext,
+    },
 };
 use status::CaptureState;
 use std::{
@@ -365,6 +370,7 @@ impl X11InputCapture {
                 let mut target = NativeTarget {
                     source,
                     shared: shared.clone(),
+                    text: text::Context::default(),
                 };
                 let result = if system_shortcuts {
                     run_with_system_shortcuts(&display, window, &layout, &mut target)
@@ -583,6 +589,18 @@ trait Target {
     fn capabilities(&self) -> Capabilities;
     fn push(&mut self, event: Event, sampled: ClientInstant) -> Result<(), StopReason>;
     fn ready(&self);
+    fn text_offer(&mut self, _held: bool) -> Result<text::Offer, StopReason> {
+        Ok(text::Offer::default())
+    }
+    fn text_send(
+        &mut self,
+        _commit: &text::Commit,
+        _sampled: Option<ClientInstant>,
+        _held: bool,
+    ) -> Result<bool, StopReason> {
+        Ok(false)
+    }
+    fn text_retire(&mut self, _serial: u64) {}
     fn file_shortcuts_enabled(&self) -> bool {
         false
     }
@@ -604,8 +622,61 @@ trait Target {
 struct NativeTarget {
     source: Source,
     shared: Arc<Shared>,
+    text: text::Context<TextContext>,
 }
 impl Target for NativeTarget {
+    fn text_retire(&mut self, serial: u64) {
+        let _ = self.text.take(serial);
+    }
+    fn text_offer(&mut self, held: bool) -> Result<text::Offer, StopReason> {
+        use frd::session_startup::viewer_events::Error;
+        if !self.source.supports_text() {
+            return self.text.offer(None, false);
+        }
+        let context = match self.source.text_context() {
+            Ok(context) => context,
+            Err(Error::UnsupportedText) => None,
+            Err(_) => return Err(StopReason::Closed),
+        };
+        let ready = match context.as_ref() {
+            Some(context) => match self.source.text_context_ready(context) {
+                Ok(ready) => ready && !held,
+                // A lapse between the two reads invalidates the draft before
+                // another native callback can see the old context.
+                Err(Error::StaleTextContext) => return self.text.offer(None, false),
+                Err(_) => return Err(StopReason::Closed),
+            },
+            None => false,
+        };
+        self.text.offer(context, ready)
+    }
+    fn text_send(
+        &mut self,
+        commit: &text::Commit,
+        sampled: Option<ClientInstant>,
+        held: bool,
+    ) -> Result<bool, StopReason> {
+        use frd::session_startup::viewer_events::Error;
+        // Consume the original serial before validation. Neither a refusal nor
+        // another native notification can replay this explicit Send.
+        let Some(context) = self.text.take(commit.serial) else {
+            return Ok(false);
+        };
+        let now = self.clock()?;
+        let Some((value, sampled, until)) = commit.validate(sampled, now, held) else {
+            return Ok(false);
+        };
+        match self
+            .source
+            .commit_text_in_context_until(&context, value, sampled, until)
+        {
+            Ok(()) => Ok(true),
+            Err(Error::UnsupportedText | Error::StaleTextContext | Error::TextNotReady) => {
+                Ok(false)
+            }
+            Err(_) => Err(StopReason::Queue),
+        }
+    }
     fn window_resized(&self, width: u32, height: u32) {
         // Reserve the precise native cause before the window's immediate fence
         // wakes cleanup. An earlier input stop cannot become resize intent.
@@ -751,6 +822,8 @@ fn run_focused_mode(
     };
     let native = Native(raw);
     let guard = NativeRun { native, target };
+    let text_available = guard.target.capabilities().contains(Capability::Text)
+        && text::prepare(&guard.native, display);
     let result = run_events(
         &guard.native,
         window,
@@ -758,6 +831,7 @@ fn run_focused_mode(
         &names,
         guard.target,
         system_shortcuts,
+        text_available,
     );
     guard
         .target
@@ -783,6 +857,7 @@ fn run_events(
     names: &[[u8; 4]; 256],
     target: &mut impl Target,
     system_shortcuts: bool,
+    text_available: bool,
 ) -> Result<(), StopReason> {
     let mut escape = escape::LocalEscape::new(names)?;
     if system_shortcuts {
@@ -813,17 +888,20 @@ fn run_events(
                 &sampler,
                 shortcuts.as_ref(),
                 display_switch.as_ref(),
+                text_available,
             )?
         } else {
             None
         };
         let before = target.clock()?;
         let local_held = local_keys_held(target, shortcuts.as_ref(), display_switch.as_ref());
-        let sample = timeline.is_some() && sampler.due_with_local(&decoder, local_held, before);
+        let sample = timeline.is_some()
+            && sampler.due_with_local(&decoder, local_held || text::has_held(native), before);
         if sample {
             sampler.begin(native, before)?;
         }
-        let (events, used, barrier) = batch(native, target, window, first, before)?;
+        let text_held = !text_available || timeline.is_none() || decoder.has_held() || local_held;
+        let (events, used, barrier) = batch(native, target, window, first, before, text_held)?;
         // Local escape is negative authority only. Scan the complete bounded
         // native batch BEFORE waiting for held-state replies or exporting any
         // event. The triggering key and all its batch companions stay local.
@@ -865,8 +943,10 @@ fn run_events(
                 target,
                 &mut decoder,
                 shortcuts.as_mut(),
+                native,
             )?;
             if let Some(snapshot) = snapshot.filter(|_| held::stable(&events[..used])) {
+                text::reconcile(native, &snapshot);
                 escape.reconcile(&snapshot.keys);
                 if let Some(shortcuts) = &mut shortcuts {
                     shortcuts.reconcile(&snapshot.keys);
@@ -932,8 +1012,33 @@ fn dispatch_batch(
     target: &mut impl Target,
     decoder: &mut Decoder,
     mut shortcuts: Option<&mut file_keys::Shortcuts>,
+    native: &Native,
 ) -> Result<(), StopReason> {
+    // Native owns at most one pending explicit Send. Multiple notifications
+    // cannot choose a new timestamp for the same value.
+    if events
+        .iter()
+        .filter(|event| matches!(event.kind, text::SEND | text::RETIRED))
+        .count()
+        > 1
+    {
+        return Err(StopReason::NativeFailure);
+    }
     for (index, event) in events.iter().enumerate() {
+        if event.kind == text::RETIRED {
+            if let Some(commit) = text::take(native)? {
+                target.text_retire(commit.serial);
+            }
+            continue;
+        }
+        if event.kind == text::SEND {
+            if let Some(commit) = text::take(native)? {
+                let result = target.text_send(&commit, captured.at[index], decoder.has_held());
+                text::result(native, commit.serial, result == Ok(true));
+                result?;
+            }
+            continue;
+        }
         if let Some(at) = captured.at[index] {
             if captured.local[index] {
                 continue;
@@ -979,8 +1084,14 @@ fn captured_batch(
     let mut request = display_switch::BatchIntent::default();
     for (index, event) in events.iter().enumerate() {
         target.clock()?;
-        if (1..=5).contains(&event.kind) {
-            let at = timeline.sample(event.time, barrier, before)?;
+        if (1..=5).contains(&event.kind) || event.kind == text::SEND {
+            let at = match timeline.sample(event.time, barrier, before) {
+                Ok(at) => at,
+                // Refuse this whole Send without reviving or retiming it.
+                // Physical releases keep the existing capture failure policy.
+                Err(StopReason::Expired) if event.kind == text::SEND => continue,
+                Err(error) => return Err(error),
+            };
             captured.at[index] = Some(at);
             if matches!(event.kind, 1 | 2)
                 && let Some(shortcut) = &mut shortcut
@@ -999,10 +1110,11 @@ fn captured_batch(
 }
 fn batch(
     native: &Native,
-    target: &impl Target,
+    target: &mut impl Target,
     window: Window,
     mut first: Option<Raw>,
     before: ClientInstant,
+    text_held: bool,
 ) -> Result<([Raw; MAX_NATIVE_EVENTS], usize, u32), StopReason> {
     // SAFETY: same live native owner, at most one pending clock property.
     if unsafe { fr_viewer_input_barrier(native.0.as_ptr()) } != 1 {
@@ -1019,6 +1131,7 @@ fn batch(
             event
         } else {
             let mut event = Raw::default();
+            text::offer(native, target, text_held)?;
             // SAFETY: unique owner and a writable fixed-size output record.
             match unsafe { fr_viewer_input_next(native.0.as_ptr(), &raw mut event) } {
                 0 => {
@@ -1056,11 +1169,12 @@ fn batch(
 }
 fn await_event(
     native: &Native,
-    target: &impl Target,
+    target: &mut impl Target,
     decoder: &Decoder,
     sampler: &held::Sampler,
     shortcuts: Option<&file_keys::Shortcuts>,
     display_switch: Option<&display_switch::Shortcut>,
+    text_available: bool,
 ) -> Result<Option<Raw>, StopReason> {
     loop {
         target.clock()?;
@@ -1079,11 +1193,15 @@ fn await_event(
             return Ok(None);
         }
         let mut event = Raw::default();
+        let text_held = !text_available
+            || decoder.has_held()
+            || local_keys_held(target, shortcuts, display_switch);
+        text::offer(native, target, text_held)?;
         // SAFETY: unique owning thread, writable fixed-size event, no callbacks.
         match unsafe { fr_viewer_input_next(native.0.as_ptr(), &raw mut event) } {
             0 if sampler.due_with_local(
                 decoder,
-                local_keys_held(target, shortcuts, display_switch),
+                local_keys_held(target, shortcuts, display_switch) || text::has_held(native),
                 target.clock()?,
             ) =>
             {

@@ -571,15 +571,16 @@ fn connect(
         } else {
             offer
         };
-        let offer = if automation {
-            fr_wire::control::with_committed_text(offer).map_err(|_| Failure::new(
+        // Both the explicit native editor and foreground automation use the
+        // shared committed-Unicode path. An older host omits this optional
+        // boundary and retains physical-key control; no fallback types text.
+        let offer = fr_wire::control::with_committed_text(offer).map_err(|_| {
+            Failure::new(
                 "text_capability_limit",
-                "The explicit automation profile cannot fit its bounded committed-text capability offer.",
+                "The native control profile cannot fit its bounded committed-text capability offer.",
                 2,
-            ))?
-        } else {
-            offer
-        };
+            )
+        })?;
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),

@@ -60,7 +60,7 @@ def main() -> None:
         directory = Path(temporary)
         binary = directory / "keyboard-map"
         compiler = shlex.split(os.environ.get("CC", "cc"))
-        subprocess.run(compiler + ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        subprocess.run(compiler + ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread",
                                    str(HERE / "keyboard_map.c"), "-lxcb", "-lX11",
                                    "-l:libXtst.so.6", "-o", str(binary)],
                        check=True, timeout=30)

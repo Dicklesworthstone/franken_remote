@@ -51,9 +51,10 @@ use frd::{
 /// host profile: keys (with repeat), absolute pointer, buttons and discrete
 /// line scrolling on both axes. Line scrolling is requested only when the host
 /// selected the optional `native-input-line-scroll` boundary (its executor can
-/// scroll by lines); otherwise the wheel alone is unavailable. Pixel scrolling,
-/// relative pointer and text stay unavailable; no fractional wheel
-/// accumulation or keyboard emulation is used.
+/// scroll by lines); otherwise the wheel alone is unavailable. The explicit
+/// local Send Text editor additionally requests whole committed Unicode only
+/// under the host's optional text boundary. Pixel scrolling and relative
+/// pointer remain unavailable; no keyboard/clipboard text emulation is used.
 pub(super) fn capabilities() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
@@ -61,6 +62,7 @@ pub(super) fn capabilities() -> Capabilities {
         .with(Capability::Absolute)
         .with(Capability::Buttons)
         .with(Capability::LineScroll)
+        .with(Capability::Text)
 }
 pub(super) fn policy() -> ControlPolicy {
     ControlPolicy {
@@ -70,8 +72,8 @@ pub(super) fn policy() -> ControlPolicy {
         capabilities: capabilities(),
     }
 }
-/// Only the explicit foreground robot owner produces committed Unicode. The
-/// actual request intersects this with the peer's negotiated text boundary.
+/// The foreground robot uses the same positive text negotiation as the local
+/// editor. Its distinct opt-in endpoint and source remain owned by automation.
 pub(super) fn automation_policy() -> ControlPolicy {
     ControlPolicy {
         capabilities: capabilities().with(Capability::Text),
@@ -706,14 +708,11 @@ mod tests {
             Capability::Absolute,
             Capability::Buttons,
             Capability::LineScroll,
+            Capability::Text,
         ] {
             assert!(caps.contains(granted));
         }
-        for absent in [
-            Capability::Text,
-            Capability::PixelScroll,
-            Capability::Relative,
-        ] {
+        for absent in [Capability::PixelScroll, Capability::Relative] {
             assert!(!caps.contains(absent));
         }
         let policy = policy();
@@ -721,11 +720,11 @@ mod tests {
         assert_eq!(policy.capabilities, caps);
     }
     #[test]
-    fn only_explicit_automation_requests_negotiated_committed_text() {
+    fn native_editor_and_automation_require_positive_committed_text_negotiation() {
         use fr_wire::control::{requestable, with_committed_text};
         let requested = automation_policy().capabilities;
         assert!(requested.contains(Capability::Text));
-        assert!(!policy().capabilities.contains(Capability::Text));
+        assert!(policy().capabilities.contains(Capability::Text));
         let client = with_committed_text(offer(false)).unwrap();
         let legacy = offer(false);
         let selected = client.intersect(&legacy).unwrap();

@@ -39,7 +39,9 @@ impl LocalEscape {
     /// A chord may span batches, but no part of the triggering batch is exported.
     pub(super) fn inspect(&mut self, events: &[Raw]) -> Result<(), StopReason> {
         for event in events {
-            if !matches!(event.kind, 1 | 2) {
+            // Text-editor keys remain local, but retain the same physical
+            // emergency escape even while the IME owns their text.
+            if !matches!(event.kind, 1 | 2 | 14 | 15) {
                 continue;
             }
             if let Some(slot) = self
@@ -47,7 +49,7 @@ impl LocalEscape {
                 .iter()
                 .position(|code| code.is_some_and(|code| u32::from(code) == event.detail))
             {
-                self.held[slot] = event.kind == 1;
+                self.held[slot] = matches!(event.kind, 1 | 14);
                 if self.held[6]
                     && (0..3).all(|group| self.held[2 * group] || self.held[2 * group + 1])
                 {
@@ -130,6 +132,35 @@ mod tests {
                 key(6, true),
             ])
             .unwrap();
+    }
+
+    #[test]
+    fn local_editor_keys_keep_emergency_escape_ahead_of_a_pending_send() {
+        let mut escape = LocalEscape::new(&names()).unwrap();
+        let mut events = vec![Raw {
+            kind: 13,
+            time: 123,
+            ..Raw::default()
+        }];
+        for slot in [0, 2, 4, 6] {
+            let mut event = key(slot, true);
+            event.kind = 14;
+            events.push(event);
+        }
+        assert_eq!(escape.inspect(&events), Err(StopReason::LocalEscape));
+    }
+
+    #[test]
+    fn editor_release_does_not_leave_a_stale_escape_modifier() {
+        let mut escape = LocalEscape::new(&names()).unwrap();
+        let mut control = key(0, true);
+        control.kind = 14;
+        escape.inspect(&[control]).unwrap();
+        control.kind = 15;
+        escape.inspect(&[control]).unwrap();
+        for slot in [2, 4, 6] {
+            escape.inspect(&[key(slot, true)]).unwrap();
+        }
     }
     #[test]
     fn stable_snapshot_clears_only_locally_seen_modifier_presses() {
