@@ -441,7 +441,11 @@ impl BrowserIngress {
                 http::write_http_response(
                     stream,
                     asset.status_code,
-                    "OK",
+                    if asset.status_code == 503 {
+                        "Service Unavailable"
+                    } else {
+                        "OK"
+                    },
                     asset.content_type,
                     BROWSER_UI_CSP,
                     &asset.body,

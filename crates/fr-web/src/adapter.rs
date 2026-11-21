@@ -216,9 +216,9 @@ impl BrowserConnectionAdapter {
         let Some(serial) = self.last_attempt.checked_add(1) else {
             return self.fail(BrowserAdapterError::AttemptExhausted);
         };
-        let Some(deadline_us) = now_us.checked_add(
-            u64::from(ProtocolLimits::ABSOLUTE.max_handshake_duration_ms()) * 1000,
-        ) else {
+        let Some(deadline_us) = now_us
+            .checked_add(u64::from(ProtocolLimits::ABSOLUTE.max_handshake_duration_ms()) * 1000)
+        else {
             return self.fail(BrowserAdapterError::InvalidClock);
         };
         self.retire(Phase::Closed, None);
@@ -277,9 +277,10 @@ impl BrowserConnectionAdapter {
         if response.role != Some(self.role) || response.refusal_code.is_some() {
             return self.fail(BrowserAdapterError::InvalidBootstrap);
         }
-        let Some(lifetime_ms) = response.expires_in_ms.filter(|&value| {
-            value > 0 && value <= MAX_BOOTSTRAP_LIFETIME_MS
-        }) else {
+        let Some(lifetime_ms) = response
+            .expires_in_ms
+            .filter(|&value| value > 0 && value <= MAX_BOOTSTRAP_LIFETIME_MS)
+        else {
             return self.fail(BrowserAdapterError::InvalidBootstrap);
         };
         let Some(until_us) = self.started_us.checked_add(u64::from(lifetime_ms) * 1000) else {
@@ -345,18 +346,14 @@ impl BrowserConnectionAdapter {
         if bytes.len() > MAX_CONTROL_RECORD_BYTES {
             return self.fail(BrowserAdapterError::MessageTooLarge);
         }
-        let message = match refusal::decode(
-            bytes,
-            0,
-            MAX_CONTROL_RECORD_BYTES,
-            InputDelivery::Reliable,
-        ) {
-            Ok(message) => message,
-            Err(WireError::UnsupportedKind) => {
-                return self.fail(BrowserAdapterError::UnsupportedControl);
-            }
-            Err(_) => return self.fail(BrowserAdapterError::InvalidControl),
-        };
+        let message =
+            match refusal::decode(bytes, 0, MAX_CONTROL_RECORD_BYTES, InputDelivery::Reliable) {
+                Ok(message) => message,
+                Err(WireError::UnsupportedKind) => {
+                    return self.fail(BrowserAdapterError::UnsupportedControl);
+                }
+                Err(_) => return self.fail(BrowserAdapterError::InvalidControl),
+            };
         if message.operation.is_some() || message.stage.is_some() {
             return self.fail(BrowserAdapterError::InvalidControl);
         }
@@ -384,7 +381,10 @@ impl BrowserConnectionAdapter {
             _ => return self.fail(BrowserAdapterError::InvalidLifecycle),
         };
         self.core.on_lifecycle_event(event, now_us);
-        if matches!(event, BrowserLifecycleEvent::PageHide | BrowserLifecycleEvent::BfcacheRestore) {
+        if matches!(
+            event,
+            BrowserLifecycleEvent::PageHide | BrowserLifecycleEvent::BfcacheRestore
+        ) {
             self.retire(Phase::Closed, None);
         }
         Ok(())
@@ -419,7 +419,10 @@ impl BrowserConnectionAdapter {
         }
     }
 
-    pub(crate) fn require_attempt(&self, attempt: BrowserAttempt) -> Result<(), BrowserAdapterError> {
+    pub(crate) fn require_attempt(
+        &self,
+        attempt: BrowserAttempt,
+    ) -> Result<(), BrowserAdapterError> {
         if self.attempt == Some(attempt) {
             Ok(())
         } else {
@@ -432,7 +435,10 @@ impl BrowserConnectionAdapter {
         if let Err(error) = self.require_attempt(attempt) {
             return error;
         }
-        self.retire(Phase::Refused, Some(BrowserAdapterError::InvalidClock.code()));
+        self.retire(
+            Phase::Refused,
+            Some(BrowserAdapterError::InvalidClock.code()),
+        );
         BrowserAdapterError::InvalidClock
     }
 

@@ -1,4 +1,4 @@
-//! Browser-asset serving stub with strict Content-Security-Policy and headers (plan sections 5.2, 6).
+//! Self-hosted browser-asset serving with strict Content-Security-Policy and headers (plan sections 5.2, 6).
 //!
 //! Serves versioned static assets for browser-based workstation access with:
 //! - Strict CSP: `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`
@@ -8,7 +8,7 @@
 use core::fmt;
 
 /// Content-Security-Policy header value for browser workstations.
-pub const STRICT_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'";
+pub const STRICT_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'";
 
 /// Response for a browser asset request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,35 +83,55 @@ impl BrowserAssets {
     pub fn serve(path: &str) -> Result<AssetResponse, AssetError> {
         let clean_path = Self::sanitize_path(path)?;
 
-        let (content_type, body) = match clean_path {
-            "/" | "/index.html" => ("text/html; charset=utf-8", INDEX_HTML.as_bytes().to_vec()),
+        let (status_code, content_type, body) = match clean_path {
+            "/" | "/index.html" => (200, "text/html; charset=utf-8", INDEX_HTML.as_bytes()),
             "/app.js" | "/fr.js" => (
+                200,
                 "application/javascript; charset=utf-8",
-                APP_JS.as_bytes().to_vec(),
+                APP_JS.as_bytes(),
             ),
             "/hevc_probe.js" => (
+                200,
                 "application/javascript; charset=utf-8",
-                HEVC_PROBE_JS.as_bytes().to_vec(),
+                HEVC_PROBE_JS.as_bytes(),
+            ),
+            "/wasm_client.js" => (
+                200,
+                "application/javascript; charset=utf-8",
+                WASM_CLIENT_JS.as_bytes(),
             ),
             "/wss_client.js" => (
+                200,
                 "application/javascript; charset=utf-8",
-                WSS_CLIENT_JS.as_bytes().to_vec(),
+                WSS_CLIENT_JS.as_bytes(),
             ),
-            "/styles.css" | "/style.css" => {
-                ("text/css; charset=utf-8", STYLES_CSS.as_bytes().to_vec())
-            }
-            "/manifest.json" => ("application/json", MANIFEST_JSON.as_bytes().to_vec()),
+            "/pkg/fr_web.js" | "/pkg/fr_web_bg.wasm" => match BROWSER_WASM_BUNDLE {
+                Some((javascript, wasm)) => {
+                    if clean_path == "/pkg/fr_web.js" {
+                        (200, "application/javascript; charset=utf-8", javascript)
+                    } else {
+                        (200, "application/wasm", wasm)
+                    }
+                }
+                None => (
+                    503,
+                    "application/json",
+                    BROWSER_CLIENT_UNAVAILABLE.as_bytes(),
+                ),
+            },
+            "/styles.css" | "/style.css" => (200, "text/css; charset=utf-8", STYLES_CSS.as_bytes()),
+            "/manifest.json" => (200, "application/json", MANIFEST_JSON.as_bytes()),
             _ => return Err(AssetError::NotFound),
         };
 
         Ok(AssetResponse {
-            status_code: 200,
+            status_code,
             content_type,
             csp: STRICT_CSP,
             cache_control: "no-cache, no-store, must-revalidate",
             x_content_type_options: "nosniff",
             x_frame_options: "DENY",
-            body,
+            body: body.to_vec(),
         })
     }
 }
@@ -119,8 +139,21 @@ impl BrowserAssets {
 const INDEX_HTML: &str = include_str!("../../../../web/index.html");
 const STYLES_CSS: &str = include_str!("../../../../web/styles.css");
 const HEVC_PROBE_JS: &str = include_str!("../../../../web/hevc_probe.js");
+const WASM_CLIENT_JS: &str = include_str!("../../../../web/wasm_client.js");
 const WSS_CLIENT_JS: &str = include_str!("../../../../web/wss_client.js");
 const APP_JS: &str = include_str!("../../../../web/app.js");
+
+// Both bytestrings are selected by one build flag after the complete generated
+// pair has been bounded and validated. No placeholder WASM is served.
+#[cfg(browser_wasm_bundle)]
+const BROWSER_WASM_BUNDLE: Option<(&[u8], &[u8])> = Some((
+    include_bytes!(concat!(env!("OUT_DIR"), "/fr_web.js")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/fr_web_bg.wasm")),
+));
+#[cfg(not(browser_wasm_bundle))]
+const BROWSER_WASM_BUNDLE: Option<(&[u8], &[u8])> = None;
+
+const BROWSER_CLIENT_UNAVAILABLE: &str = r#"{"error":"browser_client_unavailable"}"#;
 
 const MANIFEST_JSON: &str = r#"{"name":"FrankenRemote","display":"fullscreen","start_url":"/"}"#;
 
@@ -146,6 +179,7 @@ mod tests {
             ("/app.js", "application/javascript; charset=utf-8"),
             ("/hevc_probe.js", "application/javascript; charset=utf-8"),
             ("/wss_client.js", "application/javascript; charset=utf-8"),
+            ("/wasm_client.js", "application/javascript; charset=utf-8"),
             ("/style.css", "text/css; charset=utf-8"),
             ("/styles.css", "text/css; charset=utf-8"),
             ("/manifest.json", "application/json"),
@@ -167,7 +201,81 @@ mod tests {
         assert!(!html.contains("http://") && !html.contains("https://"));
         assert!(html.contains("/hevc_probe.js"));
         assert!(html.contains("/wss_client.js"));
+        assert!(html.contains("/wasm_client.js"));
         assert!(html.contains("/app.js"));
+    }
+
+    #[test]
+    fn csp_permits_only_the_required_wasm_evaluation() {
+        let script_policy = STRICT_CSP
+            .split(';')
+            .find(|directive| directive.trim().starts_with("script-src"))
+            .unwrap()
+            .trim();
+        assert_eq!(script_policy, "script-src 'self' 'wasm-unsafe-eval'");
+        let html = String::from_utf8(BrowserAssets::serve("/").unwrap().body).unwrap();
+        assert!(html.contains(STRICT_CSP));
+    }
+
+    #[cfg(not(browser_wasm_bundle))]
+    #[test]
+    fn absent_bundle_returns_typed_unavailable_for_both_assets() {
+        for path in ["/pkg/fr_web.js", "/pkg/fr_web_bg.wasm"] {
+            let response = BrowserAssets::serve(path).unwrap();
+            assert_eq!(response.status_code, 503);
+            assert_eq!(response.content_type, "application/json");
+            assert_eq!(response.body, br#"{"error":"browser_client_unavailable"}"#);
+            assert_eq!(
+                response.cache_control,
+                "no-cache, no-store, must-revalidate"
+            );
+            assert_eq!(response.x_content_type_options, "nosniff");
+            assert_eq!(response.x_frame_options, "DENY");
+            assert_eq!(response.csp, STRICT_CSP);
+        }
+    }
+
+    #[cfg(browser_wasm_bundle)]
+    #[test]
+    fn embedded_package_routes_return_exact_generated_bytes_and_mime() {
+        let (javascript, wasm) = BROWSER_WASM_BUNDLE.unwrap();
+        assert!(!javascript.is_empty() && javascript.len() <= 256 * 1024);
+        assert!(std::str::from_utf8(javascript).is_ok());
+        assert!(wasm.starts_with(b"\0asm\x01\0\0\0") && wasm.len() <= 4 * 1024 * 1024);
+        for (path, content_type, expected) in [
+            (
+                "/pkg/fr_web.js",
+                "application/javascript; charset=utf-8",
+                javascript,
+            ),
+            ("/pkg/fr_web_bg.wasm", "application/wasm", wasm),
+        ] {
+            let response = BrowserAssets::serve(path).unwrap();
+            assert_eq!(response.status_code, 200);
+            assert_eq!(response.content_type, content_type);
+            assert_eq!(response.body, expected);
+            assert_eq!(
+                response.cache_control,
+                "no-cache, no-store, must-revalidate"
+            );
+            assert_eq!(response.x_content_type_options, "nosniff");
+            assert_eq!(response.x_frame_options, "DENY");
+            assert_eq!(response.csp, STRICT_CSP);
+        }
+    }
+
+    #[test]
+    fn package_catalog_does_not_expose_other_build_outputs() {
+        for path in [
+            "/pkg/",
+            "/pkg/fr_web.d.ts",
+            "/pkg/fr_web.js.map",
+            "/pkg/fr_web_bg.wasm.map",
+            "/pkg/other.wasm",
+            "/pkg/fr_web_bg.wasm/extra",
+        ] {
+            assert_eq!(BrowserAssets::serve(path), Err(AssetError::NotFound));
+        }
     }
 
     #[test]

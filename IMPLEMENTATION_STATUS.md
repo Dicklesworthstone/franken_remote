@@ -1,5 +1,56 @@
 # Implementation status
 
+## Served Rust/WASM browser transport and embedded package (2026-11-20)
+
+The served shell now loads the real Rust/WASM startup owner. JavaScript sends
+the exact canonical hello returned by Rust and passes bounded control records
+back to that same owner. It no longer implements the legacy FRBA/FRAT/FRTK
+session protocol or creates session authority from transport events. The DOM
+projects Rust startup/refusal state, with desktop controls disabled until real
+session/media/control operations exist.
+
+Each attempt owns its adapter, reader, timers, and socket. Retirement fences
+callbacks before cleanup, including reentrant replacement, pending body reads,
+close-before-open, and late module creation. Package loading has a 15-second
+I/O watchdog; Rust still receives the original start time, so loading cannot
+extend its connection deadline. Both cumulative bootstrap bytes and control
+records are bounded before copying into WASM. Peer diagnostic text stays out
+of displayed failures. One shared module-load handler retains at most 16 pending
+subscribers; cancellation removes a subscriber immediately, so repeated retries
+during a stalled native import cannot retain an unbounded chain of old attempts.
+
+`node scripts/build-web.cjs NEW_OUTPUT_DIRECTORY` checks the pinned compiler
+and matching wasm-bindgen CLI, builds the release module, generates the web
+pair, and runs the actual-WASM adapter and transport tests. The daemon build
+optionally embeds that complete pair from `FR_WEB_ASSET_DIR`; it bounds and
+validates both files before selecting them. Missing packages produce typed
+HTTP 503, while incomplete or invalid configured packages fail the build.
+Self-hosted routes provide the correct JS/WASM MIME types and the narrow
+`wasm-unsafe-eval` CSP permission. See [browser build and limits](docs/browser-client.md).
+
+Passed on the restored source:
+
+- 47 Node browser I/O/UI/HEVC ownership tests and eight module-loader tests,
+  including 40 cancellation/watchdog retries against one blocked dynamic import.
+- 26 tests through the actual generated WASM: 11 exported-ABI tests and
+  15 production transport/DOM integration tests with simulated browser I/O.
+- All 35 portable `fr-web` Rust tests, exact release WASM build, strict all-target
+  WASM Clippy, and pinned formatting of the changed Rust files.
+- Six production build-script tests and nine production asset-catalog tests
+  in each of the bundled and unbundled configurations, with strict standalone
+  Rust compilation and Clippy. The bundled run used the real generated pair.
+- Actual package-builder execution and nine malformed/missing/oversized package
+  refusals; refused packages did not replace the accepted embedded bytes.
+
+These results cover the Rust owner, actual WASM execution, JS integration and
+asset packaging. Complete native-daemon checks remain blocked by the pinned
+Asupersync compilation's resource requirements; UBS is unavailable after the
+executor restart. The native HTTPS/WSS listener and authenticated host-session
+handoff still need qualification, and WebCodecs custody/presentation, receiver
+credit, input/control, H3, and live browser/tailnet gates remain open. The host
+continues to report `desktop_available: false`. `fr-w9jo` and the broader browser
+bead remain in progress.
+
 ## Executable Rust/WASM browser startup adapter (2026-11-20)
 
 `fr-web` now builds an actual `cdylib` for `wasm32-unknown-unknown`,
@@ -25,15 +76,14 @@ refusal, lifecycle/attempt fencing, invalid clocks, malformed records and
 bootstrap bounds. Generated code was 16,545 bytes of JavaScript plus 151,977
 bytes of WASM in that build; these are package sizes, not performance claims.
 
-The full portable Rust run (23 existing tests plus 12 new adapter tests) was
-interrupted by executor disconnection; its result is unknown. Applied source
-patches and lint corrections were preserved through GitHub after that loss.
-Their Rust tokens match the successfully built implementation, but canonical
-formatting of the reconstructed files still needs rechecking.
-
-The served shell and host bundle integration remain in progress under
-`fr-w9jo`. This export does not claim a running browser desktop, native TLS
-listener validation, positive WebCodecs closure, or input/control qualification.
+After executor restoration, all 35 portable Rust tests passed (12 adapter,
+12 browser-core, and 11 ownership tests). The exact-pinned release build,
+generated web package, all 11 actual-WASM Node tests, strict all-target WASM
+Clippy, and canonical formatting check passed again. The reconstructed files'
+formatting is restored. The served shell and package integration are described
+above; native host session/media integration remains open under `fr-w9jo`.
+No running browser desktop, native TLS listener validation, positive WebCodecs
+closure, or input/control qualification is claimed.
 
 ## Browser HEVC configuration lifetime (2026-11-20)
 

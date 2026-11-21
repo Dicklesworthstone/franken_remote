@@ -32,7 +32,7 @@ mod tokens;
 use tokens::Tokens;
 
 /// Default Content-Security-Policy for browser workstation UI.
-pub const BROWSER_UI_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'";
+pub const BROWSER_UI_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'";
 
 /// JSON API Content-Security-Policy (strictly no embedding, no scripts).
 pub const BROWSER_API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";

@@ -1,431 +1,354 @@
 "use strict";
-
-// Transport-shell regressions only; these are not a live browser or HEVC gate.
+// I/O and DOM ownership with an instrumented adapter. wasm_transport.cjs runs
+// this same I/O implementation against the real compiled Rust/WASM owner.
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
+const { available, deferred, nextTurn, ioFixture, uiFixture } = require("./browser_fixture.cjs");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "wss_client.js"), "utf8");
-const appSource = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
-
-function fixture(response, protocol = "https:", options = {}) {
-    const requests = [];
-    let sockets = 0;
-    const socketInstances = [];
-    const window = {
-        location: { protocol, host: "host.fixture.ts.net:8443" },
-        AbortController,
-        fetch: async (url, requestOptions) => {
-            const index = requests.length;
-            requests.push({ url, options: requestOptions });
-            // Deliberately allow a queued body to finish after AbortSignal:
-            // cancellation must fence the continuation as well as the fetch.
-            return { ok: true, json: async () => typeof response === "function" ? response(index) : response };
-        },
-        WebSocket: class {
-            static OPEN = 1;
-            constructor(url) {
-                sockets += 1;
-                if (!options.allowSockets) throw new Error("No socket is permitted without a desktop capability");
-                this.url = url;
-                this.readyState = 0;
-                this.sent = [];
-                this.closeCalls = [];
-                socketInstances.push(this);
-            }
-            send(bytes) {
-                assert.equal(this.readyState, 1);
-                this.sent.push(Array.from(bytes));
-            }
-            close(code, reason) {
-                this.readyState = 2;
-                this.closeCalls.push({ code, reason });
-            }
-            open() {
-                this.readyState = 1;
-                if (this.onopen) this.onopen();
-            }
-            peerClose(reason = "peer_closed") {
-                this.readyState = 3;
-                if (this.onclose) this.onclose({ reason });
-            }
-            message(data) {
-                if (this.onmessage) this.onmessage({ data });
-            }
-        },
-    };
-    const context = { window, ArrayBuffer, Uint8Array, DataView, TextDecoder };
-    vm.runInNewContext(source, context);
-    return {
-        client: new window.FrankenWss.FrankenWssClient(options.callbacks),
-        api: window.FrankenWss,
-        window,
-        context,
-        requests,
-        socketInstances,
-        sockets: () => sockets,
-    };
+async function open(client, fixture, index = 0) {
+    const pending = client.connect("observer");
+    await nextTurn();
+    fixture.sockets[index].open();
+    await pending;
 }
 
-function deferred() {
-    let resolve;
-    const promise = new Promise((done) => { resolve = done; });
-    return { promise, resolve };
-}
-
-function available(extra = {}) {
-    return { nonce_hex: "a5".repeat(32), desktop_available: true, ...extra };
-}
-
-function nextTurn() {
-    return new Promise((resolve) => setImmediate(resolve));
-}
-
-function uiFixture(response, options = {}) {
-    const f = fixture(response, "https:", { allowSockets: true });
-    const elements = new Map();
-    const events = new Map();
-    const document = {
-        hidden: false,
-        getElementById(id) {
-            if (!elements.has(id)) {
-                const classes = new Set();
-                elements.set(id, {
-                    disabled: false,
-                    textContent: "",
-                    className: "",
-                    listeners: new Map(),
-                    classList: {
-                        add: (name) => classes.add(name),
-                        remove: (name) => classes.delete(name),
-                        contains: (name) => classes.has(name),
-                    },
-                    addEventListener(name, callback) { this.listeners.set(name, callback); },
-                });
-            }
-            return elements.get(id);
-        },
-        addEventListener() {},
-    };
-    f.window.addEventListener = (name, callback) => events.set(name, callback);
-    f.window.FrankenHevc = {
-        WebCodecsHevcPlayer: class {
-            reset() {}
-            setVisible() {}
-            configure(params) {
-                return options.configure ? options.configure(params) : Promise.resolve({ supported: true });
-            }
-        },
-    };
-    let uiClient;
-    const WssClient = f.window.FrankenWss.FrankenWssClient;
-    f.window.FrankenWss.FrankenWssClient = class extends WssClient {
-        constructor(callbacks) {
-            super(callbacks);
-            uiClient = this;
-        }
-    };
-    vm.runInNewContext(appSource, { ...f.context, document });
-    return {
-        ...f,
-        element: (id) => document.getElementById(id),
-        click: (id) => document.getElementById(id).listeners.get("click")(),
-        event: (name, detail = {}) => events.get(name)(detail),
-        video: (bytes) => uiClient.callbacks.onVideoBinary(bytes),
-    };
-}
-
-function decoderConfiguration(generation) {
-    const codec = new TextEncoder().encode("hvc1.1.6.L93.B0");
-    const bytes = new Uint8Array(15 + codec.length + 23);
-    const view = new DataView(bytes.buffer);
-    view.setUint8(0, 1);
-    view.setUint32(1, generation, false);
-    view.setUint32(5, 640, false);
-    view.setUint32(9, 480, false);
-    view.setUint16(13, codec.length, false);
-    bytes.set(codec, 15);
-    return bytes;
-}
-
-test("bootstrap availability is required before any socket or observation", async () => {
+test("an adapter bootstrap refusal prevents every socket and disposes its original owner", async () => {
     for (const availability of [false, undefined, "true", 1]) {
-        const nonce = "a5".repeat(32);
-        const f = fixture({
-            nonce_hex: nonce,
-            desktop_available: availability,
-            refusal_code: "browser_session_unavailable",
-        });
-        await assert.rejects(f.client.connect("observer"), (error) => {
-            assert.equal(error.code, "browser_session_unavailable");
-            assert.ok(!error.message.includes(nonce));
-            return true;
-        });
-        assert.equal(f.sockets(), 0);
-        assert.equal(f.client.sessionMeta, null);
-        assert.equal(f.requests.length, 1);
+        const f = ioFixture(available({ desktop_available: availability }));
+        const client = f.makeClient();
+        await assert.rejects(client.connect("observer"), { code: "browser_session_unavailable" });
+        assert.equal(f.sockets.length, 0);
+        assert.equal(client.closed, true);
+        assert.equal(f.cores[0].freed, 1);
+        assert.equal(f.timers.size, 0);
         assert.equal(f.requests[0].url, "/api/session/bootstrap");
-        assert.equal(f.requests[0].options.method, "POST");
         assert.equal(f.requests[0].options.credentials, "same-origin");
         assert.equal(f.requests[0].options.cache, "no-store");
-        assert.ok(!f.requests[0].url.includes(nonce));
     }
 });
 
-test("plaintext bootstrap is refused before sending credentials", async () => {
-    const f = fixture({ nonce_hex: "a5".repeat(32) }, "http:");
-    await assert.rejects(f.client.connect("observer"), {
-        code: "browser_https_required",
-    });
+test("plaintext bootstrap is refused before adapter creation or network traffic", async () => {
+    const f = ioFixture(available(), { protocol: "http:" });
+    await assert.rejects(f.makeClient().connect(), { code: "browser_https_required" });
     assert.equal(f.requests.length, 0);
-    assert.equal(f.sockets(), 0);
+    assert.equal(f.cores.length, 0);
+    assert.equal(f.sockets.length, 0);
 });
 
-test("hex tokens reject partial parseInt matches and whitespace", () => {
-    const { api } = fixture({});
-    assert.deepEqual(Array.from(api.hexToBytes("a500FF")), [165, 0, 255]);
-    for (const invalid of ["0g", " 1", "1 ", "aa\n", "f", 12, null]) {
-        assert.throws(() => api.hexToBytes(invalid));
+test("control socket sends exactly the opaque hello returned by the Rust boundary", async () => {
+    const hello = Uint8Array.of(19, 2, 141, 9, 17);
+    const f = ioFixture(available(), { hello });
+    const client = f.makeClient();
+    await open(client, f);
+    assert.deepEqual(f.sockets[0].sent, [Array.from(hello)]);
+    assert.equal(f.sockets[0].url, "wss://host.fixture.ts.net:8443/ws/control");
+    assert.equal(f.cores[0].calls.filter((x) => x[0] === "clientHello").length, 1);
+    assert.equal(f.requests[0].options.body, '{"role":"observer"}');
+    assert.equal(typeof client.attachVideoChannel, "undefined");
+    assert.equal(typeof client.sendReceiverPressure, "undefined");
+    client.disconnect();
+});
+
+test("disconnect settles a pending body read without waiting for its late response", async () => {
+    const body = deferred();
+    const f = ioFixture(() => body.promise);
+    const client = f.makeClient();
+    const pending = client.connect();
+    const rejection = assert.rejects(pending, { code: "browser_connection_cancelled" });
+    await nextTurn();
+    client.disconnect();
+    await rejection;
+    assert.equal(f.requests[0].options.signal.aborted, true);
+    assert.equal(f.cores[0].freed, 1);
+    body.resolve(available());
+    await nextTurn();
+    assert.equal(f.sockets.length, 0);
+    assert.equal(f.cores[0].calls.some((x) => x[0] === "acceptBootstrap"), false);
+    assert.equal(f.timers.size, 0);
+});
+
+test("a superseded bootstrap cannot overwrite a replacement owner even with reused local token", async () => {
+    const body = deferred();
+    const f = ioFixture((index) => index === 0 ? body.promise : available());
+    const client = f.makeClient();
+    const first = client.connect();
+    const rejection = assert.rejects(first, { code: "browser_connection_cancelled" });
+    await nextTurn();
+    await open(client, f);
+    const current = client.controlSocket;
+    body.resolve(available());
+    await rejection;
+    await nextTurn();
+    assert.equal(client.controlSocket, current);
+    assert.equal(client.closed, false);
+    assert.equal(f.sockets.length, 1);
+    assert.equal(f.cores[0].freed, 1);
+    assert.equal(f.cores[1].freed, 0);
+    client.disconnect();
+});
+
+test("close before socket open settles connection and retires late socket callbacks", async () => {
+    const closed = [];
+    const f = ioFixture();
+    const client = f.makeClient({ onClosed: (code) => closed.push(code) });
+    const pending = client.connect();
+    const rejection = assert.rejects(pending, { code: "browser_transport_closed" });
+    await nextTurn();
+    const socket = f.sockets[0];
+    socket.peerClose();
+    await rejection;
+    socket.open();
+    socket.message(new ArrayBuffer(1));
+    socket.peerClose();
+    assert.equal(client.closed, true);
+    assert.equal(client.controlSocket, null);
+    assert.equal(socket.sent.length, 0);
+    assert.deepEqual(closed, ["browser_transport_closed"]);
+    assert.equal(f.timers.size, 0);
+});
+
+test("retired socket messages and failures never reach the replacement Rust owner", async () => {
+    const f = ioFixture();
+    const client = f.makeClient();
+    await open(client, f);
+    const oldSocket = f.sockets[0];
+    await open(client, f, 1);
+    const current = f.sockets[1];
+    oldSocket.open();
+    oldSocket.message(new ArrayBuffer(1));
+    oldSocket.peerClose();
+    assert.equal(client.controlSocket, current);
+    assert.equal(f.cores[1].calls.some((x) => x[0] === "receiveControl"), false);
+    assert.equal(current.closeCalls.length, 0);
+    assert.equal(oldSocket.sent.length, 1);
+    client.disconnect();
+});
+
+test("control bytes go to Rust and a typed refusal closes only that connection", async () => {
+    const refusals = [];
+    const f = ioFixture(available(), { receiveControl: () => "browser_host_required_capability" });
+    const client = f.makeClient({ onRefused: (error) => refusals.push(error) });
+    await open(client, f);
+    f.sockets[0].message(Uint8Array.of(91, 14, 5).buffer);
+    assert.equal(client.closed, true);
+    assert.deepEqual(f.cores[0].calls.find((x) => x[0] === "receiveControl")[2], [91, 14, 5]);
+    assert.equal(refusals.length, 1);
+    assert.equal(refusals[0].code, "browser_host_required_capability");
+    assert.equal(f.cores[0].freed, 1);
+    assert.equal(f.timers.size, 0);
+});
+
+test("bootstrap byte bounds are enforced before copying a body into WASM", async () => {
+    for (const options of [{ contentLength: "5000" }, { rawBody: new Uint8Array(4097) }]) {
+        const f = ioFixture(available(), options);
+        await assert.rejects(f.makeClient().connect(), { code: "browser_bootstrap_too_large" });
+        assert.equal(f.sockets.length, 0);
+        assert.equal(f.cores[0].calls.some((x) => x[0] === "acceptBootstrap"), false);
+        assert.equal(f.cores[0].freed, 1);
     }
 });
 
-test("disconnect aborts bootstrap and a late body cannot create a socket or metadata", async () => {
+test("control byte bounds are enforced before copying a record into WASM", async () => {
+    const refused = [];
+    const f = ioFixture();
+    const client = f.makeClient({ onRefused: (error) => refused.push(error.code) });
+    await open(client, f);
+    f.sockets[0].message(new ArrayBuffer(4097));
+    assert.equal(f.cores[0].calls.some((x) => x[0] === "receiveControl"), false);
+    assert.deepEqual(refused, ["browser_control_too_large"]);
+    assert.equal(client.closed, true);
+});
+
+test("the Rust deadline retires a silent bootstrap while its response remains pending", async () => {
     const body = deferred();
-    let profiles = 0;
-    const f = fixture(() => body.promise, "https:", {
-        allowSockets: true,
-        callbacks: { onTransportProfile: () => { profiles += 1; } },
-    });
-    const pending = f.client.connect("observer");
-    const rejected = assert.rejects(pending, { code: "browser_connection_cancelled" });
+    const f = ioFixture(() => body.promise, { tick: () => { throw "browser_handshake_expired"; } });
+    const client = f.makeClient();
+    const pending = client.connect();
+    const rejection = assert.rejects(pending, { code: "browser_handshake_expired" });
     await nextTurn();
-    f.client.disconnect("user_requested");
+    f.tick(200);
+    await rejection;
     assert.equal(f.requests[0].options.signal.aborted, true);
+    assert.equal(f.cores[0].freed, 1);
+    assert.equal(f.timers.size, 0);
     body.resolve(available());
-    await rejected;
-    assert.equal(f.sockets(), 0);
-    assert.equal(profiles, 0);
-    assert.equal(f.client.sessionMeta, null);
-    assert.equal(f.client.closed, true);
 });
 
-test("a superseded bootstrap cannot overwrite a replacement connection", async () => {
-    const body = deferred();
-    const f = fixture((index) => index === 0 ? body.promise : available({ session_id_hex: "bb".repeat(16) }),
-        "https:", { allowSockets: true });
-    const first = f.client.connect("observer");
-    const retired = assert.rejects(first, { code: "browser_connection_cancelled" });
-    await nextTurn();
-    const second = f.client.connect("observer");
-    await nextTurn();
-    assert.equal(f.sockets(), 1);
-    const current = f.socketInstances[0];
-    current.open();
-    await second;
-    body.resolve(available({ session_id_hex: "cc".repeat(16) }));
-    await retired;
-    assert.equal(f.requests[0].options.signal.aborted, true);
-    assert.equal(f.client.controlSocket, current);
-    assert.equal(f.client.sessionMeta.sessionIdHex, "bb".repeat(16));
-    assert.equal(f.client.closed, false);
-    assert.equal(f.sockets(), 1);
-    f.client.disconnect();
+test("terminal lifecycle retires transport immediately and pre-connect visibility reaches Rust", async () => {
+    const f = ioFixture();
+    const client = f.makeClient();
+    client.lifecycle("hidden");
+    client.lifecycle("focus_lost");
+    await open(client, f);
+    assert.equal(f.cores[0].visible, false);
+    assert.equal(f.cores[0].focused, false);
+    client.lifecycle("pagehide");
+    assert.equal(client.closed, true);
+    assert.equal(f.sockets[0].closeCalls.length, 1);
+    assert.equal(f.cores[0].freed, 1);
+    assert.equal(f.timers.size, 0);
 });
 
-test("close before WebSocket open settles connect and retires its socket", async () => {
-    const closed = [];
-    const f = fixture(available(), "https:", {
-        allowSockets: true,
-        callbacks: { onClosed: (reason) => closed.push(reason) },
-    });
-    const pending = f.client.connect("observer");
-    const rejected = assert.rejects(pending, /closed before opening/);
+test("disconnect while WASM is loading settles promptly and frees a late adapter", async () => {
+    const loaded = deferred();
+    let freed = 0;
+    const f = ioFixture(available(), { createAdapter: () => loaded.promise });
+    const client = f.makeClient();
+    const pending = client.connect();
+    const rejection = assert.rejects(pending, { code: "browser_connection_cancelled" });
     await nextTurn();
-    const socket = f.socketInstances[0];
-    socket.peerClose("refused_before_open");
-    await rejected;
-    assert.equal(f.client.closed, true);
-    assert.equal(f.client.controlSocket, null);
-    assert.equal(f.client.sessionMeta, null);
-    assert.deepEqual(closed, ["refused_before_open"]);
-    socket.open();
-    socket.peerClose("late_callback");
-    assert.equal(socket.sent.length, 0);
-    assert.deepEqual(closed, ["refused_before_open"]);
+    client.disconnect();
+    await rejection;
+    loaded.resolve({ core: { free() { freed += 1; } }, maxBootstrapBytes: 4096, maxControlRecordBytes: 4096 });
+    await nextTurn();
+    assert.equal(freed, 1);
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.sockets.length, 0);
 });
 
-test("retired control and video socket callbacks cannot affect current owners", async () => {
-    const events = [];
-    const f = fixture(available(), "https:", {
-        allowSockets: true,
-        callbacks: {
-            onClosed: () => events.push("closed"),
-            onControlBinary: () => events.push("control"),
-            onVideoBinary: () => events.push("video"),
-            onVideoClosed: () => events.push("video_closed"),
-        },
-    });
-    const first = f.client.connect("observer");
-    await nextTurn();
-    const oldControl = f.socketInstances[0];
-    oldControl.open();
-    await first;
-    const second = f.client.connect("observer");
-    await nextTurn();
-    const control = f.socketInstances[1];
-    control.open();
-    await second;
-    oldControl.open();
-    oldControl.message(new ArrayBuffer(1));
-    oldControl.peerClose();
-    assert.equal(oldControl.sent.length, 1);
-    assert.deepEqual(events, []);
-    assert.equal(f.client.controlSocket, control);
-
-    const session = new Uint8Array(16);
-    const ticket = new Uint8Array(32);
-    assert.equal(f.client.attachVideoChannel(session, ticket), true);
-    const oldVideo = f.socketInstances[2];
-    oldVideo.open();
-    assert.equal(f.client.attachVideoChannel(session, ticket), true);
-    const video = f.socketInstances[3];
-    oldVideo.open();
-    oldVideo.message(new ArrayBuffer(1));
-    oldVideo.peerClose();
-    assert.equal(oldVideo.sent.length, 1);
-    assert.deepEqual(events, []);
-    video.open();
-    video.message(new ArrayBuffer(1));
-    control.message(new ArrayBuffer(1));
-    assert.deepEqual(events, ["video", "control"]);
-    f.client.disconnect();
-    assert.equal(f.client.attachVideoChannel(session, ticket), false);
-    assert.equal(f.sockets(), 4);
+test("a reentrant state callback can retire startup before fetch or timer creation", async () => {
+    const f = ioFixture();
+    let client;
+    client = f.makeClient({ onState() { client.disconnect(); } });
+    await assert.rejects(client.connect(), { code: "browser_connection_cancelled" });
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.sockets.length, 0);
+    assert.equal(f.timers.size, 0);
+    assert.equal(f.cores[0].freed, 1);
 });
 
-test("an old bootstrap refusal cannot overwrite Disconnected or a newer Connecting UI", async () => {
-    const firstBody = deferred();
-    const secondBody = deferred();
+test("an old bootstrap refusal cannot overwrite a replacement Connecting UI", async () => {
+    const firstBody = deferred(), secondBody = deferred();
     const ui = uiFixture((index) => index === 0 ? firstBody.promise : secondBody.promise);
     const first = ui.click("btn-connect");
     await nextTurn();
     ui.click("btn-disconnect");
-    assert.equal(ui.element("connection-state").textContent, "Disconnected");
     const second = ui.click("btn-connect");
     await nextTurn();
-    firstBody.resolve({ nonce_hex: "a5".repeat(32), desktop_available: false });
+    firstBody.resolve(available({ desktop_available: false }));
     await first;
     assert.equal(ui.element("connection-state").textContent, "Connecting...");
-    assert.equal(ui.element("btn-connect").disabled, true);
-    assert.equal(ui.element("btn-disconnect").disabled, false);
     assert.equal(ui.element("refusal-overlay").classList.contains("hidden"), true);
-    secondBody.resolve({ nonce_hex: "a5".repeat(32), desktop_available: false });
+    secondBody.resolve(available({ desktop_available: false }));
     await second;
     assert.equal(ui.element("connection-state").textContent, "Refused");
     assert.equal(ui.element("btn-connect").disabled, false);
-    assert.equal(ui.sockets(), 0);
+    assert.equal(ui.sockets.length, 0);
 });
 
-test("pagehide and bfcache restoration cancel pending UI work and permit a fresh connect", async () => {
+test("pagehide and bfcache restoration cancel pending UI work and allow a fresh attempt", async () => {
     const body = deferred();
-    const ui = uiFixture((index) => index === 0 ? body.promise : {
-        nonce_hex: "a5".repeat(32), desktop_available: false,
-    });
+    const ui = uiFixture((index) => index === 0 ? body.promise : available({ desktop_available: false }));
     const pending = ui.click("btn-connect");
     await nextTurn();
     ui.event("pagehide");
     ui.event("pageshow", { persisted: true });
+    await pending;
     assert.equal(ui.requests[0].options.signal.aborted, true);
     assert.equal(ui.element("btn-connect").disabled, false);
     assert.equal(ui.element("btn-disconnect").disabled, true);
-    body.resolve({ nonce_hex: "a5".repeat(32), desktop_available: false });
-    await pending;
-    assert.equal(ui.element("connection-state").textContent, "Disconnected (bfcache_restore)");
+    body.resolve(available({ desktop_available: false }));
+    await nextTurn();
+    assert.equal(ui.element("connection-state").textContent, "Disconnected");
     assert.equal(ui.element("refusal-overlay").classList.contains("hidden"), true);
     await ui.click("btn-connect");
-    assert.equal(ui.requests.length, 2);
     assert.equal(ui.element("connection-state").textContent, "Refused");
-    assert.equal(ui.sockets(), 0);
 });
 
-test("WebSocket open remains awaiting authorization and cannot enable observation controls", async () => {
+test("socket open and arbitrary media bytes cannot enable observation or control", async () => {
     const ui = uiFixture(available());
     const pending = ui.click("btn-connect");
     await nextTurn();
-    ui.socketInstances[0].open();
+    ui.sockets[0].open();
     await pending;
     assert.equal(ui.element("connection-state").textContent, "Awaiting session authorization");
+    for (const button of ["btn-request-control", "btn-release-control", "btn-fullscreen"]) {
+        assert.equal(ui.element(button).disabled, true);
+    }
+    // No JS FRTK/media parser may infer a usable session from unvalidated bytes.
+    ui.sockets[0].message(Uint8Array.of(70, 82, 84, 75, 1).buffer);
+    assert.equal(ui.element("connection-state").textContent, "Refused");
+    assert.equal(ui.element("freshness-badge").textContent, "View: Unverified");
     assert.equal(ui.element("btn-request-control").disabled, true);
-    assert.equal(ui.element("btn-fullscreen").disabled, true);
-    assert.equal(ui.element("btn-connect").disabled, true);
-    assert.equal(ui.element("btn-disconnect").disabled, false);
-    ui.socketInstances[0].peerClose();
-    assert.equal(ui.element("btn-connect").disabled, false);
-    assert.equal(ui.element("btn-disconnect").disabled, true);
 });
 
-test("a superseded decoder configuration cannot disconnect its replacement in the same connection", async () => {
-    const firstProbe = deferred();
-    const secondProbe = deferred();
-    let configurations = 0;
-    const ui = uiFixture(available(), {
-        configure: () => (++configurations === 1 ? firstProbe.promise : secondProbe.promise),
-    });
-    const pending = ui.click("btn-connect");
+
+test("a stalled browser package load expires before a Rust adapter exists", async () => {
+    const loading = deferred();
+    const f = ioFixture(available(), { createAdapter: () => loading.promise });
+    const refusals = [];
+    const client = f.makeClient({ onRefused: (error) => refusals.push(error.code) });
+    const pending = client.connect("observer");
+    const expired = assert.rejects(pending, { code: "browser_client_load_timeout" });
     await nextTurn();
-    ui.socketInstances[0].open();
+    assert.equal(f.timers.size, 1);
+    f.tick(15099);
+    assert.equal(client.closed, false);
+    f.tick(15100);
+    await expired;
+    assert.equal(client.closed, true);
+    assert.equal(f.timers.size, 0);
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.sockets.length, 0);
+    assert.deepEqual(refusals, ["browser_client_load_timeout"]);
+
+    let freed = 0;
+    loading.resolve({ core: { free() { freed += 1; } }, maxBootstrapBytes: 4096, maxControlRecordBytes: 4096 });
+    await nextTurn();
+    assert.equal(freed, 1, "a late package result disposes only its original adapter");
+    assert.equal(f.requests.length, 0);
+});
+
+test("a retired loading watchdog cannot close its replacement connection", async () => {
+    const loading = deferred();
+    const f = ioFixture();
+    const createAdapter = f.window.FrankenRust.createAdapter;
+    let attempts = 0;
+    f.window.FrankenRust.createAdapter = () => attempts++ === 0 ? loading.promise : createAdapter();
+    const refusals = [];
+    const client = f.makeClient({ onRefused: (error) => refusals.push(error.code) });
+    const old = client.connect("observer");
+    const cancelled = assert.rejects(old, { code: "browser_connection_cancelled" });
+    await nextTurn();
+    const staleWatchdog = Array.from(f.timers.values())[0];
+
+    f.tick(15000);
+    await open(client, f);
+    await cancelled;
+    const replacement = client.controlSocket;
+    f.tick(15100);
+    staleWatchdog();
+    assert.equal(client.controlSocket, replacement);
+    assert.equal(client.closed, false);
+    assert.deepEqual(refusals, []);
+
+    let freed = 0;
+    loading.resolve({ core: { free() { freed += 1; } }, maxBootstrapBytes: 4096, maxControlRecordBytes: 4096 });
+    await nextTurn();
+    assert.equal(freed, 1);
+    assert.equal(f.cores[0].freed, 0);
+    assert.equal(f.timers.size, 1, "only the replacement Rust deadline remains");
+    client.disconnect();
+    assert.equal(f.timers.size, 0);
+});
+
+test("loading the browser package never resets the original Rust start time", async () => {
+    const loading = deferred();
+    const f = ioFixture();
+    const createAdapter = f.window.FrankenRust.createAdapter;
+    f.window.FrankenRust.createAdapter = () => loading.promise;
+    const client = f.makeClient();
+    const pending = client.connect("observer");
+    await nextTurn();
+    f.tick(5000);
+    loading.resolve(await createAdapter());
+    await nextTurn();
+    assert.deepEqual(f.cores[0].calls.find((call) => call[0] === "begin"), ["begin", "observer", 100]);
+    assert.equal(f.cores[0].calls.find((call) => call[0] === "acceptBootstrap")[3], 5000);
+    assert.equal(f.timers.size, 1, "successful loading replaces the I/O watchdog with Rust ticking");
+    f.sockets[0].open();
     await pending;
-    // Reused wire generations still represent distinct local configuration attempts.
-    ui.video(decoderConfiguration(37));
-    ui.video(decoderConfiguration(37));
-    secondProbe.resolve({ supported: true });
-    await nextTurn();
-    firstProbe.resolve({ supported: false, cancelled: true, code: "decoder_configuration_cancelled" });
-    await nextTurn();
-    assert.equal(configurations, 2);
-    assert.equal(ui.socketInstances[0].closeCalls.length, 0);
-    assert.equal(ui.element("connection-state").textContent, "Awaiting session authorization");
-    assert.equal(ui.element("refusal-overlay").classList.contains("hidden"), true);
-    assert.equal(ui.element("btn-disconnect").disabled, false);
-    ui.click("btn-disconnect");
-});
-
-test("a retired connection's decoder refusal cannot close a replacement connection", async () => {
-    const probe = deferred();
-    const ui = uiFixture(available(), { configure: () => probe.promise });
-    const first = ui.click("btn-connect");
-    await nextTurn();
-    ui.socketInstances[0].open();
-    await first;
-    ui.video(decoderConfiguration(1));
-    ui.click("btn-disconnect");
-    const second = ui.click("btn-connect");
-    await nextTurn();
-    ui.socketInstances[1].open();
-    await second;
-    probe.resolve({ supported: false, code: "no_supported_hevc_decoder", reason: "Retired probe" });
-    await nextTurn();
-    assert.equal(ui.socketInstances[1].closeCalls.length, 0);
-    assert.equal(ui.element("connection-state").textContent, "Awaiting session authorization");
-    assert.equal(ui.element("refusal-overlay").classList.contains("hidden"), true);
-    ui.click("btn-disconnect");
-});
-
-test("a current decoder configuration refusal still closes the connection and reports its code", async () => {
-    const ui = uiFixture(available(), {
-        configure: async () => ({ supported: false, code: "hevc_configuration_failed", reason: "HEVC configuration was refused." }),
-    });
-    const pending = ui.click("btn-connect");
-    await nextTurn();
-    ui.socketInstances[0].open();
-    await pending;
-    ui.video(decoderConfiguration(1));
-    await nextTurn();
-    assert.equal(ui.socketInstances[0].closeCalls.length, 1);
-    assert.equal(ui.element("connection-state").textContent, "Disconnected (hevc_configuration_failed)");
-    assert.equal(ui.element("refusal-title").textContent, "HEVC Unavailable (hevc_configuration_failed)");
-    assert.equal(ui.element("refusal-overlay").classList.contains("hidden"), false);
-    assert.equal(ui.element("btn-connect").disabled, false);
+    assert.equal(f.cores[0].calls.find((call) => call[0] === "clientHello")[2], 5000);
+    client.disconnect();
+    assert.equal(f.timers.size, 0);
 });
