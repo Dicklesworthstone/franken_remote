@@ -18,6 +18,39 @@ These test definitions are not claimed as executed results. `frd run` listener
 composition, real host-session/media/control integration, H3, and live browser
 qualification remain open under `fr-w9jo` and the browser ingress beads.
 
+## Shared client lifecycle and decoder ownership (2026-11-21)
+
+`ClientSession` now binds each projected control grant to the exact outstanding
+request sequence. Focus loss, hidden windows, stale presentation, changed
+mapping and display-target changes retire pending requests and retained grants.
+Fresh presentation permits another explicit request; it cannot restore old
+lease or ticket IDs. Removed displays do not silently retarget control, and
+regressed or contradictory catalogs cannot replace the current catalog.
+Authority-bearing lease and input-ticket handles no longer appear in its traces.
+
+`DecoderScheduler` now separates admission, native decode completion and
+presentation. Counts and bytes are checked before mutation; an oversized picture
+or pressure from undecoded references produces a typed refusal. In-flight work
+and undecoded references cannot be discarded to satisfy a queue limit. Only
+completed presentation candidates and queued nonreference pictures can make room.
+Decode callbacks consume an original local owner token, so a replacement
+decoder cannot accept an older callback with the same wire frame number.
+Disconnect and explicit decoder recovery fence admission and presentation while
+retaining original reservations. A separate original-owner close token confirms
+native cleanup before those reservations can be released or decoding restarted.
+Focus and readiness changes alone do not tear down observation's decoder.
+
+Validation includes the passing full `fr-client` Cargo test suite and 32 focused
+session/lifecycle/scheduler cases compiled against the final production source.
+All-target `fr-client` check and strict Clippy also pass. Pinned formatting and
+targeted UBS analysis passed; UBS reported no critical
+findings, and its warnings were confined to test assertions and test unwraps.
+
+This shared session projection does not replace the authenticated input owner's
+lease, ticket, freshness or submission-time checks. Portable core evidence is
+separate from native decoder, browser desktop and live tailnet qualification.
+The implementation is tracked by `fr-m5sn`.
+
 ## Served Rust/WASM browser transport and embedded package (2026-11-20)
 
 The served shell now loads the real Rust/WASM startup owner. JavaScript sends

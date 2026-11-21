@@ -247,9 +247,13 @@ fn mapping_generation_changes_reject_stale_coordinates() {
     };
     session.on_session_opened(binding, now).unwrap();
     session.update_view_freshness(true, now).unwrap();
-    session.request_control(now).unwrap();
+    let request = session.request_control(now).unwrap();
     session
-        .on_control_granted(InputLeaseId::from_raw(10), InputTicketId::from_raw(20))
+        .on_control_granted(
+            request,
+            InputLeaseId::from_raw(10),
+            InputTicketId::from_raw(20),
+        )
         .unwrap();
 
     let disp_0 = DisplayGeometryGeneration::INITIAL;
@@ -268,7 +272,21 @@ fn mapping_generation_changes_reject_stale_coordinates() {
     );
     assert_eq!(session.diagnostics().mapping_rejections, 1);
 
-    // New generation coordinates pass
+    // A mapping update retires old control; freshness and an explicit grant
+    // are both required before even new-generation coordinates can pass.
+    assert_eq!(
+        session.validate_coordinate_mapping(disp_1, view_1),
+        Err(SessionError::InvalidState)
+    );
+    session.update_view_freshness(true, now).unwrap();
+    let next = session.request_control(now).unwrap();
+    session
+        .on_control_granted(
+            next,
+            InputLeaseId::from_raw(11),
+            InputTicketId::from_raw(21),
+        )
+        .unwrap();
     assert!(session.validate_coordinate_mapping(disp_1, view_1).is_ok());
 }
 
@@ -290,9 +308,13 @@ fn focus_loss_suspends_input_readiness_and_invalidates_ticket() {
     };
     session.on_session_opened(binding, now).unwrap();
     session.update_view_freshness(true, now).unwrap();
-    session.request_control(now).unwrap();
+    let request = session.request_control(now).unwrap();
     session
-        .on_control_granted(InputLeaseId::from_raw(10), InputTicketId::from_raw(20))
+        .on_control_granted(
+            request,
+            InputLeaseId::from_raw(10),
+            InputTicketId::from_raw(20),
+        )
         .unwrap();
 
     assert!(session.diagnostics().is_controlling);
@@ -321,10 +343,28 @@ fn focus_loss_suspends_input_readiness_and_invalidates_ticket() {
         Err(SessionError::InputSuspended)
     );
 
-    // Focus regained: if lease still valid and view fresh, control resumes
+    // Focus regain never restores the old lease/ticket or stale presentation.
+    assert_eq!(session.diagnostics().current_lease, None);
     let resumed = session.on_focus_gained(now).unwrap();
-    assert!(resumed);
-    assert!(matches!(session.state(), SessionState::Controlling { .. }));
+    assert!(!resumed);
+    assert!(matches!(
+        session.state(),
+        SessionState::Viewing {
+            view_fresh: false,
+            ..
+        }
+    ));
+    assert!(!session.diagnostics().is_controlling);
+    session.update_view_freshness(true, now).unwrap();
+    let next = session.request_control(now).unwrap();
+    assert!(next > request);
+    session
+        .on_control_granted(
+            next,
+            InputLeaseId::from_raw(11),
+            InputTicketId::from_raw(21),
+        )
+        .unwrap();
     assert!(session.diagnostics().is_controlling);
 }
 
@@ -407,9 +447,13 @@ fn focus_gain_with_expired_lease_refuses_silent_resurrection() {
     };
     session.on_session_opened(binding, now).unwrap();
     session.update_view_freshness(true, now).unwrap();
-    session.request_control(now).unwrap();
+    let request = session.request_control(now).unwrap();
     session
-        .on_control_granted(InputLeaseId::from_raw(10), InputTicketId::from_raw(20))
+        .on_control_granted(
+            request,
+            InputLeaseId::from_raw(10),
+            InputTicketId::from_raw(20),
+        )
         .unwrap();
 
     // Focus is lost

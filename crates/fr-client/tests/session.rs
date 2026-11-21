@@ -169,7 +169,7 @@ fn reconnect_never_silently_restores_revoked_input_lease() {
     // Host grants control: lease 500, ticket 600
     let lease_1 = InputLeaseId::from_raw(500);
     let ticket_1 = InputTicketId::from_raw(600);
-    session.on_control_granted(lease_1, ticket_1).unwrap();
+    session.on_control_granted(seq, lease_1, ticket_1).unwrap();
     assert!(matches!(
         session.state(),
         SessionState::Controlling {
@@ -226,7 +226,9 @@ fn reconnect_never_silently_restores_revoked_input_lease() {
     // Host issues a brand new lease: lease 501, ticket 601
     let lease_2 = InputLeaseId::from_raw(501);
     let ticket_2 = InputTicketId::from_raw(601);
-    session.on_control_granted(lease_2, ticket_2).unwrap();
+    session
+        .on_control_granted(seq_2, lease_2, ticket_2)
+        .unwrap();
     assert_eq!(session.diagnostics().current_lease, Some(501));
     assert!(session.diagnostics().is_controlling);
 }
@@ -239,9 +241,13 @@ fn stale_view_suspends_input_readiness_while_diagnostics_continue() {
     session.connect(now).unwrap();
     session.on_session_opened(sample_binding(1), now).unwrap();
     session.update_view_freshness(true, now).unwrap();
-    session.request_control(now).unwrap();
+    let request = session.request_control(now).unwrap();
     session
-        .on_control_granted(InputLeaseId::from_raw(10), InputTicketId::from_raw(20))
+        .on_control_granted(
+            request,
+            InputLeaseId::from_raw(10),
+            InputTicketId::from_raw(20),
+        )
         .unwrap();
 
     assert!(session.diagnostics().is_controlling);
@@ -278,9 +284,23 @@ fn stale_view_suspends_input_readiness_while_diagnostics_continue() {
     assert!(!diag.is_controlling);
     assert_eq!(diag.stale_view_suspensions, 1);
 
-    // View freshness restored: input resumes
+    // Freshness restores viewing only. The old grant has been retired.
+    assert_eq!(session.diagnostics().current_lease, None);
     session.update_view_freshness(true, now).unwrap();
-    assert!(matches!(session.state(), SessionState::Controlling { .. }));
+    assert!(matches!(session.state(), SessionState::Viewing { .. }));
+    assert_eq!(
+        session.validate_coordinate_mapping(disp, view),
+        Err(SessionError::InvalidState)
+    );
+    let renewed_request = session.request_control(now).unwrap();
+    assert!(renewed_request > request);
+    session
+        .on_control_granted(
+            renewed_request,
+            InputLeaseId::from_raw(11),
+            InputTicketId::from_raw(21),
+        )
+        .unwrap();
     assert!(session.validate_coordinate_mapping(disp, view).is_ok());
 }
 
@@ -292,9 +312,13 @@ fn mapping_generation_rejection_of_stale_coordinates() {
     session.connect(now).unwrap();
     session.on_session_opened(sample_binding(1), now).unwrap();
     session.update_view_freshness(true, now).unwrap();
-    session.request_control(now).unwrap();
+    let request = session.request_control(now).unwrap();
     session
-        .on_control_granted(InputLeaseId::from_raw(10), InputTicketId::from_raw(20))
+        .on_control_granted(
+            request,
+            InputLeaseId::from_raw(10),
+            InputTicketId::from_raw(20),
+        )
         .unwrap();
 
     let disp_0 = DisplayGeometryGeneration::INITIAL;
@@ -313,7 +337,20 @@ fn mapping_generation_rejection_of_stale_coordinates() {
     );
     assert_eq!(session.diagnostics().mapping_rejections, 1);
 
-    // Coordinates using the updated generation pass
+    // New coordinates need fresh presentation and a new explicit grant too.
+    assert_eq!(
+        session.validate_coordinate_mapping(disp_1, view_1),
+        Err(SessionError::InvalidState)
+    );
+    session.update_view_freshness(true, now).unwrap();
+    let renewed_request = session.request_control(now).unwrap();
+    session
+        .on_control_granted(
+            renewed_request,
+            InputLeaseId::from_raw(11),
+            InputTicketId::from_raw(21),
+        )
+        .unwrap();
     assert!(session.validate_coordinate_mapping(disp_1, view_1).is_ok());
 }
 
@@ -352,18 +389,22 @@ fn decoder_scheduler_newest_ready_frame_wins_and_discards_obsolete_presentation(
     assert_eq!(scheduler.queued_count(), 3);
     assert_eq!(scheduler.queued_bytes(), 3000);
 
+    // Admission is not decoding. Complete the original FIFO operations first.
+    assert_eq!(scheduler.select_presentation_frame(true), None);
+    for frame in 10..=12 {
+        let work = scheduler.next_decode().unwrap();
+        assert_eq!(work.picture().frame_number, frame);
+        scheduler.on_frame_decoded(work).unwrap();
+    }
     // Present frames: Newest ready frame (12) wins!
     let winning = scheduler.select_presentation_frame(true);
     assert_eq!(winning, Some(12));
 
-    // Obsolete presentation work discarded: frames 10 and 11 presentation skipped
-    // Decoded vs presented progress reported separately
-    scheduler.on_frame_decoded();
-    scheduler.on_frame_decoded();
-    scheduler.on_frame_decoded();
-
-    assert_eq!(scheduler.queued_count(), 2);
-    assert_eq!(scheduler.queued_bytes(), 2000);
+    // Both obsolete presentation candidates are retired, never presented later.
+    // Their codec-owned reference surfaces are outside this compressed queue.
+    assert_eq!(scheduler.queued_count(), 0);
+    assert_eq!(scheduler.queued_bytes(), 0);
+    assert_eq!(scheduler.select_presentation_frame(true), None);
 }
 
 #[test]
@@ -374,9 +415,13 @@ fn window_occlusion_does_not_present_and_suspends_input() {
     session.connect(now).unwrap();
     session.on_session_opened(sample_binding(1), now).unwrap();
     session.update_view_freshness(true, now).unwrap();
-    session.request_control(now).unwrap();
+    let request = session.request_control(now).unwrap();
     session
-        .on_control_granted(InputLeaseId::from_raw(10), InputTicketId::from_raw(20))
+        .on_control_granted(
+            request,
+            InputLeaseId::from_raw(10),
+            InputTicketId::from_raw(20),
+        )
         .unwrap();
 
     assert!(matches!(session.state(), SessionState::Controlling { .. }));

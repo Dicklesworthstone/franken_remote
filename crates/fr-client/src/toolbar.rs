@@ -313,10 +313,10 @@ mod tests {
         assert_eq!(toolbar.session_state_label, "Viewing (Fresh)");
 
         // Control granted
-        session.request_control(now).unwrap();
+        let request = session.request_control(now).unwrap();
         let lease = fr_core::ids::InputLeaseId::from_raw(10);
         let ticket = fr_core::ids::InputTicketId::from_raw(20);
-        session.on_control_granted(lease, ticket).unwrap();
+        session.on_control_granted(request, lease, ticket).unwrap();
         toolbar.update_from_session(&session);
         assert_eq!(toolbar.session_state_label, "Controlling");
         assert!(toolbar.is_controlling);

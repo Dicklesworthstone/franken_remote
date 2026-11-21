@@ -555,7 +555,8 @@ impl BrowserSessionCore {
         if now_us >= until {
             return Err(SessionError::LeaseRevoked);
         }
-        self.session.on_control_granted(grant.lease, grant.ticket)?;
+        self.session
+            .on_control_granted(grant.request_sequence, grant.lease, grant.ticket)?;
         self.control_until_us = Some(until);
         Ok(())
     }
