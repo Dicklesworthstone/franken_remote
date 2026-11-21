@@ -68,6 +68,34 @@ Content-Length header. Malformed UTF-8, oversized records, wrong protocol
 messages, unavailable desktop capability, and typed host refusals terminate
 startup. Diagnostics are static and do not include peer text or credentials.
 
+## Native HTTPS/WSS startup boundary
+
+The native ingress now emits the same bootstrap schema that the Rust adapter
+validates: WSS profile and version, the requested role, and the explicit
+`desktop_available: false` capability. An unavailable bootstrap allocates no
+nonce, session, control binding, media queue, or attachment ticket. The server
+retains exact Origin, Host/SNI, Fetch Metadata, and credential-in-URL checks.
+
+The control socket accepts a bounded canonical `FRD0` browser ClientHello. A
+policy-issued nonce is single-use and bound to its original peer and role; even
+a valid hello receives a canonical `HostUnavailable` refusal until a real host
+session is attached. Legacy `FRBA` authentication and `FRAT`/`FRTK` attachment
+messages cannot construct a session. Auxiliary sockets close immediately.
+
+TLS setup, HTTP headers and body, the WebSocket upgrade, and the first control
+message share the configured original startup deadline. The first-message
+authentication budget is also enforced while no bytes arrive. Progress cannot
+restart either deadline, and a peer's terminal refusal is never answered by
+another refusal.
+
+`cargo test -p frd --test browser_ingress --locked` covers these paths with
+actual TCP sockets and the real Rust browser adapter. Its TLS cases use a
+fresh test CA and normal certificate/hostname verification, including an
+otherwise valid certificate whose SNI violates the configured host policy.
+These are local ingress tests: `frd run` still needs installed-tailnet listener
+composition and authenticated host-session/media integration before browser
+viewing is available.
+
 ## Validation and remaining integration
 
 The portable Rust suite tests policy and ownership. The actual-WASM suite loads

@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 //! Asupersync HTTPS/WSS browser workstation ingress (`frd`).
 //!
-//! Wires together the existing hardened security and transport layers:
+//! Serves self-hosted assets and canonical, explicitly unavailable startup.
+//! No HTTP bootstrap or authenticated WebSocket creates desktop authority.
+//! Wires together the existing security and transport layers:
 //! - [`crate::broker::browser_security::BrowserSecurityPolicy`] (exact `Origin`,
 //!   `Host`/SNI DNS-rebinding defense, Fetch Metadata, URL query safety,
 //!   CSPRNG HMAC-bound single-use bootstrap nonces & role-specific auxiliary tickets,
-//!   first-message `SocketAuthGuard`).
+//!   bounded canonical first-message authentication).
 //! - [`crate::broker::browser_assets::BrowserAssets`] (self-hosted `web/` shell,
 //!   strict CSP, zero CDN, zero authority on `GET`).
 //! - [`fr_transport::wss`] (`ReceiverCreditWindow`, `ChannelSupervisor`,
@@ -20,9 +22,9 @@ pub mod websocket;
 use crate::broker::{
     browser_assets::BrowserAssets,
     browser_security::{
-        AuxiliaryChannelRole, BROWSER_API_CSP, BROWSER_UI_CSP, BootstrapRequest,
-        BrowserSecurityPolicy, BrowserSessionRole, ExpectedHostOrigin, FIRST_MESSAGE_AUTH_TIMEOUT,
-        FetchMetadata, MAX_AUTH_MESSAGE_BYTES, SocketAuthGuard, check_url_query_safety,
+        AuxiliaryChannelRole, BROWSER_API_CSP, BROWSER_UI_CSP, BrowserSecurityPolicy,
+        BrowserSessionRole, ExpectedHostOrigin, FIRST_MESSAGE_AUTH_TIMEOUT, FetchMetadata,
+        check_url_query_safety,
     },
 };
 use asupersync::{
@@ -41,9 +43,10 @@ use fr_transport::wss::{
     WssProfile, is_compression_allowed,
 };
 use fr_wire::{
-    input::{InputDelivery, InputDirection},
-    negotiation::ControlBinding,
-    receiver_pressure::{self, ChannelRole},
+    WireError,
+    input::InputDelivery,
+    negotiation::{self, Role, browser},
+    refusal::{self, Reason, Refused},
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -60,11 +63,6 @@ pub const MAX_OUTBOUND_VIDEO_QUEUE: usize = 8;
 pub const DEFAULT_VIDEO_CREDIT_BYTES: u64 = 2 * 1024 * 1024;
 /// Default receiver credit ceiling in frames for a browser video WSS channel.
 pub const DEFAULT_VIDEO_CREDIT_FRAMES: u64 = 4;
-
-const ATTACH_MAGIC: [u8; 4] = *b"FRAT";
-const TICKET_GRANT_MAGIC: [u8; 4] = *b"FRTK";
-const ATTACH_MESSAGE_BYTES: usize = 4 + 16 + 1 + 32;
-const TICKET_GRANT_BYTES: usize = 4 + 1 + 16 + 32;
 
 /// Configuration for the `frd` HTTPS/WSS browser ingress listener.
 #[derive(Debug, Clone)]
@@ -142,8 +140,6 @@ pub struct BrowserSessionMetrics {
 struct ActiveBrowserSession {
     peer_ip: IpAddr,
     role: BrowserSessionRole,
-    control_binding: ControlBinding,
-    video_channel_binding: u32,
     credit_epoch: u64,
     video_supervisor: ChannelSupervisor,
     video_credit: ReceiverCreditWindow,
@@ -312,13 +308,16 @@ impl BrowserIngress {
         peer_ip: IpAddr,
         now_fn: impl Fn() -> HostInstant,
     ) -> std::io::Result<()> {
-        let tls = acceptor
-            .accept(tcp)
-            .await
-            .map_err(|_| std::io::Error::other("TLS handshake failed"))?;
-        let sni = tls.sni_hostname().map(str::to_owned);
-        self.serve_stream(tls, peer_ip, sni.as_deref(), now_fn)
-            .await
+        bounded_startup(self.startup_budget(), async {
+            let tls = acceptor
+                .accept(tcp)
+                .await
+                .map_err(|_| std::io::Error::other("TLS handshake failed"))?;
+            let sni = tls.sni_hostname().map(str::to_owned);
+            self.serve_stream_inner(tls, peer_ip, sni.as_deref(), now_fn)
+                .await
+        })
+        .await
     }
 
     /// Serve one HTTP/1.1 or RFC 6455 WSS connection over any Asupersync stream.
@@ -327,6 +326,24 @@ impl BrowserIngress {
     /// passing a plain stream is for loopback tests and enforces identical origin,
     /// Host/SNI, Fetch Metadata, nonce, ticket, and credit checks.
     pub async fn serve_stream<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: S,
+        peer_ip: IpAddr,
+        sni: Option<&str>,
+        now_fn: impl Fn() -> HostInstant,
+    ) -> std::io::Result<()> {
+        bounded_startup(
+            self.startup_budget(),
+            self.serve_stream_inner(stream, peer_ip, sni, now_fn),
+        )
+        .await
+    }
+
+    fn startup_budget(&self) -> Duration {
+        Duration::from_millis(u64::from(self.config.limits.max_handshake_duration_ms()))
+    }
+
+    async fn serve_stream_inner<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         mut stream: S,
         peer_ip: IpAddr,
@@ -364,36 +381,23 @@ impl BrowserIngress {
 
         match req.path() {
             "/api/session/bootstrap" => {
-                self.handle_bootstrap(&mut stream, &req, &metadata, peer_ip, sni, now_fn())
+                self.handle_bootstrap(&mut stream, &req, &metadata, sni)
                     .await
             }
             "/ws/control" => {
-                self.handle_ws_control(&mut stream, &req, &metadata, peer_ip, sni, &now_fn)
-                    .await
+                bounded_startup(
+                    first_message_auth_duration(),
+                    self.handle_ws_control(&mut stream, &req, &metadata, peer_ip, sni, &now_fn),
+                )
+                .await
             }
             "/ws/video" => {
-                self.handle_ws_auxiliary(
-                    &mut stream,
-                    &req,
-                    &metadata,
-                    peer_ip,
-                    sni,
-                    AuxiliaryChannelRole::VideoStream,
-                    &now_fn,
-                )
-                .await
+                self.handle_ws_auxiliary(&mut stream, &req, &metadata, sni, WssChannelRole::Video)
+                    .await
             }
             "/ws/audio" => {
-                self.handle_ws_auxiliary(
-                    &mut stream,
-                    &req,
-                    &metadata,
-                    peer_ip,
-                    sni,
-                    AuxiliaryChannelRole::AudioDownlink,
-                    &now_fn,
-                )
-                .await
+                self.handle_ws_auxiliary(&mut stream, &req, &metadata, sni, WssChannelRole::Audio)
+                    .await
             }
             _ => {
                 self.handle_static_get(&mut stream, &req, &metadata, sni)
@@ -471,11 +475,8 @@ impl BrowserIngress {
         stream: &mut S,
         req: &http::HttpRequest,
         metadata: &FetchMetadata<'_>,
-        peer_ip: IpAddr,
         sni: Option<&str>,
-        now: HostInstant,
     ) -> std::io::Result<()> {
-        // State-changing bootstrap is strictly POST; navigation GET must never issue a nonce.
         if req.method != "POST" {
             return http::write_http_response(
                 stream,
@@ -487,68 +488,38 @@ impl BrowserIngress {
             )
             .await;
         }
-
-        let role = match parse_requested_role(&req.body) {
-            Ok(role) => role,
-            Err(()) => {
-                return http::write_http_response(
-                    stream,
-                    400,
-                    "Bad Request",
-                    "application/json",
-                    BROWSER_API_CSP,
-                    b"{\"error\":\"invalid_bootstrap_role\"}",
-                )
-                .await;
-            }
-        };
-
-        let Ok(session_id) = random_nonzero_session_id() else {
+        // Preserve all origin checks even for an unavailable capability. No
+        // identity, approval, nonce or session is inferred from this request.
+        if !self.state_changing_allowed(req, metadata, sni) {
             return http::write_http_response(
                 stream,
-                503,
-                "Service Unavailable",
+                403,
+                "Forbidden",
                 "application/json",
                 BROWSER_API_CSP,
-                b"{\"error\":\"entropy_unavailable\"}",
+                b"{\"error\":\"bootstrap_origin_policy_refused\"}",
+            )
+            .await;
+        }
+        let Ok(role) = parse_requested_role(&req.body) else {
+            return http::write_http_response(
+                stream,
+                400,
+                "Bad Request",
+                "application/json",
+                BROWSER_API_CSP,
+                b"{\"error\":\"invalid_bootstrap_role\"}",
             )
             .await;
         };
 
-        let boot_req = BootstrapRequest {
-            uri: &req.target,
-            host_header: req.host.as_deref(),
-            origin_header: req.origin.as_deref(),
-            sni,
-            metadata,
-            peer_ip,
-            session_id,
-            role,
-            now,
-        };
-
-        let secret = match self.policy.handle_bootstrap_post(&boot_req) {
-            Ok(secret) => secret,
-            Err(_) => {
-                return http::write_http_response(
-                    stream,
-                    403,
-                    "Forbidden",
-                    "application/json",
-                    BROWSER_API_CSP,
-                    b"{\"error\":\"bootstrap_origin_policy_refused\"}",
-                )
-                .await;
-            }
-        };
-
+        // Exactly the Rust/WASM bootstrap schema. In particular, no caller-
+        // constructed binding, nonce, ticket or invented observation is sent.
         let body = format!(
-            "{{\"nonce_hex\":\"{}\",\"session_id_hex\":\"{:032x}\",\"host_boot_hex\":\"{:032x}\",\"os_session_hex\":\"{:032x}\",\"control_binding_id\":1,\"video_binding_id\":2,\"credit_epoch\":1,\"role\":\"{role}\",\"transport_profile\":\"{}\",\"expires_in_ms\":15000}}",
-            hex_encode(secret.as_bytes()),
-            session_id.as_raw(),
-            self.config.host_boot.as_raw(),
-            self.config.os_session.as_raw(),
+            "{{\"transport_profile\":\"{}\",\"profile_id\":{},\"profile_version\":{},\"role\":\"{role}\",\"desktop_available\":false,\"refusal_code\":\"browser_session_unavailable\"}}",
             self.transport_profile().diagnostic_label(),
+            browser::WSS_PROFILE,
+            browser::PROFILE_VERSION,
         );
         http::write_http_response(
             stream,
@@ -561,29 +532,13 @@ impl BrowserIngress {
         .await
     }
 
-    async fn validate_ws_upgrade<S: AsyncWrite + Unpin>(
+    fn state_changing_allowed(
         &self,
-        stream: &mut S,
         req: &http::HttpRequest,
         metadata: &FetchMetadata<'_>,
         sni: Option<&str>,
-        role: WssChannelRole,
-    ) -> std::io::Result<bool> {
-        if req.method != "GET" || !req.is_websocket_upgrade() {
-            http::write_http_response(
-                stream,
-                400,
-                "Bad Request",
-                "application/json",
-                BROWSER_API_CSP,
-                b"{\"error\":\"websocket_upgrade_required\"}",
-            )
-            .await?;
-            return Ok(false);
-        }
-
-        // Reject bearer query strings, Host/SNI mismatches, non-exact Origins, and cross-site/iframe.
-        let origin_ok = check_url_query_safety(&req.target).is_ok()
+    ) -> bool {
+        check_url_query_safety(&req.target).is_ok()
             && self
                 .policy
                 .expected_origin()
@@ -594,7 +549,19 @@ impl BrowserIngress {
                 .expected_origin()
                 .validate_origin(req.origin.as_deref())
                 .is_ok()
-            && metadata.validate_state_changing().is_ok();
+            && metadata.validate_state_changing().is_ok()
+    }
+
+    async fn validate_ws_upgrade<S: AsyncWrite + Unpin>(
+        &self,
+        stream: &mut S,
+        req: &http::HttpRequest,
+        metadata: &FetchMetadata<'_>,
+        sni: Option<&str>,
+        role: WssChannelRole,
+    ) -> std::io::Result<bool> {
+        // Reject bearer query strings, Host/SNI mismatches, non-exact Origins, and cross-site/iframe.
+        let origin_ok = self.state_changing_allowed(req, metadata, sni);
         if !origin_ok {
             http::write_http_response(
                 stream,
@@ -603,6 +570,19 @@ impl BrowserIngress {
                 "application/json",
                 BROWSER_API_CSP,
                 b"{\"error\":\"websocket_origin_policy_refused\"}",
+            )
+            .await?;
+            return Ok(false);
+        }
+
+        if req.method != "GET" || !req.is_websocket_upgrade() {
+            http::write_http_response(
+                stream,
+                400,
+                "Bad Request",
+                "application/json",
+                BROWSER_API_CSP,
+                b"{\"error\":\"websocket_upgrade_required\"}",
             )
             .await?;
             return Ok(false);
@@ -625,288 +605,105 @@ impl BrowserIngress {
         sni: Option<&str>,
         now_fn: &impl Fn() -> HostInstant,
     ) -> std::io::Result<()> {
+        let started = now_fn();
         if !self
             .validate_ws_upgrade(stream, req, metadata, sni, WssChannelRole::Control)
             .await?
         {
             return Ok(());
         }
-
-        let mut guard = SocketAuthGuard::new(peer_ip, now_fn());
-        let first_frame = match websocket::read_ws_frame(stream, MAX_AUTH_MESSAGE_BYTES, true).await
-        {
+        let maximum = browser::MAX_RECORD
+            .min(usize::try_from(self.config.limits.max_control_message_bytes()).unwrap_or(0));
+        let first_frame = match websocket::read_ws_frame(stream, maximum, true).await {
             Ok(websocket::WsFrame::Binary(bytes)) => bytes,
-            _ => {
-                let _ = websocket::write_server_close(stream, 1008).await;
-                return Ok(());
-            }
+            _ => return websocket::write_server_close(stream, 1008).await,
         };
-
-        // Parse optional 37th role byte (default: Observer; observation precedes control).
-        let requested_role = if first_frame.len() == 37 && first_frame[36] == 1 {
-            BrowserSessionRole::Controller
-        } else {
-            BrowserSessionRole::Observer
-        };
-
-        let auth_now = now_fn();
-        let auth_result = self.policy.with_nonce_manager(|mgr| {
-            guard.process_auth_message(&first_frame, requested_role, mgr, auth_now)
-        });
-        let Ok(Ok(session_id)) = auth_result else {
-            let _ = websocket::write_server_close(stream, 1008).await;
-            return Ok(());
-        };
-        if guard.check_media_or_input_allowed().is_err() {
-            let _ = websocket::write_server_close(stream, 1008).await;
-            return Ok(());
+        // Terminal refusal never begins another negotiation or refusal exchange.
+        if refusal::decode(&first_frame, 0, maximum, InputDelivery::Reliable).is_ok() {
+            return websocket::write_server_close(stream, 1008).await;
         }
-
-        // Register bounded active browser session with ReceiverCreditWindow and ChannelSupervisor.
-        let control_binding = ControlBinding {
-            id: 1,
-            host_boot: self.config.host_boot,
-            os_session: self.config.os_session,
-            remote_session: session_id,
-        };
-        let video_channel_binding = 2u32;
-        let credit_epoch = 1u64;
-        let Ok(credit_window) = ReceiverCreditWindow::new(
-            credit_epoch,
-            self.config.max_video_credit_bytes,
-            self.config.max_video_credit_frames,
-        ) else {
-            let _ = websocket::write_server_close(stream, 1011).await;
-            return Ok(());
-        };
-
+        let now = now_fn();
+        let reason = if now < started
+            || started
+                .checked_add(FIRST_MESSAGE_AUTH_TIMEOUT)
+                .is_none_or(|deadline| now >= deadline)
         {
-            let Ok(mut sessions) = self.sessions.lock() else {
-                let _ = websocket::write_server_close(stream, 1011).await;
-                return Ok(());
-            };
-            if sessions.len() >= MAX_BROWSER_SESSIONS && !sessions.contains_key(&session_id) {
-                let _ = websocket::write_server_close(stream, 1013).await;
-                return Ok(());
-            }
-            sessions.insert(
-                session_id,
-                ActiveBrowserSession {
-                    peer_ip,
-                    role: requested_role,
-                    control_binding,
-                    video_channel_binding,
-                    credit_epoch,
-                    video_supervisor: ChannelSupervisor::new(WssChannelRole::Video, 4),
-                    video_credit: credit_window,
-                    video_attached: false,
-                    audio_attached: false,
-                    outbound_video: VecDeque::with_capacity(MAX_OUTBOUND_VIDEO_QUEUE),
-                    profile: self.transport_profile(),
-                },
-            );
-        }
-
-        // Issue single-use role-specific VideoStream auxiliary ticket over authenticated /ws/control.
-        let Ok(video_ticket) = self.policy.issue_auxiliary_ticket(
-            session_id,
-            AuxiliaryChannelRole::VideoStream,
-            peer_ip,
-            now_fn(),
-        ) else {
-            let _ = websocket::write_server_close(stream, 1011).await;
-            return Ok(());
+            Reason::Expired
+        } else {
+            self.hello_refusal(&first_frame, peer_ip, now, maximum)
         };
-        let mut grant_frame = [0u8; TICKET_GRANT_BYTES];
-        grant_frame[..4].copy_from_slice(&TICKET_GRANT_MAGIC);
-        grant_frame[4] = 1; // VideoStream
-        grant_frame[5..21].copy_from_slice(&session_id.as_raw().to_be_bytes());
-        grant_frame[21..53].copy_from_slice(video_ticket.as_bytes());
-        websocket::write_server_binary(stream, &grant_frame).await?;
-
-        // Bounded binary control loop: processes 0x0081 ReceiverPressure credit releases.
-        let max_ctrl = usize::try_from(self.config.limits.max_control_message_bytes())
-            .unwrap_or(64 * 1024)
-            .min(64 * 1024);
-        loop {
-            match websocket::read_ws_frame(stream, max_ctrl, true).await {
-                Ok(websocket::WsFrame::Binary(payload)) => {
-                    if let Ok((decoded_binding, report)) = receiver_pressure::decode(
-                        &payload,
-                        &self.config.limits,
-                        InputDirection::ViewerToHost,
-                        InputDelivery::Reliable,
-                    ) {
-                        if decoded_binding != control_binding {
-                            let _ = websocket::write_server_close(stream, 1008).await;
-                            break;
-                        }
-                        let applied = {
-                            let Ok(mut sessions) = self.sessions.lock() else {
-                                let _ = websocket::write_server_close(stream, 1011).await;
-                                break;
-                            };
-                            sessions.get_mut(&session_id).map(|s| {
-                                s.video_credit.apply_wire_pressure(
-                                    s.video_channel_binding,
-                                    ChannelRole::Video,
-                                    &report,
-                                )
-                            })
-                        };
-                        match applied {
-                            Some(Ok(_)) => {
-                                // Acknowledge credit applied with a 4-byte binary receipt "FRCR".
-                                websocket::write_server_binary(stream, b"FRCR").await?;
-                            }
-                            _ => {
-                                let _ = websocket::write_server_close(stream, 1008).await;
-                                break;
-                            }
-                        }
-                    } else {
-                        let _ = websocket::write_server_close(stream, 1008).await;
-                        break;
-                    }
-                }
-                Ok(websocket::WsFrame::Ping(data)) => {
-                    websocket::write_ws_frame(stream, 0x0A, &data, None).await?;
-                }
-                Ok(websocket::WsFrame::Pong(_)) => {}
-                Ok(websocket::WsFrame::Close) | Err(websocket::WsFrameError::Eof) => break,
-                Err(_) => {
-                    let _ = websocket::write_server_close(stream, 1002).await;
-                    break;
-                }
-            }
-        }
-        Ok(())
+        let mut bytes = [0; refusal::MAX_BYTES];
+        let length = refusal::encode(
+            Refused::connection(reason),
+            0,
+            maximum,
+            &mut bytes,
+            InputDelivery::Reliable,
+        )
+        .map_err(|_| std::io::Error::other("browser refusal encoding failed"))?;
+        websocket::write_server_binary(stream, &bytes[..length]).await?;
+        websocket::write_server_close(stream, 1008).await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn hello_refusal(
+        &self,
+        bytes: &[u8],
+        peer_ip: IpAddr,
+        now: HostInstant,
+        maximum: usize,
+    ) -> Reason {
+        let hello = match browser::decode_hello(bytes, maximum) {
+            Ok(hello) => hello,
+            Err(negotiation::Error::Profile) => return Reason::UnsupportedProfile,
+            Err(
+                negotiation::Error::Version
+                | negotiation::Error::Wire(WireError::UnsupportedVersion),
+            ) => return Reason::UnsupportedVersion,
+            Err(negotiation::Error::Limits) => return Reason::InvalidLimits,
+            Err(
+                negotiation::Error::Allocation
+                | negotiation::Error::Wire(WireError::ResourceLimit | WireError::ArithmeticOverflow),
+            ) => return Reason::ResourceLimit,
+            Err(_) => return Reason::InvalidMessage,
+        };
+        let role = match hello.offer.role {
+            Role::Observe => BrowserSessionRole::Observer,
+            Role::RequestControl => BrowserSessionRole::Controller,
+        };
+        // Only the exact peer/role-bound nonce can be consumed, once. Transport
+        // authentication is not a host observation grant or a SessionOpened.
+        if !matches!(
+            self.policy.with_nonce_manager(|manager| {
+                manager.consume_nonce(hello.nonce(), peer_ip, role, now)
+            }),
+            Ok(Ok(_))
+        ) {
+            return Reason::PermissionDenied;
+        }
+        if !hello.offer.versions.contains(&0) {
+            return Reason::UnsupportedVersion;
+        }
+        if hello.offer.capabilities.iter().any(|cap| cap.required) {
+            return Reason::RequiredCapability;
+        }
+        Reason::HostUnavailable
+    }
+
     async fn handle_ws_auxiliary<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         stream: &mut S,
         req: &http::HttpRequest,
         metadata: &FetchMetadata<'_>,
-        peer_ip: IpAddr,
         sni: Option<&str>,
-        expected_role: AuxiliaryChannelRole,
-        now_fn: &impl Fn() -> HostInstant,
+        role: WssChannelRole,
     ) -> std::io::Result<()> {
-        let wss_role = match expected_role {
-            AuxiliaryChannelRole::VideoStream => WssChannelRole::Video,
-            AuxiliaryChannelRole::AudioDownlink | AuxiliaryChannelRole::AudioUplink => {
-                WssChannelRole::Audio
-            }
-            _ => WssChannelRole::Control,
-        };
-        if !self
-            .validate_ws_upgrade(stream, req, metadata, sni, wss_role)
+        if self
+            .validate_ws_upgrade(stream, req, metadata, sni, role)
             .await?
         {
-            return Ok(());
-        }
-
-        // First binary message MUST be FRAT + 16B session_id + 1B role + 32B single-use ticket.
-        let first_frame = match websocket::read_ws_frame(stream, MAX_AUTH_MESSAGE_BYTES, true).await
-        {
-            Ok(websocket::WsFrame::Binary(bytes)) => bytes,
-            _ => {
-                let _ = websocket::write_server_close(stream, 1008).await;
-                return Ok(());
-            }
-        };
-
-        let Some((session_id, wire_role, ticket)) = parse_attach_frame(&first_frame) else {
-            let _ = websocket::write_server_close(stream, 1008).await;
-            return Ok(());
-        };
-        if wire_role != expected_role {
-            let _ = websocket::write_server_close(stream, 1008).await;
-            return Ok(());
-        }
-
-        if self
-            .policy
-            .consume_auxiliary_ticket(Some(&ticket), session_id, expected_role, peer_ip, now_fn())
-            .is_err()
-        {
-            let _ = websocket::write_server_close(stream, 1008).await;
-            return Ok(());
-        }
-
-        let attached_gen = {
-            let Ok(mut sessions) = self.sessions.lock() else {
-                let _ = websocket::write_server_close(stream, 1011).await;
-                return Ok(());
-            };
-            let Some(session) = sessions.get_mut(&session_id) else {
-                let _ = websocket::write_server_close(stream, 1008).await;
-                return Ok(());
-            };
-            match expected_role {
-                AuxiliaryChannelRole::VideoStream => {
-                    session.video_attached = true;
-                    session.video_supervisor.active_generation()
-                }
-                AuxiliaryChannelRole::AudioDownlink => {
-                    session.audio_attached = true;
-                    session.video_supervisor.active_generation()
-                }
-                _ => session.video_supervisor.active_generation(),
-            }
-        };
-
-        // Send a 12-byte attachment confirmation ("FROK" + 8-byte active generation BE).
-        let mut ok_frame = [0u8; 12];
-        ok_frame[..4].copy_from_slice(b"FROK");
-        ok_frame[4..12].copy_from_slice(&attached_gen.0.to_be_bytes());
-        websocket::write_server_binary(stream, &ok_frame).await?;
-
-        // Drain any already-reserved outbound video frames for this generation, then wait for
-        // client poll pings ("FRPL") or Close so callers can drive bounded credit delivery.
-        let drain_queued = |ingress: &Self| -> Vec<Vec<u8>> {
-            let mut frames = Vec::new();
-            while let Ok(Some(frame)) = ingress.pop_outbound_video_frame(session_id, attached_gen) {
-                frames.push(frame);
-            }
-            frames
-        };
-
-        for frame in drain_queued(self) {
-            websocket::write_server_binary(stream, &frame).await?;
-        }
-
-        loop {
-            match websocket::read_ws_frame(stream, 256, true).await {
-                Ok(websocket::WsFrame::Binary(cmd)) if cmd.as_slice() == b"FRPL" => {
-                    // Check channel generation hasn't been fenced before draining!
-                    let frames = match self.pop_outbound_video_frame(session_id, attached_gen) {
-                        Ok(Some(first)) => {
-                            let mut batch = vec![first];
-                            batch.extend(drain_queued(self));
-                            batch
-                        }
-                        Ok(None) => Vec::new(),
-                        Err(_) => {
-                            let _ = websocket::write_server_close(stream, 1008).await;
-                            break;
-                        }
-                    };
-                    for frame in frames {
-                        websocket::write_server_binary(stream, &frame).await?;
-                    }
-                }
-                Ok(websocket::WsFrame::Ping(data)) => {
-                    websocket::write_ws_frame(stream, 0x0A, &data, None).await?;
-                }
-                Ok(websocket::WsFrame::Close) | Err(websocket::WsFrameError::Eof) => break,
-                _ => {
-                    let _ = websocket::write_server_close(stream, 1008).await;
-                    break;
-                }
-            }
+            // No production observation session exists, so no auxiliary
+            // channel can attach. Do not consume a ticket or wait for payload.
+            websocket::write_server_close(stream, 1008).await?;
         }
         Ok(())
     }
@@ -927,59 +724,33 @@ pub const fn first_message_auth_duration() -> Duration {
 pub type SharedBrowserIngress = Arc<BrowserIngress>;
 
 fn parse_requested_role(body: &[u8]) -> Result<BrowserSessionRole, ()> {
-    if body.is_empty() {
-        return Ok(BrowserSessionRole::Observer);
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request<'a> {
+        role: &'a str,
     }
-    let val: serde_json::Value = serde_json::from_slice(body).map_err(|_| ())?;
-    match val.get("role").and_then(serde_json::Value::as_str) {
-        None | Some("observer") => Ok(BrowserSessionRole::Observer),
-        Some("controller") => Ok(BrowserSessionRole::Controller),
-        Some(_) => Err(()),
+    let request: Request<'_> = serde_json::from_slice(body).map_err(|_| ())?;
+    match request.role {
+        "observer" => Ok(BrowserSessionRole::Observer),
+        "controller" => Ok(BrowserSessionRole::Controller),
+        _ => Err(()),
     }
 }
 
-fn parse_attach_frame(bytes: &[u8]) -> Option<(RemoteSessionId, AuxiliaryChannelRole, [u8; 32])> {
-    if bytes.len() != ATTACH_MESSAGE_BYTES || bytes[..4] != ATTACH_MAGIC {
-        return None;
-    }
-    let mut sid_bytes = [0u8; 16];
-    sid_bytes.copy_from_slice(&bytes[4..20]);
-    let session_id = RemoteSessionId::from_raw(u128::from_be_bytes(sid_bytes));
-    if session_id.as_raw() == 0 {
-        return None;
-    }
-    let role = match bytes[20] {
-        1 => AuxiliaryChannelRole::VideoStream,
-        2 => AuxiliaryChannelRole::AudioDownlink,
-        3 => AuxiliaryChannelRole::AudioUplink,
-        4 => AuxiliaryChannelRole::ClipboardSync,
-        5 => AuxiliaryChannelRole::FilesTransfer,
-        6 => AuxiliaryChannelRole::DiagnosticsStream,
-        _ => return None,
-    };
-    let mut ticket = [0u8; 32];
-    ticket.copy_from_slice(&bytes[21..53]);
-    Some((session_id, role, ticket))
-}
-
-fn random_nonzero_session_id() -> Result<RemoteSessionId, ()> {
-    for _ in 0..4 {
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).map_err(|_| ())?;
-        let raw = u128::from_be_bytes(bytes);
-        if raw != 0 {
-            return Ok(RemoteSessionId::from_raw(raw));
-        }
-    }
-    Err(())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(char::from(HEX[usize::from(b >> 4)]));
-        out.push(char::from(HEX[usize::from(b & 0x0F)]));
-    }
-    out
+/// Startup has no workers or admitted authority. On expiry the sole owning
+/// connection is dropped; a partial reply cannot be retried on a successor.
+async fn bounded_startup<T>(
+    budget: Duration,
+    operation: impl core::future::Future<Output = std::io::Result<T>>,
+) -> std::io::Result<T> {
+    let cx = asupersync::cx::Cx::current()
+        .ok_or_else(|| std::io::Error::other("browser ingress requires runtime context"))?;
+    asupersync::time::timeout(cx.now(), budget, operation)
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "browser startup deadline expired",
+            )
+        })?
 }

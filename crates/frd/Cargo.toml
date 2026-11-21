@@ -51,3 +51,7 @@ fr-winsys.workspace = true
 [[test]]
 name = "host_policy_windows"
 required-features = ["windows-host"]
+
+[dev-dependencies]
+# Exercise the actual shared browser adapter against host startup responses.
+fr-web.workspace = true

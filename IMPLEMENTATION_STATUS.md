@@ -1,5 +1,23 @@
 # Implementation status
 
+## Canonical native browser startup boundary (2026-11-21)
+
+The native HTTPS/WSS ingress now matches the served Rust/WASM adapter's
+bootstrap and `FRD0` hello/refusal schema. An unavailable desktop returns its
+explicit capability without allocating credentials or session authority. The
+legacy socket authentication/attachment path no longer invents a session.
+Canonical hello validation retains peer/role-bound, single-use nonces, bounded
+records, exact origin/host/SNI checks, and terminal refusal without a retry loop.
+The original startup deadline now also bounds silent TLS/HTTP/body/socket I/O.
+
+New regressions cover the actual Rust adapter over TCP, actual verified TLS/WSS
+with an ephemeral CA, replay/role/peer/version refusals, malformed frames, and
+stalled headers, body, and first message. Pinned formatting and diff checks pass;
+native Cargo compilation/test execution is still in progress at this checkpoint.
+These test definitions are not claimed as executed results. `frd run` listener
+composition, real host-session/media/control integration, H3, and live browser
+qualification remain open under `fr-w9jo` and the browser ingress beads.
+
 ## Served Rust/WASM browser transport and embedded package (2026-11-20)
 
 The served shell now loads the real Rust/WASM startup owner. JavaScript sends

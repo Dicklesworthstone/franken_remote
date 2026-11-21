@@ -1,23 +1,15 @@
-//! Real-socket integration and adversarial security tests for `frd::browser_ingress`.
+//! Real-socket browser startup and origin-security regressions.
 //!
-//! Exercises the real Asupersync TCP/WSS ingress wired to `BrowserSecurityPolicy`,
-//! `BrowserAssets`, `ReceiverCreditWindow`, and `ChannelSupervisor`:
-//! 1. Full happy path: static self-hosted assets -> POST /api/session/bootstrap ->
-//!    /ws/control first-message FRBA auth -> server-issued single-use FRTK VideoStream ticket ->
-//!    /ws/video FRAT attach -> credit exhaustion (WssError::CreditStarvation) ->
-//!    0x0081 ReceiverPressure over /ws/control -> credit unlocked & video frame delivered ->
-//!    channel replacement fences stale generation.
-//! 2. Adversarial / planted negative security matrix over real sockets:
-//!    GET bootstrap refusal, missing/null/wildcard/cross-origin rejection, DNS-rebinding Host/SNI
-//!    rejection, iframe/cross-site Fetch Metadata rejection, query-string bearer leak rejection,
-//!    HTTP request smuggling (Transfer-Encoding / duplicate Content-Length) rejection,
-//!    replayed nonce rejection, bare session ID & wrong-role auxiliary ticket rejection,
-//!    text/compressed/unmasked WebSocket frame rejection, and forged ReceiverPressure rejection.
+//! Actual host bootstrap bytes are consumed by the actual Rust browser adapter.
+//! The host truthfully refuses unavailable desktops without allocating a nonce,
+//! binding, session, attachment ticket, media queue, or input authority. Policy-
+//! issued test nonces exercise canonical ClientHello/refusal interoperability;
+//! they do not represent installed-tailnet admission or real desktop support.
 
 #![cfg(any(target_os = "linux", target_os = "macos", windows))]
 
 use asupersync::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     runtime::RuntimeBuilder,
 };
@@ -26,14 +18,15 @@ use fr_core::{
     limits::ProtocolLimits,
     time::HostInstant,
 };
-use fr_transport::wss::{ChannelGeneration, WssError};
+use fr_web::adapter::{BrowserAdapterError, BrowserAttempt, BrowserConnectionAdapter};
 use fr_wire::{
-    input::{InputDelivery, InputDirection},
-    negotiation::ControlBinding,
-    receiver_pressure::{self, ChannelRole, QueuePressure, ReceiverPressure},
+    input::InputDelivery,
+    negotiation::{Capability, Offer, Role, browser},
+    refusal::{self, Reason},
 };
+use frd::broker::browser_security::{BrowserSessionRole, FIRST_MESSAGE_AUTH_TIMEOUT};
 use frd::browser_ingress::{
-    BrowserIngress, BrowserIngressConfig, BrowserIngressError,
+    BrowserIngress, BrowserIngressConfig,
     websocket::{WsFrame, read_ws_frame, write_ws_frame},
 };
 use std::{
@@ -58,15 +51,6 @@ fn test_ingress(max_credit_bytes: u64, max_credit_frames: u64) -> Arc<BrowserIng
     cfg.max_video_credit_bytes = max_credit_bytes;
     cfg.max_video_credit_frames = max_credit_frames;
     Arc::new(BrowserIngress::new(cfg))
-}
-
-fn hex_decode(hex: &str) -> Vec<u8> {
-    hex.as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|b| u8::from_str_radix(core::str::from_utf8(b).unwrap(), 16).unwrap())
-        .collect()
 }
 
 async fn send_http_raw(
@@ -142,7 +126,7 @@ async fn futures_join<A, B>(
     .await
 }
 
-async fn read_http_head_from_stream(stream: &mut TcpStream) -> String {
+async fn read_http_head_from_stream<S: AsyncRead + Unpin>(stream: &mut S) -> String {
     let mut raw = Vec::new();
     let mut b = [0u8; 1];
     while !raw.ends_with(b"\r\n\r\n") {
@@ -153,275 +137,422 @@ async fn read_http_head_from_stream(stream: &mut TcpStream) -> String {
     String::from_utf8(raw).unwrap()
 }
 
+fn bootstrap_request(role: &str) -> String {
+    let body = format!(r#"{{"role":"{role}"}}"#);
+    format!(
+        "POST /api/session/bootstrap HTTP/1.1\r\n\
+         Host: {EXPECTED_HOST_HDR}\r\n\
+         Origin: {EXPECTED_ORIGIN}\r\n\
+         Sec-Fetch-Site: same-origin\r\n\
+         Sec-Fetch-Mode: cors\r\n\
+         Sec-Fetch-Dest: empty\r\n\
+         Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn upgrade_request(path: &str) -> String {
+    format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: {EXPECTED_HOST_HDR}\r\n\
+         Origin: {EXPECTED_ORIGIN}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+}
+
+fn issue_fixture_nonce(ingress: &BrowserIngress, role: BrowserSessionRole) -> [u8; 32] {
+    *ingress
+        .policy()
+        .with_nonce_manager(|manager| {
+            manager.issue_nonce(
+                PEER_IP,
+                RemoteSessionId::from_raw(101),
+                role,
+                HostInstant::from_micros(10_000_000),
+            )
+        })
+        .unwrap()
+        .unwrap()
+        .as_bytes()
+}
+
+fn client_fixture(
+    ingress: &BrowserIngress,
+    role: &str,
+) -> (BrowserConnectionAdapter, BrowserAttempt, Vec<u8>) {
+    let nonce = issue_fixture_nonce(
+        ingress,
+        if role == "observer" {
+            BrowserSessionRole::Observer
+        } else {
+            BrowserSessionRole::Controller
+        },
+    );
+    // Explicit test-only available bootstrap, backed by a real policy nonce.
+    // Production bootstrap remains unavailable and never issues this credential.
+    let hex: String = nonce
+        .iter()
+        .flat_map(|byte| {
+            let digits = b"0123456789abcdef";
+            [
+                char::from(digits[usize::from(byte >> 4)]),
+                char::from(digits[usize::from(byte & 15)]),
+            ]
+        })
+        .collect();
+    let body = format!(
+        r#"{{"nonce_hex":"{hex}","expires_in_ms":15000,"transport_profile":"wss_degraded_tcp_hol_dedicated","profile_id":3,"profile_version":0,"role":"{role}","desktop_available":true}}"#
+    );
+    let mut adapter = BrowserConnectionAdapter::new();
+    let attempt = adapter.begin(role, 1_000_000).unwrap();
+    adapter.accept_bootstrap(attempt, &body, 1_001_000).unwrap();
+    let hello = adapter.client_hello(attempt, 1_002_000).unwrap();
+    (adapter, attempt, hello)
+}
+
+async fn exchange_first_message(
+    ingress: &Arc<BrowserIngress>,
+    peer: IpAddr,
+    message: &[u8],
+    times: [u64; 2],
+) -> WsFrame {
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ingress = Arc::clone(ingress);
+    let (response, ()) = futures_join(
+        async {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(upgrade_request("/ws/control").as_bytes())
+                .await
+                .unwrap();
+            let head = read_http_head_from_stream(&mut client).await;
+            assert!(head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+            assert!(head.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+            assert!(!head.to_ascii_lowercase().contains("permessage-deflate"));
+            write_ws_frame(&mut client, 0x02, message, Some([1, 2, 3, 4]))
+                .await
+                .unwrap();
+            let first = read_ws_frame(&mut client, browser::MAX_RECORD, false)
+                .await
+                .unwrap();
+            if matches!(first, WsFrame::Binary(_)) {
+                assert_eq!(
+                    read_ws_frame(&mut client, 128, false).await.unwrap(),
+                    WsFrame::Close
+                );
+            }
+            let mut byte = [0];
+            assert_eq!(client.read(&mut byte).await.unwrap(), 0);
+            first
+        },
+        async {
+            let (server, _) = listener.accept().await.unwrap();
+            let counter = std::cell::Cell::new(0);
+            ingress
+                .serve_stream(server, peer, Some(EXPECTED_HOST), || {
+                    let index = counter.get();
+                    counter.set(1);
+                    HostInstant::from_micros(times[index])
+                })
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    response
+}
+
+fn refused(frame: &WsFrame) -> Reason {
+    let WsFrame::Binary(bytes) = frame else {
+        panic!("expected canonical refusal");
+    };
+    let refusal = refusal::decode(bytes, 0, browser::MAX_RECORD, InputDelivery::Reliable).unwrap();
+    assert!(refusal.operation.is_none());
+    assert!(refusal.stage.is_none());
+    refusal.reason
+}
+
 #[test]
-fn end_to_end_browser_bootstrap_wss_auth_auxiliary_ticket_and_credit_flow() {
+fn unavailable_bootstrap_reaches_the_real_browser_adapter_without_authority() {
     let runtime = RuntimeBuilder::current_thread()
         .enable_platform_reactor(true)
         .build()
         .unwrap();
     runtime.block_on(async {
-        // Small credit window: 128 bytes / 2 frames to prove real starvation & 0x0081 unlock!
-        let ingress = test_ingress(128, 2);
-
-        // 1. GET / serves self-hosted HTML with strict CSP and no authority.
+        let ingress = test_ingress(4096, 4);
         let get_index = format!(
             "GET / HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nSec-Fetch-Dest: document\r\n\r\n"
         );
-        let resp =
+        let response =
             send_http_raw(&ingress, PEER_IP, Some(EXPECTED_HOST), get_index.as_bytes()).await;
-        assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"), "{resp}");
-        assert!(
-            resp.contains("Content-Security-Policy: default-src 'self'"),
-            "{resp}"
-        );
-        assert!(resp.contains("frame-ancestors 'none'"), "{resp}");
-        assert!(resp.contains("X-Content-Type-Options: nosniff"), "{resp}");
-        assert!(resp.contains("X-Frame-Options: DENY"), "{resp}");
-        assert!(resp.contains("Referrer-Policy: no-referrer"), "{resp}");
-        assert!(resp.contains("/hevc_probe.js"), "{resp}");
-        assert!(resp.contains("/wss_client.js"), "{resp}");
-
-        // 2. POST /api/session/bootstrap with exact Origin issues CSPRNG single-use nonce.
-        let body = r#"{"role":"observer"}"#;
-        let post_boot = format!(
-            "POST /api/session/bootstrap HTTP/1.1\r\n\
-             Host: {EXPECTED_HOST_HDR}\r\n\
-             Origin: {EXPECTED_ORIGIN}\r\n\
-             Sec-Fetch-Site: same-origin\r\n\
-             Sec-Fetch-Mode: cors\r\n\
-             Sec-Fetch-Dest: empty\r\n\
-             Content-Length: {}\r\n\r\n{body}",
-            body.len()
-        );
-        let boot_resp =
-            send_http_raw(&ingress, PEER_IP, Some(EXPECTED_HOST), post_boot.as_bytes()).await;
-        assert!(boot_resp.starts_with("HTTP/1.1 200 OK\r\n"), "{boot_resp}");
-        assert!(
-            boot_resp.contains("Cache-Control: no-cache, no-store"),
-            "{boot_resp}"
-        );
-        assert!(
-            boot_resp.contains("default-src 'none'; frame-ancestors 'none'"),
-            "{boot_resp}"
-        );
-        let json_body = boot_resp.split_once("\r\n\r\n").unwrap().1;
-        let parsed: serde_json::Value = serde_json::from_str(json_body).unwrap();
-        assert_eq!(
-            parsed["transport_profile"],
-            "wss_degraded_tcp_hol_dedicated"
-        );
-        assert_eq!(parsed["role"], "observer");
-        let nonce_bytes = hex_decode(parsed["nonce_hex"].as_str().unwrap());
-        let sid_bytes = hex_decode(parsed["session_id_hex"].as_str().unwrap());
-        assert_eq!(nonce_bytes.len(), 32);
-        assert_eq!(sid_bytes.len(), 16);
-        let session_id = RemoteSessionId::from_raw(u128::from_be_bytes(
-            sid_bytes.as_slice().try_into().unwrap(),
-        ));
-
-        // 3. Connect /ws/control, authenticate with FRBA + nonce, receive single-use FRTK video ticket,
-        //    attach /ws/video with FRAT + ticket, prove ReceiverCreditWindow starvation + 0x0081 unlock!
-        let ctrl_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let ctrl_addr = ctrl_listener.local_addr().unwrap();
-        let vid_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let vid_addr = vid_listener.local_addr().unwrap();
-
-        let ingress_ctrl = Arc::clone(&ingress);
-        let ingress_vid = Arc::clone(&ingress);
-        let ingress_driver = Arc::clone(&ingress);
-
-        let server_fut = futures_join(
-            async move {
-                let (s, _) = ctrl_listener.accept().await.unwrap();
-                ingress_ctrl
-                    .serve_stream(s, PEER_IP, Some(EXPECTED_HOST), || {
-                        HostInstant::from_micros(10_500_000)
-                    })
-                    .await
-                    .unwrap();
-            },
-            async move {
-                let (s, _) = vid_listener.accept().await.unwrap();
-                ingress_vid
-                    .serve_stream(s, PEER_IP, Some(EXPECTED_HOST), || {
-                        HostInstant::from_micros(10_600_000)
-                    })
-                    .await
-                    .unwrap();
-            },
-        );
-
-        let client_fut = async move {
-            // Open /ws/control
-            let mut ctrl = TcpStream::connect(ctrl_addr).await.unwrap();
-            let upgrade_ctrl = format!(
-                "GET /ws/control HTTP/1.1\r\n\
-                 Host: {EXPECTED_HOST_HDR}\r\n\
-                 Origin: {EXPECTED_ORIGIN}\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                 Sec-WebSocket-Version: 13\r\n\r\n"
-            );
-            ctrl.write_all(upgrade_ctrl.as_bytes()).await.unwrap();
-            ctrl.flush().await.unwrap();
-            let head = read_http_head_from_stream(&mut ctrl).await;
-            assert!(
-                head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
-                "{head}"
-            );
-            assert!(head.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="), "{head}");
-            assert!(!head.to_ascii_lowercase().contains("permessage-deflate"));
-
-            // Send FRBA + 32-byte nonce as FIRST binary message
-            let mut auth_msg = Vec::with_capacity(36);
-            auth_msg.extend_from_slice(b"FRBA");
-            auth_msg.extend_from_slice(&nonce_bytes);
-            write_ws_frame(&mut ctrl, 0x02, &auth_msg, Some([0x11, 0x22, 0x33, 0x44]))
-                .await
-                .unwrap();
-
-            // Receive FRTK single-use VideoStream ticket
-            let WsFrame::Binary(grant) = read_ws_frame(&mut ctrl, 256, false).await.unwrap() else {
-                panic!("expected binary FRTK ticket grant");
-            };
-            assert_eq!(grant.len(), 53);
-            assert_eq!(&grant[..4], b"FRTK");
-            assert_eq!(grant[4], 1); // VideoStream
-            assert_eq!(&grant[5..21], sid_bytes.as_slice());
-            let video_ticket = &grant[21..53];
-
-            // Open /ws/video and attach with FRAT + session_id + role(1) + ticket
-            let mut vid = TcpStream::connect(vid_addr).await.unwrap();
-            let upgrade_vid = format!(
-                "GET /ws/video HTTP/1.1\r\n\
-                 Host: {EXPECTED_HOST_HDR}\r\n\
-                 Origin: {EXPECTED_ORIGIN}\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                 Sec-WebSocket-Version: 13\r\n\r\n"
-            );
-            vid.write_all(upgrade_vid.as_bytes()).await.unwrap();
-            vid.flush().await.unwrap();
-            let vid_head = read_http_head_from_stream(&mut vid).await;
-            assert!(vid_head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
-
-            let mut attach_msg = Vec::with_capacity(53);
-            attach_msg.extend_from_slice(b"FRAT");
-            attach_msg.extend_from_slice(&sid_bytes);
-            attach_msg.push(1); // VideoStream
-            attach_msg.extend_from_slice(video_ticket);
-            write_ws_frame(&mut vid, 0x02, &attach_msg, Some([0x55, 0x66, 0x77, 0x88]))
-                .await
-                .unwrap();
-
-            let WsFrame::Binary(ok_ack) = read_ws_frame(&mut vid, 64, false).await.unwrap() else {
-                panic!("expected binary FROK attach confirmation");
-            };
-            assert_eq!(&ok_ack[..4], b"FROK");
-            let gen1 = ChannelGeneration(u64::from_be_bytes(ok_ack[4..12].try_into().unwrap()));
-            assert_eq!(gen1, ChannelGeneration(1));
-
-            // Host enqueues two 60-byte frames (120/128 bytes, 2/2 frames) -> succeeds.
-            ingress_driver
-                .enqueue_video_frame(session_id, gen1, vec![0xAA; 60])
-                .unwrap();
-            ingress_driver
-                .enqueue_video_frame(session_id, gen1, vec![0xBB; 60])
-                .unwrap();
-            // 3rd frame MUST fail with CreditStarvation (max_frames=2)!
-            assert!(matches!(
-                ingress_driver.enqueue_video_frame(session_id, gen1, vec![0xCC; 20]),
-                Err(BrowserIngressError::Wss(WssError::CreditStarvation(
-                    120, 128, 2, 2
-                )))
-            ));
-
-            // Poll video frames on /ws/video
-            write_ws_frame(&mut vid, 0x02, b"FRPL", Some([1, 2, 3, 4]))
-                .await
-                .unwrap();
-            let WsFrame::Binary(f1) = read_ws_frame(&mut vid, 256, false).await.unwrap() else {
-                panic!("expected frame 1");
-            };
-            let WsFrame::Binary(f2) = read_ws_frame(&mut vid, 256, false).await.unwrap() else {
-                panic!("expected frame 2");
-            };
-            assert_eq!(f1, vec![0xAA; 60]);
-            assert_eq!(f2, vec![0xBB; 60]);
-
-            // Send real 0x0081 ReceiverPressure on /ws/control releasing both closed frames (120 B, 2 frames).
-            let binding = ControlBinding {
-                id: 1,
-                host_boot: HostBootId::from_raw(11),
-                os_session: OsSessionId::from_raw(22),
-                remote_session: session_id,
-            };
-            let report = ReceiverPressure {
-                channel_binding: 2,
-                channel_role: ChannelRole::Video,
-                credit_epoch: 1,
-                released_bytes: 120,
-                released_frames: 2,
-                pressure: QueuePressure::Low,
-                queued_bytes: 0,
-                queued_items: 0,
-            };
-            let mut wire = [0u8; receiver_pressure::RECORD_BYTES];
-            let n = receiver_pressure::encode(
-                &report,
-                binding,
-                &ProtocolLimits::ABSOLUTE,
-                &mut wire,
-                InputDirection::ViewerToHost,
-                InputDelivery::Reliable,
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        for header in [
+            "frame-ancestors 'none'",
+            "X-Content-Type-Options: nosniff",
+            "X-Frame-Options: DENY",
+            "Referrer-Policy: no-referrer",
+            "/wasm_client.js",
+        ] {
+            assert!(response.contains(header), "missing {header}");
+        }
+        for role in [
+            "observer",
+            "controller",
+            "observer",
+            "controller",
+            "observer",
+            "controller",
+        ] {
+            let response = send_http_raw(
+                &ingress,
+                PEER_IP,
+                Some(EXPECTED_HOST),
+                bootstrap_request(role).as_bytes(),
             )
-            .unwrap();
-            write_ws_frame(&mut ctrl, 0x02, &wire[..n], Some([9, 8, 7, 6]))
-                .await
-                .unwrap();
-            let WsFrame::Binary(cr_ack) = read_ws_frame(&mut ctrl, 64, false).await.unwrap() else {
-                panic!("expected FRCR credit ack");
-            };
-            assert_eq!(cr_ack.as_slice(), b"FRCR");
-
-            // Now 3rd frame succeeds!
-            ingress_driver
-                .enqueue_video_frame(session_id, gen1, vec![0xCC; 20])
-                .unwrap();
-            write_ws_frame(&mut vid, 0x02, b"FRPL", Some([1, 2, 3, 4]))
-                .await
-                .unwrap();
-            let WsFrame::Binary(f3) = read_ws_frame(&mut vid, 256, false).await.unwrap() else {
-                panic!("expected frame 3 after credit release");
-            };
-            assert_eq!(f3, vec![0xCC; 20]);
-
-            // Replacing the video channel immediately fences gen1.
-            let gen2 = ingress_driver.replace_video_channel(session_id).unwrap();
-            assert_eq!(gen2, ChannelGeneration(2));
+            .await;
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(response.contains("Cache-Control: no-cache, no-store"));
+            assert!(response.contains("default-src 'none'; frame-ancestors 'none'"));
+            let body = response.split_once("\r\n\r\n").unwrap().1;
+            let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(parsed["desktop_available"], false);
+            assert_eq!(parsed["profile_id"], browser::WSS_PROFILE);
+            assert_eq!(parsed["profile_version"], browser::PROFILE_VERSION);
+            assert_eq!(parsed["role"], role);
+            for forbidden in [
+                "nonce_hex",
+                "session_id_hex",
+                "host_boot_hex",
+                "os_session_hex",
+                "control_binding_id",
+                "video_binding_id",
+                "credit_epoch",
+            ] {
+                assert!(
+                    parsed.get(forbidden).is_none(),
+                    "unexpected authority field {forbidden}"
+                );
+            }
+            let mut adapter = BrowserConnectionAdapter::new();
+            let attempt = adapter.begin(role, 1_000_000).unwrap();
             assert_eq!(
-                ingress_driver.enqueue_video_frame(session_id, gen1, vec![0xDD; 10]),
-                Err(BrowserIngressError::Wss(WssError::StaleGeneration(
-                    gen2, gen1
-                )))
+                adapter.accept_bootstrap(attempt, body, 1_001_000),
+                Err(BrowserAdapterError::DesktopUnavailable)
             );
+            assert_eq!(
+                adapter.snapshot().refusal_code,
+                Some("browser_session_unavailable")
+            );
+            assert!(!adapter.snapshot().is_controlling);
+            assert!(!adapter.snapshot().can_request_control);
+        }
+        assert_eq!(
+            ingress
+                .policy()
+                .with_nonce_manager(|manager| manager.pending_count())
+                .unwrap(),
+            0
+        );
+        assert!(
+            ingress
+                .session_metrics(RemoteSessionId::from_raw(101))
+                .unwrap()
+                .is_none()
+        );
+    });
+}
 
-            // Clean close on both channels.
-            write_ws_frame(&mut vid, 0x08, &1000u16.to_be_bytes(), Some([1, 1, 1, 1]))
-                .await
-                .unwrap();
-            write_ws_frame(&mut ctrl, 0x08, &1000u16.to_be_bytes(), Some([2, 2, 2, 2]))
-                .await
-                .unwrap();
-        };
+#[test]
+fn canonical_hello_consumes_original_nonce_and_refuses_without_session_or_tickets() {
+    let runtime = RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for role in ["observer", "controller"] {
+            let ingress = test_ingress(4096, 4);
+            let (mut adapter, attempt, hello) = client_fixture(&ingress, role);
+            let response = exchange_first_message(&ingress, PEER_IP, &hello, [10_001_000; 2]).await;
+            assert_eq!(refused(&response), Reason::HostUnavailable);
+            let WsFrame::Binary(bytes) = response else {
+                unreachable!()
+            };
+            assert_eq!(
+                adapter.receive_control(attempt, &bytes, 1_003_000),
+                Ok("host_unavailable")
+            );
+            assert!(!adapter.snapshot().is_controlling);
+            assert!(!adapter.snapshot().can_request_control);
+            assert!(
+                ingress
+                    .session_metrics(RemoteSessionId::from_raw(101))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                ingress
+                    .policy()
+                    .with_nonce_manager(|manager| manager.pending_count())
+                    .unwrap(),
+                0
+            );
+            assert!(
+                ingress
+                    .issue_auxiliary_ticket_for_session(
+                        RemoteSessionId::from_raw(101),
+                        frd::broker::browser_security::AuxiliaryChannelRole::VideoStream,
+                        HostInstant::from_micros(10_002_000)
+                    )
+                    .is_err()
+            );
+            let replay = exchange_first_message(&ingress, PEER_IP, &hello, [10_002_000; 2]).await;
+            assert_eq!(refused(&replay), Reason::PermissionDenied);
+        }
+    });
+}
 
-        let (_, _) = futures_join(server_fut, client_fut).await;
+#[test]
+fn peer_role_and_deadline_refusals_do_not_consume_a_live_original_nonce() {
+    let runtime = RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let ingress = test_ingress(4096, 4);
+        let (_, _, hello) = client_fixture(&ingress, "observer");
+        let parsed = browser::decode_hello(&hello, browser::MAX_RECORD).unwrap();
+        let mut changed = parsed.offer.clone();
+        changed.role = Role::RequestControl;
+        let changed = browser::Hello::new(changed, *parsed.nonce()).unwrap();
+        let mut bytes = [0; browser::MAX_RECORD];
+        let length = browser::encode_hello(&changed, browser::MAX_RECORD, &mut bytes).unwrap();
+        assert_eq!(
+            refused(
+                &exchange_first_message(&ingress, PEER_IP, &bytes[..length], [10_001_000; 2]).await
+            ),
+            Reason::PermissionDenied
+        );
+        let other_peer = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 8));
+        assert_eq!(
+            refused(&exchange_first_message(&ingress, other_peer, &hello, [10_001_000; 2]).await),
+            Reason::PermissionDenied
+        );
+        let expiry = 10_001_000 + FIRST_MESSAGE_AUTH_TIMEOUT.as_micros();
+        assert_eq!(
+            refused(&exchange_first_message(&ingress, PEER_IP, &hello, [10_001_000, expiry]).await),
+            Reason::Expired
+        );
+        assert_eq!(
+            refused(
+                &exchange_first_message(&ingress, PEER_IP, &hello, [10_002_000, 10_001_000]).await
+            ),
+            Reason::Expired
+        );
+        assert_eq!(
+            ingress
+                .policy()
+                .with_nonce_manager(|manager| manager.pending_count())
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            refused(&exchange_first_message(&ingress, PEER_IP, &hello, [10_002_000; 2]).await),
+            Reason::HostUnavailable
+        );
+    });
+}
+
+#[test]
+fn legacy_malformed_profiles_and_required_capabilities_cannot_open_sessions() {
+    let runtime = RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let ingress = test_ingress(4096, 4);
+        let (_, _, hello) = client_fixture(&ingress, "observer");
+        let parsed = browser::decode_hello(&hello, browser::MAX_RECORD).unwrap();
+        let mut legacy = b"FRBA".to_vec();
+        legacy.extend_from_slice(parsed.nonce());
+        assert_eq!(
+            refused(&exchange_first_message(&ingress, PEER_IP, &legacy, [10_001_000; 2]).await),
+            Reason::InvalidMessage
+        );
+        let mut trailing = hello.clone();
+        trailing.push(0);
+        assert_eq!(
+            refused(&exchange_first_message(&ingress, PEER_IP, &trailing, [10_001_000; 2]).await),
+            Reason::InvalidMessage
+        );
+        let mut wrong_profile = hello.clone();
+        // FRD0 header (24), version count (4), one offered u16 version (2).
+        wrong_profile[30] = 1;
+        assert_eq!(
+            refused(
+                &exchange_first_message(&ingress, PEER_IP, &wrong_profile, [10_001_000; 2]).await
+            ),
+            Reason::UnsupportedProfile
+        );
+        let mut wrong_version = hello.clone();
+        wrong_version[5] = 1;
+        assert_eq!(
+            refused(
+                &exchange_first_message(&ingress, PEER_IP, &wrong_version, [10_001_000; 2]).await
+            ),
+            Reason::UnsupportedVersion
+        );
+        let mut terminal = [0; refusal::MAX_BYTES];
+        let length = refusal::encode(
+            refusal::Refused::connection(Reason::PermissionDenied),
+            0,
+            browser::MAX_RECORD,
+            &mut terminal,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        assert_eq!(
+            exchange_first_message(&ingress, PEER_IP, &terminal[..length], [10_001_000; 2]).await,
+            WsFrame::Close
+        );
+        assert_eq!(
+            ingress
+                .policy()
+                .with_nonce_manager(|manager| manager.pending_count())
+                .unwrap(),
+            1
+        );
+        let hello = browser::Hello::new(
+            Offer {
+                capabilities: vec![Capability {
+                    name: "unimplemented".into(),
+                    version: 1,
+                    required: true,
+                }],
+                ..parsed.offer.clone()
+            },
+            *parsed.nonce(),
+        )
+        .unwrap();
+        let mut bytes = [0; browser::MAX_RECORD];
+        let length = browser::encode_hello(&hello, browser::MAX_RECORD, &mut bytes).unwrap();
+        assert_eq!(
+            refused(
+                &exchange_first_message(&ingress, PEER_IP, &bytes[..length], [10_001_000; 2]).await
+            ),
+            Reason::RequiredCapability
+        );
+        assert!(
+            ingress
+                .session_metrics(RemoteSessionId::from_raw(101))
+                .unwrap()
+                .is_none()
+        );
     });
 }
 
@@ -591,10 +722,8 @@ fn adversarial_origin_host_smuggling_and_ticket_attacks_are_refused() {
                 client.flush().await.unwrap();
                 let head = read_http_head_from_stream(&mut client).await;
                 assert!(head.starts_with("HTTP/1.1 101"));
-                // Bare 16-byte session ID with no FRAT ticket MUST be refused with Close!
-                write_ws_frame(&mut client, 0x02, &[0x99; 16], Some([7, 7, 7, 7]))
-                    .await
-                    .unwrap();
+                // An unavailable desktop never accepts any auxiliary attachment,
+                // even before the caller presents a session ID or bearer ticket.
                 let frame = read_ws_frame(&mut client, 64, false).await.unwrap();
                 assert_eq!(frame, WsFrame::Close);
             },
@@ -602,3 +731,179 @@ fn adversarial_origin_host_smuggling_and_ticket_attacks_are_refused() {
         .await;
     });
 }
+
+#[test]
+fn invalid_bootstrap_roles_and_oversized_bodies_never_issue_credentials() {
+    let runtime = RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let ingress = test_ingress(4096, 4);
+        for body in [r#"{}"#, r#"{"role":null}"#, r#"{"role":"other"}"#, r#"{"role":"observer","role":"controller"}"#, r#"{"role":"observer","session_id_hex":"1"}"#] {
+            let request = format!("POST /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nOrigin: {EXPECTED_ORIGIN}\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            let response = send_http_raw(&ingress, PEER_IP, Some(EXPECTED_HOST), request.as_bytes()).await;
+            assert!(response.starts_with("HTTP/1.1 400 "));
+            assert!(!response.contains("nonce_hex"));
+        }
+        let request = format!("POST /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nOrigin: {EXPECTED_ORIGIN}\r\nContent-Length: 4097\r\n\r\n");
+        let response = send_http_raw(&ingress, PEER_IP, Some(EXPECTED_HOST), request.as_bytes()).await;
+        assert!(response.starts_with("HTTP/1.1 413 "));
+        assert_eq!(ingress.policy().with_nonce_manager(|manager| manager.pending_count()).unwrap(), 0);
+    });
+}
+
+#[test]
+fn text_compressed_unmasked_fragmented_and_oversized_first_frames_close() {
+    let runtime = RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let ingress = test_ingress(4096, 4);
+        for raw in [
+            vec![0x81, 0x80],             // text, refused before mask/payload
+            vec![0xc2, 0x80],             // compression, refused before mask/payload
+            vec![0x82, 0],                // unmasked
+            vec![0x02, 0x80],             // fragmented, refused before mask/payload
+            vec![0x82, 0xfe, 0x10, 0x01], // 4097 B rejected before mask/payload
+        ] {
+            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+            let ((), ()) = futures_join(
+                async {
+                    let mut stream = TcpStream::connect(addr).await.unwrap();
+                    stream
+                        .write_all(upgrade_request("/ws/control").as_bytes())
+                        .await
+                        .unwrap();
+                    assert!(
+                        read_http_head_from_stream(&mut stream)
+                            .await
+                            .starts_with("HTTP/1.1 101 ")
+                    );
+                    stream.write_all(&raw).await.unwrap();
+                    assert_eq!(
+                        read_ws_frame(&mut stream, 128, false).await.unwrap(),
+                        WsFrame::Close
+                    );
+                },
+                async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    ingress
+                        .serve_stream(stream, PEER_IP, Some(EXPECTED_HOST), || {
+                            HostInstant::from_micros(10_000_000)
+                        })
+                        .await
+                        .unwrap();
+                },
+            )
+            .await;
+        }
+        assert!(
+            ingress
+                .session_metrics(RemoteSessionId::from_raw(101))
+                .unwrap()
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn a_silent_first_message_expires_even_when_the_supplied_clock_does_not_advance() {
+    let runtime = RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut config = BrowserIngressConfig::https_tailnet(
+            EXPECTED_HOST,
+            EXPECTED_PORT,
+            HostBootId::from_raw(11),
+            OsSessionId::from_raw(22),
+            ProtocolLimits::with_overrides(fr_core::limits::LimitOverrides {
+                max_handshake_duration_ms: Some(1_000),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        config.max_video_credit_bytes = 4096;
+        let ingress = Arc::new(BrowserIngress::new(config));
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ((), ()) = futures_join(
+            async {
+                let mut stream = TcpStream::connect(addr).await.unwrap();
+                stream
+                    .write_all(upgrade_request("/ws/control").as_bytes())
+                    .await
+                    .unwrap();
+                assert!(
+                    read_http_head_from_stream(&mut stream)
+                        .await
+                        .starts_with("HTTP/1.1 101 ")
+                );
+                // Deliberately send no authentication bytes. Expiry must wake
+                // independently of read completion or this fixed test clock.
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+            },
+            async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let error = ingress
+                    .serve_stream(stream, PEER_IP, Some(EXPECTED_HOST), || {
+                        HostInstant::from_micros(10_000_000)
+                    })
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            },
+        )
+        .await;
+    });
+}
+
+#[test]
+fn incomplete_http_headers_and_bootstrap_bodies_expire_without_allocating_nonce() {
+    let runtime = RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let limits = ProtocolLimits::with_overrides(fr_core::limits::LimitOverrides {
+            max_handshake_duration_ms: Some(1_000),
+            ..Default::default()
+        }).unwrap();
+        let ingress = Arc::new(BrowserIngress::new(BrowserIngressConfig::https_tailnet(
+            EXPECTED_HOST, EXPECTED_PORT, HostBootId::from_raw(11), OsSessionId::from_raw(22), limits,
+        )));
+        for request in [
+            format!("POST /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\n"),
+            format!("POST /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nOrigin: {EXPECTED_ORIGIN}\r\nContent-Length: 19\r\n\r\n{{\"role\":"),
+        ] {
+            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let ((), ()) = futures_join(
+                async {
+                    let mut stream = TcpStream::connect(addr).await.unwrap();
+                    stream.write_all(request.as_bytes()).await.unwrap();
+                    let mut byte = [0];
+                    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+                },
+                async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let error = ingress.serve_stream(stream, PEER_IP, Some(EXPECTED_HOST), || HostInstant::from_micros(10_000_000)).await.unwrap_err();
+                    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+                },
+            ).await;
+        }
+        assert_eq!(ingress.policy().with_nonce_manager(|manager| manager.pending_count()).unwrap(), 0);
+    });
+}
+
+#[path = "browser_ingress/tls.rs"]
+mod tls;
