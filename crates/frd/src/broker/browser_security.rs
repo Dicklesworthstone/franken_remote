@@ -79,6 +79,8 @@ impl fmt::Display for BrowserSessionRole {
 /// Role of an auxiliary channel requiring a dedicated attachment ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AuxiliaryChannelRole {
+    /// HEVC video downlink channel (`/ws/video`).
+    VideoStream,
     /// ATP file transfer channel.
     FilesTransfer,
     /// Opus audio downlink (host playback to client).
@@ -94,6 +96,7 @@ pub enum AuxiliaryChannelRole {
 impl fmt::Display for AuxiliaryChannelRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::VideoStream => "video-stream",
             Self::FilesTransfer => "files-transfer",
             Self::AudioDownlink => "audio-downlink",
             Self::AudioUplink => "audio-uplink",

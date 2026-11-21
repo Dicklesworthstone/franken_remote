@@ -85,11 +85,21 @@ impl BrowserAssets {
 
         let (content_type, body) = match clean_path {
             "/" | "/index.html" => ("text/html; charset=utf-8", INDEX_HTML.as_bytes().to_vec()),
-            "/fr.js" => (
+            "/app.js" | "/fr.js" => (
                 "application/javascript; charset=utf-8",
-                FR_JS.as_bytes().to_vec(),
+                APP_JS.as_bytes().to_vec(),
             ),
-            "/style.css" => ("text/css; charset=utf-8", STYLE_CSS.as_bytes().to_vec()),
+            "/hevc_probe.js" => (
+                "application/javascript; charset=utf-8",
+                HEVC_PROBE_JS.as_bytes().to_vec(),
+            ),
+            "/wss_client.js" => (
+                "application/javascript; charset=utf-8",
+                WSS_CLIENT_JS.as_bytes().to_vec(),
+            ),
+            "/styles.css" | "/style.css" => {
+                ("text/css; charset=utf-8", STYLES_CSS.as_bytes().to_vec())
+            }
             "/manifest.json" => ("application/json", MANIFEST_JSON.as_bytes().to_vec()),
             _ => return Err(AssetError::NotFound),
         };
@@ -106,53 +116,11 @@ impl BrowserAssets {
     }
 }
 
-const INDEX_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'">
-    <title>FrankenRemote Workstation</title>
-    <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-    <div id="app">
-        <div id="status-bar">Connecting to tailnet host...</div>
-        <canvas id="viewport" tabindex="0"></canvas>
-    </div>
-    <script src="/fr.js"></script>
-</body>
-</html>"#;
-
-const FR_JS: &str = r#""use strict";
-// FrankenRemote browser client bootstrap.
-// Strictly uses same-origin transport and respects input ticket boundaries.
-(function() {
-    console.log("FrankenRemote client loaded under strict origin policy.");
-})();"#;
-
-const STYLE_CSS: &str = r"html, body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
-    background: #111;
-    color: #eee;
-    font-family: system-ui, -apple-system, sans-serif;
-}
-#app {
-    display: flex;
-    flex-direction: column;
-    width: 100%;
-    height: 100%;
-}
-#viewport {
-    flex: 1;
-    width: 100%;
-    height: 100%;
-    outline: none;
-}";
+const INDEX_HTML: &str = include_str!("../../../../web/index.html");
+const STYLES_CSS: &str = include_str!("../../../../web/styles.css");
+const HEVC_PROBE_JS: &str = include_str!("../../../../web/hevc_probe.js");
+const WSS_CLIENT_JS: &str = include_str!("../../../../web/wss_client.js");
+const APP_JS: &str = include_str!("../../../../web/app.js");
 
 const MANIFEST_JSON: &str = r#"{"name":"FrankenRemote","display":"fullscreen","start_url":"/"}"#;
 
@@ -173,13 +141,33 @@ mod tests {
 
     #[test]
     fn serve_js_and_css() {
-        let js = BrowserAssets::serve("/fr.js").unwrap();
-        assert_eq!(js.content_type, "application/javascript; charset=utf-8");
-        assert_ne!(js.body.len(), 0);
-
-        let css = BrowserAssets::serve("/style.css").unwrap();
-        assert_eq!(css.content_type, "text/css; charset=utf-8");
-        assert_ne!(css.body.len(), 0);
+        for (path, expected_ct) in [
+            ("/fr.js", "application/javascript; charset=utf-8"),
+            ("/app.js", "application/javascript; charset=utf-8"),
+            ("/hevc_probe.js", "application/javascript; charset=utf-8"),
+            ("/wss_client.js", "application/javascript; charset=utf-8"),
+            ("/style.css", "text/css; charset=utf-8"),
+            ("/styles.css", "text/css; charset=utf-8"),
+            ("/manifest.json", "application/json"),
+        ] {
+            let asset = BrowserAssets::serve(path).unwrap();
+            assert_eq!(asset.content_type, expected_ct);
+            assert_ne!(asset.body.len(), 0);
+            assert!(
+                asset.body.len() <= 64 * 1024,
+                "browser asset {path} exceeds 64 KiB ceiling"
+            );
+            let text = String::from_utf8(asset.body).unwrap();
+            assert!(
+                !text.contains("http://") && !text.contains("https://") && !text.contains("cdn."),
+                "browser asset {path} must remain 100% self-hosted without external URLs"
+            );
+        }
+        let html = String::from_utf8(BrowserAssets::serve("/").unwrap().body).unwrap();
+        assert!(!html.contains("http://") && !html.contains("https://"));
+        assert!(html.contains("/hevc_probe.js"));
+        assert!(html.contains("/wss_client.js"));
+        assert!(html.contains("/app.js"));
     }
 
     #[test]

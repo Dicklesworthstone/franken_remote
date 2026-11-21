@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'">
+    <meta name="referrer" content="no-referrer">
+    <title>FrankenRemote Workstation</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div id="app">
+        <header id="status-bar" role="status" aria-live="polite">
+            <div class="status-group">
+                <span id="connection-state" class="badge badge-neutral">Disconnected</span>
+                <span id="transport-badge" class="badge badge-warn">Transport: Pending</span>
+                <span id="authority-badge" class="badge badge-neutral">Role: View-Only</span>
+                <span id="freshness-badge" class="badge badge-neutral">View: Unverified</span>
+            </div>
+            <div class="controls-group">
+                <button id="btn-connect" type="button">Connect</button>
+                <button id="btn-request-control" type="button" disabled>Request Control</button>
+                <button id="btn-release-control" type="button" disabled>Release Control</button>
+                <button id="btn-fullscreen" type="button" disabled>Fullscreen</button>
+                <button id="btn-disconnect" type="button" disabled>Disconnect</button>
+            </div>
+        </header>
+        <div id="degradation-banner" class="banner hidden" role="alert"></div>
+        <div id="shortcut-notice" class="notice">
+            Browser-reserved shortcuts (for example Ctrl/Cmd+W, Ctrl/Cmd+T, Cmd+Q, Alt+Tab) remain owned by your browser or OS and are not captured.
+        </div>
+        <main id="viewport-wrap">
+            <canvas id="viewport" tabindex="0" aria-label="Remote desktop viewport"></canvas>
+            <div id="refusal-overlay" class="overlay hidden" role="alert">
+                <h2 id="refusal-title">Session Refused</h2>
+                <p id="refusal-detail"></p>
+            </div>
+        </main>
+    </div>
+    <script src="/hevc_probe.js"></script>
+    <script src="/wss_client.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
