@@ -8,7 +8,7 @@
 //! The child's content-free completion document becomes the picker notice.
 use super::hosts::{self, Chosen, Error, Mode, Notice, PickError, Picked, Request};
 use super::install;
-use crate::{machines, outcome, settings::Settings};
+use crate::{machines, session_output, settings::Settings};
 use std::{
     os::windows::process::CommandExt,
     path::Path,
@@ -261,70 +261,74 @@ fn application() -> ExitCode {
     }
 }
 
-/// The session log keeps roughly this much; older text is dropped first.
-const LOG_LIMIT: usize = 1024 * 1024;
-
-/// One window's lines in `sessions.log` beside the settings, so a session can
-/// be explained while it runs and afterwards. A window now reconnects instead
-/// of closing, so its status lines are appended as they arrive, not only
-/// when it closes. The viewer's own output is content-free: typed states,
-/// counts and timings, never keys, pixels, clipboard text or file paths.
-struct SessionLog(Option<std::path::PathBuf>);
-
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
 }
 
-impl SessionLog {
-    /// Trim the log to its limit and write this window's header.
-    fn begin(args: &[String]) -> Self {
-        let path = install::settings_path().map(|settings| settings.with_file_name("sessions.log"));
-        if let Some(path) = &path {
-            let mut text = std::fs::read(path).unwrap_or_default();
-            if text.len() > LOG_LIMIT {
-                let cut = text.len() - LOG_LIMIT / 2;
-                let start = text[cut..]
-                    .iter()
-                    .position(|&byte| byte == b'\n')
-                    .map_or(cut, |line| cut + line + 1);
-                text.drain(..start);
-            }
+/// The path and command arguments never enter the content-free log.
+fn begin_session_log() -> (Option<session_output::CappedLog>, bool) {
+    let Some(path) = install::settings_path() else {
+        return (None, true);
+    };
+    let opened = session_output::CappedLog::open(&path.with_file_name("sessions.log")).and_then(
+        |mut log| {
+            log.append(format!("=== session started at unix {}\n", unix_now()).as_bytes())?;
+            Ok(log)
+        },
+    );
+    match opened {
+        Ok(log) => (Some(log), false),
+        Err(_) => (None, true),
+    }
+}
+
+/// Append only bounded diagnostics after both pipe readers have joined.
+fn finish_session_log(output: &mut session_output::ChildOutput) -> bool {
+    let failed = output
+        .stderr
+        .as_ref()
+        .is_some_and(|capture| capture.log_error.is_some());
+    let exit = output
+        .status
+        .and_then(|status| status.code())
+        .map_or_else(|| "unavailable".to_owned(), |code| code.to_string());
+    let mut text = format!("=== session ended at unix {}, exit {exit}\n", unix_now()).into_bytes();
+    if output.failure.is_some() || output.cleanup_error.is_some() {
+        text.extend_from_slice(
+            format!(
+                "[viewer monitor {:?}; cleanup {:?}]\n",
+                output.failure, output.cleanup_error
+            )
+            .as_bytes(),
+        );
+    }
+    if let Some(capture) = &output.stdout {
+        if !capture.report.complete() {
             text.extend_from_slice(
-                format!(
-                    "=== session started at unix {}: {}\n",
-                    unix_now(),
-                    args.join(" ")
-                )
-                .as_bytes(),
+                format!("[completion capture incomplete: {:?}]\n", capture.report).as_bytes(),
             );
-            let _ = std::fs::write(path, text);
         }
-        Self(path)
-    }
-
-    fn append(&self, text: &[u8]) {
-        use std::io::Write as _;
-        if let Some(path) = &self.0
-            && let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path)
-        {
-            let _ = file.write_all(text);
+        // A retained document is diagnostic only. The picker separately checks
+        // complete capture, the child's exit status, and the reported outcome.
+        if let Some(document) = capture.retained_document() {
+            text.extend_from_slice(document.as_bytes());
+            text.push(b'\n');
         }
     }
-
-    /// The window closed: its exit code and completion document.
-    fn finish(&self, output: &std::process::Output) {
-        let mut text = format!(
-            "=== session ended at unix {}, exit {}\n",
-            unix_now(),
-            output.status.code().unwrap_or(-1)
-        )
-        .into_bytes();
-        text.extend_from_slice(&output.stdout);
-        text.push(b'\n');
-        self.append(&text);
+    if let Some(capture) = &output.stderr
+        && !capture.report.complete()
+    {
+        text.extend_from_slice(
+            format!("[status capture incomplete: {:?}]\n", capture.report).as_bytes(),
+        );
     }
+    let write_failed = output
+        .log
+        .as_mut()
+        .is_some_and(|log| log.append(&text).is_err());
+    failed || write_failed
 }
 
 fn session(chosen: Chosen) -> Notice {
@@ -339,7 +343,6 @@ fn session(chosen: Chosen) -> Notice {
     };
     // The locally selected receive path belongs only to this child. Keep it
     // out of the content-free session log and the remembered settings.
-    let log_args = chosen.settings.viewer_args(chosen.peer.stable_id(), None);
     let args = chosen
         .settings
         .viewer_args(chosen.peer.stable_id(), chosen.receive);
@@ -351,66 +354,19 @@ fn session(chosen: Chosen) -> Notice {
         .stderr(Stdio::piped())
         .creation_flags(0x0800_0000)
         .spawn();
-    let mut child = match child {
+    let child = match child {
         Ok(child) => child,
         Err(error) => return failed(format!("Could not start the viewer ({error}).")),
     };
     // SAFETY: a scalar foreground-permission grant for the new viewer.
     let _ = unsafe { AllowSetForegroundWindow(child.id()) };
-    let log = std::sync::Arc::new(SessionLog::begin(&log_args));
-    // Status lines go to the log as they arrive. Draining stderr on its own
-    // thread also keeps the viewer from ever blocking on a full pipe.
-    let lines = child.stderr.take().and_then(|stderr| {
-        let log = std::sync::Arc::clone(&log);
-        std::thread::Builder::new()
-            .name("fr-session-log".into())
-            .spawn(move || {
-                use std::io::BufRead as _;
-                let opened = std::time::Instant::now();
-                for line in std::io::BufReader::new(stderr).split(b'\n') {
-                    let Ok(line) = line else { break };
-                    // Seconds since the window opened, so reconnects and
-                    // their gaps can be timed from the log alone.
-                    let mut stamped =
-                        format!("{:8.1}s ", opened.elapsed().as_secs_f64()).into_bytes();
-                    stamped.extend_from_slice(&line);
-                    stamped.push(b'\n');
-                    log.append(&stamped);
-                }
-            })
-            .ok()
-    });
-    let output = child.wait_with_output();
-    if let Some(lines) = lines {
-        let _ = lines.join();
+    let (log, open_failed) = begin_session_log();
+    let mut output = session_output::follow_child(child, log);
+    let write_failed = finish_session_log(&mut output);
+    let summary = session_output::summarize(&output, &name, open_failed || write_failed);
+    Notice {
+        text: summary.message,
+        warning: !summary.ok,
+        sticky: true,
     }
-    let output = match output {
-        Ok(output) => output,
-        Err(error) => return failed(format!("The viewer could not be followed ({error}).")),
-    };
-    log.finish(&output);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(document) = stdout
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with('{'))
-    {
-        let summary = outcome::summarize(document, &name);
-        return Notice {
-            text: summary.message,
-            warning: !summary.ok,
-            sticky: true,
-        };
-    }
-    // No completion document: the command line refused before a session
-    // (its stderr line is content-free guidance).
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let reason = stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map_or_else(
-            || format!("exit {}", output.status.code().unwrap_or(-1)),
-            |line| line.trim_start_matches("fr-windows: ").trim().to_owned(),
-        );
-    failed(format!("Could not connect to {name}: {reason}"))
 }

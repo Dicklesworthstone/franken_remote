@@ -142,6 +142,31 @@ The status area's second line names the decoder this PC offers (see
 **Get the HEVC decoder** button opens Microsoft's HEVC Video Extensions in
 the Microsoft Store.
 
+### Session diagnostics and long sessions
+
+The app drains the viewer's stdout and stderr concurrently while the viewer
+runs. It retains at most 4 KiB per status line and 256 KiB for the final
+nonempty completion line. Older stdout lines are discarded as they arrive;
+a later malformed or oversized line cannot revive an earlier success report.
+Output beyond a line limit is drained and reported as incomplete.
+
+`%LOCALAPPDATA%\FrankenRemote\sessions.log` records status, elapsed times,
+the child's exit status and the bounded completion document. Every append
+keeps this file within 1 MiB, including during a long reconnecting session.
+Older entries are replaced with an omission marker. Opening a log left large
+by an older app version reads only a bounded suffix before compacting it.
+The app does not record command arguments, selected receive folders, machine
+identifiers, pixels, key contents or clipboard text in this log.
+
+The picker reports a successful session only when the completion, pipe reads
+and process exit agree. An abnormal exit, failed reader, truncated capture or
+incomplete local log produces a warning. If the viewer refuses before writing
+its completion, the first bounded stderr message remains available as guidance.
+A log-write failure does not stop draining either pipe. Reader or reader-thread
+failures stop and reap the original viewer; a cleanup error remains explicit.
+This bounds retained data, not the time taken by blocked operating-system I/O
+or a separate descendant that keeps an inherited pipe open.
+
 ## Find and select a host
 
 Run `fr-windows` or `fr-windows view` without a destination to open the native
