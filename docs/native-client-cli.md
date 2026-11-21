@@ -58,6 +58,23 @@ is applied only after its original command exits successfully and reports the
 selection-only, fresh-lookup-required result. Each viewer still resolves the
 selected identity again before connecting.
 
+Choose **View only** or **View and control**, clipboard sharing, which display
+to show, and **Play host audio** before connecting. Playback starts off and
+works with either viewing role. On Linux, F2 toggles control, F3 clipboard,
+F4 display selection, and F5 playback; clicking the options also works.
+Clipboard remains available only with control. The confirmed preferences are
+remembered for the next picker.
+
+**Play host audio** requests the existing `--audio` session. The host must have
+locally enabled playback capture, and its normal admission and approval rules
+still apply. After connecting, use the viewer's local audio controls to adjust
+volume or mute playback. This choice never enables your microphone. Playback
+requires `linux-audio` or `macos-audio` in the respective desktop build; a build
+without it visibly marks audio unavailable, disables the option, and clears
+any remembered playback choice before connecting. The machine picker itself
+does not open or check an audio device. See [macOS playback audio](#macos-playback-audio)
+for the Mac build and playback controls.
+
 The application continuously drains bounded completion output. Native commands
 retain their existing 2 MiB document allowance; the shared Windows capture
 keeps its 256 KiB allowance. Only the complete final nonempty UTF-8 JSON line

@@ -11,16 +11,17 @@ use fr_client::discovery::picker::{Candidate, Catalog, PathHint};
 
 /// The desktop application's connection choices, shown beside the list for
 /// `--pick-only` and reported with the chosen host. They shape only the next
-/// command line; that connector requests control and clipboard itself.
+/// command line; that connector requests control, clipboard and audio itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "three independent check boxes"
+    reason = "independent local connection preferences"
 )]
 pub(super) struct Choices {
     pub control: bool,
     pub clipboard: bool,
     pub choose_display: bool,
+    pub playback_audio: bool,
 }
 impl Choices {
     /// The window's initial choices, only for a `--pick-only` request.
@@ -29,6 +30,7 @@ impl Choices {
             control: connection.control,
             clipboard: pick.clipboard,
             choose_display: matches!(connection.display, DisplayChoice::Choose),
+            playback_audio: pick.playback_audio,
         })
     }
 }
@@ -108,11 +110,12 @@ pub(super) fn selected_report(
             object.insert("control".into(), choices.control.into());
             object.insert("clipboard".into(), choices.clipboard.into());
             object.insert("choose_display".into(), choices.choose_display.into());
+            object.insert("playback_audio".into(), choices.playback_audio.into());
         }
         format!("{report}\n")
     } else if let Some(choices) = choices {
         format!(
-            "Selected {} ({}), port {port}: {}, clipboard {}, {}.\n",
+            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}.\n",
             candidate.certificate_name(),
             candidate.stable_id(),
             if choices.control {
@@ -129,6 +132,11 @@ pub(super) fn selected_report(
                 "ask which display"
             } else {
                 "only display"
+            },
+            if choices.playback_audio {
+                "requested"
+            } else {
+                "off"
             }
         )
     } else {

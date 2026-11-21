@@ -4,7 +4,7 @@
 //!
 //! 1. `fr connect --choose-host --pick-only --json ...` shows the native
 //!    machine picker with the connection choices (view only or view and
-//!    control, clipboard text, which display) and the previous outcome, then
+//!    control, clipboard text, which display, host audio) and the previous outcome, then
 //!    reports the chosen identity and choices. It opens no connection.
 //! 2. `fr connect NODE ... --json` is the plain viewer for that choice.
 //!
@@ -29,8 +29,9 @@ use child::Finished;
 
 const USAGE: &str = "fr app [--install | --uninstall]\n\n\
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
-View only or View and control, Share clipboard text and Ask which display to\n\
-show, then Connect. Closing the viewer returns to the picker with the outcome;\n\
+View only or View and control, Share clipboard text, Ask which display to\n\
+show and Play host audio, then Connect. Audio starts off; enabling it never\n\
+enables your microphone. Closing the viewer returns to the picker with the outcome;\n\
 Cancel or Escape in the picker quits. Choices are remembered. An unused\n\
 picker reopens with a fresh machine list every two minutes; after half an\n\
 hour unused, fr app quits.\n\n\
@@ -79,12 +80,13 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "three independent check boxes"
+    reason = "independent local connection preferences"
 )]
 struct Settings {
     control: bool,
     clipboard: bool,
     choose_display: bool,
+    playback_audio: bool,
     last_machine: Option<String>,
 }
 
@@ -94,6 +96,7 @@ impl Default for Settings {
             control: true,
             clipboard: true,
             choose_display: false,
+            playback_audio: false,
             last_machine: None,
         }
     }
@@ -118,6 +121,7 @@ impl Settings {
         settings.control = flag("control", settings.control);
         settings.clipboard = flag("clipboard", settings.clipboard);
         settings.choose_display = flag("choose_display", settings.choose_display);
+        settings.playback_audio = flag("playback_audio", settings.playback_audio);
         settings.last_machine = map
             .get("last_machine")
             .and_then(Value::as_str)
@@ -132,6 +136,7 @@ impl Settings {
             "control": self.control,
             "clipboard": self.clipboard,
             "choose_display": self.choose_display,
+            "playback_audio": self.playback_audio,
         });
         if let Some(id) = self.last_machine.as_deref().filter(|id| valid_id(id)) {
             document["last_machine"] = json!(id);
@@ -214,6 +219,7 @@ enum Report {
         control: bool,
         clipboard: bool,
         choose_display: bool,
+        playback_audio: bool,
     },
     Failed {
         code: String,
@@ -256,13 +262,22 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
         }
         let text = |name: &str| value.get(name).and_then(Value::as_str).map(str::to_owned);
         let flag = |name: &str| value.get(name).and_then(Value::as_bool);
-        let (Some(node), Some(name), Some(control), Some(clipboard), Some(choose_display)) = (
+        let (
+            Some(node),
+            Some(name),
+            Some(control),
+            Some(clipboard),
+            Some(choose_display),
+            Some(playback_audio),
+        ) = (
             text("node_id").filter(|id| valid_id(id)),
             text("certificate_name"),
             flag("control"),
             flag("clipboard"),
             flag("choose_display"),
-        ) else {
+            flag("playback_audio"),
+        )
+        else {
             return None;
         };
         return Some(Report::Selected {
@@ -271,6 +286,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             control,
             clipboard,
             choose_display,
+            playback_audio,
         });
     }
     // These are the actual Linux and macOS connect completion formats. A
@@ -365,6 +381,9 @@ fn pick_args(settings: &Settings, notice: Option<&str>) -> Vec<String> {
     ]
     .map(str::to_owned)
     .into();
+    if settings.playback_audio {
+        args.push("--audio".to_owned());
+    }
     if let Some(notice) = notice {
         args.push("--app-notice".to_owned());
         args.push(notice.to_owned());
@@ -395,6 +414,9 @@ fn session_args(node: &str, settings: &Settings) -> Vec<String> {
     // Clipboard text follows control by default; view-only never offers it.
     if settings.control && !settings.clipboard {
         args.push("--no-clipboard".to_owned());
+    }
+    if settings.playback_audio {
+        args.push("--audio".to_owned());
     }
     args
 }
@@ -564,10 +586,12 @@ fn application() -> Result<String, Failure> {
                 control,
                 clipboard,
                 choose_display,
+                playback_audio,
             }) => {
                 settings.control = control;
                 settings.clipboard = clipboard;
                 settings.choose_display = choose_display;
+                settings.playback_audio = playback_audio;
                 settings.last_machine = Some(node.clone());
                 save(&path, &settings);
                 (node, name)
@@ -794,6 +818,7 @@ mod tests {
             control: false,
             clipboard: true,
             choose_display: true,
+            playback_audio: true,
             last_machine: Some("nABC123CNTRL".to_owned()),
         };
         assert_eq!(Settings::from_json(settings.to_json().as_bytes()), settings);
@@ -803,9 +828,12 @@ mod tests {
             Settings::default()
         );
         let partial = Settings::from_json(
-            br#"{"version":1,"control":"yes","clipboard":false,"last_machine":42}"#,
+            br#"{"version":1,"control":"yes","clipboard":false,"playback_audio":"yes","last_machine":42}"#,
         );
         assert!(partial.control && !partial.clipboard && partial.last_machine.is_none());
+        assert!(!partial.playback_audio);
+        // Existing version-one preferences never implicitly enable audio.
+        assert!(!Settings::from_json(br#"{"version":1,"control":true}"#).playback_audio);
         let long = format!(
             r#"{{"version":1,"last_machine":"{}"}}"#,
             "n".repeat(MAX_ID_BYTES + 1)
@@ -892,8 +920,42 @@ mod tests {
     }
 
     #[test]
+    fn audio_is_opt_in_for_both_roles_and_never_enables_the_microphone() {
+        for control in [false, true] {
+            let mut settings = Settings {
+                control,
+                ..Settings::default()
+            };
+            for audio in [false, true] {
+                settings.playback_audio = audio;
+                let picker = pick_args(&settings, None);
+                let session = session_args("nMAC", &settings);
+                for args in [&picker, &session] {
+                    assert_eq!(args.iter().any(|arg| arg == "--audio"), audio);
+                    assert!(!args.iter().any(|arg| arg.starts_with("--microphone")));
+                }
+                let crate::options::Command::Connect(picker) =
+                    crate::options::parse(&picker).unwrap().command
+                else {
+                    panic!("expected picker connection");
+                };
+                assert_eq!(picker.pick.unwrap().playback_audio, audio);
+                assert!(picker.audio.is_none() && picker.microphone.is_none());
+                let crate::options::Command::Connect(session) =
+                    crate::options::parse(&session).unwrap().command
+                else {
+                    panic!("expected viewer connection");
+                };
+                assert_eq!(session.audio.is_some(), audio);
+                assert_eq!(session.control, control);
+                assert!(session.microphone.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn child_reports_become_selections_exits_and_notices() {
-        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
+        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":true,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
 "#;
         assert_eq!(
             last_report(selected),
@@ -903,8 +965,14 @@ mod tests {
                 control: true,
                 clipboard: false,
                 choose_display: false,
+                playback_audio: true,
             })
         );
+        let mut malformed: Value = serde_json::from_slice(selected).unwrap();
+        malformed["playback_audio"] = json!("yes");
+        assert_eq!(last_report(malformed.to_string().as_bytes()), None);
+        malformed.as_object_mut().unwrap().remove("playback_audio");
+        assert_eq!(last_report(malformed.to_string().as_bytes()), None);
         // A selection without choices is not a picker answer.
         assert_eq!(
             last_report(br#"{"event":"host_selected","node_id":"nMAC","certificate_name":"m"}"#),
@@ -1087,6 +1155,7 @@ mod tests {
             "control": false,
             "clipboard": false,
             "choose_display": false,
+            "playback_audio": false,
             "selection_only": true,
             "fresh_lookup_required": true,
             "remote_session_started": false,

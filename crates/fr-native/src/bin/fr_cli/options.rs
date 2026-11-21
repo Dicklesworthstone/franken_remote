@@ -182,6 +182,8 @@ pub struct Connection {
 pub struct PickOnly {
     /// The remembered clipboard preference, kept even while view-only.
     pub clipboard: bool,
+    /// Initial playback preference only; it never opens an audio device.
+    pub playback_audio: bool,
     /// `--app-notice TEXT`: the previous session's outcome, shown above the list.
     pub notice: Option<String>,
 }
@@ -977,6 +979,14 @@ fn parse_command(
                 2,
             ));
         }
+        if pick_only
+            && (audio_server.is_some()
+                || audio_sink.is_some()
+                || audio_volume.is_some()
+                || audio_muted)
+        {
+            return Err(usage());
+        }
         if !audio
             && (audio_server.is_some()
                 || audio_sink.is_some()
@@ -1091,7 +1101,9 @@ fn parse_command(
                 control,
                 capture_system_shortcuts,
                 clipboard: control && clipboard.unwrap_or(true),
-                audio: audio.then_some(AudioRequest {
+                // A selection-only child must never prepare playback or
+                // refuse the picker because a saved audio device is absent.
+                audio: (audio && !pick_only).then_some(AudioRequest {
                     server: audio_server,
                     sink: audio_sink,
                     volume: audio_volume.unwrap_or(100),
@@ -1107,6 +1119,7 @@ fn parse_command(
                 receive,
                 pick: pick_only.then(|| PickOnly {
                     clipboard: clipboard.unwrap_or(true),
+                    playback_audio: audio,
                     notice: app_notice,
                 }),
                 diagnostics_out,
@@ -1141,6 +1154,7 @@ mod tests {
             c.pick,
             Some(PickOnly {
                 clipboard: true,
+                playback_audio: false,
                 notice: None,
             })
         );
@@ -1178,6 +1192,52 @@ mod tests {
         *long.last_mut().unwrap() = "tab\there".to_owned();
         assert!(parse(&long).is_err());
     }
+    #[test]
+    fn picker_audio_is_only_a_preference_and_never_an_audio_request() {
+        let base = "connect --choose-host --experimental-native --display only";
+        for role in ["--control", "--view-only"] {
+            let Command::Connect(picker) = options(&format!("{base} {role} --pick-only --audio"))
+                .unwrap()
+                .command
+            else {
+                panic!("expected a connection");
+            };
+            assert!(picker.pick.unwrap().playback_audio);
+            assert!(picker.audio.is_none());
+            assert!(picker.microphone.is_none());
+            let Command::Connect(session) =
+                options(&format!("{base} {role} --audio")).unwrap().command
+            else {
+                panic!("expected a connection");
+            };
+            assert_eq!(
+                session.audio,
+                Some(AudioRequest {
+                    server: None,
+                    sink: None,
+                    volume: 100,
+                    muted: false,
+                })
+            );
+            assert!(session.microphone.is_none());
+            assert!(session.pick.is_none());
+            for device_option in [
+                "--audio-server /run/user/1000/pulse/native",
+                "--audio-sink local-output",
+                "--audio-volume 50",
+                "--audio-muted",
+            ] {
+                assert!(
+                    options(&format!(
+                        "{base} {role} --pick-only --audio {device_option}"
+                    ))
+                    .is_err(),
+                    "a pure picker cannot consume {device_option}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn refuses_implicit_control_or_unqualified_transport_before_any_io() {
         for implicit in ["connect n-host", "connect n-host --view-only --control"] {

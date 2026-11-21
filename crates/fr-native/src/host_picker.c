@@ -13,15 +13,16 @@
 #include <time.h>
 
 struct fr_host_row { char name[255], stable_id[129]; uint32_t path; };
-/* Keys before KEY_REQUIRED must exist in the keymap. F2-F4 toggle the
+/* Keys before KEY_REQUIRED must exist in the keymap. F2-F5 toggle the
  * optional connection choices and may be absent (then only clicks do). */
 enum { KEY_ESCAPE, KEY_ENTER, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
        KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_HOME, KEY_END, KEY_REQUIRED,
-       KEY_F2 = KEY_REQUIRED, KEY_F3, KEY_F4, KEY_COUNT };
+       KEY_F2 = KEY_REQUIRED, KEY_F3, KEY_F4, KEY_F5, KEY_COUNT };
 /* Optional host-picker connection choices (`fr app`): local preferences for
  * the next command line, never authority. Must match host_picker.rs. */
 #define CHOICE_NONE UINT32_MAX
-#define CHOICE_ALL 7u
+#define CHOICE_AUDIO 8u
+#define CHOICE_ALL 15u
 #define NOTICE_MAX 384
 struct fr_host_picker {
     xcb_connection_t *c;
@@ -36,12 +37,12 @@ struct fr_host_picker {
     uint8_t mapped, focused, ready, dirty, pressed, pending, candidate, rearm;
     uint32_t press_at, press_row, baseline, sequence, barrier_kind, candidate_age;
     uint64_t barrier_mono, candidate_mono, revision;
-    /* Choices: the current bits, and each toggle's column span on the
-     * footer's choice line (drawn at choice_y), for clicks. */
-    uint8_t has_choices;
+    /* Choices: the current bits, and each toggle's row and column span
+     * in the footer, for clicks. */
+    uint8_t has_choices, playback_audio_available;
     uint32_t choices;
-    int choice_y;
-    uint16_t choice_from[3], choice_to[3];
+    int choice_y[4];
+    uint16_t choice_from[4], choice_to[4];
     char notice[NOTICE_MAX + 1];
 };
 
@@ -93,7 +94,7 @@ static void *xkb_reply(struct fr_host_picker *h, uint32_t sequence) {
 static int keymap(struct fr_host_picker *h) {
     static const uint32_t symbols[KEY_COUNT] = {
         0xff1b, 0xff0d, 0xff52, 0xff54, 0xff51, 0xff53,
-        0xff55, 0xff56, 0xff50, 0xff57, 0xffbf, 0xffc0, 0xffc1
+        0xff55, 0xff56, 0xff50, 0xff57, 0xffbf, 0xffc0, 0xffc1, 0xffc2
     };
     memset(h->keycodes, 0, sizeof(h->keycodes));
     const xcb_setup_t *setup = xcb_get_setup(h->c);
@@ -212,35 +213,43 @@ static void colors(struct fr_host_picker *h, uint32_t foreground, uint32_t backg
 /* Clipboard sharing follows a control grant: view-only shows it as "-" and
  * ignores its toggle, keeping the remembered value for the next control. */
 static void toggle(struct fr_host_picker *h, uint32_t bit) {
-    if (!h->has_choices || (bit == 2u && !(h->choices & 1u))) return;
+    if (!h->has_choices || (bit == 2u && !(h->choices & 1u)) ||
+        (bit == CHOICE_AUDIO && !h->playback_audio_available)) return;
     h->choices ^= bit; h->dirty = 1;
 }
 static int choice_at(const struct fr_host_picker *h, int16_t x, int16_t y, uint32_t *bit) {
-    if (!h->has_choices || !h->char_width || x < 12 || y < h->choice_y ||
-        y >= h->choice_y + (int)h->line) return 0;
+    if (!h->has_choices || !h->char_width || x < 12) return 0;
     unsigned column = ((unsigned)x - 12) / h->char_width;
-    for (unsigned i = 0; i < 3; ++i) {
-        if (column >= h->choice_from[i] && column < h->choice_to[i]) { *bit = 1u << i; return 1; }
+    for (unsigned i = 0; i < 4; ++i) {
+        if (y >= h->choice_y[i] && y < h->choice_y[i] + (int)h->line &&
+            column >= h->choice_from[i] && column < h->choice_to[i]) { *bit = 1u << i; return 1; }
     }
     return 0;
 }
 static void draw_choices(struct fr_host_picker *h, int y) {
-    static const char *const full[3] = { "View and control", "Share clipboard", "Ask which display" };
-    static const char *const brief[3] = { "Control", "Clipboard", "Display" };
+    static const char *const full[4] = { "View and control", "Share clipboard", "Ask which display", "Play host audio" };
+    static const char *const brief[4] = { "Control", "Clipboard", "Display", "Audio" };
     int wide = h->columns >= 75;
-    char line[128];
-    size_t at = 0;
-    for (unsigned i = 0; i < 3 && at < sizeof(line); ++i) {
-        char mark = i == 1 && !(h->choices & 1u) ? '-' : (h->choices >> i) & 1u ? 'x' : ' ';
-        if (i) at += (size_t)snprintf(line + at, sizeof(line) - at, wide ? "   " : " ");
-        if (at >= sizeof(line)) break;
-        h->choice_from[i] = (uint16_t)at;
-        at += (size_t)snprintf(line + at, sizeof(line) - at, wide ? "F%u [%c] %s" : "F%u[%c]%s",
-                               i + 2, mark, wide ? full[i] : brief[i]);
-        h->choice_to[i] = (uint16_t)(at < sizeof(line) ? at : sizeof(line) - 1);
+    /* Two rows keep every option visible even at the 40-column minimum. */
+    for (unsigned group = 0; group < 2; ++group) {
+        char line[128];
+        size_t at = 0;
+        for (unsigned i = group * 2; i < group * 2 + 2 && at < sizeof(line); ++i) {
+            int disabled = (i == 1 && !(h->choices & 1u)) || (i == 3 && !h->playback_audio_available);
+            char mark = disabled ? '-' : (h->choices >> i) & 1u ? 'x' : ' ';
+            const char *label = wide ? full[i] : brief[i];
+            if (i == 3 && !h->playback_audio_available)
+                label = wide ? "Audio unavailable in this build" : "Audio unavailable";
+            if (i % 2) at += (size_t)snprintf(line + at, sizeof(line) - at, wide ? "   " : " ");
+            if (at >= sizeof(line)) break;
+            h->choice_from[i] = (uint16_t)at;
+            at += (size_t)snprintf(line + at, sizeof(line) - at, wide ? "F%u [%c] %s" : "F%u[%c]%s",
+                                   i + 2, mark, label);
+            h->choice_to[i] = (uint16_t)(at < sizeof(line) ? at : sizeof(line) - 1);
+            h->choice_y[i] = y;
+        }
+        y = text(h, line, y);
     }
-    h->choice_y = y;
-    text(h, line, y);
 }
 static int draw(struct fr_host_picker *h) {
     colors(h, 0x171717, 0xf5f5f5);
@@ -279,13 +288,13 @@ static int draw(struct fr_host_picker *h) {
     uint32_t last = h->first + h->page_rows;
     if (last > h->count) last = h->count;
     snprintf(page, sizeof(page), "Hosts %u-%u of %u", h->first + 1, last, h->count);
-    y = (int)h->height - 4 * h->line - 8;
+    y = (int)h->height - (h->has_choices ? 5 : 4) * h->line - 8;
     y = text(h, page, y);
     y = text(h, "Arrows: move  Page Up/Down: page  Home/End", y);
     /* Every footer line fits one row (at least 40 columns) so the choice line
      * stays inside the reserved footer. */
     y = text(h, !h->has_choices ? "Enter or click: choose  Esc: cancel" :
-                h->columns >= 62 ? "Enter or click: connect  Esc: cancel  F2-F4 or click: options" :
+                h->columns >= 62 ? "Enter or click: connect  Esc: cancel  F2-F5 or click: options" :
                 "Enter/click: connect  Esc: cancel", y);
     if (h->has_choices) draw_choices(h, y);
     /* Local accessibility/geometry metadata. It is not read for selection. */
@@ -303,10 +312,11 @@ void fr_host_picker_close(struct fr_host_picker *h) {
 }
 struct fr_host_picker *fr_host_picker_open(const char *display,
         const struct fr_host_row *rows, uint32_t count, uint32_t choices,
-        const char *notice, uint32_t *window) {
+        int playback_audio_available, const char *notice, uint32_t *window) {
     if (!display || !rows || !count || count > 1024 || !window) return NULL;
     *window = XCB_NONE;
     if (choices != CHOICE_NONE && (choices & ~CHOICE_ALL)) return NULL;
+    if (playback_audio_available != 0 && playback_audio_available != 1) return NULL;
     size_t notice_len = 0;
     if (notice) {
         while (notice_len <= NOTICE_MAX && notice[notice_len]) {
@@ -325,6 +335,8 @@ struct fr_host_picker *fr_host_picker_open(const char *display,
     h->rows = rows; h->count = count;
     h->has_choices = choices != CHOICE_NONE;
     h->choices = h->has_choices ? choices : 0;
+    h->playback_audio_available = (uint8_t)playback_audio_available;
+    if (!h->playback_audio_available) h->choices &= ~CHOICE_AUDIO;
     if (notice_len) memcpy(h->notice, notice, notice_len);
     int screen = 0;
     h->c = xcb_connect(display, &screen);
@@ -354,8 +366,9 @@ struct fr_host_picker *fr_host_picker_open(const char *display,
     h->header = (uint16_t)(4 * h->line + 12);
     h->row_height = (uint16_t)((((263u + h->columns - 1) / h->columns) +
         ((137u + h->columns - 1) / h->columns) + 2) * h->line + 8);
-    if (h->height < h->header + 4 * h->line + 12 + h->row_height) goto fail;
-    h->page_rows = (h->height - h->header - 4 * h->line - 12) / h->row_height;
+    unsigned footer_lines = h->has_choices ? 5 : 4;
+    if (h->height < h->header + footer_lines * h->line + 12 + h->row_height) goto fail;
+    h->page_rows = (h->height - h->header - footer_lines * h->line - 12) / h->row_height;
     h->window = xcb_generate_id(h->c);
     uint32_t values[] = { 0xf5f5f5, XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
         XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE |
@@ -472,7 +485,7 @@ static int event(struct fr_host_picker *h, xcb_generic_event_t *event) {
         if (down && !was_down && !before_held && since && since < (1u << 31)) {
             if (slot == KEY_ENTER) {
                 h->pressed = 1; h->press_at = key->time; h->press_row = h->selected;
-            } else if (slot >= KEY_F2 && slot <= KEY_F4) toggle(h, 1u << (slot - KEY_F2));
+            } else if (slot >= KEY_F2 && slot <= KEY_F5) toggle(h, 1u << (slot - KEY_F2));
             else if (slot < KEY_REQUIRED) navigate(h, slot);
         }
         return 0;

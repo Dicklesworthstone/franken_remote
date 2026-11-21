@@ -28,19 +28,20 @@ fn complete(control: &Control) {
 }
 
 #[test]
-fn choices_cross_the_native_boundary_as_three_bits_only() {
-    for bits in 0..8 {
+fn choices_cross_the_native_boundary_as_four_bits_only() {
+    for bits in 0..16 {
         let choices = Choices::from_bits(bits).unwrap();
         assert_eq!(choices.bits(), bits);
     }
-    assert_eq!(Choices::from_bits(8), None);
+    assert_eq!(Choices::from_bits(16), None);
     assert_eq!(Choices::from_bits(NO_CHOICES), None);
     let choices = Choices {
         control: true,
         clipboard: false,
         choose_display: true,
+        playback_audio: true,
     };
-    assert_eq!(choices.bits(), 5);
+    assert_eq!(choices.bits(), 13);
 }
 
 #[test]

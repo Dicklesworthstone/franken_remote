@@ -38,6 +38,7 @@ unsafe extern "C" {
         rows: *const NativeRow,
         count: u32,
         choices: u32,
+        playback_audio_available: c_int,
         notice: *const c_char,
         window: *mut u32,
     ) -> *mut c_void;
@@ -81,6 +82,7 @@ pub(super) fn run(
                 rows.as_ptr(),
                 count,
                 choices.map_or(NO_CHOICES, Choices::bits),
+                c_int::from(cfg!(feature = "linux-audio")),
                 notice.map_or(core::ptr::null(), |notice| notice.as_ptr()),
                 &raw mut window,
             )
@@ -137,6 +139,11 @@ pub(super) fn run(
                         Some(Choices::from_bits(chosen).ok_or(Error::NativeChanged)?)
                     };
                     if confirmed.is_some() != choices.is_some() {
+                        return Err(Error::NativeChanged);
+                    }
+                    if !cfg!(feature = "linux-audio")
+                        && confirmed.is_some_and(|choices| choices.playback_audio)
+                    {
                         return Err(Error::NativeChanged);
                     }
                     shared.state().choices = confirmed;

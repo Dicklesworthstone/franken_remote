@@ -20,12 +20,13 @@ enum {
 #define FR_PICK_EVENTS 128
 // Optional host-picker connection choices (the desktop application's
 // `fr app`). Bits are local preferences for the next command line, never
-// authority: the connector still requests control and clipboard itself.
+// authority: the connector still requests control, clipboard and audio itself.
 #define FR_CHOICE_NONE UINT32_MAX
 #define FR_CHOICE_CONTROL 1u
 #define FR_CHOICE_CLIPBOARD 2u
 #define FR_CHOICE_DISPLAY 4u
-#define FR_CHOICE_ALL 7u
+#define FR_CHOICE_AUDIO 8u
+#define FR_CHOICE_ALL 15u
 
 // Must match RawRow in macos/picker.rs. Each byte range is borrowed only for
 // fr_mac_picker_open; NSString makes its own immutable copy before return.
@@ -75,12 +76,14 @@ typedef struct {
     NSButton *viewControl;
     NSButton *clipboard;
     NSButton *chooseDisplay;
+    NSButton *playbackAudio;
     NSArray<NSString *> *titles;
     NSArray<NSString *> *details;
     int outcome;
     NSUInteger chosen;
     double validAfter;
     BOOL hasChoices;
+    BOOL playbackAudioAvailable;
     uint32_t choices;
 }
 - (BOOL)fresh:(NSEvent *)event;
@@ -166,6 +169,8 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     clipboard.enabled = control;
     clipboard.state = (choices & FR_CHOICE_CLIPBOARD) ? NSControlStateValueOn : NSControlStateValueOff;
     chooseDisplay.state = (choices & FR_CHOICE_DISPLAY) ? NSControlStateValueOn : NSControlStateValueOff;
+    playbackAudio.enabled = playbackAudioAvailable;
+    playbackAudio.state = (choices & FR_CHOICE_AUDIO) ? NSControlStateValueOn : NSControlStateValueOff;
 }
 // A fresh local click on one of the choice controls changes only the local
 // preference; it never confirms a row. Returns YES when the event was used.
@@ -176,6 +181,9 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     else if (fr_picker_hit(clipboard, event)) {
         if (clipboard.enabled) choices ^= FR_CHOICE_CLIPBOARD;
     } else if (fr_picker_hit(chooseDisplay, event)) choices ^= FR_CHOICE_DISPLAY;
+    else if (fr_picker_hit(playbackAudio, event)) {
+        if (playbackAudio.enabled) choices ^= FR_CHOICE_AUDIO;
+    }
     else return NO;
     [self showChoices];
     return YES;
@@ -274,13 +282,14 @@ static NSString *fr_picker_string(const char *bytes, size_t length) {
 }
 
 int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uint32_t initial,
-                       const char *notice_bytes, size_t notice_len, void **out) {
+                       int playback_audio_available, const char *notice_bytes, size_t notice_len, void **out) {
     if (!out) return FR_PICK_INVALID;
     *out = NULL;
     if ((kind != 1 && kind != 2) || !rows || !count || count > FR_PICK_ROWS ||
         (kind == 2 && count > 8)) return FR_PICK_INVALID;
     // Choices and a notice belong only to the host picker.
     if (initial != FR_CHOICE_NONE && (kind != 1 || (initial & ~FR_CHOICE_ALL))) return FR_PICK_INVALID;
+    if (playback_audio_available != 0 && playback_audio_available != 1) return FR_PICK_INVALID;
     if ((notice_len && kind != 1) || (!notice_bytes && notice_len)) return FR_PICK_INVALID;
     if (![NSThread isMainThread]) return FR_PICK_THREAD;
     if (!NSApp || !NSScreen.mainScreen) return FR_PICK_NATIVE;
@@ -305,8 +314,8 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         }
         if (!isfinite(columnWidth) || columnWidth > 8192) return FR_PICK_INVALID;
         NSRect available = NSScreen.mainScreen.visibleFrame;
-        // Room for the optional notice line and choices row.
-        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 30 : 0);
+        // Room for the optional notice line and two choices rows.
+        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 60 : 0);
         CGFloat width = fmin(760, available.size.width - 40);
         CGFloat height = fmin(520 + extra, available.size.height - 60);
         if (width < (hasChoices ? 720 : 360) || height < 240 + extra) return FR_PICK_NATIVE;
@@ -318,6 +327,8 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         owner->validAfter = NSProcessInfo.processInfo.systemUptime;
         owner->hasChoices = hasChoices;
         owner->choices = hasChoices ? initial : 0;
+        owner->playbackAudioAvailable = playback_audio_available != 0;
+        if (!owner->playbackAudioAvailable) owner->choices &= ~FR_CHOICE_AUDIO;
         owner->window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
             backing:NSBackingStoreBuffered defer:NO];
@@ -347,7 +358,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             line.lineBreakMode = NSLineBreakByTruncatingTail;
             [content addSubview:line];
         }
-        CGFloat bottom = hasChoices ? 108 : 78;
+        CGFloat bottom = hasChoices ? 138 : 78;
         if (hasChoices) {
             owner->viewOnly = [NSButton radioButtonWithTitle:@"View only" target:nil action:nil];
             owner->viewOnly.frame = NSMakeRect(20, 50, 110, 24);
@@ -357,8 +368,16 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             owner->clipboard.frame = NSMakeRect(295, 50, 180, 24);
             owner->chooseDisplay = [NSButton checkboxWithTitle:@"Ask which display to show" target:nil action:nil];
             owner->chooseDisplay.frame = NSMakeRect(480, 50, 230, 24);
-            for (NSButton *choice in @[owner->viewOnly, owner->viewControl, owner->clipboard, owner->chooseDisplay])
+            owner->playbackAudio = [NSButton checkboxWithTitle:owner->playbackAudioAvailable
+                ? @"Play host audio" : @"Audio unavailable in this build" target:nil action:nil];
+            owner->playbackAudio.frame = NSMakeRect(20, 80, 260, 24);
+            for (NSButton *choice in @[owner->viewOnly, owner->viewControl, owner->clipboard, owner->chooseDisplay, owner->playbackAudio])
                 [content addSubview:choice];
+            NSTextField *audioHint = [NSTextField labelWithString:@"Host sound only; your microphone stays off."];
+            audioHint.frame = NSMakeRect(295, 82, width - 315, 20);
+            audioHint.font = [NSFont systemFontOfSize:11];
+            audioHint.textColor = NSColor.secondaryLabelColor;
+            [content addSubview:audioHint];
             [owner showChoices];
         }
         owner->scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, bottom, width - 40,
@@ -499,6 +518,7 @@ int fr_mac_picker_close(void *handle) {
         owner->viewControl = nil;
         owner->clipboard = nil;
         owner->chooseDisplay = nil;
+        owner->playbackAudio = nil;
         owner->titles = nil;
         owner->details = nil;
         // Consume only the original bridge retain. Rust clears its pointer

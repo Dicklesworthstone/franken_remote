@@ -263,6 +263,7 @@ fn actual_choice_keys_change_only_the_confirmed_choices() {
         control: true,
         clipboard: true,
         choose_display: false,
+        playback_audio: false,
     };
     let mut picker = HostPicker::start_with(
         &screen.name,
@@ -273,8 +274,8 @@ fn actual_choice_keys_change_only_the_confirmed_choices() {
     .unwrap();
     let window = mapped(&mut picker);
     screen.focus(window);
-    // F3 then F4: clipboard off, display choice on; F2 twice leaves control on.
-    for symbol in [0xffc0, 0xffc1, 0xffbf, 0xffbf] {
+    // F3/F4/F5 change clipboard/display/audio; F2 twice leaves control on.
+    for symbol in [0xffc0, 0xffc1, 0xffc2, 0xffbf, 0xffbf] {
         screen.key(symbol, true);
         screen.key(symbol, false);
         thread::sleep(Duration::from_millis(10));
@@ -303,8 +304,46 @@ fn actual_choice_keys_change_only_the_confirmed_choices() {
             control: true,
             clipboard: false,
             choose_display: true,
+            playback_audio: cfg!(feature = "linux-audio"),
         })
     );
+}
+
+#[test]
+fn actual_audio_choice_works_in_view_only_and_respects_build_availability() {
+    let screen = Screen::start();
+    for initial_audio in [false, true] {
+        let mut picker = HostPicker::start_with(
+            &screen.name,
+            &rows(3),
+            Some(Choices {
+                control: false,
+                clipboard: true,
+                choose_display: false,
+                playback_audio: initial_audio,
+            }),
+            None,
+        )
+        .unwrap();
+        let window = mapped(&mut picker);
+        screen.focus(window);
+        screen.key(0xffc2, true); // F5 is independent of control.
+        screen.key(0xffc2, false);
+        thread::sleep(Duration::from_millis(25));
+        assert_eq!(picker.poll().unwrap(), None);
+        assert_eq!(picker.choices(), None);
+        enter(&screen);
+        assert_eq!(chosen(&mut picker), 0);
+        assert_eq!(
+            picker.choices(),
+            Some(Choices {
+                control: false,
+                clipboard: true,
+                choose_display: false,
+                playback_audio: cfg!(feature = "linux-audio") && !initial_audio,
+            })
+        );
+    }
 }
 
 #[test]

@@ -53,6 +53,7 @@ pub(super) fn select(
             control: choices.control,
             clipboard: choices.clipboard,
             choose_display: choices.choose_display,
+            playback_audio: choices.playback_audio,
         }),
         notice(connection),
     )
@@ -76,6 +77,7 @@ pub(super) fn select(
         control: choices.control,
         clipboard: choices.clipboard,
         choose_display: choices.choose_display,
+        playback_audio: choices.playback_audio,
     });
     if confirmed.is_some() != initial.is_some() {
         return Err(unavailable());

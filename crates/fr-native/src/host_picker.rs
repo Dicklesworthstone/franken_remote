@@ -27,28 +27,34 @@ const NO_CHOICES: u32 = u32::MAX;
 
 /// Local connection preferences shown with the host list (`fr app`). They
 /// only shape the next command line; the connector still requests control
-/// and clipboard sharing itself, under the host's own approval.
+/// and clipboard/audio sharing itself, under the host's own approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(clippy::struct_excessive_bools, reason = "three independent toggles")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent local preferences"
+)]
 pub struct Choices {
     pub control: bool,
     pub clipboard: bool,
     pub choose_display: bool,
+    pub playback_audio: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
         u32::from(self.control)
             | (u32::from(self.clipboard) << 1)
             | (u32::from(self.choose_display) << 2)
+            | (u32::from(self.playback_audio) << 3)
     }
     const fn from_bits(bits: u32) -> Option<Self> {
-        if bits & !7 != 0 {
+        if bits & !15 != 0 {
             return None;
         }
         Some(Self {
             control: bits & 1 != 0,
             clipboard: bits & 2 != 0,
             choose_display: bits & 4 != 0,
+            playback_audio: bits & 8 != 0,
         })
     }
 }

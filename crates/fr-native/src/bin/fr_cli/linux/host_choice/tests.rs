@@ -86,7 +86,7 @@ fn selection_report_is_identity_metadata_without_a_readiness_or_authority_claim(
     let report: serde_json::Value =
         serde_json::from_str(&selected_report(&choice, 9443, true, None)).unwrap();
     assert_eq!(report["event"], "host_selected");
-    for absent in ["control", "clipboard", "choose_display"] {
+    for absent in ["control", "clipboard", "choose_display", "playback_audio"] {
         assert!(report.get(absent).is_none());
     }
     assert_eq!(report["node_id"], "n-first");
@@ -119,6 +119,7 @@ fn picker_request_reports_the_confirmed_choices_with_the_identity() {
         control: false,
         clipboard: true,
         choose_display: true,
+        playback_audio: true,
     };
     let report: serde_json::Value =
         serde_json::from_str(&selected_report(&choice, 8443, true, Some(choices))).unwrap();
@@ -126,7 +127,9 @@ fn picker_request_reports_the_confirmed_choices_with_the_identity() {
     assert_eq!(report["control"], false);
     assert_eq!(report["clipboard"], true);
     assert_eq!(report["choose_display"], true);
+    assert_eq!(report["playback_audio"], true);
     assert_eq!(report["input_requested"], false);
     let text = selected_report(&choice, 8443, false, Some(choices));
     assert!(text.contains("view only") && text.contains("clipboard not shared"));
+    assert!(text.contains("host audio requested"));
 }

@@ -25,31 +25,34 @@ const NO_CHOICES: u32 = u32::MAX;
 
 /// Local connection preferences shown beside the host list (`fr app`). They
 /// only shape the next command line; the connector still requests control
-/// and clipboard sharing itself, under the host's own approval.
+/// and clipboard/audio sharing itself, under the host's own approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "three independent check boxes"
+    reason = "independent local connection preferences"
 )]
 pub struct Choices {
     pub control: bool,
     pub clipboard: bool,
     pub choose_display: bool,
+    pub playback_audio: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
         u32::from(self.control)
             | (u32::from(self.clipboard) << 1)
             | (u32::from(self.choose_display) << 2)
+            | (u32::from(self.playback_audio) << 3)
     }
     const fn from_bits(bits: u32) -> Option<Self> {
-        if bits & !7 != 0 {
+        if bits & !15 != 0 {
             return None;
         }
         Some(Self {
             control: bits & 1 != 0,
             clipboard: bits & 2 != 0,
             choose_display: bits & 4 != 0,
+            playback_audio: bits & 8 != 0,
         })
     }
 }
@@ -90,6 +93,7 @@ unsafe extern "C" {
         rows: *const RawRow,
         count: usize,
         choices: u32,
+        playback_audio_available: c_int,
         notice: *const c_char,
         notice_len: usize,
         out: *mut *mut c_void,
@@ -163,6 +167,7 @@ impl Native {
                 raw.as_ptr(),
                 raw.len(),
                 choices.map_or(NO_CHOICES, Choices::bits),
+                c_int::from(cfg!(feature = "macos-audio")),
                 notice_ptr,
                 notice_len,
                 &raw mut pointer,
@@ -288,7 +293,12 @@ impl Picker {
                     } else {
                         Choices::from_bits(bits)
                     };
-                    if choices.is_some() == self.offered {
+                    if choices.is_some() == self.offered
+                        && (bits == NO_CHOICES || choices.is_some())
+                        && choices.is_none_or(|choice| {
+                            !choice.playback_audio || cfg!(feature = "macos-audio")
+                        })
+                    {
                         self.choices = choices;
                         self.decision = Decision::Chosen(row);
                     } else {
@@ -448,6 +458,22 @@ mod tests {
     use super::*;
     use fr_core::{ids::DisplayGeometryGeneration, limits::ProtocolLimits};
     use fr_wire::display::Display;
+
+    #[test]
+    fn playback_audio_is_an_independent_bounded_choice() {
+        for bits in 0..16 {
+            let choices = Choices::from_bits(bits).unwrap();
+            assert_eq!(choices.bits(), bits);
+        }
+        assert_eq!(Choices::from_bits(16), None);
+        assert_eq!(Choices::from_bits(NO_CHOICES), None);
+        let choices = Choices {
+            playback_audio: true,
+            ..Choices::default()
+        };
+        assert_eq!(choices.bits(), 8);
+        assert!(!choices.control);
+    }
 
     #[test]
     fn host_rows_preserve_full_identity_after_catalog_sorting() {
