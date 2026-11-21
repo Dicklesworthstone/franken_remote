@@ -35,8 +35,7 @@ pub use local_priority::{
     LocalPrioritySuspended,
 };
 pub use macos_injection::{
-    MacOsEventPoster, MacOsInputSink, MacOsKeyCode, PostedCgEvent, RecordingPoster,
-    hid_to_macos_keycode,
+    MacOsEventPoster, MacOsInputSink, MacOsKeyCode, PostedCgEvent, hid_to_macos_keycode,
 };
 pub use permissions::{
     PermissionKind, PermissionStatus, PermissionsManager, PlatformKind, PlatformPermissionError,
@@ -53,8 +52,28 @@ use fr_core::{
     input_submission::{Operation, RevokeHandle},
     time::HostInstant,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Maximum retained sleep-inhibitor refusal notices per `SessionAgent` instance.
+pub const MAX_SLEEP_INHIBITOR_NOTICES: usize = 64;
+
+/// Recorded per-session notice when the platform sleep inhibitor refuses acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SleepInhibitorNotice {
+    pub session_id: RemoteSessionId,
+    pub error: InhibitorError,
+    pub at: HostInstant,
+}
+
+impl SleepInhibitorNotice {
+    /// Stable machine-readable refusal code (e.g. `sleep_inhibitor_unavailable`).
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        self.error.code()
+    }
+}
 
 /// Typed refusal reason when an operation fails the submission-time checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +122,8 @@ pub struct SessionAgent {
     held_state: RemoteHeldTracker,
     permissions: PermissionsManager,
     sleep_inhibitor: SleepInhibitor,
+    inhibitor_refusal_logged: HashSet<RemoteSessionId>,
+    inhibitor_notices: Vec<SleepInhibitorNotice>,
     local_priority: LocalInputPriority,
     bounds: InputBounds,
     revoked: Arc<AtomicBool>,
@@ -163,6 +184,8 @@ impl SessionAgent {
             held_state: RemoteHeldTracker::new(),
             permissions,
             sleep_inhibitor: SleepInhibitor::default(),
+            inhibitor_refusal_logged: HashSet::new(),
+            inhibitor_notices: Vec::new(),
             local_priority: LocalInputPriority::default(),
             bounds,
             revoked,
@@ -204,6 +227,31 @@ impl SessionAgent {
 
     pub fn sleep_inhibitor_mut(&mut self) -> &mut SleepInhibitor {
         &mut self.sleep_inhibitor
+    }
+
+    /// Bounded per-session audit log of sleep-inhibitor acquisition refusals
+    /// (for example `sleep_inhibitor_unavailable`), recorded at most once per
+    /// active session instead of silently discarding `acquire` errors.
+    pub fn sleep_inhibitor_notices(&self) -> &[SleepInhibitorNotice] {
+        &self.inhibitor_notices
+    }
+
+    fn record_sleep_inhibitor_refusal(
+        &mut self,
+        session_id: RemoteSessionId,
+        error: InhibitorError,
+        at: HostInstant,
+    ) {
+        if self.inhibitor_refusal_logged.insert(session_id) {
+            if self.inhibitor_notices.len() >= MAX_SLEEP_INHIBITOR_NOTICES {
+                self.inhibitor_notices.remove(0);
+            }
+            self.inhibitor_notices.push(SleepInhibitorNotice {
+                session_id,
+                error,
+                at,
+            });
+        }
     }
 
     pub fn local_priority(&self) -> &LocalInputPriority {
@@ -296,7 +344,9 @@ impl SessionAgent {
             connected_at: now,
         };
         self.indicator.add_connected_session(conn);
-        let _ = self.sleep_inhibitor.acquire(session_id, now);
+        if let Err(error) = self.sleep_inhibitor.acquire(session_id, now) {
+            self.record_sleep_inhibitor_refusal(session_id, error, now);
+        }
     }
 
     /// Returns the list of all currently connected sessions with roles and capabilities.
@@ -354,6 +404,7 @@ impl SessionAgent {
             .is_some_and(|s| s.role == SessionRole::Controller);
 
         self.approval.revoke(session_id);
+        self.inhibitor_refusal_logged.remove(&session_id);
         let _ = self.sleep_inhibitor.release(session_id, now);
 
         let outcome = self.indicator.revoke_session(session_id, now, reason)?;
@@ -408,6 +459,7 @@ impl SessionAgent {
         let outcome = self.indicator.immediate_revoke(now, reason);
 
         // Emergency release sleep inhibitor
+        self.inhibitor_refusal_logged.clear();
         let _ = self.sleep_inhibitor.emergency_release_all(now);
 
         // Synthesize cleanup releases for any remotely held keys/buttons
@@ -481,6 +533,7 @@ impl SessionAgent {
     pub fn on_worker_crash(&mut self, now: HostInstant) -> UncertainReleaseReport {
         self.revoked.store(true, Ordering::Release);
         let report = self.held_state.record_worker_crash();
+        self.inhibitor_refusal_logged.clear();
         let _ = self.sleep_inhibitor.emergency_release_all(now);
         let _ = self
             .indicator
@@ -508,6 +561,7 @@ impl SessionAgent {
         now: HostInstant,
     ) -> Vec<Operation> {
         self.approval.on_session_ended(session_id);
+        self.inhibitor_refusal_logged.remove(&session_id);
         let _ = self.sleep_inhibitor.release(session_id, now);
         self.indicator.hide();
         self.held_state.synthesize_cleanup_releases()

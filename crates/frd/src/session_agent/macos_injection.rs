@@ -139,13 +139,17 @@ pub trait MacOsEventPoster: Send {
     fn post_event(&mut self, event: PostedCgEvent) -> Result<(), PlatformError>;
 }
 
-/// Test/Mock event poster that records all posted `CGEvents` for verification.
+/// Test-only event poster that records all posted `CGEvents` for unit tests.
+/// Gated to `#[cfg(test)]` so no mock/recording poster is ever exported from the
+/// production library (bead `fr-r8c`; real macOS injection lives in `fr-native::macos_input`).
+#[cfg(test)]
 #[derive(Default)]
-pub struct RecordingPoster {
+pub(crate) struct RecordingPoster {
     pub has_permission: bool,
     pub events: Vec<PostedCgEvent>,
 }
 
+#[cfg(test)]
 impl RecordingPoster {
     pub fn new(has_permission: bool) -> Self {
         Self {
@@ -155,6 +159,7 @@ impl RecordingPoster {
     }
 }
 
+#[cfg(test)]
 impl MacOsEventPoster for RecordingPoster {
     fn has_accessibility_permission(&self) -> bool {
         self.has_permission
@@ -310,5 +315,37 @@ impl<P: MacOsEventPoster> InputSink for MacOsInputSink<P> {
 
     fn cancel_prepared(&mut self) {
         self.prepared = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fr_core::input::PhysicalKey;
+
+    #[test]
+    fn submission_refuses_missing_accessibility_permission_and_unknown_hid() {
+        let bounds = InputBounds::new(DesktopPoint { x: 0, y: 0 }, 1920, 1080).unwrap();
+        let mut denied = MacOsInputSink::new(RecordingPoster::new(false), bounds);
+        let key_a = PhysicalKey::new(0x04).unwrap();
+        assert_eq!(
+            denied.submit(Operation::Key {
+                key: key_a,
+                transition: KeyTransition::Press,
+            }),
+            Submission::NotSubmitted(PlatformError::Permission)
+        );
+        assert!(denied.poster().events.is_empty());
+
+        let mut granted = MacOsInputSink::new(RecordingPoster::new(true), bounds);
+        let unmapped = PhysicalKey::new(0xF0).unwrap();
+        assert_eq!(
+            granted.submit(Operation::Key {
+                key: unmapped,
+                transition: KeyTransition::Press,
+            }),
+            Submission::NotSubmitted(PlatformError::Unsupported)
+        );
+        assert!(granted.poster().events.is_empty());
     }
 }

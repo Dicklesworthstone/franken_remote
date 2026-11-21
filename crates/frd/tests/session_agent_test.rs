@@ -22,12 +22,42 @@ use fr_core::{
 use frd::input_watchdog::StopReason;
 use frd::session_agent::{
     ApprovalMode, ApprovalState, AudioScope, DenialReason, Distinguishability, GrantedScope,
-    IndicatorDisplayState, InhibitorAction, InhibitorError, LocalPriorityOutcome, MacOsInputSink,
-    PeerIdentity, PermissionKind, PermissionStatus, PlatformKind, PlatformPermissionError,
-    PostedCgEvent, RecordingPoster, ReleaseCertainty, RequestedScope, SessionAgent,
+    IndicatorDisplayState, InhibitorAction, InhibitorError, LocalPriorityOutcome, MacOsEventPoster,
+    MacOsInputSink, PeerIdentity, PermissionKind, PermissionStatus, PlatformKind,
+    PlatformPermissionError, PostedCgEvent, ReleaseCertainty, RequestedScope, SessionAgent,
     SessionCapabilitiesInUse, SessionRole, SleepInhibitor, SleepInhibitorPlatform,
     SubmissionRefusal,
 };
+
+/// Test-owned macOS CGEvent poster (never exported from `frd` production library).
+#[derive(Default)]
+struct TestMacOsPoster {
+    has_permission: bool,
+    events: Vec<PostedCgEvent>,
+}
+
+impl TestMacOsPoster {
+    fn new(has_permission: bool) -> Self {
+        Self {
+            has_permission,
+            events: Vec::new(),
+        }
+    }
+}
+
+impl MacOsEventPoster for TestMacOsPoster {
+    fn has_accessibility_permission(&self) -> bool {
+        self.has_permission
+    }
+
+    fn post_event(&mut self, event: PostedCgEvent) -> Result<(), PlatformError> {
+        if !self.has_permission {
+            return Err(PlatformError::Permission);
+        }
+        self.events.push(event);
+        Ok(())
+    }
+}
 
 /// Test-owned in-memory inhibitor platform. It asserts nothing to any OS; it
 /// lets these tests drive the agent's ref-counting, which production cannot
@@ -416,11 +446,36 @@ fn test_default_sleep_inhibitor_reports_unavailable_not_held() {
         )
         .unwrap();
 
-    // The grant stands, but no inhibition is claimed: the production platform
-    // has no native backend and refuses with `sleep_inhibitor_unavailable`.
+    // The grant stands, no inhibition is claimed, and the refusal is logged once
+    // per session instead of being silently discarded.
     assert!(!agent.sleep_inhibitor().is_inhibiting());
     assert_eq!(agent.sleep_inhibitor().active_session_count(), 0);
     assert_eq!(agent.sleep_inhibitor().logs(), []);
+    assert_eq!(agent.sleep_inhibitor_notices().len(), 1);
+    assert_eq!(agent.sleep_inhibitor_notices()[0].session_id, session);
+    assert_eq!(
+        agent.sleep_inhibitor_notices()[0].code(),
+        "sleep_inhibitor_unavailable"
+    );
+
+    // A second distinct session records its own notice once; ending a session
+    // does not invent a held assertion.
+    let session2 = RemoteSessionId::from_raw(502);
+    agent
+        .request_session(
+            session2,
+            &make_peer("judy"),
+            &make_request(SessionRole::Observer),
+            t0,
+        )
+        .unwrap();
+    assert_eq!(agent.sleep_inhibitor_notices().len(), 2);
+    assert_eq!(agent.sleep_inhibitor_notices()[1].session_id, session2);
+    assert_eq!(
+        agent.sleep_inhibitor_notices()[1].code(),
+        "sleep_inhibitor_unavailable"
+    );
+
     let refusal = agent
         .sleep_inhibitor_mut()
         .acquire(RemoteSessionId::from_raw(501), t0)
@@ -564,7 +619,7 @@ fn test_macos_injection_adapter_physical_key_vs_committed_text() {
     let bounds = make_bounds();
 
     // 1. Accessibility missing -> refused with PlatformError::Permission
-    let poster_no_perm = RecordingPoster::new(false);
+    let poster_no_perm = TestMacOsPoster::new(false);
     let mut sink_no_perm = MacOsInputSink::new(poster_no_perm, bounds);
 
     let key_a = PhysicalKey::new(0x04).unwrap();
@@ -578,7 +633,7 @@ fn test_macos_injection_adapter_physical_key_vs_committed_text() {
     );
 
     // 2. Accessibility granted -> physical key and committed text use distinct event paths
-    let poster_perm = RecordingPoster::new(true);
+    let poster_perm = TestMacOsPoster::new(true);
     let mut sink = MacOsInputSink::new(poster_perm, bounds);
 
     // Physical key: USB usage 0x04 (Key A) maps to macOS keycode 0x00
