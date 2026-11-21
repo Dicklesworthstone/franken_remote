@@ -1,5 +1,24 @@
 # Implementation status
 
+## Browser connection cancellation and capability refusal (2026-11-20)
+
+The browser shell now gives each connection attempt its own cancellation and
+callback identity. Disconnect, pagehide and bfcache restoration abort bootstrap,
+settle pending socket opens and fence queued continuations. Old fetch, socket,
+decoder-configuration and UI results cannot mutate a replacement connection.
+
+Bootstrap requires same-origin HTTPS and an explicit `desktop_available: true`
+capability before any socket is opened. An unavailable or older host without
+that capability is refused. A WebSocket opening is labeled as awaiting session
+authorization; it cannot establish observation, fresh-view authority or control.
+
+Evidence: all ten `node --test web/tests/bootstrap_availability.test.cjs`
+regressions and syntax checks passed. They exercise asynchronous transport and
+UI ownership with simulated browser objects, including cancellation during a
+queued response body, reconnect, close-before-open and retired socket callbacks.
+These results do not qualify a live browser desktop. The Rust/WASM adapter and
+live browser integration remain open under `fr-p3-web-client-skk`.
+
 ## Browser decoder custody and local input fences (2026-11-20)
 
 `fr-web` now retains every decoder instance and compressed-input/output charge

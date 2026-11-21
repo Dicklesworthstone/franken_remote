@@ -28,6 +28,7 @@
 
     const state = {
         connected: false,
+        connecting: false,
         viewFresh: false,
         controlGranted: false,
         controlSuspended: false,
@@ -53,8 +54,8 @@
     }
 
     function syncButtons() {
-        btnConnect.disabled = state.connected;
-        btnDisconnect.disabled = !state.connected;
+        btnConnect.disabled = state.connected || state.connecting;
+        btnDisconnect.disabled = !state.connected && !state.connecting;
         btnFullscreen.disabled = !state.connected;
         // Control can only be requested once connected AND view freshness is established.
         btnReqControl.disabled = !state.connected || !state.viewFresh || state.controlGranted;
@@ -73,6 +74,7 @@
     }
 
     let wssClient = null;
+    let connectionAttempt = null;
     const player = new global.FrankenHevc.WebCodecsHevcPlayer(elCanvas, {
         onConfigured: (info) => {
             state.generation = info.generation;
@@ -115,9 +117,9 @@
             );
             if (isWss && elBanner) {
                 elBanner.textContent =
-                    "Degraded compatibility transport active (" +
+                    "Compatibility transport selected (" +
                     profile +
-                    "): TCP head-of-line blocking applies; bounded receiver-credit gating enforced.";
+                    "): TCP head-of-line blocking applies; session authorization is still required.";
                 elBanner.classList.remove("hidden");
             }
         },
@@ -146,6 +148,7 @@
                 if (15 + codecLen > bytes.length) return;
                 const codec = new TextDecoder().decode(bytes.subarray(15, 15 + codecLen));
                 const hvcc = bytes.subarray(15 + codecLen);
+                const attempt = connectionAttempt;
                 player.configure({
                     generation: gen,
                     codedWidth: width,
@@ -153,9 +156,10 @@
                     codec: codec,
                     hvcc: hvcc,
                 }).then((probe) => {
+                    if (connectionAttempt !== attempt || wssClient.closed) return;
                     if (!probe.supported) {
+                        closeConnection(probe.code);
                         showRefusal("HEVC Unavailable (" + probe.code + ")", probe.reason);
-                        wssClient.disconnect(probe.code);
                     }
                 });
             } else if (tag === 0x02) {
@@ -177,13 +181,23 @@
             }
         },
         onClosed: (reason) => {
-            state.connected = false;
-            suspendOrRevokeControl("disconnected");
-            player.reset();
-            setBadge(elConnection, "Disconnected (" + reason + ")", "badge-neutral");
-            syncButtons();
+            closeConnection(reason);
         },
     });
+
+    function closeConnection(reason, label) {
+        // Invalidate the UI owner before aborting fetch or closing sockets:
+        // any queued continuation belongs to the retired attempt.
+        connectionAttempt = null;
+        wssClient.disconnect(reason);
+        state.connected = false;
+        state.connecting = false;
+        suspendOrRevokeControl(reason);
+        player.reset();
+        clearRefusal();
+        setBadge(elConnection, label || "Disconnected (" + reason + ")", "badge-neutral");
+        syncButtons();
+    }
 
     // Browser lifecycle fencing: hidden tabs, pagehide, and bfcache restore
     // immediately revoke control and invalidate stale view freshness.
@@ -196,30 +210,36 @@
     });
 
     global.addEventListener("pagehide", () => {
+        closeConnection("pagehide");
         player.setVisible(false);
-        suspendOrRevokeControl("pagehide");
-        wssClient.disconnect("pagehide");
     });
 
     global.addEventListener("pageshow", (ev) => {
         if (ev.persisted) {
             // bfcache restoration: require fresh connection & usable view check.
-            suspendOrRevokeControl("bfcache_restore");
-            wssClient.disconnect("bfcache_restore");
+            closeConnection("bfcache_restore");
+            player.setVisible(!document.hidden);
         }
     });
 
     btnConnect.addEventListener("click", async () => {
+        if (state.connected || state.connecting) return;
+        const attempt = {};
+        connectionAttempt = attempt;
+        state.connecting = true;
         clearRefusal();
         setBadge(elConnection, "Connecting...", "badge-neutral");
+        syncButtons();
         try {
             await wssClient.connect("observer");
-            state.connected = true;
-            setBadge(elConnection, "Connected (Observing)", "badge-ok");
-            setBadge(elAuthority, "Role: View-Only", "badge-neutral");
+            if (connectionAttempt !== attempt || wssClient.closed) return;
+            // WebSocket.onopen is only transport readiness. The Rust session
+            // adapter must validate SessionOpened before observation is shown.
+            setBadge(elConnection, "Awaiting session authorization", "badge-neutral");
             syncButtons();
         } catch (err) {
-            state.connected = false;
+            if (connectionAttempt !== attempt) return;
+            closeConnection("connection_refused");
             setBadge(elConnection, "Refused", "badge-danger");
             showRefusal("Connection Refused", err && err.message ? err.message : String(err));
             syncButtons();
@@ -237,12 +257,7 @@
     });
 
     btnDisconnect.addEventListener("click", () => {
-        wssClient.disconnect("user_requested");
-        state.connected = false;
-        suspendOrRevokeControl("user_requested");
-        player.reset();
-        setBadge(elConnection, "Disconnected", "badge-neutral");
-        syncButtons();
+        closeConnection("user_requested", "Disconnected");
     });
 
     syncButtons();

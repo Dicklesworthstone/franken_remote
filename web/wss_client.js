@@ -20,7 +20,7 @@
     const DIR_VIEWER_TO_HOST = 1;
 
     function hexToBytes(hex) {
-        if (typeof hex !== "string" || hex.length % 2 !== 0) {
+        if (typeof hex !== "string" || hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) {
             throw new Error("invalid hex token");
         }
         const out = new Uint8Array(hex.length / 2);
@@ -37,6 +37,13 @@
     function wsOriginUrl(path) {
         const proto = global.location.protocol === "https:" ? "wss:" : "ws:";
         return proto + "//" + global.location.host + path;
+    }
+
+    function cancelledConnection() {
+        const error = new Error("Connection attempt was cancelled.");
+        error.name = "AbortError";
+        error.code = "browser_connection_cancelled";
+        return error;
     }
 
     function encodeReceiverPressureRecord(params) {
@@ -79,14 +86,21 @@
             this.creditEpoch = 1;
             this.videoBindingId = 2;
             this.controlBindingId = 1;
-            this.closed = false;
+            this.closed = true;
+            this.connectionAttempt = null;
         }
 
-        async bootstrap(role) {
+        async bootstrap(role, signal) {
+            if (global.location.protocol !== "https:") {
+                const error = new Error("Browser sessions require same-origin HTTPS.");
+                error.code = "browser_https_required";
+                throw error;
+            }
             const resp = await global.fetch("/api/session/bootstrap", {
                 method: "POST",
                 credentials: "same-origin",
                 cache: "no-store",
+                signal: signal,
                 headers: {
                     "Content-Type": "application/json",
                 },
@@ -100,8 +114,18 @@
             if (!data || typeof data.nonce_hex !== "string" || data.nonce_hex.length !== 64) {
                 throw new Error("Malformed bootstrap response from host");
             }
-            this.transportProfile = data.transport_profile || "wss_degraded_tcp_hol_dedicated";
-            this.sessionMeta = {
+            // A bootstrap nonce proves neither observation nor a usable browser
+            // desktop. Older hosts with no explicit capability are also refused.
+            // The host keeps this false until the Rust/WASM session adapter and
+            // real media ownership path are connected; never invent binding IDs
+            // or try the legacy socket-auth envelope to bypass that refusal.
+            if (data.desktop_available !== true) {
+                const error = new Error("Browser desktop sessions are unavailable on this host.");
+                error.code = "browser_session_unavailable";
+                throw error;
+            }
+            const transportProfile = data.transport_profile || "wss_degraded_tcp_hol_dedicated";
+            const sessionMeta = {
                 sessionIdHex: data.session_id_hex,
                 hostBootHex: data.host_boot_hex,
                 osSessionHex: data.os_session_hex,
@@ -112,81 +136,125 @@
             };
             return {
                 nonceBytes: hexToBytes(data.nonce_hex),
-                sessionMeta: this.sessionMeta,
-                transportProfile: this.transportProfile,
+                sessionMeta: sessionMeta,
+                transportProfile: transportProfile,
             };
+        }
+
+        _ownsAttempt(attempt) {
+            return attempt !== null && this.connectionAttempt === attempt && !this.closed;
         }
 
         async connect(role) {
             this.disconnect();
+            const attempt = {
+                abort: new global.AbortController(),
+                rejectOpen: null,
+            };
+            this.connectionAttempt = attempt;
             this.closed = false;
 
-            const boot = await this.bootstrap(role || "observer");
-            if (typeof this.callbacks.onTransportProfile === "function") {
-                this.callbacks.onTransportProfile(this.transportProfile);
+            try {
+                const boot = await this.bootstrap(role || "observer", attempt.abort.signal);
+                // Aborting fetch is best effort; a queued response/body result
+                // must still belong to this exact attempt before any mutation.
+                if (!this._ownsAttempt(attempt)) throw cancelledConnection();
+                this.sessionMeta = boot.sessionMeta;
+                this.transportProfile = boot.transportProfile;
+                if (typeof this.callbacks.onTransportProfile === "function") {
+                    this.callbacks.onTransportProfile(this.transportProfile);
+                }
+                await this._openControlChannel(boot.nonceBytes, attempt);
+            } catch (error) {
+                if (this.connectionAttempt === attempt) this.disconnect("connect_failed");
+                throw error;
             }
-
-            await this._openControlChannel(boot.nonceBytes);
         }
 
-        _openControlChannel(nonceBytes) {
+        _openControlChannel(nonceBytes, attempt) {
+            if (!this._ownsAttempt(attempt)) return Promise.reject(cancelledConnection());
             return new Promise((resolve, reject) => {
                 const ws = new global.WebSocket(wsOriginUrl("/ws/control"));
                 ws.binaryType = "arraybuffer";
                 this.controlSocket = ws;
 
                 let settled = false;
+                const ownsSocket = () => this._ownsAttempt(attempt) && this.controlSocket === ws;
+                const rejectOpen = (error) => {
+                    if (settled) return;
+                    settled = true;
+                    attempt.rejectOpen = null;
+                    reject(error);
+                };
+                attempt.rejectOpen = rejectOpen;
+                const end = (reason, error) => {
+                    if (!ownsSocket()) return;
+                    rejectOpen(error || new Error(reason));
+                    this.disconnect(reason);
+                    if (typeof this.callbacks.onClosed === "function") {
+                        this.callbacks.onClosed(reason);
+                    }
+                };
                 ws.onopen = () => {
+                    if (!ownsSocket()) return;
                     // First message MUST be FRBA + 32-byte single-use bootstrap nonce.
                     const authFrame = new Uint8Array(36);
                     authFrame.set(AUTH_MAGIC, 0);
                     authFrame.set(nonceBytes, 4);
-                    ws.send(authFrame);
+                    try {
+                        ws.send(authFrame);
+                    } catch (_) {
+                        end("control_socket_send_failed", new Error("Control WSS authentication failed"));
+                        return;
+                    }
                     if (!settled) {
                         settled = true;
+                        attempt.rejectOpen = null;
                         resolve();
                     }
                 };
 
                 ws.onmessage = (ev) => {
+                    if (!ownsSocket()) return;
                     if (!(ev.data instanceof ArrayBuffer)) {
                         // Text frames are forbidden on binary WSS channels.
-                        this.disconnect("protocol_text_frame_refused");
+                        end("protocol_text_frame_refused");
                         return;
                     }
                     this._handleControlBinary(new Uint8Array(ev.data));
                 };
 
                 ws.onerror = () => {
-                    if (!settled) {
-                        settled = true;
-                        reject(new Error("Control WSS connection failed"));
-                    }
+                    end("control_socket_error", new Error("Control WSS connection failed"));
                 };
 
                 ws.onclose = (ev) => {
-                    if (!this.closed && typeof this.callbacks.onClosed === "function") {
-                        this.callbacks.onClosed(ev.reason || "control_socket_closed");
-                    }
+                    end(ev.reason || "control_socket_closed", new Error("Control WSS closed before opening"));
                 };
             });
         }
 
         attachVideoChannel(sessionIdBytes, ticketBytes) {
+            const attempt = this.connectionAttempt;
+            if (!this._ownsAttempt(attempt) || !this.controlSocket ||
+                    this.controlSocket.readyState !== global.WebSocket.OPEN) return false;
             if (this.videoSocket) {
+                const old = this.videoSocket;
+                this.videoSocket = null;
                 try {
-                    this.videoSocket.close(1000, "channel_replaced");
+                    old.close(1000, "channel_replaced");
                 } catch (_) {
                     // Ignore close error on replaced channel.
                 }
-                this.videoSocket = null;
             }
 
             const ws = new global.WebSocket(wsOriginUrl("/ws/video"));
             ws.binaryType = "arraybuffer";
             this.videoSocket = ws;
+            const ownsSocket = () => this._ownsAttempt(attempt) && this.videoSocket === ws;
 
             ws.onopen = () => {
+                if (!ownsSocket()) return;
                 // First message MUST be FRAT + 16-byte session_id + 1-byte role(video=1) + 32-byte ticket.
                 const frame = new Uint8Array(53);
                 frame.set(ATTACH_MAGIC, 0);
@@ -197,8 +265,12 @@
             };
 
             ws.onmessage = (ev) => {
+                if (!ownsSocket()) return;
                 if (!(ev.data instanceof ArrayBuffer)) {
                     this.disconnect("protocol_text_frame_refused");
+                    if (typeof this.callbacks.onClosed === "function") {
+                        this.callbacks.onClosed("protocol_text_frame_refused");
+                    }
                     return;
                 }
                 if (typeof this.callbacks.onVideoBinary === "function") {
@@ -207,10 +279,13 @@
             };
 
             ws.onclose = (ev) => {
-                if (!this.closed && typeof this.callbacks.onVideoClosed === "function") {
+                if (!ownsSocket()) return;
+                this.videoSocket = null;
+                if (typeof this.callbacks.onVideoClosed === "function") {
                     this.callbacks.onVideoClosed(ev.reason || "video_socket_closed");
                 }
             };
+            return true;
         }
 
         sendReceiverPressure(releasedBytes, releasedFrames, queuedBytes, queuedItems) {
@@ -251,22 +326,31 @@
         }
 
         disconnect(reason) {
+            const attempt = this.connectionAttempt;
+            this.connectionAttempt = null;
             this.closed = true;
-            if (this.videoSocket) {
-                try {
-                    this.videoSocket.close(1000, reason || "client_disconnect");
-                } catch (_) {
-                    // Ignore close error.
-                }
-                this.videoSocket = null;
+            this.sessionMeta = null;
+            const video = this.videoSocket;
+            const control = this.controlSocket;
+            this.videoSocket = null;
+            this.controlSocket = null;
+            if (attempt) {
+                attempt.abort.abort();
+                if (attempt.rejectOpen) attempt.rejectOpen(cancelledConnection());
             }
-            if (this.controlSocket) {
+            if (video) {
                 try {
-                    this.controlSocket.close(1000, reason || "client_disconnect");
+                    video.close(1000, reason || "client_disconnect");
                 } catch (_) {
                     // Ignore close error.
                 }
-                this.controlSocket = null;
+            }
+            if (control) {
+                try {
+                    control.close(1000, reason || "client_disconnect");
+                } catch (_) {
+                    // Ignore close error.
+                }
             }
         }
     }
