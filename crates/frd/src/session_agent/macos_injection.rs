@@ -335,10 +335,12 @@ mod tests {
             }),
             Submission::NotSubmitted(PlatformError::Permission)
         );
-        assert!(denied.poster().events.is_empty());
+        assert_eq!(denied.poster().events, [] as [PostedCgEvent; 0]);
 
         let mut granted = MacOsInputSink::new(RecordingPoster::new(true), bounds);
-        let unmapped = PhysicalKey::new(0xF0).unwrap();
+        // Non-US # is a valid keyboard-page usage, but has no mapping here.
+        // Reserved usages are rejected earlier by PhysicalKey::new.
+        let unmapped = PhysicalKey::new(0x32).unwrap();
         assert_eq!(
             granted.submit(Operation::Key {
                 key: unmapped,
@@ -346,6 +348,6 @@ mod tests {
             }),
             Submission::NotSubmitted(PlatformError::Unsupported)
         );
-        assert!(granted.poster().events.is_empty());
+        assert_eq!(granted.poster().events, [] as [PostedCgEvent; 0]);
     }
 }

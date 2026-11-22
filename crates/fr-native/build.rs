@@ -26,6 +26,7 @@ fn main() {
     if env::var_os("CARGO_FEATURE_LINUX_MEDIA").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
     {
+        build_x11_connection();
         return;
     }
     assert_eq!(
@@ -97,6 +98,66 @@ fn main() {
     // Narrow public ABI for checked MIT-SHM on the original Xlib connection.
     println!("cargo:rustc-link-lib=dylib:+verbatim=libX11-xcb.so.1");
     link_system_libraries(&packages, library);
+    build_x11_connection();
+}
+fn build_x11_connection() {
+    println!("cargo:rerun-if-changed=src/x11_connection.c");
+    println!("cargo:rerun-if-changed=src/x11_connection.h");
+    println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=FR_NATIVE_INCLUDE_DIR");
+    let xlib = [
+        "CARGO_FEATURE_LINUX_MEDIA",
+        "CARGO_FEATURE_LINUX_INPUT",
+        "CARGO_FEATURE_LINUX_VIEWER_INPUT",
+    ]
+    .iter()
+    .any(|feature| env::var_os(feature).is_some());
+    let xcb = xlib
+        || env::var_os("CARGO_FEATURE_LINUX_CLIPBOARD").is_some()
+        || env::var_os("CARGO_FEATURE_LINUX_SESSION_UI").is_some();
+    if !xcb || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "X11 connection cross-builds require a qualified native sysroot"
+    );
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let mut cc = Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()));
+    cc.args([
+        "-std=c11", "-O2", "-fPIC", "-pthread", "-Wall", "-Wextra", "-Werror",
+    ]);
+    if xlib {
+        cc.arg("-DFR_NATIVE_XLIB=1");
+    }
+    if let Some(include) = env::var_os("FR_NATIVE_INCLUDE_DIR") {
+        cc.arg("-I").arg(include);
+    }
+    assert!(
+        cc.args(["-c", "src/x11_connection.c", "-o"])
+            .arg(out.join("x11connection.o"))
+            .status()
+            .expect("native C compiler")
+            .success(),
+        "install the XCB development headers and, for Xlib features, X11 headers"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrx11connection.a"))
+            .arg(out.join("x11connection.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frx11connection");
+    println!("cargo:rustc-link-lib=pthread");
+    println!("cargo:rustc-link-lib=xcb");
+    if xlib {
+        println!("cargo:rustc-link-lib=X11");
+    }
 }
 
 fn build_pipewire_microphone() {

@@ -2,6 +2,7 @@
  * session handles or input injection. Rows are borrowed immutable display
  * data until close; only their original ordinal can leave this boundary. */
 #define _POSIX_C_SOURCE 200809L
+#include "x11_connection.h"
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
 #include <X11/extensions/XKBproto.h>
@@ -345,7 +346,7 @@ struct fr_host_picker *fr_host_picker_open(const char *display,
     if (!h->playback_audio_available) h->choices &= ~CHOICE_AUDIO;
     if (notice_len) memcpy(h->notice, notice, notice_len);
     int screen = 0;
-    h->c = xcb_connect(display, &screen);
+    h->c = fr_xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(h->c));
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);

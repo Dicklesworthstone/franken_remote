@@ -15,7 +15,11 @@ fn repeated_fetch_metadata_never_overrides_an_earlier_value() {
             ("Sec-Fetch-Mode", "navigate", "cors"),
             ("Sec-Fetch-Dest", "iframe", "empty"),
         ] {
-            for (first, second) in [(rejected, accepted), (accepted, rejected), (accepted, accepted)] {
+            for (first, second) in [
+                (rejected, accepted),
+                (accepted, rejected),
+                (accepted, accepted),
+            ] {
                 let request = bootstrap_request("observer").replace(
                     &format!("{name}: {accepted}"),
                     &format!("{name}: {first}\r\n{}: {second}", name.to_ascii_lowercase()),
@@ -55,8 +59,7 @@ fn repeated_websocket_fields_refuse_before_upgrade() {
         ] {
             let mut request = upgrade_request("/ws/control");
             if name == "Sec-WebSocket-Extensions" {
-                request =
-                    request.replace("\r\n\r\n", &format!("\r\n{name}: {value}\r\n\r\n"));
+                request = request.replace("\r\n\r\n", &format!("\r\n{name}: {value}\r\n\r\n"));
             }
             request = request.replace(
                 "\r\n\r\n",
@@ -88,8 +91,8 @@ fn malformed_field_bytes_and_signed_lengths_are_not_trimmed_into_valid_requests(
             "X-Test: value\n",
             "X-Test: value\0",
         ] {
-            let request = bootstrap_request("observer")
-                .replace("\r\n\r\n", &format!("\r\n{header}\r\n\r\n"));
+            let request =
+                bootstrap_request("observer").replace("\r\n\r\n", &format!("\r\n{header}\r\n\r\n"));
             let response =
                 send_http_raw(&ingress, PEER_IP, Some(EXPECTED_HOST), request.as_bytes()).await;
             assert!(response.starts_with("HTTP/1.1 400 "));
@@ -122,9 +125,15 @@ fn ordinary_optional_whitespace_and_case_insensitive_names_remain_usable() {
         let request = bootstrap_request("observer")
             .replace("Host: ", "hOsT:\t ")
             .replace("Origin: ", "oRiGiN: \t")
-            .replace("Sec-Fetch-Site: same-origin", "sec-fetch-site:\t same-origin \t")
+            .replace(
+                "Sec-Fetch-Site: same-origin",
+                "sec-fetch-site:\t same-origin \t",
+            )
             .replace("Content-Length: 19", "content-length:\t19 \t")
-            .replace("\r\n\r\n", "\r\nX-Extension: one\r\nX-Extension: two\r\n\r\n");
+            .replace(
+                "\r\n\r\n",
+                "\r\nX-Extension: one\r\nX-Extension: two\r\n\r\n",
+            );
         let response =
             send_http_raw(&ingress, PEER_IP, Some(EXPECTED_HOST), request.as_bytes()).await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -142,7 +151,10 @@ fn non_ascii_security_fields_cannot_disguise_denied_metadata() {
     runtime.block_on(async {
         let ingress = test_ingress(4096, 4);
         for (original, replacement) in [
-            ("Sec-Fetch-Site: same-origin", "Sec-Fetch-Site: cross-site\u{00a0}"),
+            (
+                "Sec-Fetch-Site: same-origin",
+                "Sec-Fetch-Site: cross-site\u{00a0}",
+            ),
             ("Sec-Fetch-Dest: empty", "Sec-Fetch-Dest: iframe\u{00a0}"),
             ("Sec-Fetch-Mode: cors", "Sec-Fetch-Mode: navigate\u{00a0}"),
         ] {

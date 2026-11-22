@@ -25,6 +25,7 @@ use std::{
 // Test-only declarations from Xlib.h. This independent connection belongs to the
 // test thread; the production input connection belongs to its native worker.
 unsafe extern "C" {
+    #[link_name = "fr_x11_open_display"]
     fn XOpenDisplay(name: *const c_char) -> *mut c_void;
     fn XCloseDisplay(display: *mut c_void) -> c_int;
     fn XDefaultRootWindow(display: *mut c_void) -> c_ulong;

@@ -283,7 +283,7 @@ int fr_viewer_input_text_prepare(struct fr_viewer_input *h, const char *display)
         if (!memcmp(h->keynames[i], "ESC\0", 4)) t->escape = (uint8_t)i;
     }
     if (!t->f7 || !t->enter || !t->escape) goto unavailable;
-    t->display = XOpenDisplay(display); if (!t->display) goto unavailable;
+    t->display = fr_x11_open_display(display); if (!t->display) goto unavailable;
     if (!text_register_display(t)) goto unavailable;
     t->im = XOpenIM(t->display, NULL, NULL, NULL); if (!t->im) goto unavailable;
     XIMStyles *styles = NULL;

@@ -5,6 +5,7 @@
  * RENDER cursor built from an already validated, premultiplied image. Every
  * change is a checked request, so success means the X server processed it.
  * No callbacks, Xlib globals, Rust pointers or peer strings. */
+#include "x11_connection.h"
 #include <xcb/xcb.h>
 #include <xcb/render.h>
 #include <stdint.h>
@@ -76,7 +77,7 @@ struct fr_viewer_cursor *fr_viewer_cursor_open(const char *display, uint32_t win
     struct fr_viewer_cursor *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     h->window = window; h->width = (uint16_t)width; h->height = (uint16_t)height;
-    h->c = xcb_connect(display, NULL);
+    h->c = fr_xcb_connect(display, NULL);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     h->byte_order = xcb_get_setup(h->c)->image_byte_order;
     xcb_get_geometry_reply_t *g = xcb_get_geometry_reply(h->c, xcb_get_geometry(h->c, window), NULL);

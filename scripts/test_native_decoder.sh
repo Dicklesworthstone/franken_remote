@@ -8,6 +8,7 @@ mkdir -p "$work"
 native_flags_text="$(pkg-config --cflags --libs libavcodec libavutil libswscale x11 xcb)"
 read -r -a native_flags <<< "$native_flags_text"
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror=implicit-function-declaration \
+  -pthread -DFR_NATIVE_XLIB=1 crates/fr-native/src/x11_connection.c \
   crates/fr-native/tests/decoder_threads.c "${native_flags[@]}" \
   -l:libX11-xcb.so.1 -o "$work/decoder-threads"
 timeout 120 "$work/decoder-threads"

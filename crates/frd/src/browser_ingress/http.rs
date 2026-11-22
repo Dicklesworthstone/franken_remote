@@ -88,9 +88,7 @@ impl fmt::Display for HttpParseError {
             Self::BodyTooLarge => "HTTP request body exceeded 4 KiB ceiling",
             Self::MalformedRequestLine => "malformed HTTP/1.1 request line",
             Self::MalformedHeader => "malformed HTTP header",
-            Self::SmugglingRejected => {
-                "ambiguous HTTP framing or repeated policy header rejected"
-            }
+            Self::SmugglingRejected => "ambiguous HTTP framing or repeated policy header rejected",
             Self::UnsupportedVersion => "HTTP/1.1 required",
         })
     }
@@ -212,7 +210,9 @@ fn parse_http_head(bytes: &[u8]) -> Result<(HttpRequest, usize), HttpParseError>
         if line.starts_with(' ') || line.starts_with('\t') {
             return Err(HttpParseError::SmugglingRejected);
         }
-        let (name, value) = line.split_once(':').ok_or(HttpParseError::MalformedHeader)?;
+        let (name, value) = line
+            .split_once(':')
+            .ok_or(HttpParseError::MalformedHeader)?;
         if name.is_empty() || !name.bytes().all(header_name_byte) {
             return Err(HttpParseError::MalformedHeader);
         }

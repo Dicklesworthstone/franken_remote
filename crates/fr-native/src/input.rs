@@ -37,9 +37,14 @@ fn xtest_access() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+// XCB and Xlib constructors share the native authentication-storage guard.
+#[link(name = "frx11connection", kind = "static")]
+unsafe extern "C" {
+    #[link_name = "fr_x11_open_display"]
+    fn XOpenDisplay(name: *const c_char) -> *mut c_void;
+}
 #[link(name = "X11")]
 unsafe extern "C" {
-    fn XOpenDisplay(name: *const c_char) -> *mut c_void;
     fn XCloseDisplay(display: *mut c_void) -> c_int;
     fn XDefaultScreen(display: *mut c_void) -> c_int;
     fn XScreenCount(display: *mut c_void) -> c_int;

@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 /* The only C ABI boundary for the Linux CPU-staging media path. */
+#include "x11_connection.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -416,7 +417,7 @@ int fr_x11_screens_new(const char *display,FrScreens **out,uint32_t *count) {
     if (!out || !count) return FR_INVALID;
     *out=NULL; *count=0;
     FrScreens *s=calloc(1,sizeof(*s)); if (!s) return FR_MEMORY;
-    s->display=XOpenDisplay(display);
+    s->display=fr_x11_open_display(display);
     if (!s->display) { free(s); return FR_DISPLAY; }
     s->count=ScreenCount(s->display);
     if (s->count<1 || s->count>8) { fr_x11_screens_free(s); return FR_UNAVAILABLE; }
@@ -515,7 +516,7 @@ void fr_x11_free(FrX11 *x) {
 int fr_x11_new(const char *display,int presenter,int w,int h,FrX11 **out,int *width,int *height) {
     if (!out || !width || !height) return FR_INVALID; *out=NULL;
     FrX11 *x=calloc(1,sizeof(*x)); if (!x) return FR_MEMORY;
-    x->display=XOpenDisplay(display); if (!x->display) { free(x); return FR_DISPLAY; }
+    x->display=fr_x11_open_display(display); if (!x->display) { free(x); return FR_DISPLAY; }
     x->screen=DefaultScreen(x->display); x->presenter=presenter;
     Visual *v=DefaultVisual(x->display,x->screen);
     if (v->class!=TrueColor || v->red_mask!=0xff0000 || v->green_mask!=0xff00 || v->blue_mask!=0xff || DefaultDepth(x->display,x->screen)!=24) { fr_x11_free(x); return FR_UNAVAILABLE; }
@@ -544,7 +545,7 @@ int fr_x11_attach(const char *display,uint32_t window,int w,int h,FrX11 **out) {
     *out=NULL;
     if (!window || !geometry(w,h)) return FR_INVALID;
     FrX11 *x=calloc(1,sizeof(*x)); if (!x) return FR_MEMORY;
-    x->presenter=2; x->display=XOpenDisplay(display);
+    x->presenter=2; x->display=fr_x11_open_display(display);
     if (!x->display) { free(x); return FR_DISPLAY; }
     x->screen=DefaultScreen(x->display); x->window=(Window)window; x->w=w; x->h=h;
     XWindowAttributes a;

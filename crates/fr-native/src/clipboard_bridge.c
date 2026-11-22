@@ -1,6 +1,7 @@
 /* XCB representation boundary only. Rust owns text, generations, reader limits,
  * expiry and selection state. No callbacks, retained caller pointers or Xlib
  * global error handlers. Every checked request has a consumed result. */
+#include "x11_connection.h"
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
 #include <X11/extensions/xfixesproto.h>
@@ -59,7 +60,7 @@ struct fr_clip *fr_clip_open(const char *display, struct fr_clip_atoms *atoms,
     struct fr_clip *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     int screen = 0;
-    h->c = xcb_connect(display, &screen);
+    h->c = fr_xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(h->c));
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);

@@ -5,6 +5,7 @@
  * structs, not a second library.
  * Input is logical X-server input; SendEvent cannot create positive evidence.
  * XTest and the selected user's X server remain explicit trust limits. */
+#include "x11_connection.h"
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
 #include <X11/extensions/XKBproto.h>
@@ -502,7 +503,7 @@ struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t windo
     if (!display || !window || !names || !refusal || !width || !height || width > 32767 || height > 32767) return NULL;
     struct fr_viewer_input *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
-    h->c = xcb_connect(display, NULL); h->window = window;
+    h->c = fr_xcb_connect(display, NULL); h->window = window;
     h->width = width; h->height = height;
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     /* Reject a root before subscribing to ANY input. Requery after subscription

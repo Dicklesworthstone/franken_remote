@@ -2244,7 +2244,14 @@ mod tests {
             let counters = ended.control.as_mut().unwrap();
             counters.requested = true;
             counters.granted = true;
-            counters.capabilities = Some(control::capabilities());
+            // This fixture represents a legacy host's negotiated grant.
+            // The local producer also supports optional committed text, but
+            // that capability is granted only after positive negotiation.
+            let legacy = control::offer(false);
+            let selected = legacy.intersect(&legacy).unwrap();
+            counters.capabilities = Some(
+                control::capabilities().meet(fr_wire::control::requestable(&selected.capabilities)),
+            );
             counters.results = 3;
             counters.submitted = 2;
             counters.ended = Some(Ok(()));

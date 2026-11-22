@@ -6,6 +6,7 @@ work="${FR_VIEWER_SWITCH_TEST_DIR:-$(mktemp -d /tmp/fr-viewer-switch.XXXXXX)}"
 mkdir -p "$work"
 # shellcheck disable=SC2046
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror \
+  -pthread crates/fr-native/src/x11_connection.c \
   crates/fr-native/src/viewer_window.c crates/fr-native/tests/viewer_switch.c \
   $(pkg-config --cflags --libs x11 xcb) -l:libXtst.so.6 -o "$work/viewer-switch-test"
 python3 - "$work" <<'PY'

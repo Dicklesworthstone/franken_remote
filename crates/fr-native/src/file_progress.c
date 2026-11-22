@@ -203,7 +203,7 @@ static struct fr_upload *upload_open(const char *display, uint32_t parent,
     h->width = direction == 3 ? FR_CLIPBOARD_WIDTH : UP_WIDTH;
     h->height = direction == 3 ? FR_CLIPBOARD_HEIGHT : UP_HEIGHT;
     int screen = 0;
-    h->c = xcb_connect(display, &screen);
+    h->c = fr_xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(h->c));
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);

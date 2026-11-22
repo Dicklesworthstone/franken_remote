@@ -774,3 +774,61 @@ fn worker_timeout_cannot_override_host_reports_local_stop_or_failed_cleanup() {
     ui.cleanup_finished(1, summary());
     assert_eq!(ui.status(retry_worker()), Err(CallbackError));
 }
+
+#[test]
+fn original_control_history_preserves_the_exact_negotiated_text_capability() {
+    use fr_core::input_submission::Capability;
+    use fr_wire::control::{requestable, with_committed_text};
+
+    for host_text in [false, true] {
+        let client = with_committed_text(control::offer(false)).unwrap();
+        let host = if host_text {
+            with_committed_text(control::offer(false)).unwrap()
+        } else {
+            control::offer(false)
+        };
+        let selected = client.intersect(&host).unwrap();
+        let granted = control::capabilities().meet(requestable(&selected.capabilities));
+        assert_eq!(granted.contains(Capability::Text), host_text);
+
+        let mut ui = requested();
+        {
+            let mut progress = ui.progress.borrow_mut();
+            let counters = progress.control.as_mut().unwrap();
+            counters.granted = true;
+            counters.capabilities = Some(granted);
+            counters.results = 1;
+            counters.submitted = 1;
+        }
+        ui.cleanup_finished(1, summary());
+        ui.status(reconnecting()).unwrap();
+        ui.status(Status::Connecting { attempt: 2 }).unwrap();
+        assert_eq!(
+            ui.progress.borrow_mut().control.as_mut().unwrap().opened(),
+            control::AttemptMode::ViewingOnly
+        );
+
+        let progress = ui.progress.borrow();
+        let output: serde_json::Value =
+            serde_json::from_str(&completion(&progress, true, None)).unwrap();
+        let mut expected = vec![
+            "keys",
+            "repeat",
+            "absolute_pointer",
+            "buttons",
+            "line_scroll",
+        ];
+        if host_text {
+            expected.push("text");
+        }
+        assert_eq!(
+            output["control_capabilities_granted"],
+            serde_json::json!(expected)
+        );
+        assert_eq!(output["last_attempt_mode"], "view_only");
+        assert_eq!(output["control_request_attempt"], 1);
+        assert_eq!(output["viewing_reconnects"], 1);
+        assert_eq!(output["input_submitted_to_os"], 1);
+        assert_eq!(progress.control.unwrap().capabilities, Some(granted));
+    }
+}

@@ -290,7 +290,9 @@ mod tests {
 
     #[test]
     fn active_broker_reports_unmeasured_media_counts_instead_of_fabricated_values() {
-        use crate::broker::idle_harness::{IdleEnvelopeViolation, IdleHarness};
+        use crate::broker::idle_harness::{
+            IdleEnvelopeViolation, IdleHarness, IdleMeasurementReport,
+        };
         use fr_core::ids::RemoteSessionId;
         use std::time::Duration;
 
@@ -321,9 +323,22 @@ mod tests {
         assert_eq!(service.gpu_surfaces(), None);
 
         let report = IdleHarness::measure(Duration::from_millis(1), &service);
+        assert_eq!(report.active_captures, None);
+        assert_eq!(report.active_encoders, None);
+        assert_eq!(report.gpu_surfaces, None);
         assert!(!report.passed);
+
+        // The live sample includes this entire concurrent test process, whose
+        // RSS or CPU may legitimately fail an earlier envelope check. Keep
+        // its unknown media counts, then isolate their refusal in a model
+        // with resource values explicitly within the existing limits.
+        let model = IdleMeasurementReport {
+            rss_bytes: 10 * 1024 * 1024,
+            cpu_percent: 0.01,
+            ..report
+        };
         assert_eq!(
-            report.verify_envelope(),
+            model.verify_envelope(),
             Err(IdleEnvelopeViolation::UnmeasuredMediaState)
         );
     }

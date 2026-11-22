@@ -1,6 +1,7 @@
 /* Client-owned XCB drawable. The decoder borrows only the chosen X resource;
  * it never selects the input target or controls this connection's lifetime.
  * No callbacks, Xlib globals, grabs, native input injection or peer strings. */
+#include "x11_connection.h"
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
 #include <X11/extensions/XKBproto.h>
@@ -93,7 +94,7 @@ int fr_viewer_screen_area(const char *display, uint32_t *width, uint32_t *height
     if (!display || !width || !height || !root_width || !root_height) return 0;
     *width = *height = *root_width = *root_height = 0;
     int screen = 0;
-    xcb_connection_t *c = xcb_connect(display, &screen);
+    xcb_connection_t *c = fr_xcb_connect(display, &screen);
     if (!c || xcb_connection_has_error(c)) {
         if (c) xcb_disconnect(c);
         return 0;
@@ -145,7 +146,7 @@ static struct fr_viewer_window *viewer_window_open(const char *display,
     struct fr_viewer_window *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     int screen = 0;
-    h->c = xcb_connect(display, &screen);
+    h->c = fr_xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(h->c));
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);

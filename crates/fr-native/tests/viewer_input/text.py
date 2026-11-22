@@ -30,7 +30,9 @@ def main() -> None:
         binary = directory / "viewer-text"
         compiler = shlex.split(os.environ.get("CC", "cc"))
         subprocess.run(compiler + ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread",
-                                   str(HERE / "text.c"), "-lxcb", "-lX11",
+                                   "-DFR_NATIVE_XLIB=1",
+                                   str(HERE / "text.c"),
+                                   str(HERE / "../../src/x11_connection.c"), "-lxcb", "-lX11",
                                    "-l:libXtst.so.6", "-o", str(binary)],
                        check=True, timeout=30)
         for case in CASES:

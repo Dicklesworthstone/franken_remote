@@ -37,7 +37,11 @@ fn complete_receive_policy_reaches_only_the_original_selected_viewer() {
     ])
     .unwrap();
     assert!(!format!("{command:?}").contains("/private/local destination"));
-    let AppCommand::Open { port, mut receiving } = command else {
+    let AppCommand::Open {
+        port,
+        mut receiving,
+    } = command
+    else {
         panic!("application connection required");
     };
     assert_eq!(port, 9443);
@@ -62,7 +66,10 @@ fn complete_receive_policy_reaches_only_the_original_selected_viewer() {
     assert!(viewer.audio.is_some() && viewer.microphone.is_none());
     assert_eq!(viewer.display, DisplayChoice::Choose);
     let receive = viewer.receive.unwrap();
-    assert_eq!(receive.directory, PathBuf::from("/private/local destination"));
+    assert_eq!(
+        receive.directory,
+        PathBuf::from("/private/local destination")
+    );
     assert_eq!(receive.max_file_bytes, Some(4_294_967_296));
     assert_eq!(receive.max_session_bytes, Some(8_589_934_592));
     assert!(receive.keep_both);
@@ -73,7 +80,9 @@ fn complete_receive_policy_reaches_only_the_original_selected_viewer() {
     let boundary = open.iter().position(|arg| arg == "--args").unwrap();
     assert_eq!(
         open[boundary + 1..],
-        args.iter().map(std::ffi::OsString::from).collect::<Vec<_>>()
+        args.iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>()
     );
 
     // A new picker and another selected host have neither the directory nor

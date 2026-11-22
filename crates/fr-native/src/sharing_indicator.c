@@ -5,6 +5,7 @@
  * All approval and indicator input is attributed to an enabled XInput2 slave.
  * XTEST/core/SendEvent input cannot operate consent, including input injected
  * by our own controller. This is not a sandbox against same-user X clients. */
+#include "x11_connection.h"
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
 #include <sys/uio.h>
@@ -268,7 +269,7 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
         if (h->input_gate < 0 || fr_input_gate_lock(h->input_gate, 1) != 1) goto fail;
     }
     int screen = 0;
-    h->c = xcb_connect(display, &screen);
+    h->c = fr_xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(h->c));
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);
