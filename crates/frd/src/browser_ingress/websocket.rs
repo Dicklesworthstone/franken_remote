@@ -1,6 +1,6 @@
 //! Bounded RFC 6455 binary WebSocket framing for `frd` browser ingress.
 //!
-//! Enforces FrankenRemote WSS profile invariants (`AGENTS.md` §§5, 6; Plan §12.5):
+//! Enforces `FrankenRemote` WSS profile invariants (`AGENTS.md` §§5, 6; Plan §12.5):
 //! - Compression extensions (`RSV1`/`RSV2`/`RSV3` nonzero) are strictly refused.
 //! - Text frames (opcode `0x01`) are refused on binary WSS channels.
 //! - Client-to-server frames MUST be masked per RFC 6455 §5.1.
@@ -198,13 +198,13 @@ pub async fn write_ws_frame<W: AsyncWrite + Unpin>(
         #[allow(clippy::cast_possible_truncation)]
         header.push(mask_bit | (payload.len() as u8));
     } else if let Ok(len16) = u16::try_from(payload.len()) {
-        header.push(mask_bit | 126);
+        header.push(mask_bit | 0x7e);
         header.extend_from_slice(&len16.to_be_bytes());
     } else {
         let len64 = u64::try_from(payload.len()).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame length overflow")
         })?;
-        header.push(mask_bit | 127);
+        header.push(mask_bit | 0x7f);
         header.extend_from_slice(&len64.to_be_bytes());
     }
     if let Some(key) = mask_key {

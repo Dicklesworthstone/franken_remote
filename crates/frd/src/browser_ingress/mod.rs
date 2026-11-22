@@ -614,9 +614,10 @@ impl BrowserIngress {
         }
         let maximum = browser::MAX_RECORD
             .min(usize::try_from(self.config.limits.max_control_message_bytes()).unwrap_or(0));
-        let first_frame = match websocket::read_ws_frame(stream, maximum, true).await {
-            Ok(websocket::WsFrame::Binary(bytes)) => bytes,
-            _ => return websocket::write_server_close(stream, 1008).await,
+        let Ok(websocket::WsFrame::Binary(first_frame)) =
+            websocket::read_ws_frame(stream, maximum, true).await
+        else {
+            return websocket::write_server_close(stream, 1008).await;
         };
         // Terminal refusal never begins another negotiation or refusal exchange.
         if refusal::decode(&first_frame, 0, maximum, InputDelivery::Reliable).is_ok() {

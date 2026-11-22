@@ -6,7 +6,7 @@
 //! issued test nonces exercise canonical ClientHello/refusal interoperability;
 //! they do not represent installed-tailnet admission or real desktop support.
 
-#![cfg(any(target_os = "linux", target_os = "macos", windows))]
+#![cfg(native_stack)]
 
 use asupersync::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -907,3 +907,6 @@ fn incomplete_http_headers_and_bootstrap_bodies_expire_without_allocating_nonce(
 
 #[path = "browser_ingress/tls.rs"]
 mod tls;
+
+#[path = "browser_ingress/headers.rs"]
+mod headers;

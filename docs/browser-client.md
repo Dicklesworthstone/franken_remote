@@ -77,6 +77,14 @@ validates: WSS profile and version, the requested role, and the explicit
 nonce, session, control binding, media queue, or attachment ticket. The server
 retains exact Origin, Host/SNI, Fetch Metadata, and credential-in-URL checks.
 
+HTTP policy fields are single-valued. Repeated Host, Origin, Fetch Metadata,
+or WebSocket upgrade headers are refused case-insensitively before admission,
+even when the repeated values agree. Field names must be HTTP tokens, policy-field values must be ASCII, body
+lengths must contain only decimal digits, and control bytes are rejected
+before optional space/tab trimming. The parser retains the 8 KiB header,
+48-field and 4 KiB body ceilings; ordinary header casing and optional whitespace
+remain accepted. These checks do not enable browser desktop sessions.
+
 The control socket accepts a bounded canonical `FRD0` browser ClientHello. A
 policy-issued nonce is single-use and bound to its original peer and role; even
 a valid hello receives a canonical `HostUnavailable` refusal until a real host

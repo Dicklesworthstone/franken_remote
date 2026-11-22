@@ -89,7 +89,7 @@ impl fmt::Display for HttpParseError {
             Self::MalformedRequestLine => "malformed HTTP/1.1 request line",
             Self::MalformedHeader => "malformed HTTP header",
             Self::SmugglingRejected => {
-                "ambiguous HTTP framing rejected (Transfer-Encoding or duplicate Content-Length)"
+                "ambiguous HTTP framing or repeated policy header rejected"
             }
             Self::UnsupportedVersion => "HTTP/1.1 required",
         })
@@ -122,126 +122,15 @@ pub async fn read_http_request<R: AsyncRead + Unpin>(
         raw.extend_from_slice(&chunk[..n]);
     };
 
-    let head_bytes = &raw[..header_end];
-    if head_bytes.contains(&0) {
-        return Err(HttpParseError::MalformedHeader);
-    }
-    let head = core::str::from_utf8(head_bytes).map_err(|_| HttpParseError::MalformedHeader)?;
-    let mut lines = head.split("\r\n");
-    let request_line = lines.next().ok_or(HttpParseError::MalformedRequestLine)?;
-    let mut rl_parts = request_line.split(' ');
-    let method = rl_parts
-        .next()
-        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_uppercase()))
-        .ok_or(HttpParseError::MalformedRequestLine)?
-        .to_owned();
-    let target = rl_parts
-        .next()
-        .filter(|s| !s.is_empty() && s.starts_with('/'))
-        .ok_or(HttpParseError::MalformedRequestLine)?
-        .to_owned();
-    let version = rl_parts
-        .next()
-        .ok_or(HttpParseError::MalformedRequestLine)?;
-    if rl_parts.next().is_some() {
-        return Err(HttpParseError::MalformedRequestLine);
-    }
-    if version != "HTTP/1.1" {
-        return Err(HttpParseError::UnsupportedVersion);
-    }
-
-    let mut host = None;
-    let mut origin = None;
-    let mut sec_fetch_site = None;
-    let mut sec_fetch_mode = None;
-    let mut sec_fetch_dest = None;
-    let mut upgrade = None;
-    let mut connection = None;
-    let mut sec_websocket_key = None;
-    let mut sec_websocket_version = None;
-    let mut sec_websocket_extensions = None;
-    let mut content_length: Option<usize> = None;
-    let mut header_count = 0usize;
-
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        header_count += 1;
-        if header_count > MAX_HTTP_HEADERS {
-            return Err(HttpParseError::TooManyHeaders);
-        }
-        // Reject obs-fold (leading whitespace continuation).
-        if line.starts_with(' ') || line.starts_with('\t') {
-            return Err(HttpParseError::SmugglingRejected);
-        }
-        let (name, value) = line
-            .split_once(':')
-            .ok_or(HttpParseError::MalformedHeader)?;
-        if name.is_empty()
-            || name
-                .bytes()
-                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-        {
-            return Err(HttpParseError::MalformedHeader);
-        }
-        let val = value.trim();
-        if val.bytes().any(|b| b.is_ascii_control() && b != b'\t') {
-            return Err(HttpParseError::MalformedHeader);
-        }
-
-        if name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err(HttpParseError::SmugglingRejected);
-        } else if name.eq_ignore_ascii_case("content-length") {
-            if content_length.is_some() {
-                return Err(HttpParseError::SmugglingRejected);
-            }
-            let parsed = val
-                .parse::<usize>()
-                .map_err(|_| HttpParseError::MalformedHeader)?;
-            if parsed > MAX_HTTP_BODY_BYTES {
-                return Err(HttpParseError::BodyTooLarge);
-            }
-            content_length = Some(parsed);
-        } else if name.eq_ignore_ascii_case("host") {
-            if host.is_some() {
-                return Err(HttpParseError::SmugglingRejected);
-            }
-            host = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("origin") {
-            if origin.is_some() {
-                return Err(HttpParseError::SmugglingRejected);
-            }
-            origin = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("sec-fetch-site") {
-            sec_fetch_site = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("sec-fetch-mode") {
-            sec_fetch_mode = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("sec-fetch-dest") {
-            sec_fetch_dest = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("upgrade") {
-            upgrade = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("connection") {
-            connection = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("sec-websocket-key") {
-            sec_websocket_key = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("sec-websocket-version") {
-            sec_websocket_version = Some(val.to_owned());
-        } else if name.eq_ignore_ascii_case("sec-websocket-extensions") {
-            sec_websocket_extensions = Some(val.to_owned());
-        }
-    }
-
-    let expected_body = content_length.unwrap_or(0);
+    let (mut request, expected_body) = parse_http_head(&raw[..header_end])?;
     let already_read_body = &raw[header_end + 4..];
-    if already_read_body.len() > MAX_HTTP_BODY_BYTES || already_read_body.len() > expected_body {
+    if already_read_body.len() > expected_body {
         return Err(HttpParseError::SmugglingRejected);
     }
-
-    let mut body = Vec::with_capacity(expected_body);
-    body.extend_from_slice(already_read_body);
-    while body.len() < expected_body {
-        let need = (expected_body - body.len()).min(chunk.len());
+    request.body = Vec::with_capacity(expected_body);
+    request.body.extend_from_slice(already_read_body);
+    while request.body.len() < expected_body {
+        let need = (expected_body - request.body.len()).min(chunk.len());
         let n = stream
             .read(&mut chunk[..need])
             .await
@@ -249,24 +138,121 @@ pub async fn read_http_request<R: AsyncRead + Unpin>(
         if n == 0 {
             return Err(HttpParseError::Eof);
         }
-        body.extend_from_slice(&chunk[..n]);
+        request.body.extend_from_slice(&chunk[..n]);
     }
+    Ok(request)
+}
 
-    Ok(HttpRequest {
+fn parse_request_line(line: &str) -> Result<(String, String), HttpParseError> {
+    let mut parts = line.split(' ');
+    let method = parts
+        .next()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_uppercase()))
+        .ok_or(HttpParseError::MalformedRequestLine)?;
+    let target = parts
+        .next()
+        .filter(|s| s.starts_with('/') && s.bytes().all(|b| b.is_ascii_graphic()))
+        .ok_or(HttpParseError::MalformedRequestLine)?;
+    let version = parts.next().ok_or(HttpParseError::MalformedRequestLine)?;
+    if parts.next().is_some() {
+        return Err(HttpParseError::MalformedRequestLine);
+    }
+    if version != "HTTP/1.1" {
+        return Err(HttpParseError::UnsupportedVersion);
+    }
+    Ok((method.to_owned(), target.to_owned()))
+}
+
+/// Only HTTP token bytes may name a field. In particular, punctuation that
+/// another parser might interpret as a delimiter cannot hide a policy header.
+fn header_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+fn singleton(field: &mut Option<String>, value: &str) -> Result<(), HttpParseError> {
+    // Every retained field has an ASCII grammar. Keeping Unicode lookalike
+    // whitespace could turn a denied Fetch Metadata value into an unknown one.
+    if !value.is_ascii() {
+        return Err(HttpParseError::MalformedHeader);
+    }
+    if field.is_some() {
+        return Err(HttpParseError::SmugglingRejected);
+    }
+    *field = Some(value.to_owned());
+    Ok(())
+}
+
+/// Parse policy-relevant fields exactly once, before allocating a body or
+/// consulting Origin, fetch metadata, bootstrap or WebSocket admission.
+fn parse_http_head(bytes: &[u8]) -> Result<(HttpRequest, usize), HttpParseError> {
+    let head = core::str::from_utf8(bytes).map_err(|_| HttpParseError::MalformedHeader)?;
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().ok_or(HttpParseError::MalformedRequestLine)?;
+    let (method, target) = parse_request_line(request_line)?;
+    let mut request = HttpRequest {
         method,
         target,
-        host,
-        origin,
-        sec_fetch_site,
-        sec_fetch_mode,
-        sec_fetch_dest,
-        upgrade,
-        connection,
-        sec_websocket_key,
-        sec_websocket_version,
-        sec_websocket_extensions,
-        body,
-    })
+        host: None,
+        origin: None,
+        sec_fetch_site: None,
+        sec_fetch_mode: None,
+        sec_fetch_dest: None,
+        upgrade: None,
+        connection: None,
+        sec_websocket_key: None,
+        sec_websocket_version: None,
+        sec_websocket_extensions: None,
+        body: Vec::new(),
+    };
+    let mut content_length = None;
+    for (index, line) in lines.enumerate() {
+        if index >= MAX_HTTP_HEADERS {
+            return Err(HttpParseError::TooManyHeaders);
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return Err(HttpParseError::SmugglingRejected);
+        }
+        let (name, value) = line.split_once(':').ok_or(HttpParseError::MalformedHeader)?;
+        if name.is_empty() || !name.bytes().all(header_name_byte) {
+            return Err(HttpParseError::MalformedHeader);
+        }
+        // Check the original bytes: trim() would silently erase CR, LF,
+        // vertical tabs and other malformed input at the ends of a value.
+        if value.bytes().any(|b| b.is_ascii_control() && b != b'\t') {
+            return Err(HttpParseError::MalformedHeader);
+        }
+        let value = value.trim_matches([' ', '\t']);
+        match name.to_ascii_lowercase().as_str() {
+            "transfer-encoding" => return Err(HttpParseError::SmugglingRejected),
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(HttpParseError::SmugglingRejected);
+                }
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(HttpParseError::MalformedHeader);
+                }
+                let length = value
+                    .parse::<usize>()
+                    .map_err(|_| HttpParseError::MalformedHeader)?;
+                if length > MAX_HTTP_BODY_BYTES {
+                    return Err(HttpParseError::BodyTooLarge);
+                }
+                content_length = Some(length);
+            }
+            "host" => singleton(&mut request.host, value)?,
+            "origin" => singleton(&mut request.origin, value)?,
+            "sec-fetch-site" => singleton(&mut request.sec_fetch_site, value)?,
+            "sec-fetch-mode" => singleton(&mut request.sec_fetch_mode, value)?,
+            "sec-fetch-dest" => singleton(&mut request.sec_fetch_dest, value)?,
+            "upgrade" => singleton(&mut request.upgrade, value)?,
+            "connection" => singleton(&mut request.connection, value)?,
+            "sec-websocket-key" => singleton(&mut request.sec_websocket_key, value)?,
+            "sec-websocket-version" => singleton(&mut request.sec_websocket_version, value)?,
+            "sec-websocket-extensions" => singleton(&mut request.sec_websocket_extensions, value)?,
+            _ => {}
+        }
+    }
+    Ok((request, content_length.unwrap_or(0)))
 }
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
