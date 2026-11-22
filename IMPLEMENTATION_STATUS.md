@@ -1,5 +1,25 @@
 # Implementation status
 
+## Original file publication receipts at sender expiry (2026-11-22)
+
+The file sender reconciles a terminal receipt already queued on its original
+authenticated file channel before returning an original transfer or batch
+timeout. A valid durable or durability-unknown publication remains recorded;
+the expired file lane still retires. No source read, payload send, renewed
+deadline or next selected file is admitted. Identity, live authorization,
+transport receive bounds and exact publication-proof checks remain required.
+A late acceptance cannot advance the source, and a missing valid proof leaves
+an admitted completion unknown.
+
+Source reviewed and scoped pinned formatting passed. Four real UDP/TLS/ATP/disk
+regressions cover transfer and batch expiry, late acceptance and authorization
+loss. A separate reply-handler fixture covers both publication directions and
+durability states; it is not reverse-native publication qualification. These
+Rust tests are added but execution is pending at this source checkpoint because
+the shared build host repeatedly stalled during dependency compilation. No
+build, test or hardware pass is claimed here. Tracking: `fr-inyy`; plan §§7.3
+and 15.6; [file protocol](PROTOCOL_FILES.md).
+
 ## Native app playback and per-connection file sending (2026-11-21)
 
 The Linux/macOS `fr app` picker exposes the existing host-playback and file-drop

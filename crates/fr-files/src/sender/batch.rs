@@ -235,7 +235,15 @@ impl Sender<'_> {
             } else if self.cx.is_cancel_requested() || !authorize() {
                 Some(Error::Cancelled)
             } else if now >= batch.deadline {
-                Some(Error::Expired)
+                // An unresolved active source already has this batch's exact
+                // deadline as its upper bound. Its ordered turn can reconcile
+                // an original terminal proof before failing with Expired. No
+                // queued source may start, and a settled transfer cannot renew
+                // the batch's lifetime.
+                self.transfer
+                    .as_ref()
+                    .is_none_or(|t| t.result.is_some())
+                    .then_some(Error::Expired)
             } else {
                 None
             };

@@ -6,6 +6,8 @@
 pub mod batch;
 mod flight;
 mod flow;
+#[cfg(all(test, target_os = "linux"))]
+mod reply_tests;
 mod source;
 use crate::{
     atp,
@@ -532,12 +534,10 @@ impl<'a> Sender<'a> {
             return Err(Error::Cancelled);
         }
         let now = self.now();
-        if let Some(t) = &self.transfer
-            && t.result.is_none()
-            && now >= t.deadline
-        {
-            return Err(Error::Expired);
-        }
+        let expired = self
+            .transfer
+            .as_ref()
+            .is_some_and(|t| t.result.is_none() && now >= t.deadline);
         let limits = self.lane.limits();
         let incoming = self.lane.incoming();
         let current = &mut self.transfer;
@@ -556,6 +556,14 @@ impl<'a> Sender<'a> {
             .map_err(Error::Transport)?;
         if let Some(error) = refusal {
             return Err(error);
+        }
+        // The original receive lane may already own a terminal publication
+        // proof when this turn misses its transfer deadline. Reconcile that
+        // evidence first, but expiry still retires the lane and stops the batch.
+        // `reply` cannot accept nonterminal progress after the same deadline,
+        // and nothing below may prepare, read or send expired source work.
+        if expired {
+            return Err(Error::Expired);
         }
         // A real terminal receipt remains evidence even if a final ACK is late.
         // All other work keeps EVERY earlier admitted record's original expiry.
@@ -850,6 +858,9 @@ impl Transfer {
         let message = files::decode(bytes, context, limits).map_err(Error::Wire)?;
         if message.id != self.id || self.result.is_some() {
             return Err(Error::Protocol);
+        }
+        if now >= self.deadline && !matches!(message.body, Body::Complete { .. }) {
+            return Err(Error::Expired);
         }
         match message.body {
             Body::Accept {

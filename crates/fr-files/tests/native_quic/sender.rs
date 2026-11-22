@@ -476,3 +476,6 @@ mod flight;
 
 #[path = "sender/send_expiry.rs"]
 mod send_expiry;
+
+#[path = "sender/reconciliation.rs"]
+mod reconciliation;

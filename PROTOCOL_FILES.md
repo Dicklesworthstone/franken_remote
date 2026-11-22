@@ -180,6 +180,15 @@ publication result; send expiry does not prove that the recipient did nothing.
 Earlier publication receipts remain available after a later timeout, and private
 staging cleanup must still complete under the original receiver owner.
 
+When the sender resumes after its original transfer or batch deadline, it first
+reconciles a terminal receipt already queued on the original authenticated file
+channel, within that channel's existing receive bounds. A validated publication
+proof records the actual durable or durability-unknown effect even though the
+expired sender still stops and retires its lane. This reconciliation admits no
+new payload, does not renew a deadline, and cannot start a queued successor in
+an expired batch. A nonterminal acceptance or invalid proof does not establish
+publication; an admitted completion without a valid proof stays unknown.
+
 The fullest native clipboard/audio/duplex offer stays within the existing 24
 capability ceiling by omitting only optional attachment-credit negotiation when
 necessary. That profile uses the existing bounded fixed-allowance attachment
