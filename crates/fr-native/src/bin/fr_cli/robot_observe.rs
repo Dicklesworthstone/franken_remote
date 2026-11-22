@@ -14,6 +14,9 @@ mod artifact;
 mod linux;
 #[path = "robot_observe/local.rs"]
 mod local;
+#[cfg(any(all(target_os = "macos", feature = "macos-desktop"), test))]
+#[path = "robot_observe/macos_report.rs"]
+pub(crate) mod macos_report;
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
 #[path = "robot_observe/report.rs"]
 mod report;
@@ -22,6 +25,13 @@ mod report;
 pub(super) enum Minimum {
     Decoded,
     SubmittedToCompositor,
+}
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+pub(super) enum NativeMode<'a> {
+    Live,
+    Once {
+        screenshot: Option<&'a std::path::Path>,
+    },
 }
 #[cfg_attr(
     not(any(
@@ -212,29 +222,29 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
     }
     #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
     {
-        if !request.live {
-            return Err(Failure::new(
-                "platform_unavailable",
-                "One-shot native observation is not implemented on macOS. Open an explicit foreground view with --publish-observations, then request metadata or a screenshot with --connection-id. No connection or output file was opened.",
-                2,
-            ));
-        }
         if args
             .iter()
             .any(|arg| arg == "--worker" || arg == "--x-display")
         {
             return Err(Failure::new(
                 "platform_unavailable",
-                "--worker and --x-display configure the Linux desktop path. The macOS publisher uses its native decoder and local AppKit session; omit these options. No connection was opened.",
+                "--worker and --x-display configure the Linux desktop path. macOS observation uses its native decoder and local AppKit session; omit these options. No connection was opened.",
                 2,
             ));
         }
+        let mode = if request.live {
+            NativeMode::Live
+        } else {
+            NativeMode::Once {
+                screenshot: request.screenshot.as_deref(),
+            }
+        };
         let options = options::Options {
             command: options::Command::Connect(request.connection),
             socket: request.socket,
             json: request.json,
         };
-        crate::linux::run_observation(&options, request.minimum)
+        crate::linux::run_observation(&options, request.minimum, mode)
     }
     #[cfg(not(any(
         all(target_os = "linux", feature = "linux-desktop"),
@@ -248,7 +258,7 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
             } else {
                 "platform_unavailable"
             },
-            "Native observation requires the Linux desktop build and a local X11 display; it is not a headless screenshot command.",
+            "Native observation requires a Linux desktop or macOS desktop build and a local graphical session; it is not a headless screenshot command.",
             2,
         ))
     }

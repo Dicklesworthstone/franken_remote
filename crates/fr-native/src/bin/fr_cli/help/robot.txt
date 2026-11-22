@@ -23,7 +23,8 @@ View-only publication requires --publish-observations; robot control requires
 --accept-input. These are explicit owner modes, not grants from a printed handle.
 Local connection IDs compare original owners; they are not remote input leases.
 Live view-only metadata and explicitly requested screenshots use the existing
-foreground owner in Linux desktop and macOS macos-desktop builds. macOS does
-not implement --native-once or robot input. Linux retains those commands.
+foreground owner in Linux desktop and macOS macos-desktop builds. Both also
+support --native-once: one new read-only observation followed by cleanup and
+optional PNG output. Robot input remains available only on Linux.
 Input requires the original lease, observation and deadline. Submitted input is
 not proof of an application's result, and uncertain effects are never retried.

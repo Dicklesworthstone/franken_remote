@@ -555,8 +555,9 @@ transport it replaced used 60-80 ms of CPU per read.
 System-shortcut capture remains unavailable on macOS and is refused before
 network I/O. Explicit foreground view publishers now expose
 [live observation metadata and screenshots](#macos-live-observation-metadata)
-through the original authenticated local owner. Robot input and one-shot native
-observations remain unavailable on macOS. Local status identifies the
+through the original authenticated local owner. macOS also supports
+[one-shot native observation](#one-shot-native-screenshots) with an optional PNG.
+Robot input remains unavailable on macOS. Local status identifies the
 foreground invocation; it does not infer a remote grant or host quality.
 The controlling text clipboard is default-on; microphone forwarding requires
 its explicit [macOS microphone build and local enable](macos-microphone.md).
@@ -671,9 +672,10 @@ validates the final response seal before writing a new mode-0600 PNG; an existin
 path is never replaced. See [screenshots from an existing foreground owner](#screenshots-from-an-existing-foreground-owner)
 for output metadata, age bounds and file-error behavior.
 
-`--native-once` and robot input remain unavailable on macOS. This view-only
-screenshot has no input precondition or control authority, and does not establish
-an application-level result or physical visibility.
+Use [`--native-once`](#one-shot-native-screenshots) for a separate finite macOS
+observation that closes after its first receipt. Robot input remains unavailable
+on macOS. These view-only screenshots have no input precondition or control
+authority, and do not establish an application-level result or physical visibility.
 
 **Verification scope:** nine tests of the actual production publication adapter
 and eleven tests of the authenticated publisher's retirement owner passed with
@@ -1965,9 +1967,9 @@ are not a new live network or desktop qualification claim.
 
 ## One-shot native screenshots
 
-This one-shot path requires the Linux native desktop and its media worker.
-macOS provides [metadata and screenshots from an existing foreground owner](#macos-live-observation-metadata);
-it does not implement `--native-once`.
+This one-shot path supports the Linux native desktop and a macOS
+`macos-desktop` build. It opens one explicitly selected native view, records
+its first real receipt and closes through the normal session cleanup path.
 
 ```sh
 fr robot observe NODE_ID --native-once --experimental-native --display only \
@@ -1976,17 +1978,30 @@ fr robot observe NODE_ID --native-once --experimental-native --display only \
 
 The `--native-once` prefix immediately follows the node. This opens one view-only
 native connection with the existing installed-tailnet identity, strict TLS and
-any configured host approval. It requires a local X11 display and the installed
-media worker. No control, clipboard, files or audio is requested; no reconnect
-is attempted. Add `--fit 1280x720` to bound the local viewport without changing
-the remote display. Each requested dimension is capped at the source dimension.
+any configured host approval. Linux requires a local X11 display and the installed
+media worker; macOS requires a logged-in graphical session for AppKit/Metal.
+The Linux-only `--worker` and `--x-display` options are refused on macOS.
+No control, clipboard, files or audio is requested; no reconnect, interactive
+display selection or resize/display reopen is attempted. Add `--fit 1280x720`
+to request a fitted local view without changing the remote display. Linux caps
+each requested window dimension at the source; macOS reports the actual physical
+viewport, including Retina scale, independently of the source dimensions.
 
-The sandboxed worker exports its first submitted viewport, bound to the original
-frame, codec configuration and recovery generation. Publication waits for the
+The original media owner exports its first submitted viewport, bound to the original
+frame, codec configuration and recovery generation. On macOS the same drained
+presenter task performs on-demand Metal readback with native geometry checks.
+Publication waits for the
 session's successful operation and confirmed local native cleanup. The PNG
 contains the rendered viewport, including fitting/letterboxing and any remote
 cursor overlay present in that frame; it excludes the native OS pointer. Its
 pixel dimensions are separate from the source display dimensions in the report.
+
+The finite observer requests `InspectionComplete` as soon as the initial receipt
+and any requested snapshot are retained. An idle desktop does not need to emit
+a second frame. The actual supervised result, cancellation state and native
+cleanup must all succeed before output is published. A routine snapshot refusal
+still closes normally, then reports that no screenshot was available; it does
+not silently substitute another frame or open another connection.
 
 The destination must be new: existing files and final symlinks, including
 dangling symlinks, refuse without replacement. Unix files are created with mode
@@ -2001,10 +2016,25 @@ JSON includes the artifact's frame and geometry binding, configuration/recovery
 generations, viewport dimensions, MIME type, byte count, SHA-256 and local path.
 Capture/presentation wall times and source freshness remain unknown. Submission
 to a compositor does not establish physical visibility or input authority.
+On macOS, `receipt_age_upper_ms` ages the original monotonic receipt through
+bootstrap acknowledgement, readback, closing and PNG output. The wall-clock
+receipt field stays null; the response timestamp is not substituted for it.
+Local cleanup confirmation and the host close exchange's acknowledgement,
+transport completion and reported cleanup/effects remain separate fields.
 Existing explicitly enabled owners can also export the current retained image,
 as described below. Without the flag, observation retains metadata only.
 
-**Verification scope:** the focused harness ran 58 actual-source options,
+**macOS verification scope (2026-11-22):** seven actual-source finite-owner policy
+tests and seven new historical report/artifact tests passed; the latter ran with
+21 existing parser, metadata and PNG tests. Strict component Clippy passed.
+The actual Rust decoder and local presenter delegation also pass cross-target
+Clippy against Darwin's standard library. Three full Mac Session policy tests
+and platform-specific CLI preflight tests are authored but have not run here.
+The pinned runtime dependency's memory requirements block full Session builds
+in this executor. Apple SDK compilation, Metal/VideoToolbox execution and live
+tailnet qualification remain open; portable tests are not native qualification.
+
+**Linux verification scope:** the focused harness ran 58 actual-source options,
 observation parser, report and PNG writer tests, followed by strict Clippy.
 Independent zlib/Pillow decoding checked ten generated images, including fitted
 viewports; a complete independently generated PNG fixture is also asserted by

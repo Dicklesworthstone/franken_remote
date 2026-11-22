@@ -1,5 +1,5 @@
 
-Explicit one-shot native observation (Linux desktop, separate read-only connection):
+Explicit one-shot native observation (Linux desktop / macOS macos-desktop):
 fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|only
     [--by-name] [--worker /absolute/fr-media-worker] [--x-display :0]
     [--trust-roots /absolute/ca-roots.pem] [--socket /absolute/tailscaled.sock]
@@ -16,8 +16,11 @@ including fitted letterboxing and any remote cursor overlay, not the native OS
 pointer. The destination must not exist; output is at most 32 MiB of raw pixels
 plus bounded PNG framing. Pixel dimensions describe the viewport separately
 from the selected host display. Capture times and source freshness stay unknown.
-Compositor submission is not physical visibility. This requires a local X11
-display, not headless capture. No screenshot is retained unless requested.
+Compositor submission is not physical visibility. This requires a local graphical
+session: X11 and the media worker on Linux, AppKit/Metal on macOS. Linux-only
+--worker and --x-display options are refused on macOS. No screenshot is retained
+unless requested. On macOS the receipt's original monotonic time survives
+bootstrap, readback, closing and PNG output; receipt age is not source freshness.
 
 Reusable foreground view-only observation publisher (Linux desktop / macOS macos-desktop):
 fr robot session open NODE_ID --foreground --role view --publish-observations
@@ -36,7 +39,7 @@ source freshness. On macOS, the first receipt keeps its original local timestamp
 across bootstrap acknowledgement waits; duplicate callbacks do not refresh it.
 No frame is reported before a real receipt, or after retirement. Old callbacks
 cannot republish a retired attempt. macOS needs a local graphical session;
---native-once and robot input remain unavailable there.
+robot input remains unavailable there.
 Display changes and resizes that need a new Mac native view end the original
 observation without another dial; start a new explicit publisher for that view.
 Linux also accepts --worker and --x-display to select its installed media worker

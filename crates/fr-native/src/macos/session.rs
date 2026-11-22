@@ -30,6 +30,7 @@ use super::{
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
 use crate::macos_live_observation;
+use crate::macos_observe_once::{self, Once};
 use crate::macos_resize::{Intent as ResizeIntent, Placement};
 use crate::macos_scroll::{CaptureClock, Refusal as ScrollRefusal, Scroll};
 use crate::macos_switch::{Action as ReopenAction, Intent as ReopenIntent, Mode as ReopenMode};
@@ -85,6 +86,7 @@ use std::{
 /// How often `AppKit` is serviced while the network is idle.
 const PUMP: Duration = Duration::from_millis(4);
 pub use super::clipboard::Report as ClipboardReport;
+pub use crate::macos_observe_once::InitialObservation;
 /// The control request this session makes. Text and each scroll mode require
 /// both peers to select their optional capability; a legacy host still grants
 /// the supported remainder of this profile.
@@ -791,6 +793,7 @@ pub struct Session {
     /// take `&mut self`, so `run`'s borrow has ended before cleanup starts.
     observer: Option<NativeObserver>,
     observations: Option<macos_live_observation::Publisher>,
+    once: Option<Once>,
     input: Rc<RefCell<Option<Input>>>,
     files: Rc<RefCell<files::Files>>,
     clipboard: Rc<RefCell<clipboard::Clipboard>>,
@@ -860,6 +863,7 @@ impl Session {
             window: Rc::default(),
             observer: None,
             observations: None,
+            once: None,
             input: Rc::default(),
             files: Rc::default(),
             clipboard: Rc::default(),
@@ -886,6 +890,43 @@ impl Session {
             .request(enabled && self.control.is_some());
         self
     }
+    /// Observe exactly one original native receipt, optionally export its
+    /// viewport, then request `InspectionComplete` and perform ordinary cleanup.
+    /// This finite mode cannot acquire control, auxiliary lanes, a publisher,
+    /// display selection UI, or a second authenticated attempt.
+    pub fn observing_once(mut self, screenshot: bool) -> Result<Self, CallbackError> {
+        if self.once.is_some()
+            || !self.one_shot_profile()
+            || self.started
+            || self.native_started.get()
+            || self.observer.is_some()
+            || self.report.borrow().attempts != 0
+        {
+            return Err(CallbackError);
+        }
+        self.once = Some(Once::new(screenshot));
+        Ok(self)
+    }
+    /// Consume the original historical observation only after its successful
+    /// close operation and confirmed native cleanup. No receipt time is renewed
+    /// and no image is reacquired. A refused snapshot remains explicit absence.
+    pub fn take_initial_observation(&mut self) -> Option<InitialObservation> {
+        let succeeded = self.service_succeeded
+            && self.terminal_failure().is_none()
+            && !self.closed.get()
+            && self.report.borrow().local_stop.is_none();
+        self.once.as_mut()?.take(succeeded, self.cleanup_confirmed)
+    }
+    fn one_shot_profile(&self) -> bool {
+        self.control.is_none()
+            && self.observations.is_none()
+            && !self.display_picker
+            && self.audio_install.is_none()
+            && self.microphone.borrow().is_none()
+            && !self.files.borrow().has_upload()
+            && !self.files.borrow().has_download()
+            && !self.clipboard.borrow().available()
+    }
     /// Explicit read-only observation publication from this original invocation.
     /// Install before any attempt. A control-capable session cannot acquire
     /// this view-only interface. The sink must bind the original snapshot
@@ -895,6 +936,7 @@ impl Session {
         publish: impl FnMut(macos_live_observation::Event) -> Result<(), ()> + 'static,
     ) -> Result<Self, CallbackError> {
         if self.control.is_some()
+            || self.once.is_some()
             || self.started
             || self.native_started.get()
             || self.observer.is_some()
@@ -1910,7 +1952,13 @@ impl Application for Session {
             original
         }
     }
-    fn offer(&mut self, _attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
+    fn offer(&mut self, attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
+        if let Some(once) = &self.once {
+            if !once.accepts_attempt(attempt) || !self.one_shot_profile() {
+                return Err(CallbackError);
+            }
+            return macos_observe_once::offer(original).map_err(|()| CallbackError);
+        }
         let available = self
             .files
             .borrow()
@@ -1961,6 +2009,13 @@ impl Application for Session {
         {
             return Err(ObserverError::Order);
         }
+        let one_shot = self.once.is_some();
+        if one_shot && !self.one_shot_profile() {
+            return Err(ObserverError::Order);
+        }
+        if let Some(once) = &mut self.once {
+            once.begin(attempt).map_err(|()| ObserverError::Order)?;
+        }
         let observation = self
             .observations
             .as_ref()
@@ -1988,7 +2043,7 @@ impl Application for Session {
             .control
             .is_some_and(|policy| policy.capabilities.contains(Capability::Text));
         let sharing_flags = sharing::flags(&files.borrow())
-            | 4
+            | if one_shot { 0 } else { 4 }
             | (u32::from(clipboard_requested) << 3)
             | if file_selections {
                 super::FILE_SELECTION_FLAG
@@ -2013,7 +2068,7 @@ impl Application for Session {
         let resize = self.resize.clone();
         let can_resize = Cell::new(false);
         let close_cx = self.close_cx.clone();
-        let switchable = self.control.is_none() || close_cx.is_some();
+        let switchable = !one_shot && (self.control.is_none() || close_cx.is_some());
         reopen_intent.borrow_mut().set_mode(
             if switchable {
                 ReopenMode::Viewing
@@ -2177,6 +2232,30 @@ impl Application for Session {
         // callbacks carry only later pictures (see `take_shown`).
         let opening_picture = submitted(opened.initial_presentation());
         let observer = self.observer.insert(opened);
+        if let Some(once) = &mut self.once {
+            let initial = observer.initial_presentation();
+            let received_at = observer.initial_presentation_received_at();
+            let snapshot = if once.screenshot() {
+                match pumped(Box::pin(observer.snapshot_initial()), &mut pump).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        once.discard();
+                        self.service_failure = Some(error);
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
+            once.retain(InitialObservation {
+                display,
+                serial: initial.frame.as_raw(),
+                evidence: observation_evidence(initial.stage),
+                received_at,
+                snapshot,
+            })
+            .map_err(|()| ObserverError::Application)?;
+        }
         if let Some(observation) = &observation {
             observation
                 .bind_snapshot(observer.snapshot_handle()?)
@@ -2198,7 +2277,7 @@ impl Application for Session {
         }
         // Startup owns a real first frame; a missing repaint is never inferred
         // to be a resize. The next current native sample can arm its watcher.
-        can_resize.set(true);
+        can_resize.set(!one_shot);
         files.borrow_mut().configure(observer);
         clipboard.borrow_mut().configure(
             observer,
@@ -2236,25 +2315,27 @@ impl Application for Session {
                 let switching = reopen_intent.clone();
                 let ui_window = window.clone();
                 let served = observer.serve_until(move |frame| {
-                    frames(frame)?;
-                    let eligible = ui_window
-                        .borrow()
-                        .as_ref()
-                        .and_then(|window| window.state().ok())
-                        .is_some_and(|state| state.key && state.visible);
-                    let mode = if eligible {
-                        ReopenMode::Viewing
-                    } else {
-                        ReopenMode::Disabled
-                    };
-                    switching.borrow_mut().set_mode(mode, event_time());
-                    if switching.borrow_mut().reject_ineligible(mode) {
-                        return Err(());
-                    }
-                    Ok(if closing.get() || switching.borrow_mut().begin_close() {
-                        std::ops::ControlFlow::Break(fr_wire::closure::Reason::Requested)
-                    } else {
-                        std::ops::ControlFlow::Continue(())
+                    macos_observe_once::flow(one_shot, || {
+                        frames(frame)?;
+                        let eligible = ui_window
+                            .borrow()
+                            .as_ref()
+                            .and_then(|window| window.state().ok())
+                            .is_some_and(|state| state.key && state.visible);
+                        let mode = if eligible {
+                            ReopenMode::Viewing
+                        } else {
+                            ReopenMode::Disabled
+                        };
+                        switching.borrow_mut().set_mode(mode, event_time());
+                        if switching.borrow_mut().reject_ineligible(mode) {
+                            return Err(());
+                        }
+                        Ok(if closing.get() || switching.borrow_mut().begin_close() {
+                            std::ops::ControlFlow::Break(fr_wire::closure::Reason::Requested)
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        })
                     })
                 });
                 pumped(served, &mut pump)
@@ -2407,6 +2488,11 @@ impl Application for Session {
         };
         self.service_succeeded = outcome.is_ok();
         self.service_failure = outcome.as_ref().err().copied();
+        if outcome.is_err()
+            && let Some(once) = &mut self.once
+        {
+            once.discard();
+        }
         outcome
     }
     fn cleanup(
@@ -2520,7 +2606,14 @@ impl Application for Session {
     }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
         match status {
-            Status::Connecting { .. } => {
+            Status::Connecting { attempt } => {
+                if self
+                    .once
+                    .as_ref()
+                    .is_some_and(|once| !once.accepts_attempt(attempt))
+                {
+                    return Err(CallbackError);
+                }
                 if self.started
                     || self.native_started.get()
                     || self.observer.is_some()
@@ -2576,7 +2669,10 @@ impl Application for Session {
         // The explicit robot publisher owns one attempt. A successful local
         // display choice must not spend the supervisor's separate reopen path
         // or clear the original receipt/cleanup evidence in a new Connecting.
-        if self.observations.is_some() || !self.reopen_intent.borrow().pending() {
+        if self.once.is_some()
+            || self.observations.is_some()
+            || !self.reopen_intent.borrow().pending()
+        {
             return Ok(CompletionAction::Finish);
         }
         let report = self.report.borrow();
@@ -2634,7 +2730,7 @@ impl Application for Session {
         &mut self,
         failure: reconnect::Failure,
     ) -> Result<Option<LocalLayoutChange>, CallbackError> {
-        if self.observations.is_some() {
+        if self.once.is_some() || self.observations.is_some() {
             return Ok(None);
         }
         Ok(self.window_resize_action(failure, super::event_time()))
@@ -3293,6 +3389,133 @@ mod tests {
     }
 
     /// A control session's attempts only ever remove from the original offer:
+    fn unstarted_observer() -> Session {
+        Session::new(
+            None,
+            ObserverPolicy::default(),
+            Box::new(|_| Ok(None)),
+            1,
+            "finite observation policy fixture".to_owned(),
+        )
+    }
+
+    #[test]
+    fn finite_observation_refuses_incompatible_owners_and_post_start_installation() {
+        for case in 0..8 {
+            let mut session = unstarted_observer();
+            match case {
+                0 => session.control = Some(ControlPolicy::default()),
+                1 => session = session.with_observations(|_| Ok(())).unwrap(),
+                2 => session.started = true,
+                3 => session.native_started.set(true),
+                4 => session.report.borrow_mut().attempts = 1,
+                5 => session = session.with_display_picker(),
+                6 => session = session.with_files(files::Files::default().with_commands()),
+                7 => session.clipboard.borrow_mut().request(true),
+                _ => unreachable!(),
+            }
+            assert!(session.observing_once(true).is_err(), "case {case}");
+        }
+        let session = unstarted_observer().observing_once(true).unwrap();
+        assert!(session.with_observations(|_| Ok(())).is_err());
+        let session = unstarted_observer().observing_once(false).unwrap();
+        assert!(session.observing_once(true).is_err());
+    }
+
+    #[test]
+    fn finite_observation_rechecks_profile_and_refuses_retry_and_display_reopen() {
+        let original = fr_client::native::observation_offer();
+        let mut session = unstarted_observer().observing_once(true).unwrap();
+        assert_eq!(session.offer(1, &original).unwrap(), original);
+        assert!(session.offer(2, &original).is_err());
+        assert!(session.status(Status::Connecting { attempt: 2 }).is_err());
+        assert_eq!(session.report().attempts, 0);
+        session.status(Status::Connecting { attempt: 1 }).unwrap();
+        assert!(session.take_initial_observation().is_none());
+        let now = Duration::from_millis(10);
+        session
+            .reopen_intent
+            .borrow_mut()
+            .set_mode(ReopenMode::Viewing, Some(now));
+        assert!(session.reopen_intent.borrow_mut().request(
+            ReopenAction::ChangeDisplay,
+            now,
+            Some(now)
+        ));
+        assert!(session.reopen_intent.borrow_mut().begin_close());
+        assert_eq!(
+            session.completion_action().unwrap(),
+            CompletionAction::Finish
+        );
+        assert_eq!(
+            session
+                .local_layout_change(reconnect::Failure::Cancelled)
+                .unwrap(),
+            None
+        );
+        assert!(!session.display_picker);
+        session = session.with_display_picker();
+        assert!(session.offer(1, &original).is_err());
+    }
+
+    #[test]
+    fn retained_finite_receipt_needs_successful_cleanup_and_no_terminal_stop() {
+        let at = Instant::now();
+        for cause in 0..6 {
+            let mut session = unstarted_observer().observing_once(false).unwrap();
+            let once = session.once.as_mut().unwrap();
+            once.begin(1).unwrap();
+            once.retain(InitialObservation {
+                display: Display {
+                    handle: 17,
+                    geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
+                    x: 0,
+                    y: 0,
+                    pixel_width: 320,
+                    pixel_height: 240,
+                    logical_width: 320,
+                    logical_height: 240,
+                    scale_numerator: 1,
+                    scale_denominator: 1,
+                    rotation: 0,
+                },
+                serial: 17,
+                evidence: Evidence::SubmittedToCompositor,
+                received_at: at,
+                snapshot: None,
+            })
+            .unwrap();
+            session.service_succeeded = true;
+            session.cleanup_confirmed = true;
+            match cause {
+                0 => session.service_succeeded = false,
+                1 => session.cleanup_confirmed = false,
+                2 => session.closed.set(true),
+                3 => session.report.borrow_mut().local_stop = Some(LocalStop::WindowClosed),
+                4 => session.terminal = Some(ObserverError::Application),
+                5 => {}
+                _ => unreachable!(),
+            }
+            // A duplicate Connecting callback cannot reset the original
+            // service/cleanup facts or negotiate a second authenticated view.
+            assert!(session.status(Status::Connecting { attempt: 1 }).is_err());
+            assert!(
+                session
+                    .offer(1, &fr_client::native::observation_offer())
+                    .is_err()
+            );
+            let original = session.take_initial_observation();
+            if cause == 5 {
+                let original = original.unwrap();
+                assert_eq!(original.serial, 17);
+                assert_eq!(original.received_at, at);
+                assert!(session.take_initial_observation().is_none());
+            } else {
+                assert!(original.is_none());
+            }
+        }
+    }
+
     /// frd's reconnect loop refuses a selection holding any capability its
     /// original lacks. Adding precise scroll and committed text per attempt
     /// made every macOS control connection end `Notification` before dialing.

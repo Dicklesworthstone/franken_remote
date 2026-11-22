@@ -29,6 +29,19 @@ impl From<ViewerCloseOutcome> for Report {
     }
 }
 impl Report {
+    #[cfg(test)]
+    pub(crate) const fn test_report(
+        request_acknowledged: bool,
+        transport_completed: bool,
+        host: Option<Closed>,
+    ) -> Self {
+        Self {
+            request_acknowledged,
+            transport_completed,
+            host,
+        }
+    }
+
     /// Called by the existing terminal-output owner. The original failure and
     /// its exit code remain authoritative even when host cleanup was reported.
     pub(super) fn failure(self, error: Failure, json: bool) -> String {

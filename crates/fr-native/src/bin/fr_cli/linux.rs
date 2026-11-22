@@ -268,16 +268,17 @@ pub fn probe_native(options: &Options) -> Option<Result<(String, u8), Failure>> 
 pub(super) fn run_automation(options: &Options) -> Result<String, Failure> {
     run_mode(options, true)
 }
-/// The same foreground Mac connection owner, with explicit read-only metadata.
+/// The same Mac connection owner for a finite observation or foreground publisher.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
 pub(super) fn run_observation(
     options: &Options,
     minimum: crate::robot_observe::Minimum,
+    mode: crate::robot_observe::NativeMode<'_>,
 ) -> Result<String, Failure> {
     let Command::Connect(connection) = &options.command else {
         return Err(Failure::new(
             "invalid_arguments",
-            "Observation publication requires an explicit foreground view.",
+            "Native observation requires an explicit read-only connection.",
             2,
         ));
     };
@@ -297,6 +298,7 @@ pub(super) fn run_observation(
         connection,
         options.json,
         minimum,
+        mode,
     )
 }
 /// These call sites precede any connection or receive owner. Preserve positive

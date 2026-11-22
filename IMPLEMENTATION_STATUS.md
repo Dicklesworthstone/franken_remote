@@ -1,5 +1,43 @@
 # Implementation status
 
+## One-shot native macOS observation (2026-11-22)
+
+`fr robot observe NODE --native-once --experimental-native --display HANDLE|only`
+now opens one explicit macOS read-only view, retains the original first receipt
+and optional `--screenshot PATH`, then closes with `InspectionComplete`. The
+first serve callback completes the observation without waiting for another
+frame, including on an idle desktop. The existing authenticated connection,
+host approval, native presenter and mandatory cleanup owners remain in use.
+
+The finite session refuses control, auxiliary lanes, a live publisher,
+interactive display selection, a second attempt and resize/display reopen.
+Screenshot work uses the original observer before serving and preserves the
+original monotonic receipt timestamp. Only a successful supervised operation,
+confirmed native cleanup and absence of terminal/local stop can release its
+single historical receipt. Normal host refusal, cancellation and cleanup
+failures keep their actual outcomes and do not publish an image.
+
+The CLI checks requested evidence and original frame identity before opening a
+new private PNG. It reports actual physical viewport dimensions independently
+of source display geometry, exact snapshot generations and receipt age through
+readback, closing and PNG I/O. Capture/presentation wall times, source freshness,
+input authority and physical visibility remain unknown or absent. Local cleanup
+and the host exchange's acknowledgement, transport and reported cleanup/effects
+retain their independent stages, including on an artifact error.
+
+Passed: seven actual-source finite-owner policy tests and 28 CLI component
+tests (seven new historical report/artifact tests plus 21 existing tests), with
+strict all-target Clippy. The complete actual local presenter trait and Mac
+presenter/decoder delegation also pass strict Darwin-target Rust Clippy. Scoped
+UBS review found no changed production defect; its existing detector limitation
+on `linux.rs` was reproduced on the baseline and those changed lines were
+reviewed directly. Pinned formatting and whitespace checks pass. Full Session policy and platform CLI
+tests are authored but not executed: the pinned runtime dependency exceeds
+executor memory before whole-session builds. Apple SDK compilation, native
+Metal/VideoToolbox and live-tailnet execution remain open. These component
+checks do not qualify native hardware. Plan §§16.1 and 18.2; tracking `fr-5vqh`;
+[usage](docs/native-client-cli.md#one-shot-native-screenshots).
+
 ## Screenshots from the original macOS observation (2026-11-22)
 
 An explicit macOS foreground view opened with `--publish-observations` can now

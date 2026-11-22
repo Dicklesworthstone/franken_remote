@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     options::{Connection, DisplayChoice},
-    robot_observe::Minimum,
+    robot_observe::{Minimum, NativeMode, macos_report},
 };
 use asupersync::{cx::Cx, runtime::Runtime, types::Budget};
 use fr_native::{
@@ -38,7 +38,7 @@ use frd::{
     native_connection::{AddressFamily, Client, Configuration, LocalApi, reconnect},
     session_startup::ObserverPolicy,
 };
-use std::{cell::Cell, fmt::Write as _, rc::Rc, time::Duration};
+use std::{cell::Cell, fmt::Write as _, path::Path, rc::Rc, time::Duration};
 
 fn unsupported(option: &'static str) -> Failure {
     Failure::new("platform_unavailable", option, 2)
@@ -86,6 +86,15 @@ impl Publication {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Observation<'a> {
+    Live(&'a Publication),
+    Once {
+        minimum: Minimum,
+        screenshot: Option<&'a Path>,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn observe(
     runtime: &Runtime,
@@ -96,6 +105,7 @@ pub(super) fn observe(
     connection: &Connection,
     json: bool,
     minimum: Minimum,
+    mode: NativeMode<'_>,
 ) -> Result<String, Failure> {
     // The public grammar already fixes this profile; keep the owner boundary
     // explicit so a future caller cannot add authority or implicit selections.
@@ -114,9 +124,24 @@ pub(super) fn observe(
     {
         return Err(Failure::new(
             "observation_profile_invalid",
-            "Publish observations only from an explicit foreground view of one selected display, with one attempt and no auxiliary sharing.",
+            "Observe only through an explicit read-only view of one selected display, with one attempt and no auxiliary sharing.",
             2,
         ));
+    }
+    if let NativeMode::Once { screenshot } = mode {
+        return connect_profile(
+            runtime,
+            cx,
+            shutdown,
+            stopped,
+            api,
+            connection,
+            json,
+            Some(Observation::Once {
+                minimum,
+                screenshot,
+            }),
+        );
     }
     let publication = Publication {
         publisher: session_control::observation::Publisher::default(),
@@ -132,7 +157,7 @@ pub(super) fn observe(
         api,
         connection,
         json,
-        Some(&publication),
+        Some(Observation::Live(&publication)),
     )
     .map_err(|mut error| {
         // Preserve actual cleanup, host refusal and closure evidence. Only the
@@ -282,7 +307,7 @@ fn connect_profile(
     api: LocalApi,
     connection: &Connection,
     json: bool,
-    publication: Option<&Publication>,
+    observation: Option<Observation<'_>>,
 ) -> Result<String, Failure> {
     let prepared = (|| {
         check(connection)?;
@@ -331,7 +356,7 @@ fn connect_profile(
         selected_files,
         audio.as_ref(),
         microphone,
-        publication,
+        observation,
     )
     .map_err(|mut error| {
         pending.preserve(&mut error);
@@ -354,7 +379,7 @@ fn connect_selected(
     selected_files: fr_native::macos::files::Files,
     audio: Option<&playback::Report>,
     microphone: Option<microphone::Prepared>,
-    publication: Option<&Publication>,
+    observation: Option<Observation<'_>>,
 ) -> Result<String, Failure> {
     fr_native::macos::initialize_application().map_err(|_| {
         failure(
@@ -407,6 +432,15 @@ fn connect_selected(
     if display == DisplayChoice::Choose {
         session = session.with_display_picker();
     }
+    if let Some(Observation::Once { screenshot, .. }) = observation {
+        session = session.observing_once(screenshot.is_some()).map_err(|_| {
+            Failure::new(
+                "observation_profile_invalid",
+                "The native session could not install the finite read-only observation profile. No connection or output file was opened.",
+                2,
+            )
+        })?;
+    }
     let cfg = Configuration {
         port: selected.port,
         family: if connection.target.ipv6 {
@@ -435,7 +469,7 @@ fn connect_selected(
     let mut owner = runtime
         .block_on(session_control::Owner::bind(&local, &selected.node))
         .map_err(robot::local_failure)?;
-    if let Some(publication) = publication {
+    if let Some(Observation::Live(publication)) = observation {
         owner = owner.with_observations(publication.publisher.clone());
         let sink = publication.clone();
         session = session
@@ -526,6 +560,40 @@ fn connect_selected(
         && outcome.is_ok()
     {
         return Err(export_err);
+    }
+    if let Some(Observation::Once {
+        minimum,
+        screenshot,
+    }) = observation
+    {
+        // The normal supervised operation, native cleanup, terminal evidence
+        // and local stop gates above must succeed before any artifact is taken
+        // or path opened. Keep the original host close stages on export errors.
+        return crate::closure::preserve(
+            outcome.and_then(|_| {
+                let original =
+                    session
+                        .take_initial_observation()
+                        .map(|original| macos_report::Receipt {
+                            display: original.display,
+                            serial: original.serial,
+                            evidence: original.evidence,
+                            received_at: original.received_at,
+                            snapshot: original.snapshot,
+                        });
+                macos_report::render(
+                    macos_report::Request {
+                        target: &selected.node,
+                        json,
+                        minimum,
+                        screenshot,
+                    },
+                    original,
+                    report.close_exchange.map(crate::closure::Report::from),
+                )
+            }),
+            report.close_exchange,
+        );
     }
     outcome
 }

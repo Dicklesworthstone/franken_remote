@@ -202,14 +202,16 @@ fn explicit_screenshot_is_local_output_and_does_not_change_connection_authority(
 
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
 #[test]
-fn macos_one_shot_refuses_before_runtime_connection_or_artifact_creation() {
-    let error = run(&args(
-        "robot observe n-host --native-once --experimental-native --display only --socket /unavailable/local.sock --trust-roots /unavailable/roots.pem --screenshot /unavailable/screen.png",
-    ))
-    .expect_err("macOS does not acquire one-shot screenshots");
-    assert_eq!(error.code, "platform_unavailable");
-    assert_eq!(error.exit, 2);
-    assert!(!format!("{error:?}").contains("/unavailable/"));
+fn macos_one_shot_refuses_linux_only_configuration_before_setup_or_artifact_creation() {
+    for option in ["--worker /unavailable/worker", "--x-display :99"] {
+        let error = run(&args(&format!(
+            "robot observe n-host --native-once --experimental-native --display only --screenshot /unavailable/screen.png {option}",
+        )))
+        .expect_err("Linux-only settings must not be silently ignored on macOS");
+        assert_eq!(error.code, "platform_unavailable");
+        assert_eq!(error.exit, 2);
+        assert!(!format!("{error:?}").contains("/unavailable/"));
+    }
 }
 
 #[cfg(any(
