@@ -96,6 +96,38 @@ you explicitly drop files into the connected viewer. Host support and transfer
 policy still apply. Reconnects do not replay a selection or restore the old
 controller's file-transfer authority.
 
+To receive host-selected files through the desktop app, launch it with one
+explicit local destination:
+
+```sh
+fr app --receive /absolute/private-destination --receive-conflict keep-both
+```
+
+The picker states that receiving is pending for one connection. Choose **View
+and control** for that connection; choosing **View only** refuses before the
+viewer starts and consumes the pending choice. The ordinary connector checks
+and pins the existing private destination before connecting. Receiving remains
+subject to host capability negotiation, host-side file selection, and the
+original controlling session's authority. The app never browses host paths or
+automatically opens a received file.
+
+The destination applies only to that first selected viewer attempt, including
+an attempt that refuses or fails to connect. After it ends, another host choice
+has receiving off. Unused picker refreshes preserve the pending choice; Cancel
+or quitting drops it. Reconnect and display replacement do not restore the
+original receive authority. No destination or receive permission is saved in
+preferences or installed launchers.
+
+The optional `--receive-max-file-bytes`, `--receive-max-session-bytes`, and
+`--receive-conflict reject|keep-both` flags use the same parser, default limits,
+and pinned-directory receiver as `fr connect --receive`. Omitting a limit
+retains the receiver's default; malformed or duplicate options, zero limits,
+and explicit totals smaller than the per-file allowance refuse. The default
+conflict policy is `reject`; `keep-both` publishes under a distinct name,
+never overwrites. A graphical destination chooser remains separate work.
+Receive options cannot be combined with `--help`, `--install`, or
+`--uninstall`.
+
 The application continuously drains bounded completion output. Native commands
 retain their existing 2 MiB document allowance; the shared Windows capture
 keeps its 256 KiB allowance. Only the complete final nonempty UTF-8 JSON line

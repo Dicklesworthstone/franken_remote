@@ -29,7 +29,15 @@ use std::{
 mod child;
 use child::Finished;
 
-const USAGE: &str = "fr app [--port PORT] | --install | --uninstall\n\n\
+#[path = "app/receiving.rs"]
+mod receiving;
+use receiving::Receiving;
+
+#[cfg(test)]
+#[path = "app/receiving_tests.rs"]
+mod receiving_tests;
+
+const USAGE: &str = "fr app [--port PORT] [--receive DIR [RECEIVE_OPTIONS]] | --install | --uninstall\n\n\
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
 View only or View and control, Share clipboard text, Ask which display to\n\
 show and Play host audio, then Connect. Audio starts off; enabling it never\n\
@@ -41,6 +49,12 @@ picker reopens with a fresh machine list every two minutes; after half an\n\
 hour unused, fr app quits.\n\n\
 --port PORT  connect to this service port for this app run (default 8443);\n\
              applies to every choice and is not saved in preferences.\n\
+--receive DIR  receive host-selected files in this existing private directory\n\
+               on the next selected controlling connection only. It is not\n\
+               remembered, repeated after an attempt, or used by view-only.\n\
+--receive-max-file-bytes N     optional positive per-file receive limit.\n\
+--receive-max-session-bytes N  optional positive total receive limit.\n\
+--receive-conflict POLICY      reject (default) or keep-both; never overwrite.\n\
 --install    add FrankenRemote to ~/Applications (macOS) or the desktop\n\
              applications menu (Linux); it runs this fr with `app`.\n\
 --uninstall  remove that launcher (nothing else).\n";
@@ -64,16 +78,19 @@ pub(super) fn requested(args: &[String]) -> bool {
 
 pub(super) fn run(args: &[String]) -> Result<String, Failure> {
     match app_command(args)? {
-        AppCommand::Open { port } => application(port),
+        AppCommand::Open { port, receiving } => application(port, receiving),
         AppCommand::Help => Ok(USAGE.to_owned()),
         AppCommand::Install => install(),
         AppCommand::Uninstall => uninstall(),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum AppCommand {
-    Open { port: u16 },
+    Open {
+        port: u16,
+        receiving: Option<Receiving>,
+    },
     Help,
     Install,
     Uninstall,
@@ -89,6 +106,7 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
     }
     let mut port = None;
     let mut action = None;
+    let mut receive_args = Vec::new();
     let mut json = false;
     let mut rest = args.iter().skip(1);
     while let Some(arg) = rest.next() {
@@ -106,15 +124,27 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
                         .ok_or_else(invalid)?,
                 );
             }
+            "--receive"
+            | "--receive-max-file-bytes"
+            | "--receive-max-session-bytes"
+            | "--receive-conflict" => {
+                receive_args.push(arg.clone());
+                receive_args.push(rest.next().ok_or_else(invalid)?.clone());
+            }
             "--help" | "-h" if action.is_none() => action = Some(AppCommand::Help),
             "--install" if action.is_none() => action = Some(AppCommand::Install),
             "--uninstall" if action.is_none() => action = Some(AppCommand::Uninstall),
             _ => return Err(invalid()),
         }
     }
+    if action.is_some() && !receive_args.is_empty() {
+        return Err(invalid());
+    }
+    let receiving = Receiving::parse(receive_args)?;
     match (action, port) {
         (None, port) => Ok(AppCommand::Open {
             port: port.unwrap_or(DEFAULT_SERVICE_PORT),
+            receiving,
         }),
         (Some(action), None) => Ok(action),
         (Some(_), Some(_)) => Err(invalid()),
@@ -643,7 +673,7 @@ fn child_failed(error: child::Error) -> Failure {
     Failure::new(code, next, 1).uncertain()
 }
 
-fn application(port: u16) -> Result<String, Failure> {
+fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Failure> {
     let launcher = Launcher::new()?;
     let path = settings_path(&home()?);
     let mut notice: Option<String> = None;
@@ -653,8 +683,13 @@ fn application(port: u16) -> Result<String, Failure> {
         let mut settings = load(&path);
         // A picker reopened only because the last one expired unused stays
         // behind whatever the user is doing.
+        let receive_notice = receiving::notice(receiving.as_ref(), notice.as_deref());
         let picked = launcher.run(
-            &pick_args(&settings, notice.as_deref(), port),
+            &pick_args(
+                &settings,
+                receive_notice.as_deref().or(notice.as_deref()),
+                port,
+            ),
             idle_expiries == 0,
         )?;
         let report = picker_report(&picked, port);
@@ -713,7 +748,14 @@ fn application(port: u16) -> Result<String, Failure> {
         };
         picker_failures = 0;
         idle_expiries = 0;
-        let session = launcher.run(&session_args(&node, &settings, port, send_files), true)?;
+        // Consume the local receive choice before constructing or starting the
+        // original viewer. A failed/refused attempt cannot pass it to another
+        // machine, a later picker, or a new controller.
+        let args = receiving::take_for_session(
+            &mut receiving,
+            session_args(&node, &settings, port, send_files),
+        )?;
+        let session = launcher.run(&args, true)?;
         let report = last_report(&session.stdout);
         notice = Some(session_notice(
             report,
@@ -947,18 +989,25 @@ mod tests {
         assert_eq!(
             parse(&["app"]).unwrap(),
             AppCommand::Open {
-                port: DEFAULT_SERVICE_PORT
+                port: DEFAULT_SERVICE_PORT,
+                receiving: None,
             }
         );
         for port in [1, 9443, u16::MAX] {
             let text = port.to_string();
             assert_eq!(
                 parse(&["app", "--port", &text, "--json"]).unwrap(),
-                AppCommand::Open { port }
+                AppCommand::Open {
+                    port,
+                    receiving: None,
+                }
             );
             assert_eq!(
                 parse(&["app", "--json", "--port", &text]).unwrap(),
-                AppCommand::Open { port }
+                AppCommand::Open {
+                    port,
+                    receiving: None,
+                }
             );
         }
         for args in [
@@ -1004,7 +1053,8 @@ mod tests {
         assert_eq!(
             parse(&["app"]).unwrap(),
             AppCommand::Open {
-                port: DEFAULT_SERVICE_PORT
+                port: DEFAULT_SERVICE_PORT,
+                receiving: None,
             }
         );
     }
