@@ -128,6 +128,22 @@ never overwrites. A graphical destination chooser remains separate work.
 Receive options cannot be combined with `--help`, `--install`, or
 `--uninstall`.
 
+After a receiving attempt, the app separately checks the original disk
+owner's completion evidence before reopening the picker. Overall viewer
+cleanup does not establish receive cleanup. A pending or failed disk-worker
+join, unknown publication, truncated results, or missing/malformed expected
+receive evidence stops the app with an explicit uncertain outcome. Earlier
+publication receipts remain in the error report; a later failure neither rolls
+them back nor authorizes replay.
+
+For a clean completion, the picker shows how many files were locally published,
+how many were refused, and how many publications have unconfirmed durability.
+An explicit pre-start receive absence stays distinct from completed disk work.
+Only known local argument, trust, configuration, or destination refusals may
+omit a receive summary; a generic session failure cannot imply that receiving
+never started. Notices and preserved receive evidence omit destinations and
+file names.
+
 The application continuously drains bounded completion output. Native commands
 retain their existing 2 MiB document allowance; the shared Windows capture
 keeps its 256 KiB allowance. Only the complete final nonempty UTF-8 JSON line

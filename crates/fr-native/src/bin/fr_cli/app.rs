@@ -33,6 +33,9 @@ use child::Finished;
 mod receiving;
 use receiving::Receiving;
 
+#[path = "app/receive_completion.rs"]
+mod receive_completion;
+
 #[cfg(test)]
 #[path = "app/receiving_tests.rs"]
 mod receiving_tests;
@@ -546,6 +549,23 @@ fn session_notice(report: Option<Report>, name: &str, success: bool) -> Result<S
     }
 }
 
+/// The viewer process and its receive disk owner each owe terminal evidence.
+/// Validate both before another picker or viewer can start.
+fn session_notice_checked(
+    stdout: &CompletionCapture,
+    name: &str,
+    success: bool,
+    receive_expected: bool,
+) -> Result<String, Failure> {
+    let report = last_report(stdout);
+    let receive = receive_completion::inspect(stdout, receive_expected, report.as_ref())?;
+    let notice = session_notice(report, name, success).map_err(|mut failure| {
+        receive.preserve(&mut failure);
+        failure
+    })?;
+    Ok(receive.with_session_notice(notice))
+}
+
 fn refuse_uncertain_report(report: Option<&Report>) -> Result<(), Failure> {
     if let Some(Report::Failed {
         code,
@@ -751,16 +771,17 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
         // Consume the local receive choice before constructing or starting the
         // original viewer. A failed/refused attempt cannot pass it to another
         // machine, a later picker, or a new controller.
+        let receive_expected = receiving.is_some();
         let args = receiving::take_for_session(
             &mut receiving,
             session_args(&node, &settings, port, send_files),
         )?;
         let session = launcher.run(&args, true)?;
-        let report = last_report(&session.stdout);
-        notice = Some(session_notice(
-            report,
+        notice = Some(session_notice_checked(
+            &session.stdout,
             short_name(&name),
             session.status.success(),
+            receive_expected,
         )?);
     }
 }
@@ -1311,7 +1332,7 @@ mod tests {
                 };
                 assert_eq!(session.upload.file_drop, control && send_files);
                 assert_eq!(session.target.port, 9443);
-                assert!(session.upload.paths.is_empty());
+                assert_eq!(session.upload.paths, [] as [std::path::PathBuf; 0]);
                 assert!(!session.upload.choose_files && !session.upload.file_commands);
                 assert!(session.receive.is_none());
                 // A new picker never inherits the previous session's consent.
