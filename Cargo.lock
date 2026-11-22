@@ -659,6 +659,7 @@ dependencies = [
  "fr-winsys",
  "getrandom 0.4.3",
  "nix",
+ "rustix",
  "serde",
  "serde_json",
 ]

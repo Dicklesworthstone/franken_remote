@@ -19,6 +19,12 @@ asupersync = { workspace = true, features = ["tls"] }
 # /dev/urandom); the same pinned version frd and fr-files use.
 getrandom = "=0.4.3"
 
+# The root Linux helper keeps namespace custody until its last trusted nft/ip
+# child exits, even if a cancelled operation drops the helper's own guard.
+# This is the already-pinned transitive version, using only its safe fd API.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["std"] }
+
 # macOS only: the safe LOCAL_PEERPID getsockopt binding, the Unix-socket
 # daemon's kernel-reported PID (Asupersync's getpeereid carries no PID). The
 # exact version and a subset of the features Asupersync already builds on

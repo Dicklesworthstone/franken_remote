@@ -58,6 +58,27 @@ Per plan §5.2 and §19.2 and [`LINUX_NATIVE_INGRESS.md`](LINUX_NATIVE_INGRESS.m
   its connection, which the broker's leases hold, so broker exit (including
   SIGKILL) removes it. A dead helper's `frdh_` tables are reclaimed at its next
   start; no other table is touched.
+- **One rule owner per network namespace.** Before reclaiming rules or
+  changing its socket, the helper retains its network-namespace descriptor and
+  takes an exclusive kernel lock on a root-only file under the fixed
+  `/run/frankenremote-ingress-locks` directory, named for that namespace. Different
+  configured socket paths use the same lock. A competing instance refuses
+  before touching the live owner's rules, and
+  custody lasts through shutdown cleanup. Trusted `nft`/`ip` children inherit
+  the same lock descriptor: cancellation or helper death cannot release
+  custody before surviving kernel commands exit. There is no explicit unlock.
+  This assumes those trusted tools retain unknown inherited descriptors until
+  exit. Lock files are never rewritten or unlinked. The installed service
+  preserves both runtime directories across stops while keeping
+  `ProtectSystem=strict`. Locks live outside the older unit's socket runtime
+  directory, so its stop/failure cleanup cannot remove a live lock. Upgrades
+  must regenerate the helper unit to grant access to the separate lock
+  directory; an unchanged old unit's strict mount fails closed.
+  A live pre-upgrade socket, an uncertain liveness check, or a changed socket
+  inode also refuses startup. Stop pre-lock helper versions during upgrade:
+  an older helper at a different custom socket cannot participate in the lock.
+  Root-controlled filesystem/mount namespaces remain part of the trusted OS
+  boundary; this does not isolate a malicious root administrator.
 - **Residual trust, stated.** The helper, the kernel, root-owned `nft`/`ip`, the
   configured TUN and the root configuration are trusted. The unprivileged broker
   cannot read the kernel ruleset. It validates the **helper's** read-back with

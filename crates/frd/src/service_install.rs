@@ -283,8 +283,9 @@ Type=simple
 ExecStart=:{} ingress-helper --config {INGRESS_HELPER_CONFIG}
 Restart=on-failure
 RestartSec=2
-RuntimeDirectory=frankenremote-ingress
+RuntimeDirectory=frankenremote-ingress frankenremote-ingress-locks
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 UMask=0022
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_NET_ADMIN
@@ -1051,10 +1052,12 @@ mod tests {
         assert_eq!(helper.copy_from, Some(options.exec_path.clone()));
         for line in [
             "ExecStart=:/usr/local/bin/frd ingress-helper --config /etc/frankenremote/ingress-helper.json",
-            "RuntimeDirectory=frankenremote-ingress",
+            "RuntimeDirectory=frankenremote-ingress frankenremote-ingress-locks",
             "RuntimeDirectoryMode=0755",
+            "RuntimeDirectoryPreserve=yes",
             "CapabilityBoundingSet=CAP_NET_ADMIN",
             "NoNewPrivileges=yes",
+            "ProtectSystem=strict",
             "RestartSec=2",
             "WantedBy=multi-user.target",
         ] {

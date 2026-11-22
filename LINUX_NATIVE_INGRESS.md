@@ -156,11 +156,53 @@ retry queue. A saturated helper refuses a new install with
 forgets an older failed cleanup to admit another rule. Only a confirmed delete
 or well-formed inventory proving absence releases an installed reservation;
 preflight cancellation before any install command releases its unused slot.
-Active rules are excluded from orphan cleanup, and no custody lock spans an
-external command.
+Active rules are excluded from orphan cleanup, and no table-ledger mutex spans
+an external command.
 
-At start, the helper reclaims every `frdh_` table (the residue of a dead helper)
-and never touches other tables. On SIGTERM it closes every connection, waits
+Before touching its socket or any rule, the helper acquires an exclusive kernel
+file lock for the current network namespace. The root-only lock file lives
+under the fixed `/run/frankenremote-ingress-locks` directory, is named from
+the open namespace descriptor's device and inode, and is shared by every
+helper configuration regardless of socket path.
+The namespace descriptor stays open to prevent identity reuse. The lock file is
+never truncated, replaced or deleted. Symlinks, hardlinks, foreign ownership
+and group/other permissions refuse startup. A second owner returns
+`ingress_helper_already_running` before reclamation.
+
+The dedicated helper's trusted `nft`/`ip` children inherit the lock descriptor.
+Custody ends only when the helper and all in-flight commands have closed that
+shared open file description. Dropping a cancelled future or killing the
+helper therefore cannot admit a replacement while an older command is still
+running. There is no explicit unlock, and no PID-file staleness decision.
+This requires the trusted tools to retain unknown inherited descriptors until
+exit; root-selected wrappers that proactively close them do not satisfy that
+lifetime guarantee. Process/descriptor regressions do not replace installed
+`nft`/`ip` and systemd qualification.
+
+The helper also refuses an existing live socket from a pre-lock helper. Only an
+explicit connection refusal identifies a candidate stale socket, and its inode
+and owner must still match before removal. A successful connection, timeout,
+unexpected connect error or replaced path leaves it intact. The new listener
+must bind before any reclamation, and the namespace lock remains held through
+shutdown cleanup. The installed unit keeps `ProtectSystem=strict`, declares
+both `frankenremote-ingress` and `frankenremote-ingress-locks` as runtime
+directories, and uses `RuntimeDirectoryPreserve=yes`. The separate lock
+directory also prevents an older installed unit's socket-directory cleanup
+from deleting a new manual helper's live lock. Manual root startup creates the
+lock directory when absent; the configured socket directory must already
+exist and be root-owned and protected.
+
+On upgrade, regenerate/reinstall the emitted root helper unit and reload
+systemd. Replacing only the executable under an old unit is insufficient:
+its strict read-only mount does not grant access to the new lock directory,
+so startup refuses with `ingress_helper_lock_unavailable`. Stop a pre-lock
+helper before starting the new version: an older process at a different
+custom socket cannot participate in this lock, and only an existing socket at
+the same path can be probed. The host's root administrator and root-controlled
+mount namespace remain trusted.
+
+At start, the sole helper reclaims every `frdh_` table (the residue of a dead
+helper) and never touches other tables. On SIGTERM it closes every connection, waits
 2 s, which is longer than the brokers' 500 ms renewal period, so they fence
 first, and then reclaims. A helper crash leaves its rules in place, which is
 restrictive. Brokers see end-of-stream at their next renewal and fence. The

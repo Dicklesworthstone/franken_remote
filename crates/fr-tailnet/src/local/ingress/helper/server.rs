@@ -21,7 +21,7 @@ use std::{
     fs::{self, File},
     future::{Future, poll_fn},
     net::IpAddr,
-    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     pin::{Pin, pin},
     sync::atomic::{AtomicU64, Ordering},
@@ -31,6 +31,8 @@ use std::{
 #[path = "ownership.rs"]
 pub(super) mod ownership;
 use ownership::{Orphans, Table, Tables};
+#[path = "instance.rs"]
+mod instance;
 
 /// Concurrent broker connections (each holds at most one rule).
 pub const MAX_CONNECTIONS: usize = 8;
@@ -222,6 +224,10 @@ pub enum ServeError {
     /// The running executable (or a parent directory) is not root-only.
     UntrustedExecutable,
     UnprotectedSocketDirectory,
+    /// Another helper owns this network namespace, even at a different socket.
+    AlreadyRunning,
+    /// Exclusive, root-protected namespace custody could not be established.
+    InstanceUnavailable,
     /// The socket path exists and is not a stale root-owned socket.
     SocketInUse,
     Bind,
@@ -234,6 +240,8 @@ impl ServeError {
         match self {
             Self::NotPrivileged => "ingress_helper_unprivileged",
             Self::UntrustedExecutable => "ingress_helper_untrusted_executable",
+            Self::AlreadyRunning => "ingress_helper_already_running",
+            Self::InstanceUnavailable => "ingress_helper_lock_unavailable",
             Self::UnprotectedSocketDirectory | Self::SocketInUse | Self::Bind => {
                 "ingress_helper_socket_unavailable"
             }
@@ -792,9 +800,35 @@ async fn reclaim(cx: &Cx, nft: &Path) -> Result<usize, super::super::Error> {
     Ok(owned.len())
 }
 
+/// A helper predating the namespace lock may still be listening at this
+/// socket. Only an explicit connection refusal proves a candidate stale;
+/// timeout, a full backlog, successful connection or changed inode refuses
+/// startup without touching the socket or the kernel ruleset.
+pub(super) async fn prepare_socket(cx: &Cx, path: &Path, owner: u32) -> Result<(), ServeError> {
+    let socket = instance::Socket::inspect(path, owner).map_err(|_| ServeError::SocketInUse)?;
+    if !socket.exists() {
+        return Ok(());
+    }
+    let stale = Box::pin(bounded(cx, FRAME_DEADLINE, async {
+        match UnixStream::connect(path).await {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => Ok(true),
+            Err(_) => Err(IdentityError::LocalApiUnavailable),
+        }
+    }))
+    .await;
+    if stale != Ok(true) {
+        return Err(ServeError::SocketInUse);
+    }
+    socket.remove_stale().map_err(|_| ServeError::SocketInUse)
+}
+
 /// Run the helper until `shutdown` completes. Refuses without `CAP_NET_ADMIN`,
 /// from a non-root-only executable, or with an unprotected socket directory.
-/// Stale helper tables are reclaimed before listening and again at shutdown,
+/// One exclusive namespace lock precedes every reclaim and socket mutation.
+/// Its descriptor is inherited by trusted nft/ip children, retaining custody
+/// if a cancelled future drops the guard before a killed child has exited.
+/// Stale helper tables are reclaimed before serving and again at shutdown,
 /// after closing every connection and waiting past one broker renewal period.
 pub async fn serve(
     cx: &Cx,
@@ -814,23 +848,23 @@ pub async fn serve(
         .parent()
         .and_then(|dir| protected(dir, Leaf::Directory))
         .ok_or(ServeError::UnprotectedSocketDirectory)?;
-    let tables = reclaim(cx, &settings.nft)
-        .await
-        .map_err(|_| ServeError::Reclaim)?;
-    report(Event::Reclaimed { tables });
-    match fs::symlink_metadata(&settings.socket) {
-        Ok(m) if m.file_type().is_socket() && m.uid() == 0 => {
-            fs::remove_file(&settings.socket).map_err(|_| ServeError::SocketInUse)?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        _ => return Err(ServeError::SocketInUse),
-    }
+    let _instance = instance::Instance::acquire().map_err(|error| match error {
+        instance::Error::InUse => ServeError::AlreadyRunning,
+        instance::Error::Unavailable => ServeError::InstanceUnavailable,
+    })?;
+    prepare_socket(cx, &settings.socket, 0).await?;
     let listener = UnixListener::bind(&settings.socket)
         .await
         .map_err(|_| ServeError::Bind)?;
     // Any local account may connect; SO_PEERCRED, not the mode, admits it.
     fs::set_permissions(&settings.socket, fs::Permissions::from_mode(0o666))
         .map_err(|_| ServeError::Bind)?;
+    // Binding first ensures an occupied/replaced socket can never trigger a
+    // reclaim. Queued connections receive no authority until serving starts.
+    let tables = reclaim(cx, &settings.nft)
+        .await
+        .map_err(|_| ServeError::Reclaim)?;
+    report(Event::Reclaimed { tables });
     report(Event::Listening);
     let shared = Shared::new(cx, settings, report);
     let result = accept(&shared, &listener, shutdown).await;

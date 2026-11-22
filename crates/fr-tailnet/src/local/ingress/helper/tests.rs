@@ -5,7 +5,7 @@
 use super::{
     server::{
         Lifecycle, MAX_CONNECTIONS, Observed, Shared, accept, check_assigned, check_request,
-        clear_orphans, connection, ownership::Tables,
+        clear_orphans, connection, ownership::Tables, prepare_socket,
     },
     *,
 };
@@ -445,6 +445,75 @@ fn a_stalled_partial_frame_is_closed_without_holding_the_connection() {
         Vec::new()
     });
     assert_eq!(events, Vec::new());
+}
+
+#[test]
+fn startup_does_not_unlink_a_live_pre_upgrade_helper_socket() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = startup_directory();
+    let path = directory.join("helper.sock");
+    let _incumbent = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let original = std::fs::symlink_metadata(&path).unwrap();
+    let result = RuntimeBuilder::new()
+        .worker_threads(1)
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap()
+        .block_on(async { prepare_socket(&Cx::current().unwrap(), &path, original.uid()).await });
+    assert_eq!(result, Err(ServeError::SocketInUse));
+    let retained = std::fs::symlink_metadata(&path).unwrap();
+    assert_eq!(
+        (retained.dev(), retained.ino()),
+        (original.dev(), original.ino())
+    );
+    assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+}
+
+#[test]
+fn startup_reuses_a_confirmed_dead_socket_and_leaves_other_paths_intact() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = startup_directory();
+    let path = directory.join("helper.sock");
+    let prior = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let uid = std::fs::symlink_metadata(&path).unwrap().uid();
+    drop(prior);
+    let other = directory.join("other.sock");
+    let _other = std::os::unix::net::UnixListener::bind(&other).unwrap();
+    RuntimeBuilder::new()
+        .worker_threads(1)
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap()
+        .block_on(async { prepare_socket(&Cx::current().unwrap(), &path, uid).await })
+        .unwrap();
+    let _replacement = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    assert!(std::os::unix::net::UnixStream::connect(&other).is_ok());
+}
+
+fn startup_directory() -> std::path::PathBuf {
+    use std::{
+        os::unix::fs::DirBuilderExt,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    for _ in 0..32 {
+        let path = std::env::temp_dir().join(format!(
+            "fr-hs-{}-{stamp:x}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("creating test directory: {error}"),
+        }
+    }
+    panic!("could not create an unused test directory");
 }
 
 #[test]
