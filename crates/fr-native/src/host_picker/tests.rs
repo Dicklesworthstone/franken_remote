@@ -28,25 +28,30 @@ fn complete(control: &Control) {
 }
 
 #[test]
-fn choices_bound_file_sending_to_control_and_five_known_bits() {
-    for bits in 0..32 {
-        if bits & 16 != 0 && bits & 1 == 0 {
-            assert_eq!(Choices::from_bits(bits), None);
-            continue;
+fn choices_bound_file_consent_to_control_and_the_original_receive_availability() {
+    for available in [false, true] {
+        for bits in 0..64 {
+            if (bits & 0b11_0000 != 0 && bits & 1 == 0) || (bits & 32 != 0 && !available) {
+                assert_eq!(Choices::from_bits(bits, available), None);
+                continue;
+            }
+            let choices = Choices::from_bits(bits, available).unwrap();
+            assert_eq!(choices.bits(), bits);
+            assert_eq!(choices.receive_available, available);
         }
-        let choices = Choices::from_bits(bits).unwrap();
-        assert_eq!(choices.bits(), bits);
+        assert_eq!(Choices::from_bits(64, available), None);
+        assert_eq!(Choices::from_bits(NO_CHOICES, available), None);
     }
-    assert_eq!(Choices::from_bits(32), None);
-    assert_eq!(Choices::from_bits(NO_CHOICES), None);
     let choices = Choices {
         control: true,
         clipboard: false,
         choose_display: true,
         playback_audio: true,
         send_files: true,
+        receive_available: true,
+        receive_files: true,
     };
-    assert_eq!(choices.bits(), 29);
+    assert_eq!(choices.bits(), 61);
 }
 
 #[test]

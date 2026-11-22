@@ -2,12 +2,22 @@
 //! The host's manifest can never choose these limits or collision behavior.
 use super::{Failure, PathBuf, usage};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReceiveOptions {
     pub directory: PathBuf,
     pub max_file_bytes: Option<u64>,
     pub max_session_bytes: Option<u64>,
     pub keep_both: bool,
+}
+
+impl std::fmt::Debug for ReceiveOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceiveOptions")
+            .field("max_file_bytes", &self.max_file_bytes)
+            .field("max_session_bytes", &self.max_session_bytes)
+            .field("keep_both", &self.keep_both)
+            .finish_non_exhaustive()
+    }
 }
 
 fn invalid_limits() -> Failure {
@@ -75,15 +85,8 @@ impl ReceiveOptions {
         all(target_os = "macos", feature = "macos-desktop")
     ))]
     pub(crate) fn open(&self) -> Result<frd::native_files::Directory, Failure> {
-        use frd::native_files::{ConflictPolicy, Directory, Limits};
-        let defaults = Limits::default();
-        let limits = Limits {
-            max_file_bytes: self.max_file_bytes.unwrap_or(defaults.max_file_bytes),
-            max_session_bytes: self.max_session_bytes.unwrap_or(defaults.max_session_bytes),
-        };
-        if limits.max_file_bytes == 0 || limits.max_session_bytes < limits.max_file_bytes {
-            return Err(invalid_limits());
-        }
+        use frd::native_files::{ConflictPolicy, Directory};
+        let limits = self.effective_limits()?;
         Directory::open(&self.directory, limits)
             .map(|directory| {
                 directory.with_conflict_policy(if self.keep_both {
@@ -99,6 +102,25 @@ impl ReceiveOptions {
                     2,
                 )
             })
+    }
+
+    /// Pure preflight shared by the direct connector and app launcher. The
+    /// latter validates caps before discovery without opening the destination.
+    #[cfg(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
+    pub(crate) fn effective_limits(&self) -> Result<frd::native_files::Limits, Failure> {
+        use frd::native_files::Limits;
+        let defaults = Limits::default();
+        let limits = Limits {
+            max_file_bytes: self.max_file_bytes.unwrap_or(defaults.max_file_bytes),
+            max_session_bytes: self.max_session_bytes.unwrap_or(defaults.max_session_bytes),
+        };
+        if limits.max_file_bytes == 0 || limits.max_session_bytes < limits.max_file_bytes {
+            return Err(invalid_limits());
+        }
+        Ok(limits)
     }
 }
 

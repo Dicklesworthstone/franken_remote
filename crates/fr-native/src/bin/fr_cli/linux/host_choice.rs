@@ -55,6 +55,8 @@ pub(super) fn select(
             choose_display: choices.choose_display,
             playback_audio: choices.playback_audio,
             send_files: choices.send_files,
+            receive_available: choices.receive_available,
+            receive_files: choices.receive_files,
         }),
         notice(connection),
     )
@@ -80,6 +82,8 @@ pub(super) fn select(
         choose_display: choices.choose_display,
         playback_audio: choices.playback_audio,
         send_files: choices.send_files,
+        receive_available: choices.receive_available,
+        receive_files: choices.receive_files,
     });
     if confirmed.is_some() != initial.is_some() {
         return Err(unavailable());

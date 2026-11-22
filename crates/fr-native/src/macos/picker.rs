@@ -38,6 +38,10 @@ pub struct Choices {
     pub playback_audio: bool,
     /// Explicit file-drop opt-in for this controlling connection only.
     pub send_files: bool,
+    /// The caller retained a receive destination; it never enters this adapter.
+    pub receive_available: bool,
+    /// Explicit receive opt-in for this controlling connection only.
+    pub receive_files: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
@@ -46,9 +50,13 @@ impl Choices {
             | (u32::from(self.choose_display) << 2)
             | (u32::from(self.playback_audio) << 3)
             | (u32::from(self.send_files) << 4)
+            | (u32::from(self.receive_files) << 5)
     }
-    const fn from_bits(bits: u32) -> Option<Self> {
-        if bits & !31 != 0 || (bits & 16 != 0 && bits & 1 == 0) {
+    const fn from_bits(bits: u32, receive_available: bool) -> Option<Self> {
+        if bits & !63 != 0
+            || (bits & 0b11_0000 != 0 && bits & 1 == 0)
+            || (bits & 32 != 0 && !receive_available)
+        {
             return None;
         }
         Some(Self {
@@ -57,6 +65,8 @@ impl Choices {
             choose_display: bits & 4 != 0,
             playback_audio: bits & 8 != 0,
             send_files: bits & 16 != 0,
+            receive_available,
+            receive_files: bits & 32 != 0,
         })
     }
 }
@@ -98,6 +108,7 @@ unsafe extern "C" {
         count: usize,
         choices: u32,
         playback_audio_available: c_int,
+        receive_available: c_int,
         notice: *const c_char,
         notice_len: usize,
         out: *mut *mut c_void,
@@ -172,6 +183,7 @@ impl Native {
                 raw.len(),
                 choices.map_or(NO_CHOICES, Choices::bits),
                 c_int::from(cfg!(feature = "macos-audio")),
+                c_int::from(choices.is_some_and(|choice| choice.receive_available)),
                 notice_ptr,
                 notice_len,
                 &raw mut pointer,
@@ -257,6 +269,7 @@ struct Picker {
     opened: Instant,
     /// Whether this picker showed choices, and the ones confirmed with the row.
     offered: bool,
+    receive_available: bool,
     choices: Option<Choices>,
 }
 impl Picker {
@@ -273,6 +286,7 @@ impl Picker {
             decision: Decision::Waiting,
             opened,
             offered: choices.is_some(),
+            receive_available: choices.is_some_and(|choice| choice.receive_available),
             choices: None,
         })
     }
@@ -295,7 +309,7 @@ impl Picker {
                     let choices = if bits == NO_CHOICES {
                         None
                     } else {
-                        Choices::from_bits(bits)
+                        Choices::from_bits(bits, self.receive_available)
                     };
                     if choices.is_some() == self.offered
                         && (bits == NO_CHOICES || choices.is_some())
@@ -464,17 +478,20 @@ mod tests {
     use fr_wire::display::Display;
 
     #[test]
-    fn native_choices_bound_file_sending_to_control() {
-        for bits in 0..32 {
-            if bits & 16 != 0 && bits & 1 == 0 {
-                assert_eq!(Choices::from_bits(bits), None);
-                continue;
+    fn native_choices_bound_file_consent_to_control_and_original_receive_availability() {
+        for available in [false, true] {
+            for bits in 0..64 {
+                if (bits & 0b11_0000 != 0 && bits & 1 == 0) || (bits & 32 != 0 && !available) {
+                    assert_eq!(Choices::from_bits(bits, available), None);
+                    continue;
+                }
+                let choices = Choices::from_bits(bits, available).unwrap();
+                assert_eq!(choices.bits(), bits);
+                assert_eq!(choices.receive_available, available);
             }
-            let choices = Choices::from_bits(bits).unwrap();
-            assert_eq!(choices.bits(), bits);
+            assert_eq!(Choices::from_bits(64, available), None);
+            assert_eq!(Choices::from_bits(NO_CHOICES, available), None);
         }
-        assert_eq!(Choices::from_bits(32), None);
-        assert_eq!(Choices::from_bits(NO_CHOICES), None);
         let choices = Choices {
             playback_audio: true,
             ..Choices::default()

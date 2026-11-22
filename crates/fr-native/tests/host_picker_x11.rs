@@ -265,6 +265,8 @@ fn actual_choice_keys_change_only_the_confirmed_choices() {
         choose_display: false,
         playback_audio: false,
         send_files: false,
+        receive_available: false,
+        receive_files: false,
     };
     let mut picker = HostPicker::start_with(
         &screen.name,
@@ -307,6 +309,8 @@ fn actual_choice_keys_change_only_the_confirmed_choices() {
             choose_display: true,
             playback_audio: cfg!(feature = "linux-audio"),
             send_files: false,
+            receive_available: false,
+            receive_files: false,
         })
     );
 }
@@ -324,6 +328,8 @@ fn actual_audio_choice_works_in_view_only_and_respects_build_availability() {
                 choose_display: false,
                 playback_audio: initial_audio,
                 send_files: false,
+                receive_available: false,
+                receive_files: false,
             }),
             None,
         )
@@ -345,6 +351,8 @@ fn actual_audio_choice_works_in_view_only_and_respects_build_availability() {
                 choose_display: false,
                 playback_audio: cfg!(feature = "linux-audio") && !initial_audio,
                 send_files: false,
+                receive_available: false,
+                receive_files: false,
             })
         );
     }
@@ -384,6 +392,57 @@ fn actual_file_sending_requires_a_fresh_control_choice() {
         let choices = picker.choices().unwrap();
         assert_eq!(choices.control, control);
         assert_eq!(choices.send_files, expected);
+    }
+}
+
+#[test]
+fn actual_file_receiving_requires_the_original_destination_and_a_fresh_control_choice() {
+    let screen = Screen::start();
+    for (control, available, keys, expected_control, expected_receive) in [
+        (true, true, &[][..], true, false),
+        (true, false, &[0xffc4][..], true, false),
+        (false, true, &[0xffc4][..], false, false),
+        (true, true, &[0xffc4][..], true, true),
+        (false, true, &[0xffbf, 0xffc4][..], true, true),
+        (true, true, &[0xffc4, 0xffbf, 0xffbf][..], true, false),
+        (
+            true,
+            true,
+            &[0xffc4, 0xffbf, 0xffbf, 0xffc4][..],
+            true,
+            true,
+        ),
+    ] {
+        let mut picker = HostPicker::start_with(
+            &screen.name,
+            &rows(3),
+            Some(Choices {
+                control,
+                receive_available: available,
+                // Reusing a previous result cannot preselect receiving in a
+                // newly opened native picker.
+                receive_files: true,
+                ..Choices::default()
+            }),
+            None,
+        )
+        .unwrap();
+        let window = mapped(&mut picker);
+        screen.focus(window);
+        for &key in keys {
+            screen.key(key, true);
+            screen.key(key, false);
+            thread::sleep(Duration::from_millis(15));
+        }
+        assert_eq!(picker.poll().unwrap(), None);
+        assert_eq!(picker.choices(), None);
+        enter(&screen);
+        assert_eq!(chosen(&mut picker), 0);
+        let choices = picker.choices().unwrap();
+        assert_eq!(choices.control, expected_control);
+        assert_eq!(choices.receive_available, available);
+        assert_eq!(choices.receive_files, expected_receive);
+        assert!(!choices.send_files);
     }
 }
 

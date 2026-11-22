@@ -42,9 +42,17 @@ impl Receiving {
         let Command::Connect(connection) = options::parse(&validation)?.command else {
             return Err(invalid());
         };
-        if connection.receive.is_none() {
-            return Err(invalid());
-        }
+        let receive = connection.receive.ok_or_else(invalid)?;
+        #[cfg(any(
+            all(target_os = "linux", feature = "linux-desktop"),
+            all(target_os = "macos", feature = "macos-desktop")
+        ))]
+        receive.effective_limits()?;
+        #[cfg(not(any(
+            all(target_os = "linux", feature = "linux-desktop"),
+            all(target_os = "macos", feature = "macos-desktop")
+        )))]
+        let _ = receive;
         Ok(Some(Self { arguments }))
     }
 
@@ -71,7 +79,7 @@ fn invalid() -> Failure {
 pub(super) fn notice(pending: Option<&Receiving>, previous: Option<&str>) -> Option<String> {
     pending.map(|_| {
         notice_text(&format!(
-            "Receive host files once: choose View and control. The destination applies only to the next connection. {}",
+            "Receive host files once: choose View and control, then Receive files. The destination applies only to the next connection. {}",
             previous.unwrap_or_default()
         ))
     })
@@ -87,5 +95,24 @@ pub(super) fn take_for_session(
     match pending.take() {
         Some(receiving) => receiving.into_session_args(arguments),
         None => Ok(arguments),
+    }
+}
+
+/// The picker can explicitly decline this one-use destination. Consume it
+/// before either choice launches a viewer; neither an unchecked choice nor a
+/// failed launch leaves receiving available on a later connection.
+pub(super) fn take_for_choice(
+    pending: &mut Option<Receiving>,
+    arguments: Vec<String>,
+    consent: bool,
+) -> Result<Vec<String>, Failure> {
+    if consent {
+        if pending.is_none() {
+            return Err(invalid());
+        }
+        take_for_session(pending, arguments)
+    } else {
+        let _ = pending.take();
+        Ok(arguments)
     }
 }

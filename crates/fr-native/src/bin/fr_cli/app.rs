@@ -28,14 +28,14 @@ use std::{
 #[path = "app/child.rs"]
 mod child;
 use child::Finished;
-
 #[path = "app/receiving.rs"]
 mod receiving;
 use receiving::Receiving;
-
 #[path = "app/receive_completion.rs"]
 mod receive_completion;
-
+#[cfg(test)]
+#[path = "app/receive_tests.rs"]
+mod receive_tests;
 #[cfg(test)]
 #[path = "app/receiving_tests.rs"]
 mod receiving_tests;
@@ -53,8 +53,8 @@ hour unused, fr app quits.\n\n\
 --port PORT  connect to this service port for this app run (default 8443);\n\
              applies to every choice and is not saved in preferences.\n\
 --receive DIR  receive host-selected files in this existing private directory\n\
-               on the next selected controlling connection only. It is not\n\
-               remembered, repeated after an attempt, or used by view-only.\n\
+               on the next selected controlling connection only. Select Receive files; it is not\n\
+               remembered, repeated after any choice, or used by view-only.\n\
 --receive-max-file-bytes N     optional positive per-file receive limit.\n\
 --receive-max-session-bytes N  optional positive total receive limit.\n\
 --receive-conflict POLICY      reject (default) or keep-both; never overwrite.\n\
@@ -104,7 +104,12 @@ enum AppCommand {
 /// preference or a child report.
 fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
     let invalid = || Failure::new("invalid_arguments", "Run fr app --help.", 2);
-    if !requested(args) {
+    if !requested(args)
+        || args.len() > 32
+        || args
+            .iter()
+            .any(|arg| arg.len() > 4096 || arg.as_bytes().contains(&0))
+    {
         return Err(invalid());
     }
     let mut port = None;
@@ -300,6 +305,7 @@ enum Report {
         choose_display: bool,
         playback_audio: bool,
         send_files: bool,
+        receive_files: bool,
     },
     Failed {
         code: String,
@@ -350,6 +356,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             Some(choose_display),
             Some(playback_audio),
             Some(send_files),
+            Some(receive_files),
         ) = (
             text("node_id").filter(|id| valid_id(id)),
             text("certificate_name"),
@@ -358,11 +365,12 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             flag("choose_display"),
             flag("playback_audio"),
             flag("send_files"),
+            flag("receive_files"),
         )
         else {
             return None;
         };
-        if send_files && !control {
+        if (send_files || receive_files) && !control {
             return None;
         }
         return Some(Report::Selected {
@@ -376,6 +384,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             choose_display,
             playback_audio,
             send_files,
+            receive_files,
         });
     }
     // These are the actual Linux and macOS connect completion formats. A
@@ -404,10 +413,15 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
     (linux_end || macos_end).then_some(Report::Ended)
 }
 
-fn picker_report(picked: &Finished, expected_port: u16) -> Option<Report> {
+fn picker_report(picked: &Finished, expected_port: u16, receive_available: bool) -> Option<Report> {
     match last_report(&picked.stdout) {
-        Some(Report::Selected { port, .. })
-            if !picked.status.success() || port != expected_port =>
+        Some(Report::Selected {
+            port,
+            receive_files,
+            ..
+        }) if !picked.status.success()
+            || port != expected_port
+            || (receive_files && !receive_available) =>
         {
             None
         }
@@ -448,7 +462,12 @@ fn short_name(certificate_name: &str) -> &str {
         .unwrap_or(certificate_name)
 }
 
-fn pick_args(settings: &Settings, notice: Option<&str>, port: u16) -> Vec<String> {
+fn pick_args(
+    settings: &Settings,
+    notice: Option<&str>,
+    port: u16,
+    receive_available: bool,
+) -> Vec<String> {
     let port_text = port.to_string();
     let mut args: Vec<String> = [
         "connect",
@@ -479,6 +498,9 @@ fn pick_args(settings: &Settings, notice: Option<&str>, port: u16) -> Vec<String
     .into();
     if settings.playback_audio {
         args.push("--audio".to_owned());
+    }
+    if receive_available {
+        args.push("--app-receive-available".to_owned());
     }
     let port_notice = (port != DEFAULT_SERVICE_PORT).then(|| {
         notice_text(&format!(
@@ -701,20 +723,21 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
     let mut idle_expiries = 0_u8;
     loop {
         let mut settings = load(&path);
+        let receiving_notice = receiving::notice(receiving.as_ref(), notice.as_deref());
         // A picker reopened only because the last one expired unused stays
         // behind whatever the user is doing.
-        let receive_notice = receiving::notice(receiving.as_ref(), notice.as_deref());
         let picked = launcher.run(
             &pick_args(
                 &settings,
-                receive_notice.as_deref().or(notice.as_deref()),
+                receiving_notice.as_deref().or(notice.as_deref()),
                 port,
+                receiving.is_some(),
             ),
             idle_expiries == 0,
         )?;
-        let report = picker_report(&picked, port);
+        let report = picker_report(&picked, port, receiving.is_some());
         refuse_uncertain_report(report.as_ref())?;
-        let (node, name, send_files) = match report {
+        let (node, name, send_files, receive_files) = match report {
             Some(Report::Selected {
                 node,
                 name,
@@ -723,6 +746,7 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
                 choose_display,
                 playback_audio,
                 send_files,
+                receive_files,
                 ..
             }) => {
                 settings.control = control;
@@ -731,7 +755,7 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
                 settings.playback_audio = playback_audio;
                 settings.last_machine = Some(node.clone());
                 save(&path, &settings);
-                (node, name, send_files)
+                (node, name, send_files, receive_files)
             }
             // Closing the picker quits.
             Some(Report::Failed { code, .. }) if code == "host_choice_cancelled" => {
@@ -768,15 +792,16 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
         };
         picker_failures = 0;
         idle_expiries = 0;
-        // Consume the local receive choice before constructing or starting the
-        // original viewer. A failed/refused attempt cannot pass it to another
-        // machine, a later picker, or a new controller.
-        let receive_expected = receiving.is_some();
-        let args = receiving::take_for_session(
+        // Consume the original local choice before validating or launching the
+        // selected viewer, including an explicit decline. No next picker or
+        // failed launch can recover this one-use destination.
+        let receive_expected = receive_files;
+        let arguments = receiving::take_for_choice(
             &mut receiving,
             session_args(&node, &settings, port, send_files),
+            receive_files,
         )?;
-        let session = launcher.run(&args, true)?;
+        let session = launcher.run(&arguments, true)?;
         notice = Some(session_notice_checked(
             &session.stdout,
             short_name(&name),
@@ -1011,7 +1036,7 @@ mod tests {
             parse(&["app"]).unwrap(),
             AppCommand::Open {
                 port: DEFAULT_SERVICE_PORT,
-                receiving: None,
+                receiving: None
             }
         );
         for port in [1, 9443, u16::MAX] {
@@ -1020,14 +1045,14 @@ mod tests {
                 parse(&["app", "--port", &text, "--json"]).unwrap(),
                 AppCommand::Open {
                     port,
-                    receiving: None,
+                    receiving: None
                 }
             );
             assert_eq!(
                 parse(&["app", "--json", "--port", &text]).unwrap(),
                 AppCommand::Open {
                     port,
-                    receiving: None,
+                    receiving: None
                 }
             );
         }
@@ -1075,7 +1100,7 @@ mod tests {
             parse(&["app"]).unwrap(),
             AppCommand::Open {
                 port: DEFAULT_SERVICE_PORT,
-                receiving: None,
+                receiving: None
             }
         );
     }
@@ -1091,8 +1116,12 @@ mod tests {
                 for playback_audio in [false, true] {
                     settings.playback_audio = playback_audio;
                     for node in ["nFIRST", "nNEXT"] {
-                        let picker =
-                            pick_args(&settings, Some("The last host did not answer."), port);
+                        let picker = pick_args(
+                            &settings,
+                            Some("The last host did not answer."),
+                            port,
+                            false,
+                        );
                         let viewer = session_args(node, &settings, port, true);
                         for (args, picking) in [(&picker, true), (&viewer, false)] {
                             let parsed = crate::options::parse(args).unwrap();
@@ -1158,7 +1187,7 @@ mod tests {
             "schema_version": 1, "event": "host_selected", "node_id": "nHOST",
             "certificate_name": "host.tail.ts.net", "port": 9443,
             "control": false, "clipboard": false, "choose_display": false,
-            "playback_audio": false, "send_files": false,
+            "playback_audio": false, "send_files": false, "receive_files": false,
             "selection_only": true, "fresh_lookup_required": true,
             "remote_session_started": false, "input_requested": false,
         });
@@ -1172,12 +1201,12 @@ mod tests {
         for playback_audio in [false, true] {
             selected["playback_audio"] = json!(playback_audio);
             assert!(matches!(
-                picker_report(&result(&selected, 0), 9443),
+                picker_report(&result(&selected, 0), 9443, false),
                 Some(Report::Selected { port: 9443, playback_audio: actual, .. })
                     if actual == playback_audio
             ));
-            assert_eq!(picker_report(&result(&selected, 0), 8443), None);
-            assert_eq!(picker_report(&result(&selected, 256), 9443), None);
+            assert_eq!(picker_report(&result(&selected, 0), 8443, false), None);
+            assert_eq!(picker_report(&result(&selected, 256), 9443, false), None);
             for value in [
                 Value::Null,
                 json!(0),
@@ -1187,15 +1216,15 @@ mod tests {
             ] {
                 let mut changed = selected.clone();
                 changed["port"] = value;
-                assert_eq!(picker_report(&result(&changed, 0), 9443), None);
+                assert_eq!(picker_report(&result(&changed, 0), 9443, false), None);
             }
             let mut changed = selected.clone();
             changed.as_object_mut().unwrap().remove("port");
-            assert_eq!(picker_report(&result(&changed, 0), 9443), None);
+            assert_eq!(picker_report(&result(&changed, 0), 9443, false), None);
         }
         let cancelled = json!({"schema_version":1,"outcome":"cancelled","error":{"code":"host_choice_cancelled","next_action":"Choose again explicitly."}});
         assert!(matches!(
-            picker_report(&result(&cancelled, 256), 9443),
+            picker_report(&result(&cancelled, 256), 9443, false),
             Some(Report::Failed {
                 unknown_effect: false,
                 ..
@@ -1210,6 +1239,7 @@ mod tests {
             &settings,
             Some("mac: The host did not answer."),
             DEFAULT_SERVICE_PORT,
+            false,
         );
         assert_eq!(
             pick,
@@ -1258,7 +1288,7 @@ mod tests {
         settings.control = false;
         settings.clipboard = true;
         settings.choose_display = false;
-        let pick = pick_args(&settings, None, DEFAULT_SERVICE_PORT);
+        let pick = pick_args(&settings, None, DEFAULT_SERVICE_PORT, false);
         assert!(pick.contains(&"--view-only".into()) && pick.contains(&"--clipboard".into()));
         assert!(crate::options::parse(&pick).is_ok());
         assert_eq!(
@@ -1286,7 +1316,7 @@ mod tests {
             };
             for audio in [false, true] {
                 settings.playback_audio = audio;
-                let picker = pick_args(&settings, None, DEFAULT_SERVICE_PORT);
+                let picker = pick_args(&settings, None, DEFAULT_SERVICE_PORT, false);
                 let session = session_args("nMAC", &settings, DEFAULT_SERVICE_PORT, false);
                 for args in [&picker, &session] {
                     assert_eq!(args.iter().any(|arg| arg == "--audio"), audio);
@@ -1313,8 +1343,9 @@ mod tests {
 
     #[test]
     fn file_sending_is_one_use_control_only_and_never_a_saved_picker_preference() {
-        let mut settings =
-            Settings::from_json(br#"{"version":1,"send_files":true,"file_drop":true}"#);
+        let mut settings = Settings::from_json(
+            br#"{"version":1,"send_files":true,"receive_files":false,"file_drop":true}"#,
+        );
         let saved: Value = serde_json::from_str(&settings.to_json()).unwrap();
         assert!(saved.get("send_files").is_none() && saved.get("file_drop").is_none());
         for control in [false, true] {
@@ -1336,7 +1367,7 @@ mod tests {
                 assert!(!session.upload.choose_files && !session.upload.file_commands);
                 assert!(session.receive.is_none());
                 // A new picker never inherits the previous session's consent.
-                let args = pick_args(&settings, None, 9443);
+                let args = pick_args(&settings, None, 9443, false);
                 assert!(!args.iter().any(|arg| arg == "--file-drop"));
                 let crate::options::Command::Connect(picker) =
                     crate::options::parse(&args).unwrap().command
@@ -1351,7 +1382,7 @@ mod tests {
 
     #[test]
     fn child_reports_become_selections_exits_and_notices() {
-        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":true,"send_files":true,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
+        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":true,"send_files":true,"receive_files":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
 "#;
         assert_eq!(
             last_report(selected),
@@ -1364,6 +1395,7 @@ mod tests {
                 choose_display: false,
                 playback_audio: true,
                 send_files: true,
+                receive_files: false,
             })
         );
         let mut malformed: Value = serde_json::from_slice(selected).unwrap();
@@ -1572,7 +1604,7 @@ mod tests {
             "clipboard": false,
             "choose_display": false,
             "playback_audio": false,
-            "send_files": false,
+            "send_files": false, "receive_files": false,
             "selection_only": true,
             "fresh_lookup_required": true,
             "remote_session_started": false,

@@ -1,5 +1,29 @@
 # Implementation status
 
+## Explicit native-app receiving consent (2026-11-22)
+
+The Linux/macOS app picker adds a default-off Receive files control for the
+original launch's one-use `--receive DIR` destination. The child receives only
+an availability flag. The parent requires a successful, correctly scoped
+controlling selection and an explicit Boolean before forwarding the original
+validated destination, limits and collision policy. Any confirmed choice,
+including declining receiving, consumes the destination before launching the
+viewer; unused picker refreshes retain configuration but never restore consent.
+View-only clears and disables receiving, and a later control choice requires
+fresh consent. No receive path or permission enters saved preferences or
+receive-option Debug output. The upstream receive outcome and original cleanup
+guard runs after every viewer, including a choice with receiving off.
+
+Passed: ten exact-source Rust picker tests, strict C11 compilation, and ten
+actual shipping-C picker scenarios using cookie-authenticated loopback TCP
+Xvfb/XTest, including keyboard and mouse consent, unavailable destinations and
+role changes. This direct C fixture preserves the production Rust local-display
+restriction and is not a full native viewer or remote-session qualification.
+App/parser/guard regressions are added; their complete Cargo execution remains
+pending under severe shared-host I/O pressure. macOS native execution and live
+file receiving are not qualified by these Linux checks. Tracking:
+`fr-app-receive-once-59f9`; plan §§15.6 and 16.1; [app usage](docs/native-client-cli.md#desktop-application-fr-app).
+
 ## Original file publication receipts at sender expiry (2026-11-22)
 
 The file sender reconciles a terminal receipt already queued on its original

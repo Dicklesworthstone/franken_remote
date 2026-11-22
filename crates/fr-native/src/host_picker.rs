@@ -40,6 +40,10 @@ pub struct Choices {
     pub playback_audio: bool,
     /// Explicit file-drop opt-in for this controlling connection only.
     pub send_files: bool,
+    /// The caller retained a receive destination; it never enters this adapter.
+    pub receive_available: bool,
+    /// Explicit receive opt-in for this controlling connection only.
+    pub receive_files: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
@@ -48,9 +52,13 @@ impl Choices {
             | (u32::from(self.choose_display) << 2)
             | (u32::from(self.playback_audio) << 3)
             | (u32::from(self.send_files) << 4)
+            | (u32::from(self.receive_files) << 5)
     }
-    const fn from_bits(bits: u32) -> Option<Self> {
-        if bits & !31 != 0 || (bits & 16 != 0 && bits & 1 == 0) {
+    const fn from_bits(bits: u32, receive_available: bool) -> Option<Self> {
+        if bits & !63 != 0
+            || (bits & 0b11_0000 != 0 && bits & 1 == 0)
+            || (bits & 32 != 0 && !receive_available)
+        {
             return None;
         }
         Some(Self {
@@ -59,6 +67,8 @@ impl Choices {
             choose_display: bits & 4 != 0,
             playback_audio: bits & 8 != 0,
             send_files: bits & 16 != 0,
+            receive_available,
+            receive_files: bits & 32 != 0,
         })
     }
 }

@@ -87,7 +87,7 @@ fn complete_receive_policy_reaches_only_the_original_selected_viewer() {
 
     // A new picker and another selected host have neither the directory nor
     // its authorization, even when the prior connection failed to open.
-    let pick = pick_args(&settings, None, port);
+    let pick = pick_args(&settings, None, port, receiving.is_some());
     assert!(connection(&pick).receive.is_none());
     let next = receiving::take_for_session(
         &mut receiving,
@@ -142,7 +142,9 @@ fn pending_receive_choice_is_visible_after_refresh_without_exposing_the_path() {
     let receiving = pending(&["app", "--receive", "/private/secret destination"]);
     let notice =
         receiving::notice(receiving.as_ref(), Some("The previous picker expired.")).unwrap();
-    assert!(notice.starts_with("Receive host files once: choose View and control."));
+    assert!(
+        notice.starts_with("Receive host files once: choose View and control, then Receive files.")
+    );
     assert!(notice.contains("The previous picker expired."));
     assert!(!notice.contains("/private/secret destination"));
     for control in [false, true] {
@@ -150,7 +152,7 @@ fn pending_receive_choice_is_visible_after_refresh_without_exposing_the_path() {
             control,
             ..Settings::default()
         };
-        let args = pick_args(&settings, Some(&notice), 9443);
+        let args = pick_args(&settings, Some(&notice), 9443, receiving.is_some());
         assert!(!args.iter().any(|arg| arg.starts_with("--receive")));
         let picker = connection(&args);
         assert!(picker.receive.is_none());

@@ -39,6 +39,7 @@ unsafe extern "C" {
         count: u32,
         choices: u32,
         playback_audio_available: c_int,
+        receive_available: c_int,
         notice: *const c_char,
         window: *mut u32,
     ) -> *mut c_void;
@@ -83,6 +84,7 @@ pub(super) fn run(
                 count,
                 choices.map_or(NO_CHOICES, Choices::bits),
                 c_int::from(cfg!(feature = "linux-audio")),
+                c_int::from(choices.is_some_and(|choice| choice.receive_available)),
                 notice.map_or(core::ptr::null(), |notice| notice.as_ptr()),
                 &raw mut window,
             )
@@ -136,7 +138,13 @@ pub(super) fn run(
                     let confirmed = if chosen == NO_CHOICES {
                         None
                     } else {
-                        Some(Choices::from_bits(chosen).ok_or(Error::NativeChanged)?)
+                        Some(
+                            Choices::from_bits(
+                                chosen,
+                                choices.is_some_and(|choice| choice.receive_available),
+                            )
+                            .ok_or(Error::NativeChanged)?,
+                        )
                     };
                     if confirmed.is_some() != choices.is_some() {
                         return Err(Error::NativeChanged);

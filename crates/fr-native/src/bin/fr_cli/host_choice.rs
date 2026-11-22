@@ -24,6 +24,10 @@ pub(super) struct Choices {
     pub playback_audio: bool,
     /// A new local opt-in for this connection, never a saved preference.
     pub send_files: bool,
+    /// The parent retains the destination; the picker receives only this hint.
+    pub receive_available: bool,
+    /// Explicit consent for this controlling connection, never remembered.
+    pub receive_files: bool,
 }
 impl Choices {
     /// The window's initial choices, only for a `--pick-only` request.
@@ -34,6 +38,8 @@ impl Choices {
             choose_display: matches!(connection.display, DisplayChoice::Choose),
             playback_audio: pick.playback_audio,
             send_files: false,
+            receive_available: pick.receive_available,
+            receive_files: false,
         })
     }
 }
@@ -115,11 +121,12 @@ pub(super) fn selected_report(
             object.insert("choose_display".into(), choices.choose_display.into());
             object.insert("playback_audio".into(), choices.playback_audio.into());
             object.insert("send_files".into(), choices.send_files.into());
+            object.insert("receive_files".into(), choices.receive_files.into());
         }
         format!("{report}\n")
     } else if let Some(choices) = choices {
         format!(
-            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}, file sending {}.\n",
+            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}, file sending {}, file receiving {}.\n",
             candidate.certificate_name(),
             candidate.stable_id(),
             if choices.control {
@@ -143,6 +150,11 @@ pub(super) fn selected_report(
                 "off"
             },
             if choices.control && choices.send_files {
+                "enabled for this connection"
+            } else {
+                "off"
+            },
+            if choices.control && choices.receive_available && choices.receive_files {
                 "enabled for this connection"
             } else {
                 "off"

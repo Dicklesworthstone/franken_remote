@@ -184,6 +184,9 @@ pub struct PickOnly {
     pub clipboard: bool,
     /// Initial playback preference only; it never opens an audio device.
     pub playback_audio: bool,
+    /// The parent retained a local receive destination; no path or permission
+    /// to receive is held by this selection-only child.
+    pub receive_available: bool,
     /// `--app-notice TEXT`: the previous session's outcome, shown above the list.
     pub notice: Option<String>,
 }
@@ -818,6 +821,7 @@ fn parse_command(
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
     let (mut pick_only, mut app_notice) = (false, None);
+    let mut app_receive_available = false;
     let mut diagnostics_out = None;
     while index < args.len() {
         let flag = args[index].as_str();
@@ -919,6 +923,7 @@ fn parse_command(
                 receive_keep_both = Some(receive::keep_both(next_arg(args, &mut index)?)?);
             }
             "--pick-only" if connect && choose_host => pick_only = true,
+            "--app-receive-available" if connect && choose_host => app_receive_available = true,
             "--diagnostics-out" if connect => diagnostics_out = Some(next_path(args, &mut index)?),
             "--app-notice" if connect && choose_host => {
                 let text = next_arg(args, &mut index)?;
@@ -935,7 +940,7 @@ fn parse_command(
             _ => return Err(usage()),
         }
     }
-    if (app_notice.is_some() && !pick_only)
+    if ((app_notice.is_some() || app_receive_available) && !pick_only)
         || (pick_only
             && (diagnostics_out.is_some()
                 || !send.is_empty()
@@ -1128,6 +1133,7 @@ fn parse_command(
                 pick: pick_only.then(|| PickOnly {
                     clipboard: clipboard.unwrap_or(true),
                     playback_audio: audio,
+                    receive_available: app_receive_available,
                     notice: app_notice,
                 }),
                 diagnostics_out,
@@ -1163,6 +1169,7 @@ mod tests {
             Some(PickOnly {
                 clipboard: true,
                 playback_audio: false,
+                receive_available: false,
                 notice: None,
             })
         );

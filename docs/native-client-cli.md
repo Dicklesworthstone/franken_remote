@@ -71,10 +71,11 @@ cannot be combined with `--port`.
 Choose **View only** or **View and control**, clipboard sharing, which display
 to show, and **Play host audio** before connecting. Playback starts off and
 works with either viewing role. On Linux, F2 toggles control, F3 clipboard,
-F4 display selection, F5 playback, and F6 file sending; clicking the options
-also works.
+F4 display selection, F5 playback, F6 file sending, and F7 file receiving;
+clicking the options also works.
 Clipboard remains available only with control. The confirmed preferences are
-remembered for the next picker, except file sending, which always starts off.
+remembered for the next picker, except file sending and receiving, which
+always start off.
 
 **Play host audio** requests the existing `--audio` session. The host must have
 locally enabled playback capture, and its normal admission and approval rules
@@ -103,30 +104,38 @@ explicit local destination:
 fr app --receive /absolute/private-destination --receive-conflict keep-both
 ```
 
-The picker states that receiving is pending for one connection. Choose **View
-and control** for that connection; choosing **View only** refuses before the
-viewer starts and consumes the pending choice. The ordinary connector checks
-and pins the existing private destination before connecting. Receiving remains
-subject to host capability negotiation, host-side file selection, and the
-original controlling session's authority. The app never browses host paths or
-automatically opens a received file.
+Choose **View and control**, then select **Receive files** for that connection.
+The checkbox starts off and is available only while the app holds that original
+destination. Switching to **View only** clears and disables receiving; switching
+back to control requires a fresh check. Without `--receive`, the disabled option
+explains how to supply a destination. File sending and receiving are independent
+choices and can both be enabled for the same controlling connection.
 
-The destination applies only to that first selected viewer attempt, including
-an attempt that refuses or fails to connect. After it ends, another host choice
-has receiving off. Unused picker refreshes preserve the pending choice; Cancel
-or quitting drops it. Reconnect and display replacement do not restore the
-original receive authority. No destination or receive permission is saved in
-preferences or installed launchers.
+The destination applies only to the first selected viewer attempt, including
+an attempt that refuses or fails to connect. Choosing **View only** or leaving
+**Receive files** unchecked opens the ordinary viewer without receiving and
+discards the pending destination. The app consumes this choice before starting
+the viewer. After it ends, another host choice has receiving unavailable; a new
+`fr app --receive` launch is needed to offer it again. Unused picker refreshes
+preserve the pending destination, with receiving still unchecked; Cancel or
+quitting drops it. Reconnect and display replacement do not restore the original
+receive authority. No destination or receive permission is saved in preferences
+or installed launchers, and the picker and completion reports never contain the
+destination path.
+
+When receiving is selected, the ordinary connector checks and pins the existing
+private destination before connecting. Receiving remains subject to host
+capability negotiation, host-side file selection, and the original controlling
+session's authority. The app never browses host paths or automatically opens a
+received file.
 
 The optional `--receive-max-file-bytes`, `--receive-max-session-bytes`, and
 `--receive-conflict reject|keep-both` flags use the same parser, default limits,
-and pinned-directory receiver as `fr connect --receive`. Omitting a limit
-retains the receiver's default; malformed or duplicate options, zero limits,
-and explicit totals smaller than the per-file allowance refuse. The default
-conflict policy is `reject`; `keep-both` publishes under a distinct name,
-never overwrites. A graphical destination chooser remains separate work.
-Receive options cannot be combined with `--help`, `--install`, or
-`--uninstall`.
+and pinned-directory receiver as `fr connect --receive`. Omitting a limit retains
+the receiver's default; malformed or duplicate options, zero limits, and an
+effective total smaller than the per-file allowance refuse before discovery or
+destination access. The default conflict policy is reject. The picker cannot
+change the original destination, limits, or conflict policy.
 
 After a receiving attempt, the app separately checks the original disk
 owner's completion evidence before reopening the picker. Overall viewer
