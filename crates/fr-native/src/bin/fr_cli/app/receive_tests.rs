@@ -16,6 +16,7 @@ fn selected(control: bool, receive: bool) -> Value {
         "remote_session_started": false, "input_requested": false,
         "control": control, "clipboard": true, "choose_display": true,
         "playback_audio": false, "send_files": false, "receive_files": receive,
+        "microphone_controls": false,
     })
 }
 

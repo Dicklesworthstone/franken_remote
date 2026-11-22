@@ -44,6 +44,9 @@ pub struct Choices {
     pub receive_available: bool,
     /// Explicit receive opt-in for this controlling connection only.
     pub receive_files: bool,
+    /// Microphone controls are unavailable in this Linux picker. A true
+    /// request is refused before starting a native window.
+    pub microphone_controls: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
@@ -53,6 +56,7 @@ impl Choices {
             | (u32::from(self.playback_audio) << 3)
             | (u32::from(self.send_files) << 4)
             | (u32::from(self.receive_files) << 5)
+            | (u32::from(self.microphone_controls) << 6)
     }
     const fn from_bits(bits: u32, receive_available: bool) -> Option<Self> {
         if bits & !63 != 0
@@ -69,6 +73,7 @@ impl Choices {
             send_files: bits & 16 != 0,
             receive_available,
             receive_files: bits & 32 != 0,
+            microphone_controls: false,
         })
     }
 }
@@ -284,6 +289,9 @@ impl HostPicker {
         notice: Option<&str>,
     ) -> Result<Self, Error> {
         validate(display, rows)?;
+        if choices.is_some_and(|choice| choice.microphone_controls) {
+            return Err(Error::NativeUnavailable);
+        }
         let notice = notice
             .map(|text| {
                 if text.is_empty()

@@ -129,6 +129,7 @@ fn picker_request_reports_the_confirmed_choices_with_the_identity() {
         send_files: false,
         receive_available: false,
         receive_files: false,
+        microphone_controls: false,
     };
     let report: serde_json::Value =
         serde_json::from_str(&selected_report(&choice, 8443, true, Some(choices))).unwrap();

@@ -22,6 +22,7 @@ const MAX_LABEL: usize = 384;
 const CHOICE_LIMIT: Duration = Duration::from_secs(120);
 /// Native "no choices row" marker; must match `FR_CHOICE_NONE`.
 const NO_CHOICES: u32 = u32::MAX;
+const MICROPHONE_AVAILABLE: bool = cfg!(all(target_os = "macos", feature = "macos-microphone"));
 
 /// Local connection preferences shown beside the host list (`fr app`). They
 /// only shape the next command line; the connector still requests control
@@ -42,6 +43,9 @@ pub struct Choices {
     pub receive_available: bool,
     /// Explicit receive opt-in for this controlling connection only.
     pub receive_files: bool,
+    /// Show this controlling connection's muted microphone controls. This is
+    /// neither microphone permission nor a request to start capturing.
+    pub microphone_controls: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
@@ -51,11 +55,25 @@ impl Choices {
             | (u32::from(self.playback_audio) << 3)
             | (u32::from(self.send_files) << 4)
             | (u32::from(self.receive_files) << 5)
+            | (u32::from(self.microphone_controls) << 6)
     }
-    const fn from_bits(bits: u32, receive_available: bool) -> Option<Self> {
-        if bits & !63 != 0
-            || (bits & 0b11_0000 != 0 && bits & 1 == 0)
+    fn initial_bits(self) -> u32 {
+        // Reusing a prior choice never preselects microphone controls.
+        Self {
+            microphone_controls: false,
+            ..self
+        }
+        .bits()
+    }
+    const fn from_bits(
+        bits: u32,
+        receive_available: bool,
+        microphone_available: bool,
+    ) -> Option<Self> {
+        if bits & !127 != 0
+            || (bits & 0b111_0000 != 0 && bits & 1 == 0)
             || (bits & 32 != 0 && !receive_available)
+            || (bits & 64 != 0 && !microphone_available)
         {
             return None;
         }
@@ -67,6 +85,7 @@ impl Choices {
             send_files: bits & 16 != 0,
             receive_available,
             receive_files: bits & 32 != 0,
+            microphone_controls: bits & 64 != 0,
         })
     }
 }
@@ -109,6 +128,7 @@ unsafe extern "C" {
         choices: u32,
         playback_audio_available: c_int,
         receive_available: c_int,
+        microphone_available: c_int,
         notice: *const c_char,
         notice_len: usize,
         out: *mut *mut c_void,
@@ -181,9 +201,10 @@ impl Native {
                 kind,
                 raw.as_ptr(),
                 raw.len(),
-                choices.map_or(NO_CHOICES, Choices::bits),
+                choices.map_or(NO_CHOICES, Choices::initial_bits),
                 c_int::from(cfg!(feature = "macos-audio")),
                 c_int::from(choices.is_some_and(|choice| choice.receive_available)),
+                c_int::from(MICROPHONE_AVAILABLE),
                 notice_ptr,
                 notice_len,
                 &raw mut pointer,
@@ -309,7 +330,7 @@ impl Picker {
                     let choices = if bits == NO_CHOICES {
                         None
                     } else {
-                        Choices::from_bits(bits, self.receive_available)
+                        Choices::from_bits(bits, self.receive_available, MICROPHONE_AVAILABLE)
                     };
                     if choices.is_some() == self.offered
                         && (bits == NO_CHOICES || choices.is_some())
@@ -478,19 +499,32 @@ mod tests {
     use fr_wire::display::Display;
 
     #[test]
-    fn native_choices_bound_file_consent_to_control_and_original_receive_availability() {
-        for available in [false, true] {
-            for bits in 0..64 {
-                if (bits & 0b11_0000 != 0 && bits & 1 == 0) || (bits & 32 != 0 && !available) {
-                    assert_eq!(Choices::from_bits(bits, available), None);
-                    continue;
+    fn native_choices_require_control_and_original_file_and_microphone_availability() {
+        for receive_available in [false, true] {
+            for microphone_available in [false, true] {
+                for bits in 0..128 {
+                    let confirmed =
+                        Choices::from_bits(bits, receive_available, microphone_available);
+                    if (bits & 0b111_0000 != 0 && bits & 1 == 0)
+                        || (bits & 32 != 0 && !receive_available)
+                        || (bits & 64 != 0 && !microphone_available)
+                    {
+                        assert_eq!(confirmed, None);
+                        continue;
+                    }
+                    let choices = confirmed.unwrap();
+                    assert_eq!(choices.bits(), bits);
+                    assert_eq!(choices.receive_available, receive_available);
                 }
-                let choices = Choices::from_bits(bits, available).unwrap();
-                assert_eq!(choices.bits(), bits);
-                assert_eq!(choices.receive_available, available);
+                assert_eq!(
+                    Choices::from_bits(128, receive_available, microphone_available),
+                    None
+                );
+                assert_eq!(
+                    Choices::from_bits(NO_CHOICES, receive_available, microphone_available),
+                    None
+                );
             }
-            assert_eq!(Choices::from_bits(64, available), None);
-            assert_eq!(Choices::from_bits(NO_CHOICES, available), None);
         }
         let choices = Choices {
             playback_audio: true,
@@ -498,6 +532,19 @@ mod tests {
         };
         assert_eq!(choices.bits(), 8);
         assert!(!choices.control);
+    }
+
+    #[test]
+    fn every_new_picker_requires_a_fresh_microphone_controls_choice() {
+        let confirmed = Choices::from_bits(125, true, true).unwrap();
+        assert!(confirmed.microphone_controls);
+        assert_eq!(confirmed.initial_bits(), 61);
+        assert!(!Choices::default().microphone_controls);
+        assert!(
+            !Choices::from_bits(confirmed.initial_bits(), true, true)
+                .unwrap()
+                .microphone_controls
+        );
     }
 
     #[test]

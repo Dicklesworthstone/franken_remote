@@ -108,6 +108,10 @@ On macOS, Receive files opens a fresh private-folder chooser before connecting;
 it requires control and starts unchecked for every connection. An explicit
 fr app --receive DIR instead supplies that exact destination once. Linux needs
 that explicit destination. No receive path or consent is remembered.
+On macOS with macos-microphone, Show microphone controls opens the original muted
+panel for this controlling connection only. It pins the current input once before
+connecting. Choose Allow microphone, then a NEW Talk, inside the viewer. This
+checkbox starts off every time; neither microphone consent nor a device is saved.
 Choices are remembered in ~/Library/Application Support/FrankenRemote/
 settings.json (macOS) or $XDG_CONFIG_HOME/frankenremote/settings.json.
 fr app --install adds ~/Applications/FrankenRemote.app (macOS) or an

@@ -44,6 +44,7 @@ pub(super) fn select(
             send_files: choices.send_files,
             receive_available: choices.receive_available,
             receive_files: choices.receive_files,
+            microphone_controls: choices.microphone_controls,
         }),
         host_choice::notice(connection),
     )
@@ -70,6 +71,7 @@ pub(super) fn select(
         send_files: choices.send_files,
         receive_available: choices.receive_available,
         receive_files: choices.receive_files,
+        microphone_controls: choices.microphone_controls,
     });
     if confirmed.is_some() != initial.is_some() {
         return Err(unavailable());

@@ -28,7 +28,8 @@ enum {
 #define FR_CHOICE_AUDIO 8u
 #define FR_CHOICE_FILES 16u
 #define FR_CHOICE_RECEIVE 32u
-#define FR_CHOICE_ALL 63u
+#define FR_CHOICE_MICROPHONE 64u
+#define FR_CHOICE_ALL 127u
 
 // Must match RawRow in macos/picker.rs. Each byte range is borrowed only for
 // fr_mac_picker_open; NSString makes its own immutable copy before return.
@@ -81,6 +82,7 @@ typedef struct {
     NSButton *playbackAudio;
     NSButton *sendFiles;
     NSButton *receiveFiles;
+    NSButton *microphoneControls;
     NSArray<NSString *> *titles;
     NSArray<NSString *> *details;
     int outcome;
@@ -89,6 +91,7 @@ typedef struct {
     BOOL hasChoices;
     BOOL playbackAudioAvailable;
     BOOL receiveAvailable;
+    BOOL microphoneAvailable;
     uint32_t choices;
 }
 - (BOOL)fresh:(NSEvent *)event;
@@ -180,6 +183,8 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     sendFiles.state = (choices & FR_CHOICE_FILES) ? NSControlStateValueOn : NSControlStateValueOff;
     receiveFiles.enabled = control && receiveAvailable;
     receiveFiles.state = (choices & FR_CHOICE_RECEIVE) ? NSControlStateValueOn : NSControlStateValueOff;
+    microphoneControls.enabled = control && microphoneAvailable;
+    microphoneControls.state = (choices & FR_CHOICE_MICROPHONE) ? NSControlStateValueOn : NSControlStateValueOff;
 }
 // A fresh local click on one of the choice controls changes only the local
 // preference; it never confirms a row. Returns YES when the event was used.
@@ -196,9 +201,12 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
         if (sendFiles.enabled) choices ^= FR_CHOICE_FILES;
     } else if (fr_picker_hit(receiveFiles, event)) {
         if (receiveFiles.enabled) choices ^= FR_CHOICE_RECEIVE;
+    } else if (fr_picker_hit(microphoneControls, event)) {
+        if (microphoneControls.enabled) choices ^= FR_CHOICE_MICROPHONE;
     } else return NO;
-    // A role downgrade retires this connection's file consent permanently.
-    if (!(choices & FR_CHOICE_CONTROL)) choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE);
+    // Returning to control still requires fresh file and microphone choices.
+    if (!(choices & FR_CHOICE_CONTROL))
+        choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE);
     [self showChoices];
     return YES;
 }
@@ -296,7 +304,8 @@ static NSString *fr_picker_string(const char *bytes, size_t length) {
 }
 
 int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uint32_t initial,
-                       int playback_audio_available, int receive_available, const char *notice_bytes, size_t notice_len, void **out) {
+                       int playback_audio_available, int receive_available, int microphone_available,
+                       const char *notice_bytes, size_t notice_len, void **out) {
     if (!out) return FR_PICK_INVALID;
     *out = NULL;
     if ((kind != 1 && kind != 2) || !rows || !count || count > FR_PICK_ROWS ||
@@ -305,6 +314,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
     if (initial != FR_CHOICE_NONE && (kind != 1 || (initial & ~FR_CHOICE_ALL))) return FR_PICK_INVALID;
     if (playback_audio_available != 0 && playback_audio_available != 1) return FR_PICK_INVALID;
     if (receive_available != 0 && receive_available != 1) return FR_PICK_INVALID;
+    if (microphone_available != 0 && microphone_available != 1) return FR_PICK_INVALID;
     if ((notice_len && kind != 1) || (!notice_bytes && notice_len)) return FR_PICK_INVALID;
     if (![NSThread isMainThread]) return FR_PICK_THREAD;
     if (!NSApp || !NSScreen.mainScreen) return FR_PICK_NATIVE;
@@ -329,8 +339,8 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         }
         if (!isfinite(columnWidth) || columnWidth > 8192) return FR_PICK_INVALID;
         NSRect available = NSScreen.mainScreen.visibleFrame;
-        // Room for the optional notice line and four choices rows.
-        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 120 : 0);
+        // Room for the optional notice line and five choices rows.
+        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 150 : 0);
         CGFloat width = fmin(760, available.size.width - 40);
         CGFloat height = fmin(520 + extra, available.size.height - 60);
         if (width < (hasChoices ? 720 : 360) || height < 240 + extra) return FR_PICK_NATIVE;
@@ -342,8 +352,12 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         owner->validAfter = NSProcessInfo.processInfo.systemUptime;
         owner->hasChoices = hasChoices;
         owner->choices = hasChoices ? initial : 0;
-        owner->choices &= ~FR_CHOICE_RECEIVE;
-        if (!(owner->choices & FR_CHOICE_CONTROL)) owner->choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE);
+        // Neither receive nor microphone opt-in survives opening a new picker.
+        // This choice only opens muted controls; Allow and Talk stay separate.
+        owner->choices &= ~(FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE);
+        if (!(owner->choices & FR_CHOICE_CONTROL))
+            owner->choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE);
+        owner->microphoneAvailable = microphone_available != 0;
         owner->receiveAvailable = receive_available != 0;
         if (!owner->receiveAvailable) owner->choices &= ~FR_CHOICE_RECEIVE;
         owner->playbackAudioAvailable = playback_audio_available != 0;
@@ -377,7 +391,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             line.lineBreakMode = NSLineBreakByTruncatingTail;
             [content addSubview:line];
         }
-        CGFloat bottom = hasChoices ? 198 : 78;
+        CGFloat bottom = hasChoices ? 228 : 78;
         if (hasChoices) {
             owner->viewOnly = [NSButton radioButtonWithTitle:@"View only" target:nil action:nil];
             owner->viewOnly.frame = NSMakeRect(20, 50, 110, 24);
@@ -394,7 +408,11 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             owner->sendFiles.frame = NSMakeRect(20, 110, 160, 24);
             owner->receiveFiles = [NSButton checkboxWithTitle:@"Receive files" target:nil action:nil];
             owner->receiveFiles.frame = NSMakeRect(20, 140, 160, 24);
-            for (NSButton *choice in @[owner->viewOnly, owner->viewControl, owner->clipboard, owner->chooseDisplay, owner->playbackAudio, owner->sendFiles, owner->receiveFiles])
+            owner->microphoneControls = [NSButton checkboxWithTitle:owner->microphoneAvailable
+                ? @"Show microphone controls" : @"Microphone unavailable in this build" target:nil action:nil];
+            owner->microphoneControls.frame = NSMakeRect(20, 170, 260, 24);
+            for (NSButton *choice in @[owner->viewOnly, owner->viewControl, owner->clipboard, owner->chooseDisplay,
+                                      owner->playbackAudio, owner->sendFiles, owner->receiveFiles, owner->microphoneControls])
                 [content addSubview:choice];
             NSTextField *audioHint = [NSTextField labelWithString:@"Host sound only; your microphone stays off."];
             audioHint.frame = NSMakeRect(295, 82, width - 315, 20);
@@ -413,6 +431,12 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             receiveHint.font = [NSFont systemFontOfSize:11];
             receiveHint.textColor = NSColor.secondaryLabelColor;
             [content addSubview:receiveHint];
+            NSTextField *microphoneHint = [NSTextField labelWithString:
+                @"Starts muted. Allow microphone, then Talk, in the viewer."];
+            microphoneHint.frame = NSMakeRect(295, 172, width - 315, 20);
+            microphoneHint.font = [NSFont systemFontOfSize:11];
+            microphoneHint.textColor = NSColor.secondaryLabelColor;
+            [content addSubview:microphoneHint];
             [owner showChoices];
         }
         owner->scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, bottom, width - 40,
@@ -555,6 +579,7 @@ int fr_mac_picker_close(void *handle) {
         owner->chooseDisplay = nil;
         owner->playbackAudio = nil;
         owner->sendFiles = nil;
+        owner->microphoneControls = nil;
         owner->titles = nil;
         owner->details = nil;
         // Consume only the original bridge retain. Rust clears its pointer

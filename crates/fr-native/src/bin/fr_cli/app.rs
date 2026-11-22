@@ -44,7 +44,10 @@ const USAGE: &str = "fr app [--port PORT] [--receive DIR [RECEIVE_OPTIONS]] | --
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
 View only or View and control, Share clipboard text, Ask which display to\n\
 show and Play host audio, then Connect. Audio starts off; enabling it never\n\
-enables your microphone. With control, select Send files to allow file drops\n\
+enables your microphone. On a macOS microphone build, Show microphone controls\n\
+opens the muted panel for this connection only; choose Allow microphone, then\n\
+Talk there. This choice starts off in every picker. With control, select Send\n\
+files to allow file drops\n\
 onto this viewer only. On macOS, select Receive files to choose a private\n\
 folder before connecting. Both choices start off in every new picker. Closing the\n\
 viewer returns to the picker with the outcome; Cancel or Escape quits. Viewing\n\
@@ -307,6 +310,7 @@ enum Report {
         playback_audio: bool,
         send_files: bool,
         receive_files: bool,
+        microphone_controls: bool,
     },
     Failed {
         code: String,
@@ -358,6 +362,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             Some(playback_audio),
             Some(send_files),
             Some(receive_files),
+            Some(microphone_controls),
         ) = (
             text("node_id").filter(|id| valid_id(id)),
             text("certificate_name"),
@@ -367,11 +372,12 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             flag("playback_audio"),
             flag("send_files"),
             flag("receive_files"),
+            flag("microphone_controls"),
         )
         else {
             return None;
         };
-        if (send_files || receive_files) && !control {
+        if (send_files || receive_files || microphone_controls) && !control {
             return None;
         }
         return Some(Report::Selected {
@@ -386,6 +392,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             playback_audio,
             send_files,
             receive_files,
+            microphone_controls,
         });
     }
     // These are the actual Linux and macOS connect completion formats. A
@@ -419,10 +426,12 @@ fn picker_report(picked: &Finished, expected_port: u16, receive_available: bool)
         Some(Report::Selected {
             port,
             receive_files,
+            microphone_controls,
             ..
         }) if !picked.status.success()
             || port != expected_port
-            || (receive_files && !receive_available) =>
+            || (receive_files && !receive_available)
+            || (microphone_controls && !microphone_controls_available()) =>
         {
             None
         }
@@ -552,6 +561,30 @@ fn session_args(node: &str, settings: &Settings, port: u16, send_files: bool) ->
         args.push("--file-drop".to_owned());
     }
     args
+}
+
+fn microphone_controls_available() -> bool {
+    cfg!(all(target_os = "macos", feature = "macos-microphone"))
+}
+
+/// Fresh picker consent only exposes the existing muted microphone panel.
+/// The selected viewer pins the current native input device before connecting;
+/// OS permission and a later explicit Talk remain separate operations.
+fn microphone_arguments(mut arguments: Vec<String>, consent: bool) -> Result<Vec<String>, Failure> {
+    if !consent {
+        return Ok(arguments);
+    }
+    if !microphone_controls_available() {
+        return Err(Failure::new(
+            "app_microphone_unavailable",
+            "Microphone controls require a macOS desktop build with macos-microphone. No connection was opened.",
+            2,
+        ));
+    }
+    arguments.extend(["--microphone", "--microphone-source", "default"].map(str::to_owned));
+    // The ordinary parser enforces control and all existing device rules.
+    crate::options::parse(&arguments)?;
+    Ok(arguments)
 }
 
 /// Only a terminal report can return the app to its picker. A launcher exit
@@ -738,7 +771,7 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
         )?;
         let report = picker_report(&picked, port, receiving::available(receiving.as_ref()));
         refuse_uncertain_report(report.as_ref())?;
-        let (node, name, send_files, receive_files) = match report {
+        let (node, name, send_files, receive_files, microphone_controls) = match report {
             Some(Report::Selected {
                 node,
                 name,
@@ -748,6 +781,7 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
                 playback_audio,
                 send_files,
                 receive_files,
+                microphone_controls,
                 ..
             }) => {
                 settings.control = control;
@@ -756,7 +790,7 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
                 settings.playback_audio = playback_audio;
                 settings.last_machine = Some(node.clone());
                 save(&path, &settings);
-                (node, name, send_files, receive_files)
+                (node, name, send_files, receive_files, microphone_controls)
             }
             // Closing the picker quits.
             Some(Report::Failed { code, .. }) if code == "host_choice_cancelled" => {
@@ -799,7 +833,10 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
         let receive_expected = receive_files;
         let arguments = receiving::take_for_app_choice(
             &mut receiving,
-            session_args(&node, &settings, port, send_files),
+            microphone_arguments(
+                session_args(&node, &settings, port, send_files),
+                microphone_controls,
+            )?,
             receive_files,
         )?;
         let session = launcher.run(&arguments, true)?;
@@ -1188,7 +1225,7 @@ mod tests {
             "schema_version": 1, "event": "host_selected", "node_id": "nHOST",
             "certificate_name": "host.tail.ts.net", "port": 9443,
             "control": false, "clipboard": false, "choose_display": false,
-            "playback_audio": false, "send_files": false, "receive_files": false,
+            "playback_audio": false, "send_files": false, "receive_files": false, "microphone_controls": false,
             "selection_only": true, "fresh_lookup_required": true,
             "remote_session_started": false, "input_requested": false,
         });
@@ -1343,9 +1380,109 @@ mod tests {
     }
 
     #[test]
+    fn microphone_controls_require_fresh_consent_and_never_become_preferences() {
+        let available = microphone_controls_available();
+        let mut settings = Settings::from_json(
+            br#"{"version":1,"microphone":true,"microphone_controls":true,"microphone_source":"old-device"}"#,
+        );
+        assert!(!settings.to_json().contains("microphone"));
+        for control in [false, true] {
+            settings.control = control;
+            for audio in [false, true] {
+                settings.playback_audio = audio;
+                for consent in [false, true, false] {
+                    let args = session_args("nHOST", &settings, 9443, false);
+                    let requested = microphone_arguments(args, consent);
+                    if consent && (!available || !control) {
+                        let failure = requested.unwrap_err();
+                        assert_eq!(
+                            failure.code,
+                            if available {
+                                "microphone_requires_control"
+                            } else {
+                                "app_microphone_unavailable"
+                            }
+                        );
+                        continue;
+                    }
+                    let crate::options::Command::Connect(viewer) =
+                        crate::options::parse(&requested.unwrap()).unwrap().command
+                    else {
+                        panic!("ordinary viewer");
+                    };
+                    assert_eq!(viewer.audio.is_some(), audio);
+                    assert_eq!(viewer.microphone.is_some(), consent);
+                    if let Some(microphone) = viewer.microphone {
+                        assert_eq!(microphone.source, "default");
+                        assert!(microphone.server.is_none());
+                    }
+                    let crate::options::Command::Connect(picker) =
+                        crate::options::parse(&pick_args(&settings, None, 9443, false))
+                            .unwrap()
+                            .command
+                    else {
+                        panic!("fresh selection-only picker");
+                    };
+                    assert!(picker.microphone.is_none());
+                    assert!(
+                        !crate::host_choice::Choices::initial(&picker)
+                            .unwrap()
+                            .microphone_controls
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn microphone_reports_require_boolean_consent_control_local_support_and_child_success() {
+        use std::os::unix::process::ExitStatusExt;
+        let original = json!({
+            "schema_version": 1, "event": "host_selected", "node_id": "nHOST",
+            "certificate_name": "host.fixture.ts.net", "port": 9443,
+            "selection_only": true, "fresh_lookup_required": true,
+            "remote_session_started": false, "input_requested": false,
+            "control": true, "clipboard": false, "choose_display": false,
+            "playback_audio": false, "send_files": false, "receive_files": false,
+            "microphone_controls": false,
+        });
+        for control in [false, true] {
+            for consent in [false, true] {
+                for success in [false, true] {
+                    let mut value = original.clone();
+                    value["control"] = json!(control);
+                    value["microphone_controls"] = json!(consent);
+                    let finished = Finished {
+                        status: std::process::ExitStatus::from_raw(if success { 0 } else { 256 }),
+                        stdout: fr_client::completion::capture_completion_with_limit(
+                            value.to_string().as_bytes(),
+                            fr_client::completion::CompletionLimit::NativeCommand,
+                        ),
+                    };
+                    assert_eq!(
+                        picker_report(&finished, 9443, false).is_some(),
+                        success && (!consent || (control && microphone_controls_available()))
+                    );
+                }
+            }
+        }
+        for invalid in [Value::Null, json!("true"), json!(1), json!({})] {
+            let mut value = original.clone();
+            value["microphone_controls"] = invalid;
+            assert_eq!(last_report(value.to_string().as_bytes()), None);
+        }
+        let mut missing = original;
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("microphone_controls");
+        assert_eq!(last_report(missing.to_string().as_bytes()), None);
+    }
+
+    #[test]
     fn file_sending_is_one_use_control_only_and_never_a_saved_picker_preference() {
         let mut settings = Settings::from_json(
-            br#"{"version":1,"send_files":true,"receive_files":false,"file_drop":true}"#,
+            br#"{"version":1,"send_files":true,"receive_files":false,"microphone_controls":false,"file_drop":true}"#,
         );
         let saved: Value = serde_json::from_str(&settings.to_json()).unwrap();
         assert!(saved.get("send_files").is_none() && saved.get("file_drop").is_none());
@@ -1383,7 +1520,7 @@ mod tests {
 
     #[test]
     fn child_reports_become_selections_exits_and_notices() {
-        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":true,"send_files":true,"receive_files":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
+        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":true,"send_files":true,"receive_files":false,"microphone_controls":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
 "#;
         assert_eq!(
             last_report(selected),
@@ -1397,6 +1534,7 @@ mod tests {
                 playback_audio: true,
                 send_files: true,
                 receive_files: false,
+                microphone_controls: false,
             })
         );
         let mut malformed: Value = serde_json::from_slice(selected).unwrap();
@@ -1605,7 +1743,7 @@ mod tests {
             "clipboard": false,
             "choose_display": false,
             "playback_audio": false,
-            "send_files": false, "receive_files": false,
+            "send_files": false, "receive_files": false, "microphone_controls": false,
             "selection_only": true,
             "fresh_lookup_required": true,
             "remote_session_started": false,

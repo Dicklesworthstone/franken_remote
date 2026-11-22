@@ -948,6 +948,9 @@ fn parse_command(
     if ((app_notice.is_some() || app_receive_available) && !pick_only)
         || (pick_only
             && (diagnostics_out.is_some()
+                || microphone
+                || microphone_server.is_some()
+                || microphone_source.is_some()
                 || !send.is_empty()
                 || choose_files
                 || file_drop

@@ -81,6 +81,34 @@ fn microphone_requires_control_explicit_source_and_its_own_enable() {
 }
 
 #[test]
+fn selection_only_picker_cannot_prepare_a_microphone_or_device() {
+    for role in ["--control", "--view-only"] {
+        for request in [
+            "--microphone",
+            "--microphone-source default",
+            "--microphone-server /private/pulse",
+            "--microphone --microphone-source default",
+        ] {
+            let args = format!(
+                "connect --choose-host --pick-only --experimental-native --display only {role} {request}"
+            );
+            assert_eq!(
+                parse(
+                    &args
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                )
+                .err()
+                .unwrap()
+                .code,
+                "invalid_arguments"
+            );
+        }
+    }
+}
+
+#[test]
 fn microphone_cannot_enable_a_discovery_or_inspection_command() {
     for words in [
         "hosts --microphone --microphone-source source",

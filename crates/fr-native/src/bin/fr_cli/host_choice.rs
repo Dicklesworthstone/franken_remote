@@ -28,6 +28,9 @@ pub(super) struct Choices {
     pub receive_available: bool,
     /// Explicit consent for this controlling connection, never remembered.
     pub receive_files: bool,
+    /// Open this controlling connection's muted microphone controls. Native
+    /// permission and a separate fresh Talk action are still required.
+    pub microphone_controls: bool,
 }
 impl Choices {
     /// The window's initial choices, only for a `--pick-only` request.
@@ -40,6 +43,7 @@ impl Choices {
             send_files: false,
             receive_available: pick.receive_available,
             receive_files: false,
+            microphone_controls: false,
         })
     }
 }
@@ -122,11 +126,15 @@ pub(super) fn selected_report(
             object.insert("playback_audio".into(), choices.playback_audio.into());
             object.insert("send_files".into(), choices.send_files.into());
             object.insert("receive_files".into(), choices.receive_files.into());
+            object.insert(
+                "microphone_controls".into(),
+                choices.microphone_controls.into(),
+            );
         }
         format!("{report}\n")
     } else if let Some(choices) = choices {
         format!(
-            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}, file sending {}, file receiving {}.\n",
+            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}, file sending {}, file receiving {}, microphone controls {}.\n",
             candidate.certificate_name(),
             candidate.stable_id(),
             if choices.control {
@@ -158,6 +166,11 @@ pub(super) fn selected_report(
                 "enabled for this connection"
             } else {
                 "off"
+            },
+            if choices.control && choices.microphone_controls {
+                "requested (starts muted; Allow microphone and Talk required)"
+            } else {
+                "off"
             }
         )
     } else {
@@ -187,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn every_host_picker_starts_without_file_sending_consent() {
+    fn every_host_picker_starts_without_file_or_microphone_consent() {
         for role in ["--control", "--view-only"] {
             let args = format!(
                 "connect --choose-host --pick-only --experimental-native --display only {role} --audio"
@@ -202,8 +215,61 @@ mod tests {
             };
             let initial = Choices::initial(&connection).unwrap();
             assert!(!initial.send_files);
+            assert!(!initial.receive_files);
+            assert!(!initial.microphone_controls);
             assert!(initial.playback_audio);
         }
+    }
+
+    #[test]
+    fn confirmed_microphone_choice_reports_only_a_request_for_muted_controls() {
+        let candidate = Candidate::new(
+            "n-mac".into(),
+            "mac.fixture.ts.net".into(),
+            PathHint::Direct,
+        )
+        .unwrap();
+        for microphone_controls in [false, true] {
+            let choices = Choices {
+                control: true,
+                clipboard: false,
+                choose_display: false,
+                playback_audio: false,
+                send_files: false,
+                receive_available: false,
+                receive_files: false,
+                microphone_controls,
+            };
+            let report: serde_json::Value =
+                serde_json::from_str(&selected_report(&candidate, 8443, true, Some(choices)))
+                    .unwrap();
+            assert_eq!(
+                report["microphone_controls"].as_bool(),
+                Some(microphone_controls)
+            );
+            assert_eq!(report["selection_only"], true);
+            assert_eq!(report["fresh_lookup_required"], true);
+            assert_eq!(report["remote_session_started"], false);
+            assert_eq!(report["input_requested"], false);
+            for absent in [
+                "microphone_permission",
+                "microphone_active",
+                "microphone_source",
+            ] {
+                assert!(report.get(absent).is_none());
+            }
+            let text = selected_report(&candidate, 8443, false, Some(choices));
+            if microphone_controls {
+                assert!(text.contains(
+                    "microphone controls requested (starts muted; Allow microphone and Talk required)"
+                ));
+            } else {
+                assert!(text.contains("microphone controls off"));
+            }
+        }
+        let identity_only: serde_json::Value =
+            serde_json::from_str(&selected_report(&candidate, 8443, true, None)).unwrap();
+        assert!(identity_only.get("microphone_controls").is_none());
     }
 
     #[test]

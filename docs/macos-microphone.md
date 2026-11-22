@@ -39,6 +39,22 @@ invocation. An exact CoreAudio UID can be supplied instead. There is no runtime
 default-device fallback, device creation or source switching. Device removal,
 route or format changes end capture. `--microphone-server` remains Linux-only.
 
+## Desktop application
+
+In `fr app`, select **View and control**, then **Show microphone controls**.
+This default-off choice is available only in a `macos-microphone` build and applies
+to the next confirmed connection. The viewer uses the same source-default
+preflight shown above; the actual selected CoreAudio UID stays inside that
+original viewer. The picker carries only a Boolean consent choice and opens no
+device, requests no microphone permission, and starts no recording.
+
+The original viewer opens the muted panel described below. Choosing playback
+audio, reentering control, returning to the machine picker, restoring OS
+permission, or reconnecting never restores microphone consent. The app does not
+save this choice or a device UID. A new connection needs a fresh checkbox choice,
+then the existing permission and Talk steps. Without the native microphone
+feature, the checkbox is disabled rather than silently selecting another source.
+
 ## Consent and lifetime
 
 The original controller gets a separate visible, nonactivating microphone panel:

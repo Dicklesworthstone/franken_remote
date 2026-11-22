@@ -1,5 +1,34 @@
 # Implementation status
 
+## Native-app microphone controls (2026-11-22)
+
+The macOS machine picker exposes the existing microphone owner through a fresh,
+default-off Show microphone controls choice. Only controlling connections in a
+local `macos-microphone` build can select it. View-only clears it; every new picker
+starts off. The parent requires the explicit Boolean in a successful scoped
+selection report and independently checks local support before composing the
+ordinary `--microphone --microphone-source default` viewer command. Selection-only
+commands refuse microphone/device options and perform no device preparation.
+
+The viewer pins the current CoreAudio input once and checks its original signed
+worker before network startup. The existing muted panel still requires separate
+Allow microphone and fresh Talk actions. Playback, reconnects, preferences and
+permission restoration cannot enable capture. Linux's native picker rejects a
+microphone choice and keeps its existing ABI; macOS's native ABI carries the
+local build availability explicitly. No native source, worker, host endpoint or
+capture-authorization policy was replaced.
+
+Passed: 148 actual-source app/parser/component tests and strict all-target
+component Clippy; six tests compiling the complete Mac picker Rust module
+without native stubs, plus its strict all-target Clippy; repository-wide pinned
+nightly formatting and diff whitespace checks. The picker tests cover every
+choice-bit pattern across availability/control states and fresh-window reset.
+The component host is Linux: AppKit calls and the app's positive macOS build
+availability branch were not executed. Full native Cargo gates, Apple SDK/AppKit
+and physical microphone/live-tailnet qualification remain open.
+Plan §§15.4 and 16.1; tracking `fr-app-microphone-controls-w7qe`;
+[microphone usage](docs/macos-microphone.md#desktop-application).
+
 ## Native macOS receiving-folder selection (2026-11-22)
 
 The ordinary macOS application can request receiving without launch-time

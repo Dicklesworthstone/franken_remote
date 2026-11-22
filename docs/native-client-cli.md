@@ -87,6 +87,24 @@ any remembered playback choice before connecting. The machine picker itself
 does not open or check an audio device. See [macOS playback audio](#macos-playback-audio)
 for the Mac build and playback controls.
 
+On a macOS build with `macos-microphone`, select **Show microphone controls**
+with **View and control** to expose the existing muted microphone panel in that
+viewer. The checkbox starts off in every picker, clears when switching to
+view-only, and is unavailable in builds without the native microphone owner.
+The confirmed choice uses the ordinary `--microphone --microphone-source default`
+preflight: before connecting, it pins the current CoreAudio input UID and checks
+for the matching installed signed worker. It does not follow later default-device
+changes or save a device choice. Playback remains independent.
+
+The viewer still requires **Allow microphone** for its original capture helper's
+OS permission, followed by a **new Talk** after permission and host readiness.
+The app checkbox requests neither permission nor recording. Mute, loss of the
+original control, closing the controls, and reconnect keep their existing fences.
+No microphone choice is stored in preferences or carried into a later picker.
+The parent checks a successful selection-only report, its role and the local
+build before launching the ordinary connector. The selection-only picker never
+prepares a microphone device. See [macOS microphone forwarding](macos-microphone.md).
+
 With **View and control**, select **Send files** to allow file drops onto that
 viewer through the existing `--file-drop` transfer path. This choice applies
 only to the connection you are about to open. Switching to **View only** clears

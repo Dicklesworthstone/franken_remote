@@ -38,6 +38,7 @@ fn choices_bound_file_consent_to_control_and_the_original_receive_availability()
             let choices = Choices::from_bits(bits, available).unwrap();
             assert_eq!(choices.bits(), bits);
             assert_eq!(choices.receive_available, available);
+            assert!(!choices.microphone_controls);
         }
         assert_eq!(Choices::from_bits(64, available), None);
         assert_eq!(Choices::from_bits(NO_CHOICES, available), None);
@@ -50,8 +51,26 @@ fn choices_bound_file_consent_to_control_and_the_original_receive_availability()
         send_files: true,
         receive_available: true,
         receive_files: true,
+        microphone_controls: false,
     };
     assert_eq!(choices.bits(), 61);
+}
+
+#[test]
+fn microphone_controls_are_refused_before_any_linux_window_opens() {
+    let rows = [Row::new("alpha.tail.example", "n-alpha", PathHint::Direct).unwrap()];
+    for control in [false, true] {
+        let choices = Choices {
+            control,
+            microphone_controls: true,
+            ..Choices::default()
+        };
+        assert_eq!(
+            HostPicker::start_with(":0", &rows, Some(choices), None).err(),
+            Some(Error::NativeUnavailable)
+        );
+        assert_eq!(Choices::from_bits(choices.bits(), false), None);
+    }
 }
 
 #[test]
