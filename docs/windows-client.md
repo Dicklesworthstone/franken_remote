@@ -179,10 +179,32 @@ by an older app version reads only a bounded suffix before compacting it.
 The app does not record command arguments, selected receive folders, machine
 identifiers, pixels, key contents or clipboard text in this log.
 
-The picker reports a successful session only when the completion, pipe reads
-and process exit agree. An abnormal exit, failed reader, truncated capture or
-incomplete local log produces a warning. If the viewer refuses before writing
-its completion, the first bounded stderr message remains available as guidance.
+The picker reports a successful session only when the terminal completion,
+pipe reads and process exit agree. The app returns to the picker after an
+orderly session or a confirmed refusal. The viewer's normal exit code 1 for a
+refusal or an orderly close before the first picture remains a known outcome;
+it is separate from a crash. A local log failure produces a warning and still
+allows another explicit choice when the original completion and cleanup agree.
+
+Missing, malformed, truncated or unrecognized completion, incomplete pipe
+reads, an unexpected process exit, or unconfirmed original cleanup makes the
+app show an error and close instead of reopening the picker. The report must
+include the original clipboard and file owners: pending or failed cleanup,
+unknown publication, missing started-file receipts, truncated receive results,
+and earlier uncertain upload batches stop continuation. A known publication
+whose durability is unconfirmed stays distinct from an unknown publication.
+The current generic internal/session failure and control-stop reports do not
+prove retirement and also stop this app invocation. A renderer-creation refusal
+after session startup cannot be treated as a pre-start refusal. These are
+conservative report decisions, not a claim that the host's effects were undone.
+When clipboard sharing was requested and the window replaced its session,
+the current report retains only the first earlier clipboard owner's result.
+The app therefore closes after that session instead of assuming that later
+clipboard owners also finished without uncertain effects. Replacement sessions
+without clipboard sharing can still return to the picker.
+
+If the viewer refuses before writing its completion, the first bounded stderr
+message remains available as guidance, but does not authorize another session.
 A log-write failure does not stop draining either pipe. Reader or reader-thread
 failures stop and reap the original viewer; a cleanup error remains explicit.
 This bounds retained data, not the time taken by blocked operating-system I/O

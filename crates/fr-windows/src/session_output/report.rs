@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use super::{CompletionError, STATUS_LINE_LIMIT, child::ChildOutput};
-use crate::outcome::{self, Summary};
+use crate::outcome::{self, Continuation, Summary};
 
 /// Preserve the session's own outcome while reporting independent failures in
 /// local output capture, process cleanup and logging.
@@ -30,9 +30,28 @@ pub(crate) fn summarize(output: &ChildOutput, machine: &str, log_incomplete: boo
                 message.push_str(" Viewer message: ");
                 message.push_str(&guidance);
             }
-            Summary { ok: false, message }
+            Summary {
+                ok: false,
+                continuation: Continuation::Stop,
+                message,
+            }
         }
     };
+    // A normal exit 1 is part of the viewer's confirmed-refusal contract.
+    // Conversely a claimed success followed by exit 1, a crash, or missing
+    // status is not proof of original cleanup. Local log writes do not affect
+    // custody of the child or the terminal report and cannot force a retry.
+    let expected = summary.continuation;
+    let exit_matches = expected.accepts_exit(output.status.and_then(|status| status.code()));
+    let followed = output.failure.is_none()
+        && output.cleanup_error.is_none()
+        && output
+            .stderr
+            .as_ref()
+            .is_some_and(|stderr| stderr.report.complete());
+    if !followed || !exit_matches {
+        summary.continuation = Continuation::Stop;
+    }
     summary.ok &= output.complete() && !log_incomplete;
 
     if output.failure.is_some() {
@@ -46,7 +65,7 @@ pub(crate) fn summarize(output: &ChildOutput, machine: &str, log_incomplete: boo
             .push_str(" Local viewer cleanup could not be confirmed.");
     }
     match output.status {
-        Some(status) if !status.success() => match status.code() {
+        Some(status) if !status.success() && !exit_matches => match status.code() {
             Some(code) => {
                 use std::fmt::Write as _;
                 let _ = write!(summary.message, " The viewer exited with code {code}.");
@@ -58,6 +77,9 @@ pub(crate) fn summarize(output: &ChildOutput, machine: &str, log_incomplete: boo
         None => summary
             .message
             .push_str(" The viewer's process exit could not be confirmed."),
+        Some(_) if !exit_matches && expected != Continuation::Stop => summary
+            .message
+            .push_str(" The viewer's process exit did not match its completion report."),
         Some(_) => {}
     }
     if let Some(stderr) = &output.stderr {

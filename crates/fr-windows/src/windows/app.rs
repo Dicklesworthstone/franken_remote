@@ -6,9 +6,12 @@
 //! viewer: a fresh installed-Tailscale lookup resolves the chosen stable ID
 //! before dialing, and every session's native state ends with its process.
 //! The child's content-free completion document becomes the picker notice.
+//! Unconfirmed original completion or cleanup stops this app invocation.
 use super::hosts::{self, Chosen, Error, Mode, Notice, PickError, Picked, Request};
 use super::install;
-use crate::{machines, options::AppCommand, session_output, settings::Settings};
+use crate::{
+    machines, options::AppCommand, outcome::Continuation, session_output, settings::Settings,
+};
 use fr_tailnet::DEFAULT_SERVICE_PORT;
 use std::{
     num::NonZeroU16,
@@ -253,7 +256,18 @@ fn application(port: NonZeroU16) -> ExitCode {
             Ok(Picked::Machine(chosen)) => {
                 settings = chosen.settings.clone();
                 save_settings(settings_path.as_deref(), &settings);
-                notice = Some(session(chosen, port));
+                match session(chosen, port) {
+                    Ok(result) => notice = Some(result),
+                    Err(reason) => {
+                        message(
+                            &format!(
+                                "{reason}\n\nFrankenRemote will close because the original viewer's outcome or cleanup could not be confirmed. Check the original session before reopening the app."
+                            ),
+                            MB_ICONERROR | MB_OK,
+                        );
+                        return ExitCode::from(1);
+                    }
+                }
             }
             Err(PickError::Choice(
                 error @ (Error::NativeUnavailable | Error::CleanupIncomplete),
@@ -352,7 +366,7 @@ fn finish_session_log(output: &mut session_output::ChildOutput) -> bool {
     failed || write_failed
 }
 
-fn session(chosen: Chosen, port: NonZeroU16) -> Notice {
+fn session(chosen: Chosen, port: NonZeroU16) -> Result<Notice, String> {
     let name = machines::short_name(chosen.peer.certificate_name()).to_owned();
     let failed = |text: String| Notice {
         text,
@@ -360,7 +374,9 @@ fn session(chosen: Chosen, port: NonZeroU16) -> Notice {
         sticky: true,
     };
     let Ok(exe) = std::env::current_exe() else {
-        return failed("FrankenRemote could not find its own program file.".to_owned());
+        return Ok(failed(
+            "FrankenRemote could not find its own program file.".to_owned(),
+        ));
     };
     // The locally selected receive path belongs only to this child. Keep it
     // out of the content-free session log and the remembered settings.
@@ -377,7 +393,7 @@ fn session(chosen: Chosen, port: NonZeroU16) -> Notice {
         .spawn();
     let child = match child {
         Ok(child) => child,
-        Err(error) => return failed(format!("Could not start the viewer ({error}).")),
+        Err(error) => return Ok(failed(format!("Could not start the viewer ({error})."))),
     };
     // SAFETY: a scalar foreground-permission grant for the new viewer.
     let _ = unsafe { AllowSetForegroundWindow(child.id()) };
@@ -385,9 +401,12 @@ fn session(chosen: Chosen, port: NonZeroU16) -> Notice {
     let mut output = session_output::follow_child(child, log);
     let write_failed = finish_session_log(&mut output);
     let summary = session_output::summarize(&output, &name, open_failed || write_failed);
-    Notice {
+    if summary.continuation == Continuation::Stop {
+        return Err(summary.message);
+    }
+    Ok(Notice {
         text: summary.message,
         warning: !summary.ok,
         sticky: true,
-    }
+    })
 }

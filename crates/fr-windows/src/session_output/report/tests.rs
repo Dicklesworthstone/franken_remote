@@ -9,7 +9,14 @@ use std::{
     process::ExitStatus,
 };
 
-const REPORT: &[u8] = br#"{"status":"ended","end":"ok","drawn":12,"dxva":1,"seconds":9}"#;
+const REPORT: &[u8] = br#"{"status":"ended","end":"ok","drawn":12,"dxva":1,"seconds":9,"reopens":0,"reopen_refusal":null,"clipboard":{"requested":false,"configured":false,"native_started":false,"received_submitted":0,"received_unknown":0,"received_refused":0,"cleanup":"not_started","reason":null},"upload":null,"download":null}"#;
+
+fn report(end: &str, drawn: u64) -> String {
+    let mut report: serde_json::Value = serde_json::from_slice(REPORT).unwrap();
+    report["end"] = end.into();
+    report["drawn"] = drawn.into();
+    report.to_string()
+}
 
 fn exit(code: u8) -> ExitStatus {
     #[cfg(unix)]
@@ -53,6 +60,10 @@ fn a_complete_success_preserves_the_actual_session_summary() {
     let summary = summarize(&output, "studio", false);
     assert!(summary.ok);
     assert_eq!(
+        summary.continuation,
+        Continuation::Picker { expected_exit: 0 }
+    );
+    assert_eq!(
         summary,
         outcome::summarize(std::str::from_utf8(REPORT).unwrap(), "studio")
     );
@@ -60,21 +71,131 @@ fn a_complete_success_preserves_the_actual_session_summary() {
 
 #[test]
 fn a_complete_host_refusal_is_never_a_positive_notice() {
-    let report = br#"{"status":"ended","end":"host_busy","drawn":0}"#;
-    let output = output(report, b"", 0);
-    assert!(output.complete());
+    let report = report("host_busy", 0);
+    let output = output(report.as_bytes(), b"", 1);
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
     assert_eq!(
-        summary,
-        outcome::summarize(std::str::from_utf8(report).unwrap(), "studio")
+        summary.continuation,
+        Continuation::Picker { expected_exit: 1 }
     );
+    assert_eq!(summary, outcome::summarize(&report, "studio"));
+}
+
+#[test]
+fn normal_refusal_and_zero_picture_exit_one_are_not_process_crashes() {
+    for report in [
+        report("ok", 0),
+        report("cancelled", 0),
+        report("host_busy", 0),
+        r#"{"status":"refused","reason":"no_d3d11_device"}"#.into(),
+    ] {
+        let captured = output(report.as_bytes(), b"", 1);
+        let summary = summarize(&captured, "studio", false);
+        assert!(!summary.ok);
+        assert_eq!(
+            summary.continuation,
+            Continuation::Picker { expected_exit: 1 },
+            "{report}"
+        );
+        assert!(!summary.message.contains("exited with code"));
+        let warning = summarize(&captured, "studio", true);
+        assert_eq!(warning.continuation, summary.continuation);
+        assert!(warning.message.contains("local session log"));
+
+        for exit_code in [0, 2, 7] {
+            let summary = summarize(&output(report.as_bytes(), b"", exit_code), "studio", false);
+            assert_eq!(
+                summary.continuation,
+                Continuation::Stop,
+                "{report}, exit {exit_code}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_confirmed_refusal_cannot_hide_incomplete_original_cleanup() {
+    let mut captured = output(report("host_busy", 0).as_bytes(), b"", 1);
+    captured.cleanup_error = Some(io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        summarize(&captured, "studio", false).continuation,
+        Continuation::Stop
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn actual_child_completion_and_exit_jointly_control_the_next_picker() {
+    use crate::session_output::child::follow_child;
+    use std::process::{Command, Stdio};
+
+    let success = std::str::from_utf8(REPORT).unwrap().to_owned();
+    for (report, code, expected) in [
+        (
+            success.clone(),
+            0,
+            Continuation::Picker { expected_exit: 0 },
+        ),
+        (success.clone(), 1, Continuation::Stop),
+        (
+            report("cancelled", 0),
+            1,
+            Continuation::Picker { expected_exit: 1 },
+        ),
+        (
+            report("host_busy", 0),
+            1,
+            Continuation::Picker { expected_exit: 1 },
+        ),
+        (report("host_busy", 0), 0, Continuation::Stop),
+        (
+            r#"{"status":"refused","reason":"window_unavailable"}"#.into(),
+            1,
+            Continuation::Picker { expected_exit: 1 },
+        ),
+        (
+            r#"{"status":"refused","reason":"swap_chain_unavailable"}"#.into(),
+            1,
+            Continuation::Stop,
+        ),
+        (r#"{"end":"ok","drawn":12}"#.into(), 0, Continuation::Stop),
+        (
+            format!("{success}\nnot a terminal report"),
+            0,
+            Continuation::Stop,
+        ),
+        (String::new(), 0, Continuation::Stop),
+    ] {
+        // Positional arguments carry fixture data; the shell only writes the
+        // exact report and exits. This exercises real drainage and reaping.
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                "printf '%s\\n' \"$1\"; exit \"$2\"",
+                "completion-test",
+            ])
+            .arg(&report)
+            .arg(code.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = follow_child(child, None);
+        assert_eq!(output.failure, None);
+        assert_eq!(output.cleanup_error, None);
+        assert_eq!(output.status.unwrap().code(), Some(code));
+        let summary = summarize(&output, "studio", false);
+        assert_eq!(summary.continuation, expected, "{report}, exit {code}");
+    }
 }
 
 #[test]
 fn a_success_document_cannot_hide_a_failed_process_exit() {
     let summary = summarize(&output(REPORT, b"", 7), "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(
         summary
             .message
@@ -91,6 +212,7 @@ fn a_signal_exit_is_distinguished_from_a_normal_exit_code() {
     output.status = Some(ExitStatus::from_raw(9));
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(summary.message.contains("without a normal exit code"));
 }
 
@@ -103,6 +225,7 @@ fn missing_completion_preserves_first_refusal_guidance_without_inventing_connect
     );
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(
         summary
             .message
@@ -134,6 +257,7 @@ fn retained_json_after_oversized_output_is_diagnostic_only() {
     );
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(summary.message.contains("exceeded the size limit"));
     assert!(!summary.message.contains("Disconnected"));
 }
@@ -146,6 +270,7 @@ fn later_invalid_terminal_output_cannot_reuse_an_earlier_success() {
         bytes.extend_from_slice(suffix);
         let summary = summarize(&output(&bytes, b"", 0), "studio", false);
         assert!(!summary.ok);
+        assert_eq!(summary.continuation, Continuation::Stop);
         assert!(summary.message.contains("completion output was invalid"));
         assert!(!summary.message.contains("Disconnected"));
     }
@@ -179,6 +304,7 @@ fn a_read_failure_after_a_complete_json_line_cannot_certify_success() {
     );
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(
         summary
             .message
@@ -202,6 +328,7 @@ fn every_follower_failure_fences_a_positive_notice_but_keeps_received_outcome() 
         output.failure = Some(failure);
         let summary = summarize(&output, "studio", false);
         assert!(!summary.ok, "{failure:?}");
+        assert_eq!(summary.continuation, Continuation::Stop, "{failure:?}");
         assert!(summary.message.contains("Disconnected from studio"));
         assert!(summary.message.contains("could not be followed completely"));
     }
@@ -214,6 +341,7 @@ fn cleanup_uncertainty_and_missing_status_remain_explicit() {
     output.cleanup_error = Some(io::ErrorKind::PermissionDenied);
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(
         summary
             .message
@@ -231,6 +359,7 @@ fn truncated_or_failed_stderr_does_not_hide_a_received_outcome_or_qualify_succes
     let mut output = output(REPORT, &vec![b'x'; STATUS_LINE_LIMIT + 1], 0);
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(summary.message.contains("Disconnected from studio"));
     assert!(summary.message.contains("diagnostics were truncated"));
 
@@ -239,6 +368,7 @@ fn truncated_or_failed_stderr_does_not_hide_a_received_outcome_or_qualify_succes
     ))));
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(summary.message.contains("Disconnected from studio"));
     assert!(
         summary
@@ -249,6 +379,7 @@ fn truncated_or_failed_stderr_does_not_hide_a_received_outcome_or_qualify_succes
     output.stderr = None;
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(summary.message.contains("diagnostics were unavailable"));
 }
 
@@ -261,6 +392,10 @@ fn both_initial_and_midstream_log_failures_preserve_the_actual_outcome() {
         }
         let summary = summarize(&output, "studio", initial_failure);
         assert!(!summary.ok);
+        assert_eq!(
+            summary.continuation,
+            Continuation::Picker { expected_exit: 0 }
+        );
         assert!(
             summary
                 .message
@@ -281,6 +416,7 @@ fn malformed_json_is_not_a_success_even_when_capture_and_exit_are_complete() {
     assert!(output.complete());
     let summary = summarize(&output, "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(summary.message.contains("without a report"));
 }
 
@@ -290,6 +426,7 @@ fn first_guidance_is_bounded_and_cannot_hide_later_warnings_with_control_charact
     bytes.extend(vec![b'x'; STATUS_LINE_LIMIT * 2]);
     let summary = summarize(&output(b"", &bytes, 7), "studio", false);
     assert!(!summary.ok);
+    assert_eq!(summary.continuation, Continuation::Stop);
     assert!(
         summary
             .message

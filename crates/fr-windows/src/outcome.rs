@@ -2,17 +2,35 @@
 //! desktop application when it returns to the machine picker.
 //!
 //! The summary is derived only from the content-free completion fields
-//! (`status`, `end`, `reason`, `drawn`, `dxva`, `seconds`); it never adds a
-//! claim the document does not make. `dxva` is the session core's decode
-//! path: 1 hardware, 0 software, -1 not yet known.
+//! and original auxiliary-owner reports; it never adds a claim the document
+//! does not make. `dxva` is the session core's decode path: 1 hardware,
+//! 0 software, -1 not yet known. An uncertain terminal report stops the app;
+//! a warning by itself never authorizes another session.
 #![forbid(unsafe_code)]
 
 use serde_json::Value;
+
+/// Whether this exact terminal document permits another explicit choice.
+/// The viewer deliberately exits 1 for a confirmed refusal or an orderly end
+/// before the first picture. Keep that contract separate from notice styling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Continuation {
+    Picker { expected_exit: i32 },
+    Stop,
+}
+
+impl Continuation {
+    pub const fn accepts_exit(self, code: Option<i32>) -> bool {
+        matches!((self, code), (Self::Picker { expected_exit }, Some(code)) if expected_exit == code)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Summary {
     /// The session showed pictures and ended in order.
     pub ok: bool,
+    /// Original terminal evidence, independent of local logging warnings.
+    pub continuation: Continuation,
     /// One sentence for the picker's notice line.
     pub message: String,
 }
@@ -22,14 +40,20 @@ pub(crate) fn summarize(completion: &str, machine: &str) -> Summary {
     let Ok(document) = serde_json::from_str::<Value>(completion.trim()) else {
         return Summary {
             ok: false,
+            continuation: Continuation::Stop,
             message: format!("The session with {machine} ended without a report."),
         };
     };
     if document["status"] == "refused" {
-        let reason = document["reason"].as_str().unwrap_or("unknown");
+        return summarize_refusal(&document, machine);
+    }
+    if document["status"] != "ended" {
         return Summary {
             ok: false,
-            message: refused(reason, machine),
+            continuation: Continuation::Stop,
+            message: format!(
+                "The session outcome for {machine} is unknown because its completion status was invalid."
+            ),
         };
     }
     let end = document["end"].as_str().unwrap_or("unknown");
@@ -40,8 +64,9 @@ pub(crate) fn summarize(completion: &str, machine: &str) -> Summary {
         Some(0) if drawn > 0 => " Decoded on the CPU (no GPU HEVC decoding).",
         _ => "",
     };
-    let ok = drawn > 0 && matches!(end, "ok" | "cancelled");
-    let message = match end {
+    let continuation = continuation(&document, end);
+    let ok = continuation == (Continuation::Picker { expected_exit: 0 });
+    let mut message = match end {
         "ok" | "cancelled" if drawn > 0 => {
             format!(
                 "Disconnected from {machine} after {}.{decode}",
@@ -52,7 +77,7 @@ pub(crate) fn summarize(completion: &str, machine: &str) -> Summary {
             format!("The session with {machine} closed before a picture arrived.")
         }
         "unreachable" => format!(
-            "{machine} did not answer. Make sure FrankenRemote is hosting there and that your tailnet policy allows UDP 8443 from this PC."
+            "{machine} did not answer. Make sure FrankenRemote is hosting there and that your tailnet policy allows UDP to its configured service port from this PC."
         ),
         "host_busy" => format!("{machine} is serving another viewer. Try again when it is free."),
         "host_refused" => format!(
@@ -76,7 +101,195 @@ pub(crate) fn summarize(completion: &str, machine: &str) -> Summary {
         ),
         _ => format!("The session with {machine} ended unexpectedly ({end})."),
     };
-    Summary { ok, message }
+    if continuation == Continuation::Stop {
+        if document["reopens"]
+            .as_u64()
+            .is_some_and(|reopens| clipboard_history_incomplete(reopens, &document["clipboard"]))
+        {
+            message.push_str(
+                " Clipboard completion across the viewer's reconnects could not be confirmed.",
+            );
+        } else {
+            message.push_str(
+                " The report did not confirm the original session's outcome and cleanup.",
+            );
+        }
+    }
+    Summary {
+        ok,
+        continuation,
+        message,
+    }
+}
+
+fn summarize_refusal(document: &Value, machine: &str) -> Summary {
+    let reason = document["reason"].as_str().unwrap_or("unknown");
+    Summary {
+        ok: false,
+        continuation: if document.as_object().is_some_and(|fields| fields.len() == 2)
+            && matches!(
+                reason,
+                "no_d3d11_device"
+                    | "window_unavailable"
+                    | "input_menu_unavailable"
+                    | "file_menu_unavailable"
+                    | "receive_menu_unavailable"
+                    | "session_thread_unavailable"
+            ) {
+            Continuation::Picker { expected_exit: 1 }
+        } else {
+            // swap_chain_unavailable and viewer_lost can follow a live
+            // Session::start. Its Drop only requests detached cleanup.
+            Continuation::Stop
+        },
+        message: refused(reason, machine),
+    }
+}
+
+/// The current viewer's terminal contract, not a general JSON-success test.
+/// End names that conflate service/cleanup failure remain unconfirmed. Normal
+/// connection refusals are usable only before any pictures were shown.
+fn continuation(document: &Value, end: &str) -> Continuation {
+    let (Some(drawn), Some(reopens)) = (document["drawn"].as_u64(), document["reopens"].as_u64())
+    else {
+        return Continuation::Stop;
+    };
+    let orderly = matches!(end, "ok" | "cancelled");
+    let known_end = orderly
+        || end == "host_closed"
+        || (drawn == 0
+            && matches!(
+                end,
+                "name_unresolved"
+                    | "outside_tailnet"
+                    | "identity_changed"
+                    | "tls_refused"
+                    | "unreachable"
+                    | "host_refused"
+                    | "host_busy"
+            ));
+    let (Some(reopen), Some(clipboard), Some(upload), Some(download)) = (
+        document.get("reopen_refusal"),
+        document.get("clipboard"),
+        document.get("upload"),
+        document.get("download"),
+    ) else {
+        return Continuation::Stop;
+    };
+    if !known_end
+        || !reopen.is_null()
+        || !clipboard_known(clipboard)
+        // The native viewer retains only the first earlier clipboard report
+        // after replacing a Session. It cannot certify every later owner's
+        // effects. No-clipboard replacements have no omitted clipboard owner.
+        || clipboard_history_incomplete(reopens, clipboard)
+        || !upload_known(upload)
+        || !download_known(download)
+    {
+        return Continuation::Stop;
+    }
+    let (Some(upload_ok), Some(download_ok)) =
+        (transfer_success(upload), transfer_success(download))
+    else {
+        return Continuation::Stop;
+    };
+    // Match windows::viewer::report's exit contract, before diagnostics or
+    // local logging can change the notice. A known failed transfer remains a
+    // failure even when the desktop itself ended normally.
+    let succeeded = drawn > 0 && orderly && upload_ok && download_ok;
+    Continuation::Picker {
+        expected_exit: i32::from(!succeeded),
+    }
+}
+
+fn clipboard_history_incomplete(reopens: u64, clipboard: &Value) -> bool {
+    reopens != 0 && clipboard["requested"] == true
+}
+
+fn cleanup_known(document: &Value) -> bool {
+    matches!(
+        document["cleanup"].as_str(),
+        Some("finished" | "not_started")
+    )
+}
+
+fn clipboard_known(clipboard: &Value) -> bool {
+    clipboard.is_object()
+        && cleanup_known(clipboard)
+        && clipboard["received_unknown"].as_u64() == Some(0)
+        && clipboard["received_submitted"].as_u64().is_some()
+        && clipboard["received_refused"].as_u64().is_some()
+        && clipboard["requested"].as_bool().is_some()
+        && clipboard["configured"].as_bool().is_some()
+        && clipboard["native_started"]
+            .as_bool()
+            .is_some_and(|started| !started || clipboard["cleanup"] == "finished")
+}
+
+fn transfer_success(transfer: &Value) -> Option<bool> {
+    if transfer.is_null() {
+        Some(true)
+    } else {
+        transfer["succeeded"].as_bool()
+    }
+}
+
+fn upload_known(upload: &Value) -> bool {
+    upload.is_null()
+        || (upload_batch_known(upload)
+            && upload["choice_cleanup"] == "finished"
+            && upload["batches"]
+                .as_array()
+                .is_some_and(|batches| batches.iter().all(upload_batch_known)))
+}
+
+fn upload_batch_known(batch: &Value) -> bool {
+    cleanup_known(batch)
+        && batch["publication_unknown_files"].as_u64() == Some(0)
+        && batch["unexpected_direction_files"].as_u64() == Some(0)
+        && batch["receipts"].as_array().is_some_and(|receipts| {
+            // A started file without its terminal receipt cannot become a
+            // confirmed refusal merely because another selection completed.
+            let all_reported = match batch.get("started_files") {
+                Some(Value::Null) => receipts.is_empty(),
+                Some(count) => count.as_u64() == u64::try_from(receipts.len()).ok(),
+                None => false,
+            };
+            all_reported
+                && receipts.iter().all(|receipt| {
+                    matches!(
+                        receipt["outcome"].as_str(),
+                        Some(
+                            "host_published"
+                                | "host_published_durability_unknown"
+                                | "host_refused"
+                                | "controller_refused"
+                                | "interrupted_before_publication"
+                        )
+                    )
+                })
+        })
+}
+
+fn download_known(download: &Value) -> bool {
+    download.is_null()
+        || (cleanup_known(download)
+            && download["results_truncated"].as_bool() == Some(false)
+            && download.get("progress").is_some_and(Value::is_null)
+            && download.get("reason_code").is_some_and(|reason| {
+                reason.is_null()
+                    || reason
+                        .as_str()
+                        .is_some_and(|code| code != "publication_unknown")
+            })
+            && download["receipts"].as_array().is_some_and(|receipts| {
+                receipts.iter().all(|receipt| {
+                    matches!(
+                        receipt["outcome"].as_str(),
+                        Some("locally_published" | "refused" | "cancelled")
+                    )
+                })
+            }))
 }
 
 /// The completion's typed, content-free failure detail, e.g.
@@ -168,32 +381,344 @@ pub(crate) fn duration(seconds: f64) -> String {
 mod tests {
     use super::*;
 
+    fn ended(end: &str, drawn: u64) -> Value {
+        serde_json::json!({
+            "status": "ended", "end": end, "drawn": drawn,
+            "seconds": 9, "dxva": -1, "reopens": 0, "reopen_refusal": null,
+            "clipboard": {
+                "requested": false, "configured": false, "native_started": false,
+                "received_submitted": 0, "received_unknown": 0, "received_refused": 0,
+                "cleanup": "not_started", "reason": null,
+            },
+            "upload": null, "download": null,
+        })
+    }
+
+    fn summary(document: &Value) -> Summary {
+        summarize(&document.to_string(), "studio")
+    }
+
     #[test]
     fn orderly_sessions_report_duration_and_decode_path() {
-        let gpu = summarize(
-            r#"{"status":"ended","end":"ok","drawn":120,"dxva":1,"seconds":185.4}"#,
-            "studio",
-        );
+        let mut document = ended("ok", 120);
+        document["dxva"] = 1.into();
+        document["seconds"] = 185.4.into();
+        let gpu = summary(&document);
         assert!(gpu.ok);
         assert_eq!(
             gpu.message,
             "Disconnected from studio after 3 min 05 s. Decoded on the GPU."
         );
-        let cpu = summarize(
-            r#"{"status":"ended","end":"cancelled","drawn":3,"dxva":0,"seconds":9}"#,
-            "box",
-        );
+        let mut document = ended("cancelled", 3);
+        document["dxva"] = 0.into();
+        let cpu = summarize(&document.to_string(), "box");
         assert!(cpu.ok);
         assert!(
             cpu.message.contains("Decoded on the CPU"),
             "{}",
             cpu.message
         );
-        let unknown = summarize(
-            r#"{"status":"ended","end":"ok","drawn":3,"dxva":-1,"seconds":9}"#,
-            "box",
-        );
+        let unknown = summarize(&ended("ok", 3).to_string(), "box");
         assert_eq!(unknown.message, "Disconnected from box after 9 s.");
+    }
+
+    #[test]
+    fn orderly_zero_picture_ends_and_known_refusals_have_their_own_exit_contract() {
+        for end in ["ok", "cancelled"] {
+            let before_picture = summary(&ended(end, 0));
+            assert!(!before_picture.ok);
+            assert_eq!(
+                before_picture.continuation,
+                Continuation::Picker { expected_exit: 1 }
+            );
+            assert_eq!(
+                summary(&ended(end, 1)).continuation,
+                Continuation::Picker { expected_exit: 0 }
+            );
+        }
+        for end in [
+            "name_unresolved",
+            "outside_tailnet",
+            "identity_changed",
+            "tls_refused",
+            "unreachable",
+            "host_refused",
+            "host_busy",
+        ] {
+            let result = summary(&ended(end, 0));
+            assert!(!result.ok);
+            assert_eq!(
+                result.continuation,
+                Continuation::Picker { expected_exit: 1 },
+                "{end}"
+            );
+            assert_eq!(
+                summary(&ended(end, 1)).continuation,
+                Continuation::Stop,
+                "{end}"
+            );
+        }
+        assert_eq!(
+            summary(&ended("host_closed", 4)).continuation,
+            Continuation::Picker { expected_exit: 1 }
+        );
+        assert!(!summary(&ended("unreachable", 0)).message.contains("8443"));
+    }
+
+    #[test]
+    fn only_known_pre_start_native_refusals_allow_a_new_picker() {
+        for reason in [
+            "no_d3d11_device",
+            "window_unavailable",
+            "input_menu_unavailable",
+            "file_menu_unavailable",
+            "receive_menu_unavailable",
+            "session_thread_unavailable",
+        ] {
+            let document = serde_json::json!({"status": "refused", "reason": reason});
+            assert_eq!(
+                summary(&document).continuation,
+                Continuation::Picker { expected_exit: 1 },
+                "{reason}"
+            );
+        }
+        for reason in ["swap_chain_unavailable", "viewer_lost", "unknown", ""] {
+            let document = serde_json::json!({"status": "refused", "reason": reason});
+            assert_eq!(
+                summary(&document).continuation,
+                Continuation::Stop,
+                "{reason}"
+            );
+        }
+        let conflicting = serde_json::json!({
+            "status": "refused", "reason": "no_d3d11_device", "drawn": 12,
+        });
+        assert_eq!(summary(&conflicting).continuation, Continuation::Stop);
+    }
+
+    #[test]
+    fn terminal_status_and_original_owner_evidence_are_required() {
+        for status in [Value::Null, true.into(), "ok".into(), "selected".into()] {
+            let mut document = ended("ok", 12);
+            document["status"] = status;
+            let result = summary(&document);
+            assert!(!result.ok);
+            assert_eq!(result.continuation, Continuation::Stop);
+        }
+        for field in [
+            "status",
+            "end",
+            "drawn",
+            "reopens",
+            "reopen_refusal",
+            "clipboard",
+            "upload",
+            "download",
+        ] {
+            let mut document = ended("ok", 12);
+            document.as_object_mut().unwrap().remove(field);
+            let result = summary(&document);
+            assert!(!result.ok, "{field}");
+            assert_eq!(result.continuation, Continuation::Stop, "{field}");
+        }
+        for end in [
+            "internal",
+            "session_failed",
+            "control_stopped",
+            "future_end",
+        ] {
+            assert_eq!(
+                summary(&ended(end, 12)).continuation,
+                Continuation::Stop,
+                "{end}"
+            );
+        }
+        let mut document = ended("ok", 12);
+        document["reopen_refusal"] = "cleanup_incomplete".into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        document["reopen_refusal"] = Value::Null;
+        document["drawn"] = "12".into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+    }
+
+    #[test]
+    fn clipboard_effect_and_cleanup_uncertainty_stop_even_after_pictures() {
+        for cleanup in ["unknown", "pending", "failed", "future_cleanup"] {
+            let mut document = ended("ok", 12);
+            document["clipboard"]["cleanup"] = cleanup.into();
+            assert_eq!(
+                summary(&document).continuation,
+                Continuation::Stop,
+                "{cleanup}"
+            );
+        }
+        let mut document = ended("ok", 12);
+        document["clipboard"]["received_unknown"] = 1.into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        document["clipboard"]["received_unknown"] = 0.into();
+        document["clipboard"]["native_started"] = true.into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        document["clipboard"]["cleanup"] = "finished".into();
+        assert_eq!(
+            summary(&document).continuation,
+            Continuation::Picker { expected_exit: 0 }
+        );
+    }
+
+    #[test]
+    fn a_first_clipboard_report_cannot_certify_later_replacement_owners() {
+        let mut document = ended("ok", 12);
+        document["reopens"] = 1.into();
+        assert_eq!(
+            summary(&document).continuation,
+            Continuation::Picker { expected_exit: 0 }
+        );
+        document["clipboard"]["requested"] = true.into();
+        document["clipboard"]["configured"] = true.into();
+        document["clipboard"]["native_started"] = true.into();
+        document["clipboard"]["cleanup"] = "finished".into();
+        let incomplete = summary(&document);
+        assert_eq!(incomplete.continuation, Continuation::Stop);
+        assert!(incomplete.message.contains(
+            "Clipboard completion across the viewer's reconnects could not be confirmed"
+        ));
+        document["reopens"] = 0.into();
+        assert_eq!(
+            summary(&document).continuation,
+            Continuation::Picker { expected_exit: 0 }
+        );
+    }
+
+    fn upload_batch() -> Value {
+        serde_json::json!({
+            "cleanup": "finished", "publication_unknown_files": 0,
+            "unexpected_direction_files": 0, "started_files": 1,
+            "receipts": [{"outcome": "host_refused"}],
+        })
+    }
+
+    fn upload() -> Value {
+        let mut upload = upload_batch();
+        upload["batches"] = serde_json::json!([upload_batch()]);
+        upload["choice_cleanup"] = "finished".into();
+        upload["succeeded"] = false.into();
+        upload
+    }
+
+    #[test]
+    fn known_upload_refusal_is_distinct_from_missing_receipts_and_prior_unknown_effects() {
+        let mut document = ended("ok", 12);
+        document["upload"] = upload();
+        let result = summary(&document);
+        assert!(!result.ok);
+        assert_eq!(
+            result.continuation,
+            Continuation::Picker { expected_exit: 1 }
+        );
+        for field in ["publication_unknown_files", "unexpected_direction_files"] {
+            let mut unknown = document.clone();
+            unknown["upload"]["batches"][0][field] = 1.into();
+            assert_eq!(
+                summary(&unknown).continuation,
+                Continuation::Stop,
+                "{field}"
+            );
+        }
+        for field in ["cleanup", "choice_cleanup"] {
+            let mut unknown = document.clone();
+            unknown["upload"][field] = "pending".into();
+            assert_eq!(
+                summary(&unknown).continuation,
+                Continuation::Stop,
+                "{field}"
+            );
+        }
+        document["upload"]["batches"][0]["started_files"] = 2.into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        document["upload"]["batches"][0]["started_files"] = 1.into();
+        document["upload"]["batches"][0]["receipts"][0]["outcome"] = "publication_unknown".into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+    }
+
+    fn download() -> Value {
+        serde_json::json!({
+            "cleanup": "finished", "results_truncated": false, "progress": null,
+            "reason_code": "receive_conflict", "succeeded": false,
+            "receipts": [{"outcome": "refused"}],
+        })
+    }
+
+    #[test]
+    fn known_download_conflict_is_distinct_from_uncertain_publication_or_cleanup() {
+        let mut document = ended("ok", 12);
+        document["download"] = download();
+        assert_eq!(
+            summary(&document).continuation,
+            Continuation::Picker { expected_exit: 1 }
+        );
+        for (field, value) in [
+            ("cleanup", "pending".into()),
+            ("results_truncated", true.into()),
+            ("progress", serde_json::json!({"staged_bytes": 1})),
+            ("reason_code", "publication_unknown".into()),
+        ] {
+            let mut unknown = document.clone();
+            unknown["download"][field] = value;
+            assert_eq!(
+                summary(&unknown).continuation,
+                Continuation::Stop,
+                "{field}"
+            );
+        }
+        document["download"]["receipts"][0]["outcome"] = "publication_unknown".into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+    }
+
+    #[test]
+    fn download_reason_cannot_be_omitted_or_retyped_to_hide_unknown_publication() {
+        let mut document = ended("ok", 12);
+        document["download"] = download();
+        document["download"]["receipts"] = serde_json::json!([]);
+        for reason in [
+            false.into(),
+            0.into(),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            document["download"]["reason_code"] = reason;
+            assert_eq!(summary(&document).continuation, Continuation::Stop);
+        }
+        document["download"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reason_code");
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+    }
+
+    #[test]
+    fn known_publication_keeps_its_separate_unconfirmed_durability_result() {
+        let mut document = ended("ok", 12);
+        document["upload"] = upload();
+        document["upload"]["receipts"][0]["outcome"] = "host_published_durability_unknown".into();
+        document["upload"]["batches"][0]["receipts"][0]["outcome"] =
+            "host_published_durability_unknown".into();
+        assert_eq!(
+            summary(&document).continuation,
+            Continuation::Picker { expected_exit: 1 }
+        );
+
+        document["upload"] = Value::Null;
+        document["download"] = download();
+        document["download"]["reason_code"] = Value::Null;
+        document["download"]["succeeded"] = true.into();
+        document["download"]["receipts"][0] = serde_json::json!({
+            "outcome": "locally_published", "receipt": "published_durability_unknown",
+            "published_bytes": 4, "durable": false,
+        });
+        assert_eq!(
+            summary(&document).continuation,
+            Continuation::Picker { expected_exit: 0 }
+        );
     }
 
     #[test]
