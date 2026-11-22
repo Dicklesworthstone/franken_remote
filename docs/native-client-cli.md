@@ -58,6 +58,16 @@ is applied only after its original command exits successfully and reports the
 selection-only, fresh-lookup-required result. Each viewer still resolves the
 selected identity again before connecting.
 
+Use `fr app --port 9443` when the host service listens on a nondefault port.
+The selected port applies to every picker and viewer launched during that app
+run, including later host choices and the macOS Launch Services route. The
+picker shows the nondefault port alongside its previous-session notice. Its
+completed selection must report that same port before a viewer can start.
+Ports are decimal integers from 1 through 65535; malformed, missing or duplicate
+options refuse before opening the picker. The default remains 8443. Port choice
+is not saved in preferences or installed launchers; `--install` and `--uninstall`
+cannot be combined with `--port`.
+
 Choose **View only** or **View and control**, clipboard sharing, which display
 to show, and **Play host audio** before connecting. Playback starts off and
 works with either viewing role. On Linux, F2 toggles control, F3 clipboard,

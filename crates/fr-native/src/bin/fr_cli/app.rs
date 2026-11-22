@@ -17,6 +17,7 @@
 //! (`~/.local/share/applications/frankenremote.desktop`) on Linux.
 use crate::{Failure, options::MAX_APP_NOTICE};
 use fr_client::completion::CompletionCapture;
+use fr_client::discovery::DEFAULT_SERVICE_PORT;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -27,7 +28,7 @@ use std::{
 mod child;
 use child::Finished;
 
-const USAGE: &str = "fr app [--install | --uninstall]\n\n\
+const USAGE: &str = "fr app [--port PORT] | --install | --uninstall\n\n\
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
 View only or View and control, Share clipboard text, Ask which display to\n\
 show and Play host audio, then Connect. Audio starts off; enabling it never\n\
@@ -35,6 +36,8 @@ enables your microphone. Closing the viewer returns to the picker with the outco
 Cancel or Escape in the picker quits. Choices are remembered. An unused\n\
 picker reopens with a fresh machine list every two minutes; after half an\n\
 hour unused, fr app quits.\n\n\
+--port PORT  connect to this service port for this app run (default 8443);\n\
+             applies to every choice and is not saved in preferences.\n\
 --install    add FrankenRemote to ~/Applications (macOS) or the desktop\n\
              applications menu (Linux); it runs this fr with `app`.\n\
 --uninstall  remove that launcher (nothing else).\n";
@@ -57,22 +60,61 @@ pub(super) fn requested(args: &[String]) -> bool {
 }
 
 pub(super) fn run(args: &[String]) -> Result<String, Failure> {
-    let rest: Vec<&str> = args
-        .iter()
-        .skip(1)
-        .map(String::as_str)
-        .filter(|arg| *arg != "--json")
-        .collect();
-    match rest.as_slice() {
-        [] => application(),
-        ["--help" | "-h"] => Ok(USAGE.to_owned()),
-        ["--install"] => install(),
-        ["--uninstall"] => uninstall(),
-        _ => Err(Failure::new(
-            "invalid_arguments",
-            "Use fr app, fr app --install or fr app --uninstall.",
-            2,
-        )),
+    match app_command(args)? {
+        AppCommand::Open { port } => application(port),
+        AppCommand::Help => Ok(USAGE.to_owned()),
+        AppCommand::Install => install(),
+        AppCommand::Uninstall => uninstall(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppCommand {
+    Open { port: u16 },
+    Help,
+    Install,
+    Uninstall,
+}
+
+/// Validate the whole invocation before touching settings, discovery or a
+/// launcher. The selected endpoint belongs to this run, never to a saved
+/// preference or a child report.
+fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
+    let invalid = || Failure::new("invalid_arguments", "Run fr app --help.", 2);
+    if !requested(args) {
+        return Err(invalid());
+    }
+    let mut port = None;
+    let mut action = None;
+    let mut json = false;
+    let mut rest = args.iter().skip(1);
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--json" if !json => json = true,
+            "--port" if port.is_none() => {
+                let raw = rest.next().ok_or_else(invalid)?;
+                if raw.is_empty() || raw.len() > 5 || !raw.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(invalid());
+                }
+                port = Some(
+                    raw.parse::<u16>()
+                        .ok()
+                        .filter(|p| *p != 0)
+                        .ok_or_else(invalid)?,
+                );
+            }
+            "--help" | "-h" if action.is_none() => action = Some(AppCommand::Help),
+            "--install" if action.is_none() => action = Some(AppCommand::Install),
+            "--uninstall" if action.is_none() => action = Some(AppCommand::Uninstall),
+            _ => return Err(invalid()),
+        }
+    }
+    match (action, port) {
+        (None, port) => Ok(AppCommand::Open {
+            port: port.unwrap_or(DEFAULT_SERVICE_PORT),
+        }),
+        (Some(action), None) => Ok(action),
+        (Some(_), Some(_)) => Err(invalid()),
     }
 }
 
@@ -216,6 +258,7 @@ enum Report {
     Selected {
         node: String,
         name: String,
+        port: u16,
         control: bool,
         clipboard: bool,
         choose_display: bool,
@@ -283,6 +326,9 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
         return Some(Report::Selected {
             node,
             name,
+            port: u16::try_from(value.get("port")?.as_u64()?)
+                .ok()
+                .filter(|p| *p != 0)?,
             control,
             clipboard,
             choose_display,
@@ -315,9 +361,13 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
     (linux_end || macos_end).then_some(Report::Ended)
 }
 
-fn picker_report(picked: &Finished) -> Option<Report> {
+fn picker_report(picked: &Finished, expected_port: u16) -> Option<Report> {
     match last_report(&picked.stdout) {
-        Some(Report::Selected { .. }) if !picked.status.success() => None,
+        Some(Report::Selected { port, .. })
+            if !picked.status.success() || port != expected_port =>
+        {
+            None
+        }
         report => report,
     }
 }
@@ -355,12 +405,15 @@ fn short_name(certificate_name: &str) -> &str {
         .unwrap_or(certificate_name)
 }
 
-fn pick_args(settings: &Settings, notice: Option<&str>) -> Vec<String> {
+fn pick_args(settings: &Settings, notice: Option<&str>, port: u16) -> Vec<String> {
+    let port_text = port.to_string();
     let mut args: Vec<String> = [
         "connect",
         "--choose-host",
         "--pick-only",
         "--json",
+        "--port",
+        &port_text,
         "--experimental-native",
         "--display",
         if settings.choose_display {
@@ -384,18 +437,27 @@ fn pick_args(settings: &Settings, notice: Option<&str>) -> Vec<String> {
     if settings.playback_audio {
         args.push("--audio".to_owned());
     }
-    if let Some(notice) = notice {
+    let port_notice = (port != DEFAULT_SERVICE_PORT).then(|| {
+        notice_text(&format!(
+            "Service port {port}. {}",
+            notice.unwrap_or_default()
+        ))
+    });
+    if let Some(notice) = port_notice.as_deref().or(notice) {
         args.push("--app-notice".to_owned());
         args.push(notice.to_owned());
     }
     args
 }
 
-fn session_args(node: &str, settings: &Settings) -> Vec<String> {
+fn session_args(node: &str, settings: &Settings, port: u16) -> Vec<String> {
+    let port_text = port.to_string();
     let mut args: Vec<String> = [
         "connect",
         node,
         "--json",
+        "--port",
+        &port_text,
         "--experimental-native",
         "--display",
         if settings.choose_display {
@@ -566,7 +628,7 @@ fn child_failed(error: child::Error) -> Failure {
     Failure::new(code, next, 1).uncertain()
 }
 
-fn application() -> Result<String, Failure> {
+fn application(port: u16) -> Result<String, Failure> {
     let launcher = Launcher::new()?;
     let path = settings_path(&home()?);
     let mut notice: Option<String> = None;
@@ -576,8 +638,11 @@ fn application() -> Result<String, Failure> {
         let mut settings = load(&path);
         // A picker reopened only because the last one expired unused stays
         // behind whatever the user is doing.
-        let picked = launcher.run(&pick_args(&settings, notice.as_deref()), idle_expiries == 0)?;
-        let report = picker_report(&picked);
+        let picked = launcher.run(
+            &pick_args(&settings, notice.as_deref(), port),
+            idle_expiries == 0,
+        )?;
+        let report = picker_report(&picked, port);
         refuse_uncertain_report(report.as_ref())?;
         let (node, name) = match report {
             Some(Report::Selected {
@@ -587,6 +652,7 @@ fn application() -> Result<String, Failure> {
                 clipboard,
                 choose_display,
                 playback_audio,
+                ..
             }) => {
                 settings.control = control;
                 settings.clipboard = clipboard;
@@ -631,7 +697,7 @@ fn application() -> Result<String, Failure> {
         };
         picker_failures = 0;
         idle_expiries = 0;
-        let session = launcher.run(&session_args(&node, &settings), true)?;
+        let session = launcher.run(&session_args(&node, &settings, port), true)?;
         let report = last_report(&session.stdout);
         notice = Some(session_notice(
             report,
@@ -859,9 +925,203 @@ mod tests {
     }
 
     #[test]
+    fn app_port_is_strict_and_launch_scoped_before_any_side_effect() {
+        let parse =
+            |args: &[&str]| app_command(&args.iter().map(ToString::to_string).collect::<Vec<_>>());
+        assert_eq!(
+            parse(&["app"]).unwrap(),
+            AppCommand::Open {
+                port: DEFAULT_SERVICE_PORT
+            }
+        );
+        for port in [1, 9443, u16::MAX] {
+            let text = port.to_string();
+            assert_eq!(
+                parse(&["app", "--port", &text, "--json"]).unwrap(),
+                AppCommand::Open { port }
+            );
+            assert_eq!(
+                parse(&["app", "--json", "--port", &text]).unwrap(),
+                AppCommand::Open { port }
+            );
+        }
+        for args in [
+            vec!["app", "--port"],
+            vec!["app", "--port", "--json", "9443"],
+            vec!["app", "--port", "9443", "--port", "9443"],
+            vec!["app", "--port", "9443", "--install"],
+            vec!["app", "--uninstall", "--port", "9443"],
+            vec!["app", "--json", "--json"],
+            vec!["app", "--control"],
+            vec!["connect", "--port", "9443"],
+        ] {
+            assert_eq!(parse(&args).unwrap_err().code, "invalid_arguments");
+        }
+        for port in [
+            "",
+            "0",
+            "65536",
+            "-1",
+            "+1",
+            " 9443",
+            "9443 ",
+            "94.43",
+            "0x24e3",
+            "９４４３",
+        ] {
+            assert_eq!(
+                parse(&["app", "--port", port]).unwrap_err().code,
+                "invalid_arguments"
+            );
+        }
+        assert_eq!(parse(&["app", "--help"]).unwrap(), AppCommand::Help);
+        assert_eq!(
+            parse(&["app", "--install", "--json"]).unwrap(),
+            AppCommand::Install
+        );
+        assert_eq!(
+            parse(&["app", "--uninstall"]).unwrap(),
+            AppCommand::Uninstall
+        );
+        // Saved preferences and a later unqualified launch do not inherit it.
+        assert!(!Settings::default().to_json().contains("port"));
+        assert_eq!(
+            parse(&["app"]).unwrap(),
+            AppCommand::Open {
+                port: DEFAULT_SERVICE_PORT
+            }
+        );
+    }
+
+    #[test]
+    fn every_picker_and_viewer_command_preserves_the_original_port() {
+        let port = 9443;
+        let mut settings = Settings::default();
+        for control in [false, true] {
+            settings.control = control;
+            for choose_display in [false, true] {
+                settings.choose_display = choose_display;
+                for playback_audio in [false, true] {
+                    settings.playback_audio = playback_audio;
+                    for node in ["nFIRST", "nNEXT"] {
+                        let picker =
+                            pick_args(&settings, Some("The last host did not answer."), port);
+                        let viewer = session_args(node, &settings, port);
+                        for (args, picking) in [(&picker, true), (&viewer, false)] {
+                            let parsed = crate::options::parse(args).unwrap();
+                            let crate::options::Command::Connect(connection) = parsed.command
+                            else {
+                                panic!("real connect command")
+                            };
+                            assert_eq!(connection.target.port, port);
+                            assert_eq!(connection.control, control);
+                            assert_eq!(
+                                connection.display,
+                                if choose_display {
+                                    crate::options::DisplayChoice::Choose
+                                } else {
+                                    crate::options::DisplayChoice::Only
+                                }
+                            );
+                            assert!(connection.microphone.is_none());
+                            assert_eq!(args.iter().filter(|arg| *arg == "--port").count(), 1);
+                            assert_eq!(
+                                args.iter().filter(|arg| *arg == "--audio").count(),
+                                usize::from(playback_audio)
+                            );
+                            if picking {
+                                let choice = connection.pick.unwrap();
+                                assert_eq!(choice.playback_audio, playback_audio);
+                                assert!(connection.audio.is_none());
+                            } else {
+                                assert!(connection.pick.is_none());
+                                assert_eq!(connection.audio.is_some(), playback_audio);
+                            }
+                        }
+                        let notice = picker
+                            .windows(2)
+                            .find(|pair| pair[0] == "--app-notice")
+                            .unwrap();
+                        assert_eq!(
+                            notice[1],
+                            "Service port 9443. The last host did not answer."
+                        );
+                        // Launch Services receives the same endpoint and audio choice.
+                        let open = open_args(Path::new("/A.app"), Path::new("/out"), true, &viewer);
+                        let boundary = open.iter().position(|arg| arg == "--args").unwrap();
+                        assert_eq!(
+                            open[boundary + 1..],
+                            viewer
+                                .iter()
+                                .map(std::ffi::OsString::from)
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn picker_cannot_retarget_the_original_port_or_override_failed_exit() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut selected = json!({
+            "schema_version": 1, "event": "host_selected", "node_id": "nHOST",
+            "certificate_name": "host.tail.ts.net", "port": 9443,
+            "control": false, "clipboard": false, "choose_display": false,
+            "playback_audio": false,
+            "selection_only": true, "fresh_lookup_required": true,
+            "remote_session_started": false, "input_requested": false,
+        });
+        let result = |value: &Value, exit| Finished {
+            stdout: fr_client::completion::capture_completion_with_limit(
+                value.to_string().as_bytes(),
+                fr_client::completion::CompletionLimit::NativeCommand,
+            ),
+            status: std::process::ExitStatus::from_raw(exit),
+        };
+        for playback_audio in [false, true] {
+            selected["playback_audio"] = json!(playback_audio);
+            assert!(matches!(
+                picker_report(&result(&selected, 0), 9443),
+                Some(Report::Selected { port: 9443, playback_audio: actual, .. })
+                    if actual == playback_audio
+            ));
+            assert_eq!(picker_report(&result(&selected, 0), 8443), None);
+            assert_eq!(picker_report(&result(&selected, 256), 9443), None);
+            for value in [
+                Value::Null,
+                json!(0),
+                json!(65536),
+                json!(-1),
+                json!("9443"),
+            ] {
+                let mut changed = selected.clone();
+                changed["port"] = value;
+                assert_eq!(picker_report(&result(&changed, 0), 9443), None);
+            }
+            let mut changed = selected.clone();
+            changed.as_object_mut().unwrap().remove("port");
+            assert_eq!(picker_report(&result(&changed, 0), 9443), None);
+        }
+        let cancelled = json!({"schema_version":1,"outcome":"cancelled","error":{"code":"host_choice_cancelled","next_action":"Choose again explicitly."}});
+        assert!(matches!(
+            picker_report(&result(&cancelled, 256), 9443),
+            Some(Report::Failed {
+                unknown_effect: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn picker_and_session_commands_follow_the_choices() {
         let mut settings = Settings::default();
-        let pick = pick_args(&settings, Some("mac: The host did not answer."));
+        let pick = pick_args(
+            &settings,
+            Some("mac: The host did not answer."),
+            DEFAULT_SERVICE_PORT,
+        );
         assert_eq!(
             pick,
             [
@@ -869,6 +1129,8 @@ mod tests {
                 "--choose-host",
                 "--pick-only",
                 "--json",
+                "--port",
+                "8443",
                 "--experimental-native",
                 "--display",
                 "only",
@@ -880,11 +1142,13 @@ mod tests {
         );
         assert!(crate::options::parse(&pick).is_ok());
         assert_eq!(
-            session_args("nMAC", &settings),
+            session_args("nMAC", &settings, DEFAULT_SERVICE_PORT),
             [
                 "connect",
                 "nMAC",
                 "--json",
+                "--port",
+                "8443",
                 "--experimental-native",
                 "--display",
                 "only",
@@ -894,23 +1158,27 @@ mod tests {
         settings.clipboard = false;
         settings.choose_display = true;
         assert!(
-            session_args("nMAC", &settings)
+            session_args("nMAC", &settings, DEFAULT_SERVICE_PORT)
                 .ends_with(&["--control".into(), "--no-clipboard".into()])
         );
-        assert!(session_args("nMAC", &settings).contains(&"choose".to_owned()));
+        assert!(
+            session_args("nMAC", &settings, DEFAULT_SERVICE_PORT).contains(&"choose".to_owned())
+        );
         // View-only remembers the clipboard choice for the picker only.
         settings.control = false;
         settings.clipboard = true;
         settings.choose_display = false;
-        let pick = pick_args(&settings, None);
+        let pick = pick_args(&settings, None, DEFAULT_SERVICE_PORT);
         assert!(pick.contains(&"--view-only".into()) && pick.contains(&"--clipboard".into()));
         assert!(crate::options::parse(&pick).is_ok());
         assert_eq!(
-            session_args("nMAC", &settings),
+            session_args("nMAC", &settings, DEFAULT_SERVICE_PORT),
             [
                 "connect",
                 "nMAC",
                 "--json",
+                "--port",
+                "8443",
                 "--experimental-native",
                 "--display",
                 "only",
@@ -928,8 +1196,8 @@ mod tests {
             };
             for audio in [false, true] {
                 settings.playback_audio = audio;
-                let picker = pick_args(&settings, None);
-                let session = session_args("nMAC", &settings);
+                let picker = pick_args(&settings, None, DEFAULT_SERVICE_PORT);
+                let session = session_args("nMAC", &settings, DEFAULT_SERVICE_PORT);
                 for args in [&picker, &session] {
                     assert_eq!(args.iter().any(|arg| arg == "--audio"), audio);
                     assert!(!args.iter().any(|arg| arg.starts_with("--microphone")));
@@ -962,6 +1230,7 @@ mod tests {
             Some(Report::Selected {
                 node: "nMAC".into(),
                 name: "mac.tail.ts.net".into(),
+                port: DEFAULT_SERVICE_PORT,
                 control: true,
                 clipboard: false,
                 choose_display: false,
@@ -1152,6 +1421,7 @@ mod tests {
             "event": "host_selected",
             "node_id": "nMAC",
             "certificate_name": "mac.tail.ts.net",
+            "port": DEFAULT_SERVICE_PORT,
             "control": false,
             "clipboard": false,
             "choose_display": false,
