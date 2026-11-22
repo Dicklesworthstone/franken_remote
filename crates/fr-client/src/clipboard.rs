@@ -3,6 +3,8 @@
 //! No host `InputSession` is synthesized from wire IDs. The native/transport
 //! integration still supplies the separately approved clipboard capability and
 //! dedicated authenticated lane, and fences already accepted bytes on closure.
+/// Bounded content-free completion evidence across original clipboard owners.
+pub mod history;
 pub mod image;
 pub(crate) mod projection;
 mod synchronize;

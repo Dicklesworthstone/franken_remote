@@ -197,11 +197,20 @@ The current generic internal/session failure and control-stop reports do not
 prove retirement and also stop this app invocation. A renderer-creation refusal
 after session startup cannot be treated as a pre-start refusal. These are
 conservative report decisions, not a claim that the host's effects were undone.
-When clipboard sharing was requested and the window replaced its session,
-the current report retains only the first earlier clipboard owner's result.
-The app therefore closes after that session instead of assuming that later
-clipboard owners also finished without uncertain effects. Replacement sessions
-without clipboard sharing can still return to the picker.
+Clipboard reports retain the observed submitted, unknown and refused publication
+counts from each original viewer connection, including the final one. A finished
+cleanup label alone does not prove that the last publication receipt was
+collected. The report's separate collection evidence comes from the original
+session's normal return after retaining and collecting its auxiliary owners.
+If replacement happens before that proof, the observed counts survive with
+explicitly incomplete history; a later clean connection cannot repair it.
+This history has fixed memory use, and coverage must match the actual viewer
+connections. Malformed, incomplete or overflowed history stops continuation.
+A clean resize or reconnect with clipboard sharing can return to the picker
+once every original owner has a known outcome, cleanup and final collection.
+Older viewer reports that include only the first earlier clipboard owner cannot
+establish that proof after a replacement, so the app still closes with an
+explanation in that case.
 
 If the viewer refuses before writing its completion, the first bounded stderr
 message remains available as guidance, but does not authorize another session.

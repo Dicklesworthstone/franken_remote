@@ -594,6 +594,26 @@ fn focus_continuity_requires_an_actual_published_grant_not_a_view_or_request() {
 }
 
 #[test]
+fn terminal_completion_and_absent_upload_are_not_final_clipboard_collection() {
+    use fr_client::clipboard::history::Collection;
+    let shared = Shared::with_auxiliary(true, true, None, None);
+    assert!(shared.upload_sources_released.load(Ordering::SeqCst));
+    let (original, collection) = shared.clipboard_completion();
+    assert_eq!(collection, Collection::Unconfirmed);
+    finish(&shared, end::OK, None);
+    assert!(shared.finished());
+    let (terminal, collection) = shared.clipboard_completion();
+    assert_eq!(collection, Collection::Unconfirmed);
+    assert_eq!(terminal.received_unknown, original.received_unknown);
+    // Only the normal original-thread return (or a spawn failure with no
+    // original worker) publishes this separate positive collection witness.
+    shared.clipboard_collected.store(true, Ordering::SeqCst);
+    let (collected, collection) = shared.clipboard_completion();
+    assert_eq!(collection, Collection::Finished);
+    assert_eq!(collected, shared.clipboard_report());
+}
+
+#[test]
 fn the_end_code_says_who_ended_the_session() {
     let hidden = Some(LocalStop::Hidden);
     let observed = Failure::Observation(ObserverError::Application);

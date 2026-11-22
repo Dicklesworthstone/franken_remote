@@ -18,6 +18,27 @@ fn report(end: &str, drawn: u64) -> String {
     report.to_string()
 }
 
+fn reconnected_clipboard_report(earlier_unknown: bool) -> String {
+    use fr_client::clipboard::history::{Cleanup, Collection, History, Snapshot};
+    let current = Snapshot {
+        requested: true,
+        configured: true,
+        native_started: true,
+        received_submitted: 1,
+        cleanup: Cleanup::Finished,
+        collection: Collection::Finished,
+        ..Snapshot::default()
+    };
+    let mut earlier = current;
+    earlier.received_unknown = u64::from(earlier_unknown);
+    let mut history = History::default();
+    history.retire(0, earlier);
+    let mut report: serde_json::Value = serde_json::from_slice(REPORT).unwrap();
+    report["reopens"] = 1.into();
+    report["clipboard"] = serde_json::json!(history.completion(1, current));
+    report.to_string()
+}
+
 fn exit(code: u8) -> ExitStatus {
     #[cfg(unix)]
     {
@@ -124,6 +145,26 @@ fn a_confirmed_refusal_cannot_hide_incomplete_original_cleanup() {
     );
 }
 
+#[test]
+fn original_clipboard_history_and_original_child_cleanup_are_both_required() {
+    let clean = reconnected_clipboard_report(false);
+    let mut captured = output(clean.as_bytes(), b"", 0);
+    assert_eq!(
+        summarize(&captured, "studio", false).continuation,
+        Continuation::Picker { expected_exit: 0 }
+    );
+    captured.cleanup_error = Some(io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        summarize(&captured, "studio", false).continuation,
+        Continuation::Stop
+    );
+    let unknown = reconnected_clipboard_report(true);
+    assert_eq!(
+        summarize(&output(unknown.as_bytes(), b"", 0), "studio", false).continuation,
+        Continuation::Stop
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn actual_child_completion_and_exit_jointly_control_the_next_picker() {
@@ -138,6 +179,12 @@ fn actual_child_completion_and_exit_jointly_control_the_next_picker() {
             Continuation::Picker { expected_exit: 0 },
         ),
         (success.clone(), 1, Continuation::Stop),
+        (
+            reconnected_clipboard_report(false),
+            0,
+            Continuation::Picker { expected_exit: 0 },
+        ),
+        (reconnected_clipboard_report(true), 0, Continuation::Stop),
         (
             report("cancelled", 0),
             1,

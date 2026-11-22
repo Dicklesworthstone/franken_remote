@@ -55,6 +55,10 @@ use crate::{
     geometry::{Mapping, Presentation, Rect as PictureRect, StaleMapping, host_scales, reopen_for},
     keys,
 };
+use fr_client::clipboard::history::{
+    Cleanup as ClipboardCleanup, Collection as ClipboardCollection, History as ClipboardHistory,
+    Snapshot as ClipboardSnapshot,
+};
 use fr_mobile_ffi::{
     events::{Event, kind, state},
     session::{
@@ -226,8 +230,11 @@ struct Stats {
     earlier_decoded: u64,
     earlier_decode_micros: u64,
     earlier_presented: u64,
-    /// The original configured clipboard's evidence survives a viewing resize.
-    clipboard: Option<ClipboardReport>,
+    /// Every retired original owner's counts and cleanup, in fixed memory.
+    clipboard: ClipboardHistory,
+    /// Preserve the first earlier typed reason as bounded diagnostic metadata.
+    /// It never substitutes for the complete history's publication or cleanup.
+    clipboard_reason: Option<ClipboardReport>,
     /// The first session's time to its first view.
     first_view_micros: Option<u64>,
     /// Longest wait from a reopen's request to its first drawn picture.
@@ -581,9 +588,6 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         next.display = fr_mobile_ffi::session::DisplayChoice::Choose;
     }
     let clipboard = v.session.shared().clipboard_report();
-    if clipboard.configured || clipboard.reason.is_some() {
-        stats.clipboard.get_or_insert(clipboard);
-    }
     // The user's clipboard choice follows each replacement view, as control
     // does. Stop control, or an earlier owner that ended for any reason but
     // its session closing (a refusal, a native failure, the privacy window's
@@ -633,6 +637,16 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     let old = std::mem::replace(&mut v.session, session);
     control::bind(&v.session.shared_handle());
     let shared = old.shared();
+    // Record this exact owner only after replacement succeeded. Earlier native
+    // queries and Session::start may fail; repeated attempts must not count the
+    // same owner twice. Pending/failed cleanup and unknown effects stay sticky.
+    let (clipboard, collection) = shared.clipboard_completion();
+    stats
+        .clipboard
+        .retire(stats.reopens, clipboard_snapshot(clipboard, collection));
+    if clipboard.reason.is_some() {
+        stats.clipboard_reason.get_or_insert(clipboard);
+    }
     let (decoded, decode_micros) = shared.frames.decode_stats();
     stats.earlier_decoded += decoded;
     stats.earlier_decode_micros += decode_micros;
@@ -640,7 +654,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     stats
         .first_view_micros
         .get_or_insert(shared.first_view_micros());
-    stats.reopens += 1;
+    stats.reopens = stats.reopens.saturating_add(1);
     stats.display_changes += u64::from(opening.cause == Cause::Display);
     stats.control_releases += u64::from(opening.cause == Cause::StopControl);
     if opening.cause == Cause::FocusLost {
@@ -1061,21 +1075,31 @@ const fn end_name(code: u32) -> &'static str {
     }
 }
 
-/// The completion document (content-free counts and timings) on stdout.
-/// Exit 0 only when pictures were drawn and the session ended in order.
-fn clipboard_document(clipboard: ClipboardReport) -> serde_json::Value {
-    serde_json::json!({
-        "requested": clipboard.requested,
-        "configured": clipboard.configured,
-        "native_started": clipboard.native_started,
-        "received_submitted": clipboard.received_submitted,
-        "received_unknown": clipboard.received_unknown,
-        "received_refused": clipboard.received_refused,
-        "cleanup": clipboard.cleanup_name(),
-        "reason": clipboard.reason.map(|reason| format!("{reason:?}")),
-    })
+/// Map the original owner's public cleanup labels conservatively.
+fn clipboard_snapshot(
+    clipboard: ClipboardReport,
+    collection: ClipboardCollection,
+) -> ClipboardSnapshot {
+    ClipboardSnapshot {
+        requested: clipboard.requested,
+        configured: clipboard.configured,
+        native_started: clipboard.native_started,
+        received_submitted: clipboard.received_submitted,
+        received_unknown: clipboard.received_unknown,
+        received_refused: clipboard.received_refused,
+        cleanup: match clipboard.cleanup_name() {
+            "not_started" => ClipboardCleanup::NotStarted,
+            "pending" => ClipboardCleanup::Pending,
+            "finished" => ClipboardCleanup::Finished,
+            "failed" => ClipboardCleanup::Failed,
+            _ => ClipboardCleanup::Unknown,
+        },
+        collection,
+    }
 }
 
+/// The completion document (content-free counts and timings) on stdout.
+/// Exit 0 only when pictures were drawn and the session ended in order.
 fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> Completion {
     let shared = viewer.session.shared();
     let code = shared.end_code();
@@ -1097,8 +1121,18 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> Completion {
         "samples": stats.intervals.gaps(),
     });
     let mean_decode = decode_micros.checked_div(decoded).map_or(0.0, micros_to_ms);
-    let clipboard =
-        clipboard_document(stats.clipboard.unwrap_or_else(|| shared.clipboard_report()));
+    let (current_clipboard, collection) = shared.clipboard_completion();
+    let mut clipboard = serde_json::json!(stats.clipboard.completion(
+        stats.reopens,
+        clipboard_snapshot(current_clipboard, collection),
+    ));
+    clipboard["reason"] = serde_json::json!(
+        stats
+            .clipboard_reason
+            .and_then(|report| report.reason)
+            .or(current_clipboard.reason)
+            .map(|reason| format!("{reason:?}"))
+    );
     let upload_ok = viewer
         .upload_menu
         .as_ref()

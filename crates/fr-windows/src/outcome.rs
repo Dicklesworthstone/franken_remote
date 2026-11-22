@@ -8,6 +8,7 @@
 //! a warning by itself never authorizes another session.
 #![forbid(unsafe_code)]
 
+use fr_client::clipboard::history::Completion as ClipboardCompletion;
 use serde_json::Value;
 
 /// Whether this exact terminal document permits another explicit choice.
@@ -107,7 +108,7 @@ pub(crate) fn summarize(completion: &str, machine: &str) -> Summary {
             .is_some_and(|reopens| clipboard_history_incomplete(reopens, &document["clipboard"]))
         {
             message.push_str(
-                " Clipboard completion across the viewer's reconnects could not be confirmed.",
+                " Clipboard completion for every viewer connection could not be confirmed.",
             );
         } else {
             message.push_str(
@@ -178,11 +179,7 @@ fn continuation(document: &Value, end: &str) -> Continuation {
     };
     if !known_end
         || !reopen.is_null()
-        || !clipboard_known(clipboard)
-        // The native viewer retains only the first earlier clipboard report
-        // after replacing a Session. It cannot certify every later owner's
-        // effects. No-clipboard replacements have no omitted clipboard owner.
-        || clipboard_history_incomplete(reopens, clipboard)
+        || !clipboard_known(clipboard, reopens)
         || !upload_known(upload)
         || !download_known(download)
     {
@@ -203,7 +200,15 @@ fn continuation(document: &Value, end: &str) -> Continuation {
 }
 
 fn clipboard_history_incomplete(reopens: u64, clipboard: &Value) -> bool {
-    reopens != 0 && clipboard["requested"] == true
+    if clipboard.get("history").is_none() && clipboard.get("collection").is_none() {
+        // Older viewers report only the first earlier clipboard owner after
+        // a replacement. Their scalar fields cannot certify later owners.
+        return reopens != 0 && clipboard["requested"] == true;
+    }
+    reopens.checked_add(1).is_none_or(|owners| {
+        ClipboardCompletion::from_document(clipboard)
+            .map_or(true, |completion| !completion.covers(owners))
+    })
 }
 
 fn cleanup_known(document: &Value) -> bool {
@@ -213,8 +218,15 @@ fn cleanup_known(document: &Value) -> bool {
     )
 }
 
-fn clipboard_known(clipboard: &Value) -> bool {
+fn clipboard_known(clipboard: &Value, reopens: u64) -> bool {
+    if clipboard.get("history").is_some() || clipboard.get("collection").is_some() {
+        return reopens.checked_add(1).is_some_and(|owners| {
+            ClipboardCompletion::from_document(clipboard)
+                .is_ok_and(|completion| completion.known(owners))
+        });
+    }
     clipboard.is_object()
+        && !clipboard_history_incomplete(reopens, clipboard)
         && cleanup_known(clipboard)
         && clipboard["received_unknown"].as_u64() == Some(0)
         && clipboard["received_submitted"].as_u64().is_some()
@@ -579,14 +591,189 @@ mod tests {
         document["clipboard"]["cleanup"] = "finished".into();
         let incomplete = summary(&document);
         assert_eq!(incomplete.continuation, Continuation::Stop);
-        assert!(incomplete.message.contains(
-            "Clipboard completion across the viewer's reconnects could not be confirmed"
-        ));
+        assert!(
+            incomplete.message.contains(
+                "Clipboard completion for every viewer connection could not be confirmed"
+            )
+        );
         document["reopens"] = 0.into();
         assert_eq!(
             summary(&document).continuation,
             Continuation::Picker { expected_exit: 0 }
         );
+    }
+
+    fn clipboard_owner(submitted: u64) -> fr_client::clipboard::history::Snapshot {
+        use fr_client::clipboard::history::{Cleanup, Collection, Snapshot};
+        Snapshot {
+            requested: true,
+            configured: true,
+            native_started: true,
+            received_submitted: submitted,
+            cleanup: Cleanup::Finished,
+            collection: Collection::Finished,
+            ..Snapshot::default()
+        }
+    }
+
+    fn with_clipboard_history(reports: &[fr_client::clipboard::history::Snapshot]) -> Value {
+        use fr_client::clipboard::history::History;
+        let (current, retired) = reports.split_last().unwrap();
+        let mut history = History::default();
+        for (owner, report) in retired.iter().enumerate() {
+            history.retire(u64::try_from(owner).unwrap(), *report);
+        }
+        let reopens = u64::try_from(retired.len()).unwrap();
+        let mut document = ended("ok", 12);
+        document["reopens"] = reopens.into();
+        document["clipboard"] = serde_json::json!(history.completion(reopens, *current));
+        document
+    }
+
+    #[test]
+    fn complete_original_clipboard_history_allows_clean_replacements() {
+        let document =
+            with_clipboard_history(&[clipboard_owner(2), clipboard_owner(3), clipboard_owner(5)]);
+        let result = summary(&document);
+        assert!(result.ok);
+        assert_eq!(
+            result.continuation,
+            Continuation::Picker { expected_exit: 0 }
+        );
+        assert_eq!(document["clipboard"]["received_submitted"], 10);
+        assert_eq!(document["clipboard"]["history"]["owners"], 3);
+        assert!(!result.message.contains("could not be confirmed"));
+    }
+
+    #[test]
+    fn an_unknown_clipboard_effect_in_any_connection_stops_continuation() {
+        for owner in 0..3 {
+            let mut reports = [clipboard_owner(2); 3];
+            reports[owner].received_unknown = 1;
+            let document = with_clipboard_history(&reports);
+            assert_eq!(summary(&document).continuation, Continuation::Stop);
+            assert_eq!(document["clipboard"]["received_unknown"], 1);
+            assert_eq!(document["clipboard"]["received_submitted"], 6);
+        }
+    }
+
+    #[test]
+    fn earlier_clipboard_cleanup_cannot_be_hidden_by_a_clean_replacement() {
+        use fr_client::clipboard::history::Cleanup;
+        for cleanup in [Cleanup::Unknown, Cleanup::Pending, Cleanup::Failed] {
+            let mut original = clipboard_owner(2);
+            original.cleanup = cleanup;
+            let document = with_clipboard_history(&[original, clipboard_owner(3)]);
+            assert_eq!(
+                summary(&document).continuation,
+                Continuation::Stop,
+                "{cleanup:?}"
+            );
+            assert_eq!(document["clipboard"]["received_submitted"], 5);
+        }
+    }
+
+    #[test]
+    fn final_collection_is_required_for_retired_and_current_clipboard_owners() {
+        use fr_client::clipboard::history::Collection;
+        for owner in 0..2 {
+            let mut reports = [clipboard_owner(2); 2];
+            reports[owner].collection = Collection::Unconfirmed;
+            let document = with_clipboard_history(&reports);
+            assert_eq!(document["clipboard"]["cleanup"], "finished");
+            assert_eq!(document["clipboard"]["received_submitted"], 4);
+            assert_eq!(summary(&document).continuation, Continuation::Stop);
+        }
+        let mut document = with_clipboard_history(&[clipboard_owner(2)]);
+        document["clipboard"]["collection"] = "unconfirmed".into();
+        // Even a purported complete history cannot upgrade an uncollected
+        // current snapshot whose final publication receipt may still arrive.
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        document["clipboard"]
+            .as_object_mut()
+            .unwrap()
+            .remove("collection");
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+    }
+
+    #[test]
+    fn missing_malformed_or_unsupported_history_cannot_replace_owner_evidence() {
+        let document = with_clipboard_history(&[clipboard_owner(1), clipboard_owner(2)]);
+        for field in ["schema_version", "owners", "complete", "overflowed"] {
+            let mut missing = document.clone();
+            missing["clipboard"]["history"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert_eq!(
+                summary(&missing).continuation,
+                Continuation::Stop,
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("schema_version", 2.into()),
+            ("owners", 0.into()),
+            ("owners", 1.into()),
+            ("owners", 3.into()),
+            ("owners", "2".into()),
+            ("complete", false.into()),
+            ("complete", 1.into()),
+            ("overflowed", true.into()),
+            ("overflowed", Value::Null),
+        ] {
+            let mut invalid = document.clone();
+            invalid["clipboard"]["history"][field] = value;
+            assert_eq!(
+                summary(&invalid).continuation,
+                Continuation::Stop,
+                "{field}"
+            );
+        }
+        for history in [
+            Value::Null,
+            true.into(),
+            "complete".into(),
+            serde_json::json!([]),
+        ] {
+            let mut invalid = document.clone();
+            invalid["clipboard"]["history"] = history;
+            assert_eq!(summary(&invalid).continuation, Continuation::Stop);
+        }
+    }
+
+    #[test]
+    fn new_single_owner_reports_do_not_fall_back_from_invalid_coverage_to_legacy_fields() {
+        let mut document = with_clipboard_history(&[clipboard_owner(1)]);
+        assert_eq!(
+            summary(&document).continuation,
+            Continuation::Picker { expected_exit: 0 }
+        );
+        document["clipboard"]["history"] = Value::Null;
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        document["clipboard"]
+            .as_object_mut()
+            .unwrap()
+            .remove("history");
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        document["clipboard"]
+            .as_object_mut()
+            .unwrap()
+            .remove("collection");
+        assert_eq!(
+            summary(&document).continuation,
+            Continuation::Picker { expected_exit: 0 }
+        );
+    }
+
+    #[test]
+    fn clipboard_owner_and_receipt_counters_never_wrap_into_continuation() {
+        let document = with_clipboard_history(&[clipboard_owner(u64::MAX - 1), clipboard_owner(2)]);
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        let mut document = with_clipboard_history(&[clipboard_owner(1)]);
+        document["reopens"] = u64::MAX.into();
+        document["clipboard"]["history"]["owners"] = 0.into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
     }
 
     fn upload_batch() -> Value {

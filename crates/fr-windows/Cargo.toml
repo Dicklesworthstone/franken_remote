@@ -29,17 +29,16 @@ path = "src/app_main.rs"
 [dependencies]
 # Portable native text validation uses the protocol's one committed-text bound.
 fr-core.workspace = true
+# Clipboard completion and original-owner history are validated on every host.
+fr-client.workspace = true
 # Settings and completion summaries are parsed portably (already in the graph).
 serde_json.workspace = true
 
 [dev-dependencies]
-# Run the native machine-choice policy against the shared catalog on every host.
-fr-client.workspace = true
 # Run the actual shared approved-catalog selection on portable CI hosts.
 fr-wire.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-fr-client.workspace = true
 fr-mobile-ffi = { workspace = true, features = ["windows-session"] }
 # `capture-probe`: the Windows host media path (Desktop Duplication into a
 # hardware Media Foundation HEVC encoder), checked by this client's decoder.

@@ -287,6 +287,9 @@ pub struct Shared {
     granted: Mutex<Option<Granted>>,
     focus_owner: Mutex<Option<FocusOwner>>,
     clipboard: clipboard::Clipboard,
+    /// Published only after the original session thread returns normally,
+    /// including retained auxiliary cleanup and final receipt collection.
+    clipboard_collected: AtomicBool,
     upload: Option<Arc<Upload>>,
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     upload_selection: Mutex<crate::upload_selection::Selections<PreparedUpload>>,
@@ -503,6 +506,7 @@ impl Shared {
             clipboard: clipboard::Clipboard::new(
                 control_capable && clipboard && cfg!(any(windows, target_os = "ios")),
             ),
+            clipboard_collected: AtomicBool::new(false),
             upload_sources_released: AtomicBool::new(upload.is_none()),
             upload,
             #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -963,6 +967,22 @@ impl Shared {
     /// local revision, item identifier or input authority.
     pub fn clipboard_report(&self) -> ClipboardReport {
         self.clipboard.report()
+    }
+
+    /// Final collection is distinct from a terminal session or cleanup label:
+    /// those can precede the original worker's last publication receipt.
+    /// Acquire the witness BEFORE reading receipts; a later witness cannot
+    /// make an earlier snapshot complete. False remains conservative.
+    pub fn clipboard_completion(
+        &self,
+    ) -> (ClipboardReport, fr_client::clipboard::history::Collection) {
+        use fr_client::clipboard::history::Collection;
+        let collection = if self.clipboard_collected.load(Ordering::SeqCst) {
+            Collection::Finished
+        } else {
+            Collection::Unconfirmed
+        };
+        (self.clipboard.report(), collection)
     }
 
     pub fn clipboard_enabled(&self) -> bool {
@@ -1742,6 +1762,7 @@ impl Session {
                     // Normal early refusal never created a source; a serving
                     // run returns only after retaining all auxiliary cleanup.
                     worker.upload_sources_released.store(true, Ordering::SeqCst);
+                    worker.clipboard_collected.store(true, Ordering::SeqCst);
                 } else if !worker.finished() {
                     worker.clear_presentation();
                     finish(&worker, end::INTERNAL, Some("Panic".into()));
@@ -1758,6 +1779,7 @@ impl Session {
                     Some("SessionThreadUnavailable".into()),
                 );
                 shared.upload_sources_released.store(true, Ordering::SeqCst);
+                shared.clipboard_collected.store(true, Ordering::SeqCst);
             })?;
         Ok(Self { shared, control })
     }
