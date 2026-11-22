@@ -22,6 +22,8 @@ pub(super) struct Choices {
     pub clipboard: bool,
     pub choose_display: bool,
     pub playback_audio: bool,
+    /// A new local opt-in for this connection, never a saved preference.
+    pub send_files: bool,
 }
 impl Choices {
     /// The window's initial choices, only for a `--pick-only` request.
@@ -31,6 +33,7 @@ impl Choices {
             clipboard: pick.clipboard,
             choose_display: matches!(connection.display, DisplayChoice::Choose),
             playback_audio: pick.playback_audio,
+            send_files: false,
         })
     }
 }
@@ -111,11 +114,12 @@ pub(super) fn selected_report(
             object.insert("clipboard".into(), choices.clipboard.into());
             object.insert("choose_display".into(), choices.choose_display.into());
             object.insert("playback_audio".into(), choices.playback_audio.into());
+            object.insert("send_files".into(), choices.send_files.into());
         }
         format!("{report}\n")
     } else if let Some(choices) = choices {
         format!(
-            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}.\n",
+            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}, file sending {}.\n",
             candidate.certificate_name(),
             candidate.stable_id(),
             if choices.control {
@@ -135,6 +139,11 @@ pub(super) fn selected_report(
             },
             if choices.playback_audio {
                 "requested"
+            } else {
+                "off"
+            },
+            if choices.control && choices.send_files {
+                "enabled for this connection"
             } else {
                 "off"
             }
@@ -163,6 +172,26 @@ mod tests {
             panic!("expected a connection");
         };
         connection.target
+    }
+
+    #[test]
+    fn every_host_picker_starts_without_file_sending_consent() {
+        for role in ["--control", "--view-only"] {
+            let args = format!(
+                "connect --choose-host --pick-only --experimental-native --display only {role} --audio"
+            )
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+            let crate::options::Command::Connect(connection) =
+                crate::options::parse(&args).unwrap().command
+            else {
+                panic!("expected a connection");
+            };
+            let initial = Choices::initial(&connection).unwrap();
+            assert!(!initial.send_files);
+            assert!(initial.playback_audio);
+        }
     }
 
     #[test]

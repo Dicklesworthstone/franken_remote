@@ -71,9 +71,10 @@ cannot be combined with `--port`.
 Choose **View only** or **View and control**, clipboard sharing, which display
 to show, and **Play host audio** before connecting. Playback starts off and
 works with either viewing role. On Linux, F2 toggles control, F3 clipboard,
-F4 display selection, and F5 playback; clicking the options also works.
+F4 display selection, F5 playback, and F6 file sending; clicking the options
+also works.
 Clipboard remains available only with control. The confirmed preferences are
-remembered for the next picker.
+remembered for the next picker, except file sending, which always starts off.
 
 **Play host audio** requests the existing `--audio` session. The host must have
 locally enabled playback capture, and its normal admission and approval rules
@@ -84,6 +85,16 @@ without it visibly marks audio unavailable, disables the option, and clears
 any remembered playback choice before connecting. The machine picker itself
 does not open or check an audio device. See [macOS playback audio](#macos-playback-audio)
 for the Mac build and playback controls.
+
+With **View and control**, select **Send files** to allow file drops onto that
+viewer through the existing `--file-drop` transfer path. This choice applies
+only to the connection you are about to open. Switching to **View only** clears
+and disables it; switching back to control does not restore it. Every new
+picker starts with file sending off, including after a session ends. The
+picker opens no source files, and enabling the option transfers nothing until
+you explicitly drop files into the connected viewer. Host support and transfer
+policy still apply. Reconnects do not replay a selection or restore the old
+controller's file-transfer authority.
 
 The application continuously drains bounded completion output. Native commands
 retain their existing 2 MiB document allowance; the shared Windows capture

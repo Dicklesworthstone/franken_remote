@@ -1,5 +1,39 @@
 # Implementation status
 
+## Native app playback and per-connection file sending (2026-11-21)
+
+The Linux/macOS `fr app` picker exposes the existing host-playback and file-drop
+paths. Playback is a remembered, default-off preference for either viewing
+role. A selection-only command carries it as a preference without preparing
+an audio device; builds without playback disable and clear the option. It
+never enables the microphone. The playback slice landed in `96ee288`.
+
+Send files is a fresh choice for one controlling connection. Every picker
+starts with it off; switching to view-only clears and disables it, and returning
+to control does not restore it. Strict picker completion requires a boolean
+and rejects file consent without control. The app passes the confirmed choice
+separately from saved settings to the existing `--file-drop` session path.
+The picker admits no source files or transfers. Original upload ownership,
+host admission/limits, cancellation and no replay on reconnect are unchanged.
+Linux provides F5 for playback and F6 for file sending; both native pickers
+also expose clickable controls.
+
+Passed: ten retained completion tests and seven final exact-source app tests
+after integrating the incoming native-port change. The app tests cover all 32
+choice combinations at both ports 8443 and 9443, strict report/port validation,
+and actual successful/failed child exits. The original launch port and the
+confirmed file choice remain separate through the viewer command. Also passed:
+ten retained Rust picker tests against the final production C; eight actual production-C/Xvfb audio
+cases and six file-choice cases (initial state, controller opt-in, view-only
+refusal, role downgrade and fresh consent); strict C11 checks and scoped
+pinned formatting. Component checks use the actual completion implementation
+and real client/serialization dependencies. They do not execute the full CLI option
+parser or qualify a live desktop session or native macOS UI/audio/file transfer.
+The all-feature workspace test attempt was interrupted during dependency
+compilation without a final exit receipt or test results; a full-suite pass
+is not claimed. Whole-native check/Clippy and live platform qualification remain
+open under `fr-3ax0` and `fr-6k00`. See [app usage](docs/native-client-cli.md#desktop-application-fr-app).
+
 ## Linux/X11 delayed release reconciliation (2026-11-21)
 
 Release-only native snapshots now preserve bounded ownership of the key/button
@@ -15,8 +49,11 @@ Xvfb with actual XTest/XIM; the two new delayed local key/button release cases
 both failed against the original implementation. Strict C11 compilation,
 pinned Rust formatting, independent source review and whitespace checks passed.
 The retained-event fixtures demonstrate the failure schedule; they do not
-establish a live-session incidence rate. The added Rust decoder/timeline
-regressions and full native/workspace gates remain pending at this checkpoint.
+establish a live-session incidence rate. A follow-up exact-source Rust harness
+against real client/core dependencies passed all 23 tests: ten held-input/time
+cases including the seven new regressions, and thirteen existing display-switch
+cases. All four actual callers pass the new decoder argument. Full
+native/workspace gates remain incomplete.
 This is a focused continuation of `fr-linux-x11-send-text-z14z` and plan §§7.3,
 15.1; physical desktop and complete viewer-to-host qualification remain open.
 

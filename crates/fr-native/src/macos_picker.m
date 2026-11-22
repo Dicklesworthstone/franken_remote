@@ -26,7 +26,8 @@ enum {
 #define FR_CHOICE_CLIPBOARD 2u
 #define FR_CHOICE_DISPLAY 4u
 #define FR_CHOICE_AUDIO 8u
-#define FR_CHOICE_ALL 15u
+#define FR_CHOICE_FILES 16u
+#define FR_CHOICE_ALL 31u
 
 // Must match RawRow in macos/picker.rs. Each byte range is borrowed only for
 // fr_mac_picker_open; NSString makes its own immutable copy before return.
@@ -77,6 +78,7 @@ typedef struct {
     NSButton *clipboard;
     NSButton *chooseDisplay;
     NSButton *playbackAudio;
+    NSButton *sendFiles;
     NSArray<NSString *> *titles;
     NSArray<NSString *> *details;
     int outcome;
@@ -171,6 +173,8 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     chooseDisplay.state = (choices & FR_CHOICE_DISPLAY) ? NSControlStateValueOn : NSControlStateValueOff;
     playbackAudio.enabled = playbackAudioAvailable;
     playbackAudio.state = (choices & FR_CHOICE_AUDIO) ? NSControlStateValueOn : NSControlStateValueOff;
+    sendFiles.enabled = control;
+    sendFiles.state = (choices & FR_CHOICE_FILES) ? NSControlStateValueOn : NSControlStateValueOff;
 }
 // A fresh local click on one of the choice controls changes only the local
 // preference; it never confirms a row. Returns YES when the event was used.
@@ -183,8 +187,11 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     } else if (fr_picker_hit(chooseDisplay, event)) choices ^= FR_CHOICE_DISPLAY;
     else if (fr_picker_hit(playbackAudio, event)) {
         if (playbackAudio.enabled) choices ^= FR_CHOICE_AUDIO;
-    }
-    else return NO;
+    } else if (fr_picker_hit(sendFiles, event)) {
+        if (sendFiles.enabled) choices ^= FR_CHOICE_FILES;
+    } else return NO;
+    // A role downgrade retires this connection's file consent permanently.
+    if (!(choices & FR_CHOICE_CONTROL)) choices &= ~FR_CHOICE_FILES;
     [self showChoices];
     return YES;
 }
@@ -314,8 +321,8 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         }
         if (!isfinite(columnWidth) || columnWidth > 8192) return FR_PICK_INVALID;
         NSRect available = NSScreen.mainScreen.visibleFrame;
-        // Room for the optional notice line and two choices rows.
-        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 60 : 0);
+        // Room for the optional notice line and three choices rows.
+        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 90 : 0);
         CGFloat width = fmin(760, available.size.width - 40);
         CGFloat height = fmin(520 + extra, available.size.height - 60);
         if (width < (hasChoices ? 720 : 360) || height < 240 + extra) return FR_PICK_NATIVE;
@@ -327,6 +334,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         owner->validAfter = NSProcessInfo.processInfo.systemUptime;
         owner->hasChoices = hasChoices;
         owner->choices = hasChoices ? initial : 0;
+        if (!(owner->choices & FR_CHOICE_CONTROL)) owner->choices &= ~FR_CHOICE_FILES;
         owner->playbackAudioAvailable = playback_audio_available != 0;
         if (!owner->playbackAudioAvailable) owner->choices &= ~FR_CHOICE_AUDIO;
         owner->window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height)
@@ -358,7 +366,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             line.lineBreakMode = NSLineBreakByTruncatingTail;
             [content addSubview:line];
         }
-        CGFloat bottom = hasChoices ? 138 : 78;
+        CGFloat bottom = hasChoices ? 168 : 78;
         if (hasChoices) {
             owner->viewOnly = [NSButton radioButtonWithTitle:@"View only" target:nil action:nil];
             owner->viewOnly.frame = NSMakeRect(20, 50, 110, 24);
@@ -371,13 +379,20 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             owner->playbackAudio = [NSButton checkboxWithTitle:owner->playbackAudioAvailable
                 ? @"Play host audio" : @"Audio unavailable in this build" target:nil action:nil];
             owner->playbackAudio.frame = NSMakeRect(20, 80, 260, 24);
-            for (NSButton *choice in @[owner->viewOnly, owner->viewControl, owner->clipboard, owner->chooseDisplay, owner->playbackAudio])
+            owner->sendFiles = [NSButton checkboxWithTitle:@"Send files" target:nil action:nil];
+            owner->sendFiles.frame = NSMakeRect(20, 110, 160, 24);
+            for (NSButton *choice in @[owner->viewOnly, owner->viewControl, owner->clipboard, owner->chooseDisplay, owner->playbackAudio, owner->sendFiles])
                 [content addSubview:choice];
             NSTextField *audioHint = [NSTextField labelWithString:@"Host sound only; your microphone stays off."];
             audioHint.frame = NSMakeRect(295, 82, width - 315, 20);
             audioHint.font = [NSFont systemFontOfSize:11];
             audioHint.textColor = NSColor.secondaryLabelColor;
             [content addSubview:audioHint];
+            NSTextField *fileHint = [NSTextField labelWithString:@"Drop files onto the viewer for this connection only."];
+            fileHint.frame = NSMakeRect(200, 112, width - 220, 20);
+            fileHint.font = [NSFont systemFontOfSize:11];
+            fileHint.textColor = NSColor.secondaryLabelColor;
+            [content addSubview:fileHint];
             [owner showChoices];
         }
         owner->scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, bottom, width - 40,
@@ -519,6 +534,7 @@ int fr_mac_picker_close(void *handle) {
         owner->clipboard = nil;
         owner->chooseDisplay = nil;
         owner->playbackAudio = nil;
+        owner->sendFiles = nil;
         owner->titles = nil;
         owner->details = nil;
         // Consume only the original bridge retain. Rust clears its pointer

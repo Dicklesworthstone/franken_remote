@@ -38,6 +38,8 @@ pub struct Choices {
     pub clipboard: bool,
     pub choose_display: bool,
     pub playback_audio: bool,
+    /// Explicit file-drop opt-in for this controlling connection only.
+    pub send_files: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
@@ -45,9 +47,10 @@ impl Choices {
             | (u32::from(self.clipboard) << 1)
             | (u32::from(self.choose_display) << 2)
             | (u32::from(self.playback_audio) << 3)
+            | (u32::from(self.send_files) << 4)
     }
     const fn from_bits(bits: u32) -> Option<Self> {
-        if bits & !15 != 0 {
+        if bits & !31 != 0 || (bits & 16 != 0 && bits & 1 == 0) {
             return None;
         }
         Some(Self {
@@ -55,6 +58,7 @@ impl Choices {
             clipboard: bits & 2 != 0,
             choose_display: bits & 4 != 0,
             playback_audio: bits & 8 != 0,
+            send_files: bits & 16 != 0,
         })
     }
 }

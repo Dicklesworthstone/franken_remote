@@ -36,6 +36,8 @@ pub struct Choices {
     pub clipboard: bool,
     pub choose_display: bool,
     pub playback_audio: bool,
+    /// Explicit file-drop opt-in for this controlling connection only.
+    pub send_files: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
@@ -43,9 +45,10 @@ impl Choices {
             | (u32::from(self.clipboard) << 1)
             | (u32::from(self.choose_display) << 2)
             | (u32::from(self.playback_audio) << 3)
+            | (u32::from(self.send_files) << 4)
     }
     const fn from_bits(bits: u32) -> Option<Self> {
-        if bits & !15 != 0 {
+        if bits & !31 != 0 || (bits & 16 != 0 && bits & 1 == 0) {
             return None;
         }
         Some(Self {
@@ -53,6 +56,7 @@ impl Choices {
             clipboard: bits & 2 != 0,
             choose_display: bits & 4 != 0,
             playback_audio: bits & 8 != 0,
+            send_files: bits & 16 != 0,
         })
     }
 }
@@ -460,12 +464,16 @@ mod tests {
     use fr_wire::display::Display;
 
     #[test]
-    fn playback_audio_is_an_independent_bounded_choice() {
-        for bits in 0..16 {
+    fn native_choices_bound_file_sending_to_control() {
+        for bits in 0..32 {
+            if bits & 16 != 0 && bits & 1 == 0 {
+                assert_eq!(Choices::from_bits(bits), None);
+                continue;
+            }
             let choices = Choices::from_bits(bits).unwrap();
             assert_eq!(choices.bits(), bits);
         }
-        assert_eq!(Choices::from_bits(16), None);
+        assert_eq!(Choices::from_bits(32), None);
         assert_eq!(Choices::from_bits(NO_CHOICES), None);
         let choices = Choices {
             playback_audio: true,

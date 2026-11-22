@@ -28,20 +28,25 @@ fn complete(control: &Control) {
 }
 
 #[test]
-fn choices_cross_the_native_boundary_as_four_bits_only() {
-    for bits in 0..16 {
+fn choices_bound_file_sending_to_control_and_five_known_bits() {
+    for bits in 0..32 {
+        if bits & 16 != 0 && bits & 1 == 0 {
+            assert_eq!(Choices::from_bits(bits), None);
+            continue;
+        }
         let choices = Choices::from_bits(bits).unwrap();
         assert_eq!(choices.bits(), bits);
     }
-    assert_eq!(Choices::from_bits(16), None);
+    assert_eq!(Choices::from_bits(32), None);
     assert_eq!(Choices::from_bits(NO_CHOICES), None);
     let choices = Choices {
         control: true,
         clipboard: false,
         choose_display: true,
         playback_audio: true,
+        send_files: true,
     };
-    assert_eq!(choices.bits(), 13);
+    assert_eq!(choices.bits(), 29);
 }
 
 #[test]

@@ -935,7 +935,15 @@ fn parse_command(
             _ => return Err(usage()),
         }
     }
-    if (app_notice.is_some() && !pick_only) || (pick_only && diagnostics_out.is_some()) {
+    if (app_notice.is_some() && !pick_only)
+        || (pick_only
+            && (diagnostics_out.is_some()
+                || !send.is_empty()
+                || choose_files
+                || file_drop
+                || file_commands
+                || receive.is_some()))
+    {
         return Err(usage());
     }
     let receive = ReceiveOptions::new(
@@ -1192,6 +1200,25 @@ mod tests {
         *long.last_mut().unwrap() = "tab\there".to_owned();
         assert!(parse(&long).is_err());
     }
+    #[test]
+    fn pick_only_never_starts_file_selection_or_transfer() {
+        let base = "connect --choose-host --experimental-native --display only --pick-only";
+        for role in ["--control", "--view-only"] {
+            for operation in [
+                "--file-drop",
+                "--file-commands",
+                "--choose-files",
+                "--send /local/file",
+                "--receive /local/folder",
+            ] {
+                assert!(
+                    options(&format!("{base} {role} {operation}")).is_err(),
+                    "{operation}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn picker_audio_is_only_a_preference_and_never_an_audio_request() {
         let base = "connect --choose-host --experimental-native --display only";

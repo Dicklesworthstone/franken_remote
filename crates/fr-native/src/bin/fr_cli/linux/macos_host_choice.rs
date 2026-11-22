@@ -41,6 +41,7 @@ pub(super) fn select(
             clipboard: choices.clipboard,
             choose_display: choices.choose_display,
             playback_audio: choices.playback_audio,
+            send_files: choices.send_files,
         }),
         host_choice::notice(connection),
     )
@@ -64,6 +65,7 @@ pub(super) fn select(
         clipboard: choices.clipboard,
         choose_display: choices.choose_display,
         playback_audio: choices.playback_audio,
+        send_files: choices.send_files,
     });
     if confirmed.is_some() != initial.is_some() {
         return Err(unavailable());
