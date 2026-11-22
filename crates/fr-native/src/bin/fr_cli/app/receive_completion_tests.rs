@@ -122,7 +122,8 @@ fn earlier_publication_survives_later_unknown_and_truncated_results() {
         value["files_received"] = json!([{"index":0,"bytes":42,"durable":false}]);
         match field {
             "receipt" => {
-                value["files_receive_refused"] = json!([{"index":1,"reason":"publication_unknown"}]);
+                value["files_receive_refused"] =
+                    json!([{"index":1,"reason":"publication_unknown"}]);
             }
             "ended" => value["files_receive_ended"] = json!("publication_unknown"),
             _ => value["files_receive_results_truncated"] = json!(true),
@@ -402,4 +403,57 @@ fn actual_native_formatter_and_terminal_preservation_match_the_application_contr
             .unwrap()
             .starts_with("Receiving did not start")
     );
+}
+
+#[test]
+fn incomplete_capture_preserves_only_the_complete_final_receive_document() {
+    use fr_client::completion::NATIVE_COMPLETION_LINE_LIMIT;
+    use std::io::{self, Read};
+
+    struct FailedTail;
+    impl Read for FailedTail {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "capture failed"))
+        }
+    }
+
+    let mut value = completion(false);
+    value["files_received"] = json!([{"index":0,"bytes":19,"durable":false}]);
+    let terminal = format!("{value}\n");
+    let broken_pipe = capture_completion_with_limit(
+        terminal.as_bytes().chain(FailedTail),
+        CompletionLimit::NativeCommand,
+    );
+    let partial = format!("{terminal}unfinished diagnostic");
+    let partial_tail = capture_completion_with_limit(
+        partial.as_bytes().chain(FailedTail),
+        CompletionLimit::NativeCommand,
+    );
+    let mut oversized = vec![b'x'; NATIVE_COMPLETION_LINE_LIMIT + 1];
+    oversized.push(b'\n');
+    oversized.extend_from_slice(terminal.as_bytes());
+    let overflow =
+        capture_completion_with_limit(oversized.as_slice(), CompletionLimit::NativeCommand);
+
+    for capture in [broken_pipe, partial_tail, overflow] {
+        assert!(capture.completion().is_err());
+        assert!(capture.retained_document().is_some());
+        for expected in [false, true] {
+            let failure =
+                session_notice_checked(&capture, "workstation", true, expected).unwrap_err();
+            assert_eq!(failure.code, "app_receive_outcome_unknown");
+            let report = retained(failure);
+            assert_eq!(report["outcome"], "unknown_external_effect");
+            assert_eq!(report["files_received"], value["files_received"]);
+        }
+    }
+
+    // The final candidate owns the evidence, even after an earlier overflow.
+    // A later non-document cannot resurrect the publication above.
+    oversized.extend_from_slice(b"viewer failed\n");
+    let invalid_tail =
+        capture_completion_with_limit(oversized.as_slice(), CompletionLimit::NativeCommand);
+    let failure = session_notice_checked(&invalid_tail, "workstation", true, true).unwrap_err();
+    assert!(failure.unknown_effect);
+    assert!(failure.files_receive.is_none());
 }

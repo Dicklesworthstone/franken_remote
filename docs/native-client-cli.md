@@ -135,6 +135,11 @@ join, unknown publication, truncated results, or missing/malformed expected
 receive evidence stops the app with an explicit uncertain outcome. Earlier
 publication receipts remain in the error report; a later failure neither rolls
 them back nor authorizes replay.
+A damaged completion stream still retains bounded receipts from its retained
+complete document when available, while the overall outcome remains uncertain.
+That diagnostic evidence never authorizes another connection or certifies a
+successful completion; a later complete invalid document cannot recover an
+older receipt document.
 
 For a clean completion, the picker shows how many files were locally published,
 how many were refused, and how many publications have unconfirmed durability.

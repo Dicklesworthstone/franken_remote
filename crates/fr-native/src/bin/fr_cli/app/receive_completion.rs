@@ -48,10 +48,25 @@ pub(super) fn inspect(
     expected: bool,
     report: Option<&Report>,
 ) -> Result<Inspection, Failure> {
-    let value = stdout
-        .completion()
-        .ok()
-        .and_then(|line| serde_json::from_str::<Value>(line).ok());
+    let Ok(line) = stdout.completion() else {
+        // Failed drainage cannot support a clean end, but a complete final
+        // document may still contain real publication receipts. Preserve
+        // only that bounded candidate; never certify a clean completion.
+        let evidence = stdout
+            .retained_document()
+            .and_then(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(has_metadata)
+            .map(|value| {
+                Record::parse(&value)
+                    .map_or_else(|()| incomplete(&value), |record| record.evidence())
+            });
+        return if expected || evidence.is_some() {
+            Err(unknown(evidence))
+        } else {
+            Ok(Inspection::default())
+        };
+    };
+    let value = serde_json::from_str::<Value>(line).ok();
     let Some(value) = value else {
         return if expected {
             Err(unknown(None))
@@ -59,12 +74,7 @@ pub(super) fn inspect(
             Ok(Inspection::default())
         };
     };
-    let present = value.as_object().is_some_and(|object| {
-        object
-            .keys()
-            .any(|key| key == "files_received" || key.starts_with("files_receive_"))
-    });
-    if !present {
+    if !has_metadata(&value) {
         // Errors before an owner exists have no receive summary. Actual later
         // failures preserve the original Summary through terminal::output.
         // A successful completion must positively account for requested work.
@@ -106,6 +116,14 @@ pub(super) fn inspect(
         }
     } else {
         Inspection::default()
+    })
+}
+
+fn has_metadata(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object
+            .keys()
+            .any(|key| key == "files_received" || key.starts_with("files_receive_"))
     })
 }
 
