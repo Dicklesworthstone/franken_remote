@@ -4,7 +4,7 @@
 //!
 //! 1. `fr connect --choose-host --pick-only --json ...` shows the native
 //!    machine picker with the connection choices (view only or view and
-//!    control, clipboard text, which display, host audio, one-use file sending)
+//!    control, clipboard text, which display, host audio, one-use file sharing)
 //!    and the previous outcome, then
 //!    reports the chosen identity and choices. It opens no connection.
 //! 2. `fr connect NODE ... --json` is the plain viewer for that choice.
@@ -45,7 +45,8 @@ Without options, opens the machine picker: choose a machine on your tailnet,\n\
 View only or View and control, Share clipboard text, Ask which display to\n\
 show and Play host audio, then Connect. Audio starts off; enabling it never\n\
 enables your microphone. With control, select Send files to allow file drops\n\
-onto this viewer only. It starts off again in every new picker. Closing the\n\
+onto this viewer only. On macOS, select Receive files to choose a private\n\
+folder before connecting. Both choices start off in every new picker. Closing the\n\
 viewer returns to the picker with the outcome; Cancel or Escape quits. Viewing\n\
 preferences are remembered. An unused\n\
 picker reopens with a fresh machine list every two minutes; after half an\n\
@@ -731,11 +732,11 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
                 &settings,
                 receiving_notice.as_deref().or(notice.as_deref()),
                 port,
-                receiving.is_some(),
+                receiving::available(receiving.as_ref()),
             ),
             idle_expiries == 0,
         )?;
-        let report = picker_report(&picked, port, receiving.is_some());
+        let report = picker_report(&picked, port, receiving::available(receiving.as_ref()));
         refuse_uncertain_report(report.as_ref())?;
         let (node, name, send_files, receive_files) = match report {
             Some(Report::Selected {
@@ -796,7 +797,7 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
         // selected viewer, including an explicit decline. No next picker or
         // failed launch can recover this one-use destination.
         let receive_expected = receive_files;
-        let arguments = receiving::take_for_choice(
+        let arguments = receiving::take_for_app_choice(
             &mut receiving,
             session_args(&node, &settings, port, send_files),
             receive_files,

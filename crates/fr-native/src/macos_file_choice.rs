@@ -42,6 +42,7 @@ enum State {
 pub(crate) struct Choice {
     opened: Instant,
     state: State,
+    directory_only: bool,
 }
 impl fmt::Debug for Choice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -55,6 +56,15 @@ impl Choice {
         Self {
             opened,
             state: State::Waiting,
+            directory_only: false,
+        }
+    }
+    /// A receiving destination exports exactly one local directory path. The
+    /// receiver still opens and verifies that directory after native cleanup.
+    pub(crate) fn directory(opened: Instant) -> Self {
+        Self {
+            directory_only: true,
+            ..Self::new(opened)
         }
     }
     pub(crate) fn waiting(&self) -> bool {
@@ -99,6 +109,18 @@ impl Choice {
         let Ok(selected) = paths(bytes) else {
             return self.refuse(Error::InvalidSelection);
         };
+        if self.directory_only
+            && (selected.len() != 1
+                || selected.iter().any(|path| {
+                    path.components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))
+                        || path
+                            .to_str()
+                            .is_none_or(|text| text.chars().any(char::is_control))
+                }))
+        {
+            return self.refuse(Error::InvalidSelection);
+        }
         self.state = State::Selected {
             paths: selected,
             captured,
@@ -259,6 +281,100 @@ mod tests {
             .unwrap();
         assert_eq!(
             choice.finish(|| before + MAX_AGE, || panic!("stale native owner")),
+            Err(Error::Expired)
+        );
+    }
+
+    #[test]
+    fn directory_mode_preserves_one_exact_path_only_after_cleanup() {
+        let now = Instant::now();
+        let mut choice = Choice::directory(now);
+        choice
+            .select(b"file:///private/caf%C3%A9%20%252F\n", 0.0, now)
+            .unwrap();
+        assert!(!format!("{choice:?}").contains("private"));
+        assert_eq!(
+            choice.finish(|| now, || Err(Error::CleanupIncomplete)),
+            Err(Error::CleanupIncomplete)
+        );
+        let selected = choice.finish(|| now, || Ok(())).unwrap().unwrap();
+        assert_eq!(selected, [PathBuf::from("/private/caf\u{e9} %2F")]);
+        assert_eq!(
+            choice.finish(|| now, || panic!("original owner already closed")),
+            Err(Error::AlreadyUsed)
+        );
+    }
+
+    #[test]
+    fn directory_mode_rejects_multiple_ambiguous_remote_and_control_paths() {
+        let now = Instant::now();
+        for bytes in [
+            b"".as_slice(),
+            b"file:///first\nfile:///second",
+            b"file://remote/private/folder",
+            b"file:///private/../folder",
+            b"file:///private/%2e%2e/folder",
+            b"file:///private/bad%00folder",
+            b"file:///private/bad%C2%85folder",
+            b"file:///private/bad%2Ffolder",
+            b"file:///private/bad%ff",
+        ] {
+            let mut choice = Choice::directory(now);
+            assert_eq!(choice.select(bytes, 0.0, now), Err(Error::InvalidSelection));
+            assert_eq!(
+                choice.finish(|| now, || panic!("invalid destination not exported")),
+                Err(Error::InvalidSelection)
+            );
+        }
+        let mut choice = Choice::directory(now);
+        let oversized = format!("file:///{}", "a".repeat(4096));
+        assert_eq!(
+            choice.select(oversized.as_bytes(), 0.0, now),
+            Err(Error::InvalidSelection)
+        );
+    }
+
+    #[test]
+    fn directory_mode_cancellation_and_native_failure_fence_late_selection() {
+        let now = Instant::now();
+        for error in [
+            Error::Cancelled,
+            Error::EventFlood,
+            Error::NativeFailure,
+            Error::WrongThread,
+        ] {
+            let mut choice = Choice::directory(now);
+            choice.select(b"file:///private/first", 0.0, now).unwrap();
+            assert_eq!(choice.refuse(error), Err(error));
+            assert_eq!(
+                choice.select(b"file:///private/replacement", 0.0, now),
+                Err(error)
+            );
+            assert_eq!(
+                choice.finish(|| now, || panic!("refused destination not exported")),
+                Err(error)
+            );
+        }
+    }
+
+    #[test]
+    fn directory_mode_keeps_original_completion_and_cleanup_deadlines() {
+        let now = Instant::now();
+        let mut expired = Choice::directory(now);
+        assert_eq!(
+            expired.select(b"file:///private/late", 0.0, now + CHOICE_LIMIT),
+            Err(Error::Expired)
+        );
+        let mut stale = Choice::directory(now);
+        stale.select(b"file:///private/stale", 0.0, now).unwrap();
+        let mut clock = [now, now + MAX_AGE].into_iter();
+        assert_eq!(
+            stale.finish(|| clock.next().unwrap(), || Ok(())),
+            Err(Error::Expired)
+        );
+        let mut aged = Choice::directory(now);
+        assert_eq!(
+            aged.select(b"file:///private/aged", MAX_AGE.as_secs_f64(), now),
             Err(Error::Expired)
         );
     }

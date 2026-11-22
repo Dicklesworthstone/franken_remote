@@ -299,14 +299,48 @@ pub(super) fn run_observation(
         minimum,
     )
 }
+/// These call sites precede any connection or receive owner. Preserve positive
+/// non-start evidence without exempting generic errors after a worker can exist.
+fn receive_before_start(options: &Options, failure: Failure) -> Failure {
+    #[cfg(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
+    if let Command::Connect(connection) = &options.command
+        && (connection.receive.is_some() || connection.choose_receive_directory)
+    {
+        let mut failure = failure;
+        crate::file_reports::download::Summary::unavailable("files_receive_not_started")
+            .preserve(&mut failure);
+        return failure;
+    }
+    let _ = options;
+    failure
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
     #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+    if matches!(&options.command, Command::Connect(connection) if connection.choose_receive_directory)
+    {
+        return Err(receive_before_start(
+            options,
+            Failure::new(
+                "receive_directory_picker_unavailable",
+                "--choose-receive-directory requires the native macOS desktop build; use --receive DIR on this platform. No connection was opened.",
+                2,
+            ),
+        ));
+    }
+    #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
     if matches!(&options.command, Command::Connect(connection) if connection.upload.choose_files) {
-        return Err(Failure::new(
-            "file_picker_unavailable",
-            "--choose-files requires the native macOS desktop build; use --send PATH or --file-drop on this platform. No connection was opened.",
-            2,
+        return Err(receive_before_start(
+            options,
+            Failure::new(
+                "file_picker_unavailable",
+                "--choose-files requires the native macOS desktop build; use --send PATH or --file-drop on this platform. No connection was opened.",
+                2,
+            ),
         ));
     }
     if let Command::SavedHosts(saved) = &options.command
@@ -314,8 +348,8 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
     {
         return Ok(text);
     }
-    let mut shutdown = Shutdown::new()?;
-    let (runtime, cx) = runtime::create()?;
+    let mut shutdown = Shutdown::new().map_err(|error| receive_before_start(options, error))?;
+    let (runtime, cx) = runtime::create().map_err(|error| receive_before_start(options, error))?;
     let stopped = Cell::new(false);
     // Local session closure still works when installed Tailscale is stopped or
     // its socket is unavailable. It never opens another remote connection.
@@ -337,7 +371,9 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
     }
     // macOS too: --socket names one root tailscaled socket (fr-tailnet).
     let api = match &options.socket {
-        Some(path) => LocalApi::new(path).map_err(tailnet)?,
+        Some(path) => LocalApi::new(path)
+            .map_err(tailnet)
+            .map_err(|error| receive_before_start(options, error))?,
         None => LocalApi::installed(),
     };
     match &options.command {
@@ -2516,6 +2552,28 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+    fn receive_directory_chooser_refuses_before_any_runtime_or_local_api() {
+        let options = crate::options::parse(
+            &"connect nHOST --control --experimental-native --display only --choose-receive-directory --socket /private/not-a-tailscale-socket"
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let failure = run_mode(&options, false).unwrap_err();
+        assert_eq!(failure.code, "receive_directory_picker_unavailable");
+        assert!(!failure.unknown_effect);
+        #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+        {
+            let value: serde_json::Value =
+                serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+            assert_eq!(value["files_receive_requested"], true);
+            assert_eq!(value["files_receive_cleanup"], "not_started");
+        }
+    }
+
     // Linux without its desktop feature. The macOS desktop build also compiles
     // this module, but there `LocalApi::new` refuses every custom endpoint.
     #[test]
@@ -2548,6 +2606,7 @@ mod tests {
                 file_commands: false,
             },
             receive: None,
+            choose_receive_directory: false,
             pick: None,
             diagnostics_out: None,
         };

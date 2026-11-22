@@ -407,7 +407,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             fileHint.textColor = NSColor.secondaryLabelColor;
             [content addSubview:fileHint];
             NSTextField *receiveHint = [NSTextField labelWithString:owner->receiveAvailable
-                ? @"Into your selected local folder, for this connection only."
+                ? @"Into a local folder you select, for this connection only."
                 : @"Start fr app with --receive DIR to select a local folder."];
             receiveHint.frame = NSMakeRect(200, 142, width - 220, 20);
             receiveHint.font = [NSFont systemFontOfSize:11];

@@ -27,7 +27,7 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--attempts 1..32] [--fit WIDTHxHEIGHT] [--no-clipboard]
     [--capture-system-shortcuts] [--choose-files|--send PATH...]
     [--file-drop] [--file-commands]
-    [--receive /absolute/private-directory]
+    [--receive /absolute/private-directory | --choose-receive-directory]
     [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
     [--receive-max-session-bytes N]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
@@ -104,6 +104,10 @@ on the bottom line), then connects with those choices. Closing the viewer
 returns to the picker with the outcome; Cancel/Escape in the picker quits.
 An unused picker reopens with a fresh machine list every two minutes; after
 half an hour unused, fr app quits.
+On macOS, Receive files opens a fresh private-folder chooser before connecting;
+it requires control and starts unchecked for every connection. An explicit
+fr app --receive DIR instead supplies that exact destination once. Linux needs
+that explicit destination. No receive path or consent is remembered.
 Choices are remembered in ~/Library/Application Support/FrankenRemote/
 settings.json (macOS) or $XDG_CONFIG_HOME/frankenremote/settings.json.
 fr app --install adds ~/Applications/FrankenRemote.app (macOS) or an
@@ -154,6 +158,11 @@ An open panel accepts X11 file-manager Copy drops. --file-drop works without
 use panel buttons. Hiding stops drops; Cancel before the first ends sharing.
 Reconnect never restores drops/repeats selections. Missing controls:
 file_drop_unavailable.
+On macOS, --choose-receive-directory chooses and pins one existing private folder
+before remote lookup. It requires --control and uses actual receiver defaults
+with reject-conflict policy. It excludes --receive, receive-policy overrides and
+--pick-only. Cancel/timeout starts no connection; each new viewer needs a fresh
+choice. Other platforms refuse this chooser before session startup.
 --receive DIR must be absolute, owned by you, not group/other writable, with no
 symlink components. Host: frd run --once --input-agent PATH --send PATH... .
 Items publish atomically, never open/run. Defaults: 256 MiB/selection, 1 GiB/session.

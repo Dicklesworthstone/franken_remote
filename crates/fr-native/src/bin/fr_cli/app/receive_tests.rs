@@ -1,4 +1,5 @@
-//! The app owns a destination; a picker result can only opt into that owner.
+//! The app retains one configured destination or requests a fresh native choice.
+//! A picker result carries consent only; the viewer owns the actual directory.
 use super::*;
 use crate::options::ReceiveOptions;
 use std::os::unix::process::ExitStatusExt;
@@ -61,6 +62,133 @@ fn connection(args: &[String]) -> crate::options::Connection {
         panic!("original viewer command");
     };
     connection
+}
+
+#[test]
+fn ordinary_app_receiving_requires_a_fresh_local_choice_for_every_viewer() {
+    let native = receiving::directory_picker_available();
+    assert_eq!(
+        native,
+        cfg!(all(target_os = "macos", feature = "macos-desktop"))
+    );
+    assert_eq!(receiving::available(None), native);
+    assert!(receiving::available(pending().as_ref()));
+    for consent in [false, true, false, true] {
+        let mut destination = None;
+        let result = receiving::take_for_app_choice(
+            &mut destination,
+            session_args("nHOST", &Settings::default(), 9443, false),
+            consent,
+        );
+        assert!(destination.is_none());
+        if consent && !native {
+            assert_eq!(result.unwrap_err().code, "invalid_arguments");
+            continue;
+        }
+        let args = result.unwrap();
+        let viewer = connection(&args);
+        assert_eq!(viewer.choose_receive_directory, consent);
+        assert!(viewer.receive.is_none());
+        assert_eq!(
+            args.iter()
+                .filter(|arg| *arg == "--choose-receive-directory")
+                .count(),
+            usize::from(consent)
+        );
+        let picker = connection(&pick_args(&Settings::default(), None, 9443, native));
+        assert!(!picker.choose_receive_directory && picker.receive.is_none());
+        let choices = crate::host_choice::Choices::initial(&picker).unwrap();
+        assert_eq!(choices.receive_available, native);
+        assert!(!choices.receive_files);
+    }
+    let saved = Settings::from_json(
+        br#"{"version":1,"choose_receive_directory":true,"receive_files":true,"receive":"/private/old"}"#,
+    )
+    .to_json();
+    assert!(!saved.contains("receive") && !saved.contains("private"));
+}
+
+#[test]
+fn configured_destination_is_consumed_before_a_later_fresh_directory_choice() {
+    for consent in [false, true] {
+        let mut destination = pending();
+        let args = receiving::take_for_app_choice(
+            &mut destination,
+            session_args("nFIRST", &Settings::default(), 9443, false),
+            consent,
+        )
+        .unwrap();
+        let first = connection(&args);
+        assert_eq!(first.receive, consent.then(receive));
+        assert!(!first.choose_receive_directory);
+        assert!(destination.is_none());
+        let args = receiving::take_for_app_choice(
+            &mut destination,
+            session_args("nNEXT", &Settings::default(), 9443, false),
+            false,
+        )
+        .unwrap();
+        let next = connection(&args);
+        assert!(next.receive.is_none() && !next.choose_receive_directory);
+        assert!(!args.iter().any(|arg| arg.contains("Chosen folder")));
+    }
+    if receiving::directory_picker_available() {
+        let mut destination = None;
+        let view = Settings {
+            control: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            receiving::take_for_app_choice(
+                &mut destination,
+                session_args("nHOST", &view, 9443, false),
+                true,
+            )
+            .unwrap_err()
+            .code,
+            "receive_requires_control"
+        );
+    }
+}
+
+#[test]
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+fn actual_prestart_receive_summary_keeps_cancel_and_local_failures_retryable() {
+    for code in [
+        "receive_directory_choice_cancelled",
+        "receive_directory_choice_expired",
+        "receive_directory_choice_invalid",
+        "files_directory_writable_by_others",
+        "runtime_unavailable",
+    ] {
+        let mut failure = Failure::new(code, "No connection was made.", 2);
+        crate::file_reports::download::Summary::unavailable("files_receive_not_started")
+            .preserve(&mut failure);
+        let value: Value = serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+        assert_eq!(value["files_receive_requested"], true);
+        assert_eq!(value["files_receive_cleanup"], "not_started");
+        assert_eq!(value["files_received"], json!([]));
+        assert!(
+            session_notice_checked(&finished(&value, false).stdout, "host", false, true).is_ok(),
+            "{code}"
+        );
+    }
+    let mut failure = Failure::new(
+        "receive_directory_picker_cleanup_incomplete",
+        "Inspect the original picker.",
+        1,
+    );
+    crate::file_reports::download::Summary::unavailable("files_receive_not_started")
+        .preserve(&mut failure);
+    let value: Value = serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+    assert!(
+        session_notice_checked(&finished(&value, false).stdout, "host", false, true)
+            .unwrap_err()
+            .unknown_effect
+    );
 }
 
 #[test]

@@ -14,6 +14,7 @@ use std::{
 
 unsafe extern "C" {
     fn fr_mac_file_picker_open(out: *mut *mut c_void) -> c_int;
+    fn fr_mac_directory_picker_open(out: *mut *mut c_void) -> c_int;
     fn fr_mac_file_picker_poll(
         handle: *mut c_void,
         bytes: *mut u8,
@@ -43,17 +44,35 @@ pub struct FilePicker {
 }
 impl FilePicker {
     pub fn open() -> Result<Self, Error> {
+        Self::open_mode(false)
+    }
+    /// Select one existing local receiving directory. No file is created or
+    /// directory opened here; the receiver validates and pins it after cleanup.
+    pub fn open_directory() -> Result<Self, Error> {
+        Self::open_mode(true)
+    }
+    fn open_mode(directory_only: bool) -> Result<Self, Error> {
         let opened = Instant::now();
         let mut handle = std::ptr::null_mut();
         // SAFETY: output is an exclusive scalar; native code retains no Rust
         // pointer and refuses a non-main-thread call before creating its owner.
-        let result = unsafe { fr_mac_file_picker_open(&raw mut handle) };
+        let result = unsafe {
+            if directory_only {
+                fr_mac_directory_picker_open(&raw mut handle)
+            } else {
+                fr_mac_file_picker_open(&raw mut handle)
+            }
+        };
         if result != 0 {
             return Err(native_error(result));
         }
         Ok(Self {
             handle: Some(NonNull::new(handle).ok_or(Error::NativeFailure)?),
-            choice: Choice::new(opened),
+            choice: if directory_only {
+                Choice::directory(opened)
+            } else {
+                Choice::new(opened)
+            },
             bytes: vec![0_u8; MAX_BYTES].into_boxed_slice(),
             _main_thread: PhantomData,
         })

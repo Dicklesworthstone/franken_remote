@@ -18,6 +18,7 @@ enum { FR_FILE_WAIT = 0, FR_FILE_CHOSEN = 1, FR_FILE_INVALID = -1,
 @public
     NSOpenPanel *panel;
     int outcome;
+    BOOL directoryOnly;
     uint8_t bytes[FR_FILE_BYTES];
     size_t length;
     double completed;
@@ -35,7 +36,8 @@ enum { FR_FILE_WAIT = 0, FR_FILE_CHOSEN = 1, FR_FILE_INVALID = -1,
     // No application/network callback can substitute paths after this point.
     completed = NSProcessInfo.processInfo.systemUptime;
     NSArray<NSURL *> *urls = panel.URLs;
-    if (!isfinite(completed) || completed <= 0 || !urls.count || urls.count > FR_FILE_PATHS) {
+    if (!isfinite(completed) || completed <= 0 || !urls.count ||
+        urls.count > FR_FILE_PATHS || (directoryOnly && urls.count != 1)) {
         outcome = FR_FILE_INVALID;
         return;
     }
@@ -64,7 +66,7 @@ enum { FR_FILE_WAIT = 0, FR_FILE_CHOSEN = 1, FR_FILE_INVALID = -1,
 }
 @end
 
-int fr_mac_file_picker_open(void **out) {
+static int fr_mac_file_picker_open_mode(void **out, BOOL directoryOnly) {
     if (!out) return FR_FILE_INVALID;
     *out = NULL;
     if (![NSThread isMainThread]) return FR_FILE_THREAD;
@@ -72,14 +74,17 @@ int fr_mac_file_picker_open(void **out) {
     @autoreleasepool {
         FrFilePickerOwner *owner = [FrFilePickerOwner new];
         owner->outcome = FR_FILE_WAIT;
+        owner->directoryOnly = directoryOnly;
         owner->panel = [NSOpenPanel openPanel];
         if (!owner->panel) return FR_FILE_NATIVE;
-        owner->panel.title = @"Choose files to send";
-        owner->panel.message = @"Choose up to 8 local files or folders. They will be sent only after the host grants this connection control. Cancel opens no connection.";
-        owner->panel.prompt = @"Use selection";
-        owner->panel.canChooseFiles = YES;
+        owner->panel.title = directoryOnly ? @"Choose where to receive files" : @"Choose files to send";
+        owner->panel.message = directoryOnly
+            ? @"Choose one existing local folder. Host-selected files can be received only on this connection after control is granted. Existing files are never replaced. Cancel opens no connection."
+            : @"Choose up to 8 local files or folders. They will be sent only after the host grants this connection control. Cancel opens no connection.";
+        owner->panel.prompt = directoryOnly ? @"Use folder" : @"Use selection";
+        owner->panel.canChooseFiles = !directoryOnly;
         owner->panel.canChooseDirectories = YES;
-        owner->panel.allowsMultipleSelection = YES;
+        owner->panel.allowsMultipleSelection = !directoryOnly;
         owner->panel.canCreateDirectories = NO;
         owner->panel.resolvesAliases = NO;
         owner->panel.treatsFilePackagesAsDirectories = YES;
@@ -106,6 +111,15 @@ int fr_mac_file_picker_open(void **out) {
         *out = (__bridge_retained void *)owner;
     }
     return FR_FILE_WAIT;
+}
+
+// Preserve the upload boundary; receiving selects its mode explicitly.
+int fr_mac_file_picker_open(void **out) {
+    return fr_mac_file_picker_open_mode(out, NO);
+}
+
+int fr_mac_directory_picker_open(void **out) {
+    return fr_mac_file_picker_open_mode(out, YES);
 }
 
 int fr_mac_file_picker_poll(void *handle, uint8_t *bytes, size_t capacity,

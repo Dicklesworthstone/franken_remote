@@ -3,14 +3,57 @@
 use super::Failure;
 use crate::{
     file_reports::{download, upload},
-    options::Connection,
+    options::{Connection, ReceiveOptions},
 };
 use fr_native::macos::files::{Files, Status};
+use frd::native_files::Directory;
+use std::path::Path;
+
+/// Open the original destination immediately after its native choice, before
+/// another chooser can delay pinning it. No disk worker or transfer starts here.
+pub(super) fn receive(
+    connection: &Connection,
+    chosen: Option<&Path>,
+) -> Result<Option<Directory>, Failure> {
+    if connection.choose_receive_directory != chosen.is_some()
+        || (chosen.is_some() && connection.receive.is_some())
+    {
+        return Err(Failure::new(
+            "receive_directory_choice_invalid",
+            "The original local destination choice is missing or ambiguous. Choose one destination for a new controlling connection.",
+            2,
+        ));
+    }
+    let chosen = chosen
+        .map(|path| ReceiveOptions::chosen_directory(path.to_owned()))
+        .transpose()?;
+    chosen
+        .as_ref()
+        .or(connection.receive.as_ref())
+        .map(ReceiveOptions::open)
+        .transpose()
+}
+
+/// This fallback applies only before the original Files owner is constructed.
+/// It never replaces actual receipts or later cleanup evidence.
+pub(super) fn preserve_not_started(connection: &Connection, failure: &mut Failure) {
+    if connection.receive.is_some() || connection.choose_receive_directory {
+        download::Summary::unavailable("files_receive_not_started").preserve(failure);
+    }
+}
 
 pub(super) fn select(
     connection: &Connection,
     chosen: Option<&[std::path::PathBuf]>,
+    download: Option<Directory>,
 ) -> Result<Files, Failure> {
+    if (connection.receive.is_some() || connection.choose_receive_directory) != download.is_some() {
+        return Err(Failure::new(
+            "receive_directory_choice_invalid",
+            "The original receive destination was not pinned. Start a new connection with one local destination choice.",
+            2,
+        ));
+    }
     // A native choice is never a fallback for explicit paths, or vice versa.
     if connection.upload.choose_files != chosen.is_some()
         || chosen.is_some_and(|paths| paths.is_empty() || !connection.upload.paths.is_empty())
@@ -22,11 +65,6 @@ pub(super) fn select(
         ));
     }
     let upload = upload::select(chosen.unwrap_or(&connection.upload.paths))?;
-    let download = connection
-        .receive
-        .as_ref()
-        .map(crate::options::ReceiveOptions::open)
-        .transpose()?;
     let files = Files::new(upload, download).map_err(upload::selection_failure)?;
     let files = if connection.upload.file_commands {
         files.with_commands()
@@ -135,6 +173,74 @@ impl Summary {
 mod tests {
     use super::*;
     use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+
+    fn connection(extra: &str) -> Connection {
+        let args = format!("connect nHOST --control --experimental-native --display only {extra}");
+        let crate::options::Command::Connect(connection) = crate::options::parse(
+            &args
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+        .command
+        else {
+            panic!("ordinary connection");
+        };
+        connection
+    }
+
+    #[test]
+    fn receive_chooser_and_pinned_destination_must_match_the_original_request() {
+        let plain = connection("");
+        assert!(receive(&plain, None).unwrap().is_none());
+        assert_eq!(
+            receive(&plain, Some(Path::new("/private/unrequested")))
+                .err()
+                .unwrap()
+                .code,
+            "receive_directory_choice_invalid"
+        );
+        let mut chosen = connection("--choose-receive-directory");
+        assert_eq!(
+            receive(&chosen, None).err().unwrap().code,
+            "receive_directory_choice_invalid"
+        );
+        assert_eq!(
+            select(&chosen, None, None).err().unwrap().code,
+            "receive_directory_choice_invalid"
+        );
+        chosen.receive = connection("--receive /private/original").receive;
+        assert_eq!(
+            receive(&chosen, Some(Path::new("/private/ambiguous")))
+                .err()
+                .unwrap()
+                .code,
+            "receive_directory_choice_invalid"
+        );
+    }
+
+    #[test]
+    fn preflight_failure_preserves_known_nonstart_without_replacing_existing_evidence() {
+        let chosen = connection("--choose-receive-directory");
+        let mut failure = Failure::new(
+            "receive_directory_choice_cancelled",
+            "No connection was made.",
+            2,
+        );
+        preserve_not_started(&chosen, &mut failure);
+        let retained = failure.files_receive;
+        let value: serde_json::Value =
+            serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+        assert_eq!(value["files_receive_requested"], true);
+        assert_eq!(value["files_receive_cleanup"], "not_started");
+        assert_eq!(value["files_received"], serde_json::json!([]));
+        preserve_not_started(&chosen, &mut failure);
+        assert_eq!(failure.files_receive, retained);
+        let mut plain = Failure::new("local_refusal", "No connection was made.", 2);
+        preserve_not_started(&connection(""), &mut plain);
+        assert!(plain.files_receive.is_none());
+    }
 
     fn absent() -> Summary {
         Summary {

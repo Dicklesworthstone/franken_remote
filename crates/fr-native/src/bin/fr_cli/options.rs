@@ -168,6 +168,9 @@ pub struct Connection {
     /// This requires control and may accompany an explicit `--send` selection;
     /// neither direction is implicit.
     pub receive: Option<ReceiveOptions>,
+    /// Choose one local receive directory before this controlling connection.
+    /// The path stays in the viewer process; a fresh request is needed next time.
+    pub choose_receive_directory: bool,
     /// `--pick-only` (with `--choose-host`, for `fr app`): show the picker
     /// with connection choices, report the chosen host and choices, and open
     /// no connection.
@@ -818,6 +821,7 @@ fn parse_command(
     let mut file_drop = false;
     let mut file_commands = false;
     let mut receive = None;
+    let mut choose_receive_directory = false;
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
     let (mut pick_only, mut app_notice) = (false, None);
@@ -913,6 +917,7 @@ fn parse_command(
             "--file-drop" if connect => file_drop = true,
             "--file-commands" if connect => file_commands = true,
             "--receive" if connect => receive = Some(next_path(args, &mut index)?),
+            "--choose-receive-directory" if connect => choose_receive_directory = true,
             "--receive-max-file-bytes" if connect => {
                 receive_max_file_bytes = Some(receive::bytes(next_arg(args, &mut index)?)?);
             }
@@ -947,7 +952,16 @@ fn parse_command(
                 || choose_files
                 || file_drop
                 || file_commands
+                || choose_receive_directory
                 || receive.is_some()))
+    {
+        return Err(usage());
+    }
+    if choose_receive_directory
+        && (receive.is_some()
+            || receive_max_file_bytes.is_some()
+            || receive_max_session_bytes.is_some()
+            || receive_keep_both.is_some())
     {
         return Err(usage());
     }
@@ -1065,10 +1079,10 @@ fn parse_command(
                 2,
             ));
         }
-        if receive.is_some() && !control {
+        if (receive.is_some() || choose_receive_directory) && !control {
             return Err(Failure::new(
                 "receive_requires_control",
-                "Files are received only on your own control lease; pass --control with --receive. A view-only session never receives files.",
+                "Files are received only on your own control lease; pass --control with --receive or --choose-receive-directory. A view-only session never receives files.",
                 2,
             ));
         }
@@ -1130,6 +1144,7 @@ fn parse_command(
                     file_commands,
                 },
                 receive,
+                choose_receive_directory,
                 pick: pick_only.then(|| PickOnly {
                     clipboard: clipboard.unwrap_or(true),
                     playback_audio: audio,
@@ -1217,6 +1232,7 @@ mod tests {
                 "--choose-files",
                 "--send /local/file",
                 "--receive /local/folder",
+                "--choose-receive-directory",
             ] {
                 assert!(
                     options(&format!("{base} {role} {operation}")).is_err(),

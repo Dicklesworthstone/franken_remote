@@ -48,6 +48,33 @@ pub(super) fn keep_both(value: &str) -> Result<bool, Failure> {
 }
 
 impl ReceiveOptions {
+    /// A native chooser supplies only a path, never policy. Keep the actual
+    /// receiver's default budgets and reject existing destinations.
+    #[cfg(any(all(target_os = "macos", feature = "macos-desktop"), test))]
+    pub(crate) fn chosen_directory(directory: PathBuf) -> Result<Self, Failure> {
+        if !directory.is_absolute()
+            || directory.as_os_str().len() > 4096
+            || directory
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || directory
+                .to_str()
+                .is_none_or(|path| path.chars().any(char::is_control))
+        {
+            return Err(Failure::new(
+                "receive_directory_choice_invalid",
+                "Choose one existing private local directory. No connection was made.",
+                2,
+            ));
+        }
+        Ok(Self {
+            directory,
+            max_file_bytes: None,
+            max_session_bytes: None,
+            keep_both: false,
+        })
+    }
+
     pub(super) fn new(
         directory: Option<PathBuf>,
         max_file_bytes: Option<u64>,
@@ -146,6 +173,66 @@ mod tests {
             unreachable!("connection required");
         };
         Ok(connection)
+    }
+
+    #[test]
+    fn native_directory_choice_is_explicit_control_only_and_has_no_implicit_policy() {
+        let chosen = connection("--choose-receive-directory").unwrap();
+        assert!(chosen.choose_receive_directory && chosen.receive.is_none());
+        assert!(!chosen.uploads() && chosen.microphone.is_none());
+        assert!(!connection("").unwrap().choose_receive_directory);
+        assert_eq!(
+            options("connect n-host --view-only --experimental-native --display only --choose-receive-directory")
+                .err()
+                .unwrap()
+                .code,
+            "receive_requires_control"
+        );
+        for extra in [
+            "--choose-receive-directory --choose-receive-directory",
+            "--choose-receive-directory --receive /private/destination",
+            "--receive /private/destination --choose-receive-directory",
+            "--choose-receive-directory --receive-max-file-bytes 4",
+            "--choose-receive-directory --receive-max-session-bytes 8",
+            "--choose-receive-directory --receive-conflict keep-both",
+        ] {
+            assert_eq!(connection(extra).err().unwrap().code, "invalid_arguments");
+        }
+        assert!(connection("--choose-receive-directory --choose-files").is_ok());
+        for command in ["hosts", "doctor", "displays n-host --experimental-native"] {
+            assert_eq!(
+                options(&format!("{command} --choose-receive-directory"))
+                    .err()
+                    .unwrap()
+                    .code,
+                "invalid_arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn chosen_directory_keeps_exact_local_path_and_the_actual_receiver_defaults() {
+        let path = PathBuf::from("/private/Chosen folder 資料");
+        let chosen = ReceiveOptions::chosen_directory(path.clone()).unwrap();
+        assert_eq!(chosen.directory, path);
+        assert_eq!(chosen.max_file_bytes, None);
+        assert_eq!(chosen.max_session_bytes, None);
+        assert!(!chosen.keep_both);
+        assert!(!format!("{chosen:?}").contains("Chosen folder"));
+        for path in [
+            "relative",
+            "/private/../other",
+            "/private/secret\0",
+            "/private/secret\n",
+        ] {
+            let failure = ReceiveOptions::chosen_directory(PathBuf::from(path)).unwrap_err();
+            assert_eq!(failure.code, "receive_directory_choice_invalid");
+            assert!(!format!("{failure:?}").contains("secret"));
+        }
+        assert!(
+            ReceiveOptions::chosen_directory(PathBuf::from(format!("/{}", "x".repeat(4096))))
+                .is_err()
+        );
     }
 
     #[test]

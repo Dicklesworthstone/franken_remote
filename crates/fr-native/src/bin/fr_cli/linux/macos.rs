@@ -104,6 +104,7 @@ pub(super) fn observe(
         || connection.audio.is_some()
         || connection.microphone.is_some()
         || connection.receive.is_some()
+        || connection.choose_receive_directory
         || !connection.upload.paths.is_empty()
         || connection.upload.choose_files
         || connection.upload.file_commands
@@ -170,10 +171,11 @@ fn check(connection: &Connection) -> Result<(), Failure> {
             2,
         ));
     }
-    if !connection.control && connection.receive.is_some() {
+    if !connection.control && (connection.receive.is_some() || connection.choose_receive_directory)
+    {
         return Err(Failure::new(
             "receive_requires_control",
-            "Files are received only on your own control lease; pass --control with --receive.",
+            "Files are received only on your own control lease; pass --control with --receive or --choose-receive-directory.",
             2,
         ));
     }
@@ -191,12 +193,22 @@ fn check(connection: &Connection) -> Result<(), Failure> {
             2,
         ));
     }
-    let directions = u32::from(
-        !connection.upload.paths.is_empty()
-            || connection.upload.choose_files
-            || connection.upload.file_commands
-            || connection.upload.file_drop,
-    ) + u32::from(connection.receive.is_some());
+    if connection.choose_receive_directory
+        && (connection.receive.is_some() || connection.pick.is_some())
+    {
+        return Err(Failure::new(
+            "receive_directory_choice_invalid",
+            "Choose one receive destination only in the original controlling viewer, never in a selection-only picker.",
+            2,
+        ));
+    }
+    let directions =
+        u32::from(
+            !connection.upload.paths.is_empty()
+                || connection.upload.choose_files
+                || connection.upload.file_commands
+                || connection.upload.file_drop,
+        ) + u32::from(connection.receive.is_some() || connection.choose_receive_directory);
     let clipboard = u32::from(connection.control && connection.clipboard);
     playback::check_profile(
         connection.control,
@@ -270,20 +282,37 @@ fn connect_profile(
     json: bool,
     publication: Option<&Publication>,
 ) -> Result<String, Failure> {
-    check(connection)?;
-    let audio = playback::prepare(connection.audio.as_ref())?;
-    let microphone = microphone::prepare(connection.microphone.as_ref())?;
-    // The explicit native choice runs before host lookup or connection startup.
-    // It never changes the active viewer's terminal focus-loss policy. Pin its
-    // sources through the same original upload owner as --send after the panel
-    // has confirmed cleanup; cancellation opens no connection.
-    let chosen = if connection.upload.choose_files {
-        Some(file_choice::select(runtime, cx, shutdown, stopped)?)
-    } else {
-        None
-    };
-    let selected_files = files::select(connection, chosen.as_deref())?;
-    drop(chosen);
+    let prepared = (|| {
+        check(connection)?;
+        let audio = playback::prepare(connection.audio.as_ref())?;
+        let microphone = microphone::prepare(connection.microphone.as_ref())?;
+        // Pin each native choice immediately after its original panel closes.
+        // A second chooser can wait for two minutes; no unpinned pathname from
+        // the first selection may wait behind that panel.
+        let chosen_directory = if connection.choose_receive_directory {
+            Some(file_choice::select_directory(
+                runtime, cx, shutdown, stopped,
+            )?)
+        } else {
+            None
+        };
+        let download = files::receive(connection, chosen_directory.as_deref())?;
+        drop(chosen_directory);
+        let chosen = if connection.upload.choose_files {
+            Some(file_choice::select(runtime, cx, shutdown, stopped)?)
+        } else {
+            None
+        };
+        let selected_files = files::select(connection, chosen.as_deref(), download)?;
+        Ok((selected_files, audio, microphone))
+    })()
+    .map_err(|mut error| {
+        // No receive worker exists in this preflight scope. Cancellation,
+        // invalid destinations and local device failures are known non-starts.
+        files::preserve_not_started(connection, &mut error);
+        error
+    })?;
+    let (selected_files, audio, microphone) = prepared;
     let pending = files::Summary::capture(&selected_files);
     let pending_clipboard = ClipboardReport {
         requested: connection.control && connection.clipboard,
@@ -777,6 +806,7 @@ mod tests {
     fn explicit_file_directions_are_admitted_without_implicit_drop_or_clipboard_support() {
         for flags in [
             "--send /private/chosen",
+            "--choose-receive-directory",
             "--receive /private/inbox",
             "--send /private/chosen --receive /private/inbox",
         ] {
@@ -817,6 +847,18 @@ mod tests {
             check(&download).err().unwrap().code,
             "receive_requires_control"
         );
+        let mut chosen = connection("--choose-receive-directory");
+        chosen.control = false;
+        assert_eq!(
+            check(&chosen).err().unwrap().code,
+            "receive_requires_control"
+        );
+        chosen.control = true;
+        chosen.receive = connection("--receive /private/inbox").receive;
+        assert_eq!(
+            check(&chosen).err().unwrap().code,
+            "receive_directory_choice_invalid"
+        );
         let mut commands = connection("--file-commands");
         commands.control = false;
         assert_eq!(
@@ -835,6 +877,7 @@ mod tests {
             ("--send /private/chosen", 565, 184),
             ("--file-commands", 565, 184),
             ("--receive /private/inbox", 566, 183),
+            ("--choose-receive-directory", 565, 184),
             ("--send /private/chosen --receive /private/inbox", 795, 184),
             ("--file-commands --receive /private/inbox", 795, 184),
             ("--file-drop", 709, 184),

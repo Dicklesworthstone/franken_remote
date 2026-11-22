@@ -1,5 +1,35 @@
 # Implementation status
 
+## Native macOS receiving-folder selection (2026-11-22)
+
+The ordinary macOS application can request receiving without launch-time
+arguments. A fresh controlling Receive files choice starts a directory-only
+native chooser in the selected viewer, before remote lookup. The existing
+bounded NSOpenPanel owner confirms cleanup before exporting one local path.
+The original receiver immediately pins that directory before any upload chooser
+opens; both directions retain their existing limits, lease and cleanup owners.
+The graphical route uses actual receiver defaults and rejects conflicts.
+Explicit app `--receive DIR` destinations and custom policy remain one-use.
+No directory or consent is saved or passed through the host-picker report.
+
+The direct `--choose-receive-directory` option is control-only, mutually exclusive
+with explicit receive policy, and unavailable in selection-only or unsupported
+platform modes. Preflight cancellation and local failures retain positive
+receive-not-started metadata; later actual publication/cleanup evidence cannot
+be replaced by that fallback. Existing uncertainty still stops the app.
+
+Passed: 144 tests using the actual app, options, host-choice, completion,
+terminal-report and portable file-choice sources; strict all-target component
+Clippy with warnings denied; and repository-wide pinned nightly formatting and
+diff whitespace checks. This includes the directory
+choice bounds, cleanup/deadline fences and fresh-consent/parser regressions.
+Independent review checked native C/Rust signatures and preflight ownership.
+The component harness excludes native session adapters; feature-gated disk-owner
+producer tests, Apple SDK compilation, AppKit execution and live-tailnet file
+receiving remain unverified. Full native Cargo gates remain open. Plan §§15.6
+and 16.1; tracking
+`fr-app-receive-picker-5cb5n`; [app usage](docs/native-client-cli.md#desktop-application-fr-app).
+
 ## Explicit native-app receiving consent (2026-11-22)
 
 The Linux/macOS app picker adds a default-off Receive files control for the

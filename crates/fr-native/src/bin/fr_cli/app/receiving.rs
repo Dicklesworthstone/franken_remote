@@ -74,6 +74,35 @@ fn invalid() -> Failure {
     )
 }
 
+/// Native macOS can acquire a fresh destination in the selected viewer. Other
+/// platforms retain the explicit launch-time destination route.
+pub(super) fn directory_picker_available() -> bool {
+    cfg!(all(target_os = "macos", feature = "macos-desktop"))
+}
+
+pub(super) fn available(pending: Option<&Receiving>) -> bool {
+    pending.is_some() || directory_picker_available()
+}
+
+/// Consume a configured destination exactly once. Without one, fresh picker
+/// consent requests a directory chooser inside this viewer only; no pathname
+/// or receiving permission is stored in the application preferences.
+pub(super) fn take_for_app_choice(
+    pending: &mut Option<Receiving>,
+    mut arguments: Vec<String>,
+    consent: bool,
+) -> Result<Vec<String>, Failure> {
+    if !consent || pending.is_some() {
+        return take_for_choice(pending, arguments, consent);
+    }
+    if !directory_picker_available() {
+        return Err(invalid());
+    }
+    arguments.push("--choose-receive-directory".to_owned());
+    options::parse(&arguments)?;
+    Ok(arguments)
+}
+
 /// The pending choice remains visible even after an unused picker refresh.
 /// Neither the destination nor any transfer contents enter this UI notice.
 pub(super) fn notice(pending: Option<&Receiving>, previous: Option<&str>) -> Option<String> {

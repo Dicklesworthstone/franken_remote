@@ -9,7 +9,7 @@ use std::{
 const END: &str =
     r#"{"schema_version":1,"outcome":"stopped","role":"observe","cleanup_confirmed":true}"#;
 const SELECTED_PORT: u16 = 9443;
-const SELECTED: &str = r#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":9443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":false,"send_files":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}"#;
+const SELECTED: &str = r#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":9443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":false,"send_files":false,"receive_files":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}"#;
 
 fn shell(script: &str, document: &str) -> Command {
     let mut command = Command::new("/bin/sh");
@@ -79,8 +79,11 @@ fn actual_failed_child_cannot_commit_its_selection_or_success() {
         let output = run(&mut shell(script, document)).unwrap();
         assert_eq!(output.status.success(), success);
         if document == SELECTED {
-            assert_eq!(picker_report(&output, SELECTED_PORT).is_some(), success);
-            assert_eq!(picker_report(&output, DEFAULT_SERVICE_PORT), None);
+            assert_eq!(
+                picker_report(&output, SELECTED_PORT, false).is_some(),
+                success
+            );
+            assert_eq!(picker_report(&output, DEFAULT_SERVICE_PORT, false), None);
         }
         assert!(
             session_notice(last_report(&output.stdout), "mac", output.status.success())
@@ -97,7 +100,7 @@ fn a_later_invalid_terminal_record_never_reuses_a_live_child_selection() {
         command.arg(suffix);
         let output = run(&mut command).unwrap();
         assert!(output.status.success());
-        assert_eq!(picker_report(&output, SELECTED_PORT), None);
+        assert_eq!(picker_report(&output, SELECTED_PORT, false), None);
         assert!(
             session_notice(last_report(&output.stdout), "mac", output.status.success())
                 .unwrap_err()

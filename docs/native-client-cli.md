@@ -97,31 +97,47 @@ you explicitly drop files into the connected viewer. Host support and transfer
 policy still apply. Reconnects do not replay a selection or restore the old
 controller's file-transfer authority.
 
-To receive host-selected files through the desktop app, launch it with one
-explicit local destination:
+On macOS, choose **View and control**, then select **Receive files**. After
+confirming the host, the viewer opens a native folder chooser before remote
+lookup or connection. Choose one existing private local directory. Cancel or
+timeout opens no connection. The original chooser confirms cleanup, and the
+receiver immediately validates and pins that directory before any upload
+chooser can open. The graphical route uses the receiver's actual default
+limits and rejects existing destination names.
+
+The checkbox starts unchecked in every new picker. Switching to **View only**
+clears and disables receiving; switching back to control requires a fresh
+check. File sending and receiving are independent choices and can both be
+enabled for the same controlling connection. After the viewer ends, a new
+macOS receiving choice opens a new directory chooser. Neither consent nor the
+previous directory is reused.
+
+For an explicit destination and custom receive policy, launch the macOS or
+Linux app with:
 
 ```sh
 fr app --receive /absolute/private-destination --receive-conflict keep-both
 ```
 
-Choose **View and control**, then select **Receive files** for that connection.
-The checkbox starts off and is available only while the app holds that original
-destination. Switching to **View only** clears and disables receiving; switching
-back to control requires a fresh check. Without `--receive`, the disabled option
-explains how to supply a destination. File sending and receiving are independent
-choices and can both be enabled for the same controlling connection.
+The configured destination applies only to the first confirmed viewer choice,
+including an attempt that refuses or fails to connect. Choosing **View only**
+or leaving **Receive files** unchecked discards that pending destination.
+Selecting receiving uses that exact configured path and policy, without a
+replacement chooser. Unused picker refreshes preserve the pending destination,
+with receiving still unchecked; Cancel or quitting drops it. After consumption,
+macOS can request a new native folder choice; Linux requires a new
+`fr app --receive` launch because it has no directory chooser adapter.
 
-The destination applies only to the first selected viewer attempt, including
-an attempt that refuses or fails to connect. Choosing **View only** or leaving
-**Receive files** unchecked opens the ordinary viewer without receiving and
-discards the pending destination. The app consumes this choice before starting
-the viewer. After it ends, another host choice has receiving unavailable; a new
-`fr app --receive` launch is needed to offer it again. Unused picker refreshes
-preserve the pending destination, with receiving still unchecked; Cancel or
-quitting drops it. Reconnect and display replacement do not restore the original
-receive authority. No destination or receive permission is saved in preferences
-or installed launchers, and the picker and completion reports never contain the
-destination path.
+Reconnect and display replacement do not restore the original receive
+authority. No destination or receive permission is saved in preferences or
+installed launchers. The host picker carries only availability and explicit
+consent, and the picker and completion reports never contain a destination path.
+
+The direct macOS command `fr connect NODE --control --experimental-native
+--display only --choose-receive-directory` uses the same local chooser.
+It cannot be combined with `--receive`, receive-policy overrides, view-only,
+or `--pick-only`. Other platforms refuse the chooser before initializing a
+session; explicit `--receive DIR` remains available where implemented.
 
 When receiving is selected, the ordinary connector checks and pins the existing
 private destination before connecting. Receiving remains subject to host
@@ -134,8 +150,8 @@ The optional `--receive-max-file-bytes`, `--receive-max-session-bytes`, and
 and pinned-directory receiver as `fr connect --receive`. Omitting a limit retains
 the receiver's default; malformed or duplicate options, zero limits, and an
 effective total smaller than the per-file allowance refuse before discovery or
-destination access. The default conflict policy is reject. The picker cannot
-change the original destination, limits, or conflict policy.
+destination access. The default conflict policy is reject. A configured launch-time destination,
+limits, and conflict policy cannot be changed by the host-picker report.
 
 After a receiving attempt, the app separately checks the original disk
 owner's completion evidence before reopening the picker. Overall viewer
@@ -153,9 +169,11 @@ older receipt document.
 For a clean completion, the picker shows how many files were locally published,
 how many were refused, and how many publications have unconfirmed durability.
 An explicit pre-start receive absence stays distinct from completed disk work.
-Only known local argument, trust, configuration, or destination refusals may
-omit a receive summary; a generic session failure cannot imply that receiving
-never started. Notices and preserved receive evidence omit destinations and
+Directory-chooser cancellation, rejected destinations, and pre-session runtime
+or device failures retain explicit `files_receive_cleanup: "not_started"`
+evidence. Only known local argument, trust, configuration, or destination
+refusals may omit a receive summary; a generic session failure cannot imply
+that receiving never started. Notices and preserved receive evidence omit destinations and
 file names.
 
 The application continuously drains bounded completion output. Native commands
