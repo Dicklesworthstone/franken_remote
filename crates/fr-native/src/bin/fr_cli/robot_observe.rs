@@ -190,7 +190,7 @@ fn parse_live(args: &[String]) -> Result<Request, Failure> {
     if request.screenshot.is_some() {
         return Err(Failure::new(
             "observation_artifact_unavailable",
-            "Live publication returns metadata only. Use an explicit --native-once observation to request a screenshot; no file was opened.",
+            "Open the foreground publisher without an output path, then request a screenshot with robot observe --connection-id and --screenshot. No file was opened.",
             2,
         ));
     }
@@ -215,7 +215,7 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
         if !request.live {
             return Err(Failure::new(
                 "platform_unavailable",
-                "One-shot native observation and screenshot acquisition are not implemented on macOS. Open an explicit foreground view with --publish-observations, then read its metadata with --connection-id. No connection or output file was opened.",
+                "One-shot native observation is not implemented on macOS. Open an explicit foreground view with --publish-observations, then request metadata or a screenshot with --connection-id. No connection or output file was opened.",
                 2,
             ));
         }

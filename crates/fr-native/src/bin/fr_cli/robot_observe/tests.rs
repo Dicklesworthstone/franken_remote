@@ -195,7 +195,7 @@ fn explicit_screenshot_is_local_output_and_does_not_change_connection_authority(
     );
     let error = parse_live(&live)
         .err()
-        .expect("live screenshots remain unavailable");
+        .expect("opening a publisher does not write a screenshot");
     assert_eq!(error.code, "observation_artifact_unavailable");
     assert!(!format!("{error:?}").contains("/private/"));
 }
@@ -212,15 +212,19 @@ fn macos_one_shot_refuses_before_runtime_connection_or_artifact_creation() {
     assert!(!format!("{error:?}").contains("/unavailable/"));
 }
 
-#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[test]
-fn macos_local_screenshot_refuses_before_connecting_to_any_owner() {
-    let error = local::run(&args(
-        "robot observe n-host --connection-id 11111111111111111111111111111111 --screenshot /unavailable/screen.png",
-    ))
-    .expect_err("macOS live publication has no screenshot handle");
-    assert_eq!(error.code, "observation_artifact_unavailable");
-    assert_eq!(error.exit, 2);
+fn local_screenshot_requires_an_existing_authenticated_owner() {
+    let error = local::run(&args(&format!(
+        "robot observe n-missing-screenshot-owner-{} --connection-id 11111111111111111111111111111111 --screenshot /unavailable/screen.png",
+        std::process::id(),
+    )))
+    .expect_err("a screenshot cannot create a missing local owner");
+    assert_eq!(error.code, "no_local_session");
+    assert_eq!(error.exit, 1);
     assert!(!format!("{error:?}").contains("/unavailable/"));
 }
 

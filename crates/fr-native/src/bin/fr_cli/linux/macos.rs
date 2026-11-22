@@ -45,7 +45,8 @@ fn unsupported(option: &'static str) -> Failure {
 }
 
 /// One explicit view publishes through its existing authenticated IPC owner.
-/// This contains no screenshot handle, input authority, or replacement session.
+/// Its screenshot handle belongs to that same observer and grants no input
+/// authority or replacement session.
 #[derive(Clone)]
 struct Publication {
     publisher: session_control::observation::Publisher,
@@ -70,6 +71,7 @@ impl Publication {
                 self.publisher.retire(phase);
                 Ok(())
             }
+            Event::Snapshot(handle) => self.publisher.bind_snapshot(handle),
             Event::Ready { evidence, .. }
                 if self.minimum == Minimum::SubmittedToCompositor
                     && evidence != fr_client::robot::live::Evidence::SubmittedToCompositor =>

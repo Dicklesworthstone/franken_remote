@@ -554,9 +554,9 @@ transport it replaced used 60-80 ms of CPU per read.
 
 System-shortcut capture remains unavailable on macOS and is refused before
 network I/O. Explicit foreground view publishers now expose
-[live observation metadata](#macos-live-observation-metadata) through the
-original authenticated local owner. Robot input, one-shot native observations
-and screenshot export remain unavailable on macOS. Local status identifies the
+[live observation metadata and screenshots](#macos-live-observation-metadata)
+through the original authenticated local owner. Robot input and one-shot native
+observations remain unavailable on macOS. Local status identifies the
 foreground invocation; it does not infer a remote grant or host quality.
 The controlling text clipboard is default-on; microphone forwarding requires
 its explicit [macOS microphone build and local enable](macos-microphone.md).
@@ -647,10 +647,33 @@ Close waits for the original cleanup outcome. A missing reply leaves that
 outcome unknown. Closing the native window or pressing Ctrl-C also ends the
 foreground owner.
 
-This macOS feature publishes metadata only. `--screenshot`, `--native-once` and
-robot input remain refused; use the [Linux screenshot paths](#one-shot-native-screenshots)
-for those existing artifact operations. A receipt does not establish an input
-precondition or an application-level result.
+To request one PNG from that same macOS foreground owner:
+
+```sh
+fr robot observe NODE_ID --connection-id CONNECTION_ID \
+  --screenshot /absolute/new-screen.png --json
+```
+
+The original media task reads the retained presented viewport on demand through
+Metal, using the same picture, color range, letterboxing and remote cursor
+composition. It does not recapture the desktop, decode another picture, or
+advance presentation counters. The actual frame, configuration and recovery
+identity must still match; a resize or retired observation refuses the export.
+One bounded reservation covers GPU work, the result and local IPC delivery.
+GPU work runs on the existing drained media task while the session owner keeps
+servicing renewal, cancellation and lifecycle events.
+
+Raw pixels are limited to 32 MiB. Retina and enlarged windows retain their actual
+physical viewport dimensions, reported separately from the remote display.
+A viewport exceeding the limit needs a smaller window or `--fit`; the request
+never silently scales a different image to satisfy the limit. The requesting process
+validates the final response seal before writing a new mode-0600 PNG; an existing
+path is never replaced. See [screenshots from an existing foreground owner](#screenshots-from-an-existing-foreground-owner)
+for output metadata, age bounds and file-error behavior.
+
+`--native-once` and robot input remain unavailable on macOS. This view-only
+screenshot has no input precondition or control authority, and does not establish
+an application-level result or physical visibility.
 
 **Verification scope:** nine tests of the actual production publication adapter
 and eleven tests of the authenticated publisher's retirement owner passed with
@@ -1942,9 +1965,9 @@ are not a new live network or desktop qualification claim.
 
 ## One-shot native screenshots
 
-This path requires the Linux native desktop and its media worker. macOS
-publishes [live metadata](#macos-live-observation-metadata); it does not implement
-`--native-once` or screenshot export.
+This one-shot path requires the Linux native desktop and its media worker.
+macOS provides [metadata and screenshots from an existing foreground owner](#macos-live-observation-metadata);
+it does not implement `--native-once`.
 
 ```sh
 fr robot observe NODE_ID --native-once --experimental-native --display only \
@@ -1993,9 +2016,8 @@ GPU compositor or physical display.
 
 ## Screenshots from an existing foreground owner
 
-Image export in this section uses the Linux native desktop. The equivalent
-macOS view publisher supports
-[metadata reads without `--screenshot`](#macos-live-observation-metadata).
+Image export in this section uses the Linux native desktop or a macOS
+`macos-desktop` build. Both use the explicitly opened foreground view below.
 
 Open one explicit view publisher, then leave that process running:
 
@@ -2012,8 +2034,9 @@ fr robot observe NODE_ID --connection-id CONNECTION_ID \
   --screenshot /absolute/new-screen.png --json
 ```
 
-The same command also reads an owner opened with `--foreground --role control
---accept-input`. Ordinary `fr connect` owners refuse image export. The local
+On Linux, the same command also reads an owner opened with `--foreground --role
+control --accept-input`. macOS exposes read-only observation exports. Ordinary
+`fr connect` owners refuse image export. The local
 kernel authenticates the caller, and the public connection ID pins the exact
 original owner on the same socket. This opens no new host connection and requests
 no new control lease. The existing host approval and selected display still

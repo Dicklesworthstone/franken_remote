@@ -26,6 +26,27 @@ try:
             if MODE=='cursor-bad': reply(h,261,(999).to_bytes(8,'big'))
             else: reply(h,275)
             continue
+        if k==21:
+            assert len(b)==24 and MODE.startswith('snapshot-')
+            if MODE=='snapshot-absent':
+                reply(h,281,bytes([4]))
+                continue
+            if MODE=='snapshot-over-ceiling':
+                # Advertise too much before sending any pixels: the original
+                # worker must reject this header without a large allocation.
+                sys.stdout.buffer.write(h[:6]+(280).to_bytes(2,'big')+h[8:32]+(32+32*1024*1024+4).to_bytes(4,'big'))
+                sys.stdout.buffer.flush()
+                continue
+            width,height=(640,480)
+            if MODE=='snapshot-wide': width,height=(8193,1)
+            stamp=bytearray(b)
+            for field,offset in [('frame',0),('configuration',8),('recovery',16)]:
+                if MODE=='snapshot-wrong-'+field:
+                    stamp[offset:offset+8]=(int.from_bytes(b[offset:offset+8],'big')+1).to_bytes(8,'big')
+            pixels=bytes([0x17,0x2a,0x3d,255])*(width*height)
+            if MODE=='snapshot-short': pixels=pixels[:-4]
+            reply(h,280,stamp+width.to_bytes(4,'big')+height.to_bytes(4,'big')+pixels)
+            continue
         assert k in (4,6)
         if MODE=='stall': time.sleep(60)
         if MODE=='slow': time.sleep(.04)

@@ -675,6 +675,23 @@ impl LocalPresenter for Presenter {
             .refresh()
             .map_err(worker_error)
     }
+    fn read_presentation(
+        &mut self,
+        expected: fr_media::worker::presentation_snapshot::Stamp,
+        maximum_body_bytes: usize,
+    ) -> Result<
+        Result<
+            fr_media::worker::presentation_snapshot::Snapshot,
+            fr_media::worker::presentation_snapshot::Absent,
+        >,
+        WorkerError,
+    > {
+        self.decoder
+            .as_mut()
+            .ok_or(WorkerError::WrongState)?
+            .read_presentation(expected, maximum_body_bytes)
+            .map_err(worker_error)
+    }
 }
 
 /// This attempt's window, kept until mandatory cleanup. The pump and the
@@ -869,9 +886,10 @@ impl Session {
             .request(enabled && self.control.is_some());
         self
     }
-    /// Explicit read-only metadata publication from this original invocation.
+    /// Explicit read-only observation publication from this original invocation.
     /// Install before any attempt. A control-capable session cannot acquire
-    /// this view-only interface, and it never supplies a screenshot handle.
+    /// this view-only interface. The sink must bind the original snapshot
+    /// handle explicitly; no pixels are exported until an authenticated read.
     pub fn with_observations(
         mut self,
         publish: impl FnMut(macos_live_observation::Event) -> Result<(), ()> + 'static,
@@ -2160,6 +2178,9 @@ impl Application for Session {
         let opening_picture = submitted(opened.initial_presentation());
         let observer = self.observer.insert(opened);
         if let Some(observation) = &observation {
+            observation
+                .bind_snapshot(observer.snapshot_handle()?)
+                .map_err(|()| ObserverError::Application)?;
             let initial = observer.initial_presentation();
             // The first receipt predates bootstrap acknowledgement waits. Keep
             // its actual local timestamp; registration cannot renew its age.

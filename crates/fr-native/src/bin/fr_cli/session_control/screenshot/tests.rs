@@ -132,6 +132,37 @@ fn image_must_match_the_original_frame_geometry_and_all_known_generations() {
     decoded.observation.frame.as_mut().unwrap().evidence_level = Evidence::Decoded;
     assert_eq!(decoded.validate_image(&image()), Err(Error::Protocol));
 }
+
+#[test]
+fn hidpi_viewport_is_independent_of_source_but_keeps_exact_allocation_bounds() {
+    let mut value = metadata(false);
+    let frame = value.observation.frame.as_mut().unwrap();
+    frame.pixel_width = 8;
+    frame.pixel_height = 6;
+    frame.logical_width = 4;
+    frame.logical_height = 3;
+    frame.scale_numerator = 2;
+    value.viewport_width = 16;
+    value.viewport_height = 12;
+    let stamp = image().stamp();
+    let enlarged =
+        Snapshot::decode(Snapshot::encode(stamp, 16, 12, &[1, 2, 3, 255].repeat(16 * 12)).unwrap())
+            .unwrap();
+    assert_eq!(value.validate_image(&enlarged), Ok(()));
+    assert!(value.control.is_none());
+    let expected_length = presentation_snapshot::HEADER_BYTES + 16 * 12 * 4;
+    assert_eq!(value.validate_length(expected_length), Ok(()));
+    assert_eq!(
+        value.validate_length(expected_length + 4),
+        Err(Error::Protocol)
+    );
+    for (width, height) in [(0, 12), (16, 0), (8193, 1), (4096, 2160), (u32::MAX, 1)] {
+        let mut oversized = value.clone();
+        oversized.viewport_width = width;
+        oversized.viewport_height = height;
+        assert_eq!(oversized.validate_fields(), Err(Error::Protocol));
+    }
+}
 #[test]
 fn original_input_age_includes_delivery_and_writing_and_expiry_clears_handles() {
     let mut value = metadata(true);

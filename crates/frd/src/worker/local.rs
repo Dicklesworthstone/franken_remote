@@ -21,7 +21,10 @@ use fr_core::limits::ProtocolLimits;
 use fr_media::{
     access_unit::EncodedAccessUnit,
     hevc::{DecoderRecord, HevcGuard},
-    worker::{self, Configuration, Identity, Kind, Record, Role, overlay},
+    worker::{
+        self, Configuration, Identity, Kind, Record, Role, overlay,
+        presentation_snapshot::{self, Absent, Snapshot, Stamp},
+    },
 };
 use std::{
     future::{Future, poll_fn},
@@ -54,6 +57,18 @@ pub trait LocalPresenter: Send {
     /// Install the client-rendered remote cursor between decodes and redraw
     /// the retained picture with it. Not a decode or presentation receipt.
     fn overlay(&mut self, update: &overlay::Update<'_>) -> Result<(), worker::Error>;
+    /// Copy only the retained viewport for this exact presented picture. This
+    /// cannot decode, advance the picture stamp, or create freshness evidence.
+    /// Routine absence leaves the decoder usable. Inspect native dimensions
+    /// before allocating: the complete response allocation, header included,
+    /// must fit `maximum_body_bytes` or return `Absent::TooLarge` without a copy.
+    fn read_presentation(
+        &mut self,
+        _expected: Stamp,
+        _maximum_body_bytes: usize,
+    ) -> Result<Result<Snapshot, Absent>, worker::Error> {
+        Ok(Err(Absent::NoFrame))
+    }
     /// Apply pending local resize/expose work to the retained picture, without
     /// creating a decode, visibility or freshness receipt. Called only after
     /// configuration, between commands, on this presenter's same native task.
@@ -68,6 +83,7 @@ enum Command {
     Configure(Configuration, DecoderRecord),
     Unit(EncodedAccessUnit, bool),
     Overlay(Vec<u8>),
+    ReadPresentation(Stamp),
     Stop,
 }
 impl Command {
@@ -91,6 +107,7 @@ impl Command {
                 overlay::decode(&body, limits)?;
                 Ok(Self::Overlay(body))
             }
+            Kind::ReadPresentation => Ok(Self::ReadPresentation(Stamp::decode(&body)?)),
             Kind::Stop => Ok(Self::Stop),
             _ => Err(Error::WorkerRefused(worker::Error::Unsupported)),
         }
@@ -100,6 +117,7 @@ impl Command {
         self,
         presenter: &mut dyn LocalPresenter,
         limits: &ProtocolLimits,
+        maximum_capacity: Option<usize>,
     ) -> Result<(Kind, Vec<u8>), Error> {
         match self {
             Self::Configure(configuration, record) => {
@@ -123,6 +141,28 @@ impl Command {
                 let update = overlay::decode(&body, limits)?;
                 presenter.overlay(&update).map_err(Error::WorkerRefused)?;
                 Ok((Kind::CursorOverlayApplied, Vec::new()))
+            }
+            Self::ReadPresentation(expected) => {
+                match presenter
+                    .read_presentation(
+                        expected,
+                        maximum_capacity.unwrap_or(presentation_snapshot::MAX_BODY_BYTES),
+                    )
+                    .map_err(Error::WorkerRefused)?
+                {
+                    Ok(image) => {
+                        if image.stamp() != expected {
+                            return Err(Error::Protocol(worker::Error::WrongSequence));
+                        }
+                        let length =
+                            presentation_snapshot::pixel_bytes(image.width(), image.height())?;
+                        if image.pixels().len() != length {
+                            return Err(Error::Protocol(worker::Error::Malformed));
+                        }
+                        Ok((Kind::PresentationPixels, image.into_body()))
+                    }
+                    Err(absent) => Ok((Kind::PresentationAbsent, absent.encode().to_vec())),
+                }
             }
             Self::Stop => Err(Error::Unavailable), // handled only after native destruction
         }
@@ -237,7 +277,7 @@ fn run(
     stopped: &AtomicBool,
     limits: &ProtocolLimits,
 ) {
-    let mut configured = false;
+    let mut configured = None;
     loop {
         if stopped.load(Ordering::Acquire) || cx.checkpoint().is_err() {
             return;
@@ -245,7 +285,7 @@ fn run(
         let request = match requests.recv_timeout(Duration::from_millis(5)) {
             Ok(request) => request,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if configured
+                if configured.is_some()
                     && (stopped.load(Ordering::Acquire)
                         || cx.checkpoint().is_err()
                         || presenter.refresh().is_err())
@@ -272,8 +312,19 @@ fn run(
             });
             return;
         }
-        let configuring = matches!(request.command, Command::Configure(..));
-        let response = request.command.apply(presenter.as_mut(), limits);
+        let configuring = match &request.command {
+            Command::Configure(configuration, _) => Some(configuration.generation),
+            _ => None,
+        };
+        let response = match request.command {
+            Command::ReadPresentation(expected) if configured != Some(expected.configuration) => {
+                Ok((
+                    Kind::PresentationAbsent,
+                    Absent::NotCurrent.encode().to_vec(),
+                ))
+            }
+            command => command.apply(presenter.as_mut(), limits, request.maximum_capacity),
+        };
         if !publish(cx, request.reply, stopped, request.deadline, || {
             let (kind, body) = response?;
             if request
@@ -286,7 +337,9 @@ fn run(
         }) {
             return;
         }
-        configured |= configuring;
+        if configuring.is_some() {
+            configured = configuring;
+        }
     }
 }
 
@@ -372,11 +425,15 @@ impl Worker {
         let next = identity.sequence.checked_add(1).ok_or(Error::Unavailable)?;
         let request = Record::new(kind, identity, body, &self.limits).map_err(Error::from)?;
         let command = Command::prepare(kind, request.into_body(), &self.limits)?;
-        // These are the only running requests with a nonempty reply. Refuse
-        // insufficient retained credit before a native call or allocation.
-        if matches!(kind, Kind::Present | Kind::Decode)
-            && maximum_capacity.is_some_and(|maximum| maximum < size_of::<u64>())
-        {
+        // A native read needs enough reserved capacity for at least one pixel.
+        // The actual viewport is checked on its owning task before allocation,
+        // using this original capacity; it cannot widen the caller's credit.
+        let required = match kind {
+            Kind::ReadPresentation => presentation_snapshot::HEADER_BYTES + 4,
+            Kind::Present | Kind::Decode => size_of::<u64>(),
+            _ => 0,
+        };
+        if maximum_capacity.is_some_and(|maximum| maximum < required) {
             return Err(Error::Protocol(worker::Error::ResourceLimit).into());
         }
         let mut guard = Exchange {

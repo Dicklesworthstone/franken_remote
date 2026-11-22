@@ -41,8 +41,6 @@ impl Metadata {
         let frame = self.observation.frame.as_ref().ok_or(Error::Protocol)?;
         if self.observation.phase != Phase::Streaming
             || frame.evidence_level != Evidence::SubmittedToCompositor
-            || self.viewport_width > frame.pixel_width
-            || self.viewport_height > frame.pixel_height
             || pixel_bytes(self.viewport_width, self.viewport_height).is_err()
         {
             return Err(Error::Protocol);
@@ -60,7 +58,7 @@ impl Metadata {
         }
         Ok(())
     }
-    /// The declared frame dimensions, not only the global ceiling, bound the
+    /// The declared viewport dimensions, not only the global ceiling, bound the
     /// reader's allocation before it consumes any pixel body.
     pub(crate) fn validate_length(&self, length: usize) -> Result<(), Error> {
         self.validate_fields()?;

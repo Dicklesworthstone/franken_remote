@@ -252,13 +252,10 @@ fn unsupported_and_malformed_requests_are_refused_without_native_calls() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut worker = start(&cx, recorder(&calls)).await.unwrap();
         let deadline = Deadline::after(&cx, Duration::from_secs(1)).unwrap();
-        // A pixel snapshot is a presenter request this owner cannot answer.
-        // Its well-formed request carries one stamp; an empty body would be
-        // refused earlier as a malformed record (ResourceLimit).
-        let stamp = vec![0; fr_media::worker::presentation_snapshot::STAMP_BYTES];
+        // Poll is role-valid but unused by this synchronous presenter owner.
         assert_eq!(
             worker
-                .request(&cx, Kind::ReadPresentation, stamp, deadline)
+                .request(&cx, Kind::Poll, Vec::new(), deadline)
                 .await
                 .err(),
             Some(Error::WorkerRefused(worker::Error::Unsupported))
@@ -386,6 +383,7 @@ enum Stage {
     Configure,
     Submit,
     Overlay,
+    Snapshot,
     Refresh,
     Destroy,
 }
@@ -432,6 +430,20 @@ impl LocalPresenter for Stalling {
     fn overlay(&mut self, update: &overlay::Update<'_>) -> Result<(), worker::Error> {
         self.pause(Stage::Overlay);
         self.recorder.as_mut().unwrap().overlay(update)
+    }
+    fn read_presentation(
+        &mut self,
+        expected: worker::presentation_snapshot::Stamp,
+        maximum_body_bytes: usize,
+    ) -> Result<
+        Result<worker::presentation_snapshot::Snapshot, worker::presentation_snapshot::Absent>,
+        worker::Error,
+    > {
+        self.pause(Stage::Snapshot);
+        self.recorder
+            .as_mut()
+            .unwrap()
+            .read_presentation(expected, maximum_body_bytes)
     }
     fn refresh(&mut self) -> Result<(), worker::Error> {
         self.pause(Stage::Refresh);
@@ -491,6 +503,7 @@ fn request(stage: Stage) -> (Kind, Vec<u8>) {
             Kind::CursorOverlay,
             overlay::encode(&overlay::Update::Hidden, &configuration().limits().unwrap()).unwrap(),
         ),
+        Stage::Snapshot => (Kind::ReadPresentation, snapshots::stamp().encode().to_vec()),
         Stage::Destroy => (Kind::Stop, Vec::new()),
         Stage::Configure | Stage::Refresh => unreachable!("not an explicit frame request"),
     }
@@ -525,8 +538,13 @@ fn blocked_configuration_expires_while_the_authority_future_keeps_running() {
 }
 
 #[test]
-fn native_submit_overlay_and_destructor_stalls_keep_cleanup_pending() {
-    for stage in [Stage::Submit, Stage::Overlay, Stage::Destroy] {
+fn native_submit_overlay_snapshot_and_destructor_stalls_keep_cleanup_pending() {
+    for stage in [
+        Stage::Submit,
+        Stage::Overlay,
+        Stage::Snapshot,
+        Stage::Destroy,
+    ] {
         let clock = Arc::new(VirtualClock::new());
         runtime(&clock).block_on(async {
             let cx = Cx::current().unwrap();
@@ -569,18 +587,23 @@ fn native_submit_overlay_and_destructor_stalls_keep_cleanup_pending() {
 
 #[test]
 fn cancellation_and_dropped_waits_fence_native_work_before_it_returns() {
-    for cancel in [false, true] {
+    for (stage, cancel) in [
+        (Stage::Submit, false),
+        (Stage::Submit, true),
+        (Stage::Snapshot, false),
+        (Stage::Snapshot, true),
+    ] {
         let clock = Arc::new(VirtualClock::new());
         let runtime = runtime(&clock);
         runtime.block_on(async {
             let cleanup = Cx::current().unwrap();
             let operation = runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE);
             let calls = Arc::new(Mutex::new(Vec::new()));
-            let (presenter, mut gate) = stalling(&calls, Stage::Submit);
+            let (presenter, mut gate) = stalling(&calls, stage);
             let mut worker = start(&cleanup, presenter).await.unwrap();
             let deadline = Deadline::after(&operation, Duration::from_secs(1)).unwrap();
-            let mut requesting =
-                Box::pin(worker.request(&operation, Kind::Present, unit(1), deadline));
+            let (kind, body) = request(stage);
+            let mut requesting = Box::pin(worker.request(&operation, kind, body, deadline));
             entered(&cleanup, &mut requesting, &mut gate).await;
             if cancel {
                 operation.set_cancel_requested(true);
@@ -658,3 +681,6 @@ fn an_idle_repaint_stall_keeps_the_native_owner_until_actual_retirement() {
         assert_eq!(calls.lock().unwrap().last(), Some(&Call::Dropped));
     });
 }
+
+#[path = "local_snapshot_tests.rs"]
+mod snapshots;

@@ -143,6 +143,11 @@ impl Snapshot {
     pub fn pixels(&self) -> &[u8] {
         &self.body[HEADER_BYTES..]
     }
+    /// Transfer the original checked response allocation into the worker reply.
+    /// Exporting an in-process presentation never needs a second pixel copy.
+    pub fn into_body(self) -> Vec<u8> {
+        self.body
+    }
 }
 
 #[cfg(test)]
@@ -168,6 +173,9 @@ mod tests {
         assert_eq!(image.pixels(), pixels);
         assert_eq!(image.body.as_ptr(), pointer);
         assert_eq!(Stamp::decode(&stamp().encode()).unwrap(), stamp());
+        let body = image.into_body();
+        assert_eq!(body.as_ptr(), pointer);
+        assert_eq!(&body[HEADER_BYTES..], pixels);
     }
     #[test]
     fn malformed_geometry_and_inexact_pixel_lengths_never_become_images() {

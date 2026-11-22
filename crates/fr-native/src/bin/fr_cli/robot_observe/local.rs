@@ -90,14 +90,6 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
 
 pub(super) fn run(args: &[String]) -> Result<String, Failure> {
     let request = parse(args)?;
-    #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
-    if request.screenshot.is_some() {
-        return Err(Failure::new(
-            "observation_artifact_unavailable",
-            "The macOS live owner publishes metadata only; screenshot acquisition is not implemented. No output file, local IPC request, or remote connection was opened.",
-            2,
-        ));
-    }
     #[cfg(any(
         target_os = "linux",
         all(target_os = "macos", feature = "macos-desktop")
@@ -117,7 +109,6 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
             .map_err(|_| {
                 Failure::new("runtime_unavailable", "Check local runtime resources.", 1)
             })?;
-        #[cfg(target_os = "linux")]
         if request.screenshot.is_some() {
             let observed = runtime
                 .block_on(crate::session_control::screenshot::read(
@@ -270,6 +261,9 @@ fn read_failure(error: crate::session_control::observation::ReadError) -> Failur
 #[path = "local_tests.rs"]
 mod tests;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "local/artifact.rs"]
 mod artifact;

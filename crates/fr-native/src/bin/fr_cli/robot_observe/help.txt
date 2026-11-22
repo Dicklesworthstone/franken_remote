@@ -27,26 +27,33 @@ fr robot session open NODE_ID --foreground --role view --publish-observations
     [--evidence-level decoded|submitted_to_compositor] [--json]
 fr robot session status NODE_ID --json
 fr robot observe NODE_ID --connection-id HEX32 [--max-receipt-age-ms 1..60000]
-    [--evidence-level decoded|submitted_to_compositor] [--json]
+    [--evidence-level decoded|submitted_to_compositor]
+    [--screenshot /path/new-screen.png] [--json]
 The opt-in owner stays foreground with one attempt; status supplies its public
 comparison ID. Reads authenticate that existing local owner and never dial,
 capture, reconnect or grant input. Receipt age is local metadata age, NOT host
 source freshness. On macOS, the first receipt keeps its original local timestamp
 across bootstrap acknowledgement waits; duplicate callbacks do not refresh it.
 No frame is reported before a real receipt, or after retirement. Old callbacks
-cannot republish a retired attempt. macOS needs a local graphical session and
-publishes metadata only: --native-once, --screenshot and robot input refuse.
+cannot republish a retired attempt. macOS needs a local graphical session;
+--native-once and robot input remain unavailable there.
 Display changes and resizes that need a new Mac native view end the original
 observation without another dial; start a new explicit publisher for that view.
 Linux also accepts --worker and --x-display to select its installed media worker
 and local X11 display. Those Linux-only options are explicitly refused on macOS.
 
-Linux image export additionally accepts --screenshot /path/new-screen.png.
-With --screenshot, the original worker copies one retained
+Linux and macOS image export accept --screenshot /path/new-screen.png.
+With --screenshot, the original media owner copies one retained
 presented viewport; this does not recapture or decode a new frame. The same
 32 MiB raw-pixel, PNG, cursor and new-file rules above apply. The owner stays
 connected. Only one export is in flight, including a slow reader; no recording
 or automatic pixel publication is enabled by opening an owner.
+On macOS, on-demand Metal readback uses the same fitted picture, color range
+and remote cursor composition as presentation, on the original media task.
+It never creates a new frame receipt. Retina and enlarged windows retain their
+actual physical viewport dimensions, separately from the remote display.
+The 32 MiB ceiling still applies; a larger viewport needs a smaller window or
+--fit. GPU failure, resize or stale identity refuses.
 
 A Linux foreground control owner explicitly opened with --accept-input also accepts
 --connection-id ID --screenshot PATH. Its result includes control_authority with

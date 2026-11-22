@@ -1,9 +1,11 @@
-//! Bounded metadata publication from one original macOS viewing attempt.
+//! Bounded observation publication from one original macOS viewing attempt.
 //!
 //! The native session supplies actual decoder receipts. The callback connects
-//! them to the existing authenticated local observation owner; it grants no
-//! control, opens no file, and never substitutes receipt age for source age.
+//! them and one explicit snapshot handle to the authenticated local owner.
+//! It grants no control, opens no file, and never substitutes receipt age for
+//! source age. Attaching the handle copies no pixels and requests no capture.
 use fr_client::robot::live::{self, Evidence, Observation, Phase};
+use fr_client::robot::snapshot::Handle;
 use fr_wire::display::Display;
 use std::{
     cell::{Cell, RefCell},
@@ -12,11 +14,14 @@ use std::{
 };
 
 /// Native lifecycle evidence, carrying the original receipt's local timestamp.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub enum Event {
     Begin(u8),
     Authenticated,
     Approval,
+    /// The original observer's bounded on-demand export channel. It must be
+    /// bound explicitly by the local IPC owner, separately from metadata.
+    Snapshot(Handle),
     Ready {
         display: Display,
         serial: u64,
@@ -32,13 +37,16 @@ pub enum Event {
 }
 
 impl Event {
-    /// Apply to the same bounded observation slot served by local IPC.
+    /// Apply metadata to the same bounded observation slot served by local IPC.
     /// Duplicate receipts retain their original age in that shared owner.
+    /// Snapshot attachment requires an explicit handler; metadata-only sinks
+    /// cannot report a successful binding they never installed.
     pub fn apply(self, state: &mut Observation) -> Result<(), live::Error> {
         match self {
             Self::Begin(attempt) => state.begin(attempt),
             Self::Authenticated => state.authenticated(),
             Self::Approval => state.approval(),
+            Self::Snapshot(_) => Err(live::Error::Order),
             Self::Ready {
                 display,
                 serial,
@@ -65,6 +73,7 @@ struct Shared {
     attempt: Cell<u8>,
     active: Cell<bool>,
     failed: Cell<bool>,
+    snapshot_bound: Cell<bool>,
 }
 
 impl Shared {
@@ -116,6 +125,7 @@ impl Publisher {
             attempt: Cell::new(0),
             active: Cell::new(false),
             failed: Cell::new(false),
+            snapshot_bound: Cell::new(false),
         }))
     }
 
@@ -129,6 +139,7 @@ impl Publisher {
         }
         self.0.active.set(false);
         self.0.attempt.set(attempt);
+        self.0.snapshot_bound.set(false);
         self.0.send(Event::Begin(attempt))?;
         self.0.active.set(true);
         Ok(())
@@ -175,6 +186,18 @@ impl Attempt {
 
     pub(crate) fn approval(&self) -> Result<(), ()> {
         self.send(Event::Approval)
+    }
+
+    /// Attach at most once, before serving this exact observer. Retirement and
+    /// failed callbacks fence attachment just like frame receipts; a stale
+    /// callback cannot replace a newer attempt's export owner.
+    pub(crate) fn bind_snapshot(&self, handle: Handle) -> Result<(), ()> {
+        self.shared.check(self.attempt)?;
+        if self.shared.snapshot_bound.replace(true) {
+            return Err(());
+        }
+        self.send(Event::Snapshot(handle))?;
+        self.shared.check(self.attempt)
     }
 
     pub(crate) fn ready(

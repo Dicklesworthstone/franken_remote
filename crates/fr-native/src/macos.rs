@@ -3,7 +3,8 @@
 //! `macos_viewer.m`. The Rust HEVC guard admits the hvcC record and every
 //! access unit before `VideoToolbox` sees a byte; the glue never parses media.
 //! Decoded pictures stay in `IOSurface`-backed buffers that Metal samples
-//! directly: no CPU readback, conversion or copy.
+//! directly during playback. Explicit snapshots perform one bounded on-demand
+//! readback of the retained viewport on the same media owner.
 //!
 //! `Window` lives on the main thread (`AppKit`'s rule). `Surface` and
 //! `HevcDecoder` move to one media thread.
@@ -17,6 +18,7 @@ use fr_media::access_unit::{EncodedAccessUnit, FrameId, FrameKind};
 use fr_media::config::{CodecConfiguration, ColorRange};
 use fr_media::hevc::HevcGuard;
 use fr_media::worker::overlay::Update as CursorUpdate;
+use fr_media::worker::presentation_snapshot::{self, Absent, Snapshot, Stamp};
 use std::time::{Duration, Instant};
 
 pub(crate) use crate::macos_text::Commit as TextCommit;
@@ -60,6 +62,16 @@ struct RawEvent {
     flags: u32,
     reserved: u32,
     timestamp: f64,
+}
+
+/// Native dimensions and geometry revision sampled under the renderer's lock.
+/// This token only compares the original viewport; it grants no observation.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SnapshotGeometry {
+    width: u32,
+    height: u32,
+    revision: u64,
 }
 
 unsafe extern "C" {
@@ -188,6 +200,18 @@ unsafe extern "C" {
     fn fr_mac_window_free(window: *mut c_void);
     fn fr_mac_renderer_presented(renderer: *mut c_void) -> u64;
     fn fr_mac_renderer_refresh(renderer: *mut c_void) -> c_int;
+    fn fr_mac_renderer_snapshot_geometry(
+        renderer: *mut c_void,
+        token: u64,
+        out: *mut SnapshotGeometry,
+    ) -> c_int;
+    fn fr_mac_renderer_snapshot(
+        renderer: *mut c_void,
+        token: u64,
+        expected: *const SnapshotGeometry,
+        pixels: *mut u8,
+        length: usize,
+    ) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fr_mac_renderer_cursor(
         renderer: *mut c_void,
@@ -1168,6 +1192,7 @@ pub struct HevcDecoder {
     limits: ProtocolLimits,
     admission: HevcGuard,
     last: Option<FrameId>,
+    snapshot: crate::macos_snapshot::Retained,
     closed: bool,
 }
 // SAFETY: the VideoToolbox session is used by one thread at a time (`&mut
@@ -1212,6 +1237,7 @@ impl HevcDecoder {
             limits,
             admission,
             last: None,
+            snapshot: crate::macos_snapshot::Retained::default(),
             closed: false,
         })
     }
@@ -1226,6 +1252,85 @@ impl HevcDecoder {
     }
     pub fn surface(&self) -> &Surface {
         &self.surface
+    }
+    /// Export only this decoder's original successfully submitted viewport.
+    /// Runs on its existing drained media worker: GPU completion may block,
+    /// while the supervising session continues servicing expiry and teardown.
+    /// No capture, decode, frame receipt or freshness evidence is created.
+    pub fn read_presentation(
+        &mut self,
+        expected: Stamp,
+        maximum_body_bytes: usize,
+    ) -> Result<Result<Snapshot, Absent>, NativeError> {
+        if self.closed {
+            return Err(NativeError::Closed);
+        }
+        if let Err(absent) = self.snapshot.check(expected) {
+            return Ok(Err(absent));
+        }
+        let token = expected
+            .frame
+            .as_raw()
+            .checked_add(1)
+            .ok_or(NativeError::StaleGeneration)?;
+        let mut geometry = SnapshotGeometry::default();
+        // SAFETY: the original renderer is live, the frame token was checked
+        // against this decoder, and native writes only this scalar structure.
+        let queried = unsafe {
+            fr_mac_renderer_snapshot_geometry(self.surface.raw.as_ptr(), token, &raw mut geometry)
+        };
+        if let Some(absent) = snapshot_status(queried)? {
+            return Ok(Err(absent));
+        }
+        let length = match crate::macos_snapshot::pixel_bytes(geometry.width, geometry.height) {
+            Ok(length) => length,
+            Err(absent) => return Ok(Err(absent)),
+        };
+        if length
+            .checked_add(presentation_snapshot::HEADER_BYTES)
+            .is_none_or(|total| total > maximum_body_bytes)
+        {
+            return Ok(Err(Absent::TooLarge));
+        }
+        let mut body = match crate::macos_snapshot::prepare(
+            expected,
+            geometry.width,
+            geometry.height,
+            length,
+            maximum_body_bytes,
+        ) {
+            Ok(body) => body,
+            Err(fr_media::worker::Error::Allocation | fr_media::worker::Error::ResourceLimit) => {
+                return Ok(Err(Absent::TooLarge));
+            }
+            Err(_) => return Err(NativeError::InvalidConfiguration),
+        };
+        let pixels = &mut body[presentation_snapshot::HEADER_BYTES..];
+        // SAFETY: exact checked byte storage stays alive throughout this
+        // synchronous call. Native rechecks frame, revision, geometry and byte
+        // ceiling before allocation, after GPU completion and after copying.
+        // It retains no Rust pointer. The snapshot adopts this allocation only
+        // after the native result confirms that same original viewport.
+        let copied = unsafe {
+            fr_mac_renderer_snapshot(
+                self.surface.raw.as_ptr(),
+                token,
+                &raw const geometry,
+                pixels.as_mut_ptr(),
+                pixels.len(),
+            )
+        };
+        if let Some(absent) = snapshot_status(copied)? {
+            return Ok(Err(absent));
+        }
+        self.snapshot.check(expected).map_or_else(
+            |absent| Ok(Err(absent)),
+            |()| {
+                Snapshot::decode(body)
+                    .map(Ok)
+                    .map_err(|_| NativeError::InvalidConfiguration)
+            },
+        )
     }
     /// Admits, decodes and presents one access unit. Admission and decode are
     /// one transaction: a refused or failed unit leaves the guard unchanged.
@@ -1274,6 +1379,7 @@ impl HevcDecoder {
             .and_then(|frame| frame.checked_add(1))
             .ok_or(NativeError::StaleGeneration)?;
         let bytes = sample.bytes();
+        self.snapshot.begin(unit.kind(), present);
         // SAFETY: the admitted sample lives for this synchronous call and the
         // glue copies it into a CoreMedia block buffer before decoding.
         if let Err(error) = status(unsafe {
@@ -1286,11 +1392,27 @@ impl HevcDecoder {
             )
         }) {
             self.closed = true;
+            self.snapshot.failed();
             return Err(error);
         }
         self.admission = admission;
         self.last = Some(unit.frame());
+        self.snapshot
+            .completed(unit.frame(), unit.config_generation(), unit.kind(), present);
         Ok(())
+    }
+}
+
+/// Positive codes are bounded routine absence; zero alone confirms a copy.
+fn snapshot_status(code: c_int) -> Result<Option<Absent>, NativeError> {
+    match code {
+        1 => Ok(Some(Absent::NoFrame)),
+        2 => Ok(Some(Absent::NotCurrent)),
+        3 => Ok(Some(Absent::Busy)),
+        // These allocations belong only to the optional export. Refusing its
+        // resources must not poison the still-valid decoder or live desktop.
+        -4 | 4 => Ok(Some(Absent::TooLarge)),
+        _ => status(code).map(|()| None),
     }
 }
 impl Drop for HevcDecoder {

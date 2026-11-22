@@ -199,3 +199,105 @@ fn backwards_receipt_clock_stops_publication_without_fabricated_age() {
     assert_eq!(snapshot.phase, Phase::Stopped);
     assert!(snapshot.frame.is_none());
 }
+
+#[test]
+fn original_snapshot_attachment_is_once_only_and_does_not_publish_a_frame() {
+    use fr_client::robot::snapshot::Channel;
+
+    let state = Rc::new(RefCell::new(Observation::default()));
+    let sink = Rc::clone(&state);
+    let attached = Rc::new(RefCell::new(Vec::new()));
+    let bindings = Rc::clone(&attached);
+    let owner = Publisher::new(move |event| match event {
+        Event::Snapshot(handle) => {
+            bindings.borrow_mut().push(handle);
+            Ok(())
+        }
+        event => event.apply(&mut sink.borrow_mut()).map_err(|_| ()),
+    });
+    owner.begin(1).unwrap();
+    owner.authenticated(1).unwrap();
+    let original = owner.original(1).unwrap();
+    let (channel, handle) = Channel::new();
+    original.bind_snapshot(handle.clone()).unwrap();
+    assert!(original.bind_snapshot(handle).is_err());
+    assert_eq!(attached.borrow().len(), 1);
+    assert!(attached.borrow()[0].current_stamp().is_none());
+    let snapshot = state.borrow().snapshot(Instant::now()).unwrap();
+    assert_eq!(snapshot.phase, Phase::Authenticated);
+    assert!(snapshot.frame.is_none());
+
+    let at = Instant::now();
+    original
+        .ready(display(), 0, Evidence::SubmittedToCompositor, at)
+        .unwrap();
+    let stamp = fr_media::worker::presentation_snapshot::Stamp {
+        frame: fr_media::access_unit::FrameId::from_raw(0),
+        configuration: fr_core::ids::CodecConfigurationGeneration::INITIAL,
+        recovery: fr_core::ids::RecoveryGeneration::INITIAL,
+    };
+    channel.publish(Some(stamp));
+    assert_eq!(attached.borrow()[0].current_stamp(), Some(stamp));
+    drop(channel);
+    assert!(attached.borrow()[0].current_stamp().is_none());
+}
+
+#[test]
+fn a_retired_snapshot_callback_cannot_install_into_the_replacement() {
+    use fr_client::robot::snapshot::Channel;
+
+    let state = Rc::new(RefCell::new(Observation::default()));
+    let sink = Rc::clone(&state);
+    let attached = Rc::new(Cell::new(0));
+    let bindings = Rc::clone(&attached);
+    let owner = Publisher::new(move |event| match event {
+        Event::Snapshot(_) => {
+            bindings.set(bindings.get() + 1);
+            Ok(())
+        }
+        event => event.apply(&mut sink.borrow_mut()).map_err(|_| ()),
+    });
+    let at = Instant::now();
+    let old = streaming(&owner, 1, at);
+    owner.retire(Phase::Cleaning).unwrap();
+    let current = streaming(&owner, 2, at);
+    let (_channel, handle) = Channel::new();
+    assert!(old.bind_snapshot(handle.clone()).is_err());
+    assert_eq!(attached.get(), 0);
+    current.bind_snapshot(handle.clone()).unwrap();
+    assert_eq!(attached.get(), 1);
+    drop(owner);
+    assert!(current.bind_snapshot(handle).is_err());
+    assert_eq!(attached.get(), 1);
+}
+
+#[test]
+fn failed_snapshot_binding_retires_original_metadata_and_cannot_retry() {
+    use fr_client::robot::snapshot::Channel;
+
+    let state = Rc::new(RefCell::new(Observation::default()));
+    let sink = Rc::clone(&state);
+    let owner = Publisher::new(move |event| match event {
+        Event::Snapshot(_) => Err(()),
+        event => event.apply(&mut sink.borrow_mut()).map_err(|_| ()),
+    });
+    let at = Instant::now();
+    let original = streaming(&owner, 1, at);
+    let (_channel, handle) = Channel::new();
+    assert!(original.bind_snapshot(handle.clone()).is_err());
+    let snapshot = state.borrow().snapshot(at).unwrap();
+    assert_eq!(snapshot.phase, Phase::Stopped);
+    assert!(snapshot.frame.is_none());
+    assert!(original.bind_snapshot(handle).is_err());
+    assert!(owner.begin(2).is_err());
+}
+
+#[test]
+fn a_metadata_only_sink_cannot_claim_it_bound_an_export_handle() {
+    let (owner, state) = owner();
+    let at = Instant::now();
+    let original = streaming(&owner, 1, at);
+    let (_channel, handle) = fr_client::robot::snapshot::Channel::new();
+    assert!(original.bind_snapshot(handle).is_err());
+    assert_eq!(state.borrow().snapshot(at).unwrap().phase, Phase::Stopped);
+}

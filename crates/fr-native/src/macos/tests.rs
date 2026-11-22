@@ -166,6 +166,249 @@ fn remote_cursor_needs_a_checked_shape_and_redraws_without_a_presentation() {
     assert_eq!(surface.presented(), 1, "a cursor redraw is not a picture");
 }
 
+fn snapshot_stamp(frame: u64) -> Stamp {
+    Stamp {
+        frame: FrameId::from_raw(frame),
+        configuration: CodecConfigurationGeneration::INITIAL,
+        recovery: RecoveryGeneration::INITIAL,
+    }
+}
+
+#[test]
+fn snapshot_native_status_and_geometry_preserve_the_optional_export_boundary() {
+    assert_eq!(std::mem::size_of::<SnapshotGeometry>(), 16);
+    assert_eq!(std::mem::align_of::<SnapshotGeometry>(), 8);
+    for (code, absent) in [
+        (1, Absent::NoFrame),
+        (2, Absent::NotCurrent),
+        (3, Absent::Busy),
+        (4, Absent::TooLarge),
+        (-4, Absent::TooLarge),
+    ] {
+        assert_eq!(snapshot_status(code), Ok(Some(absent)));
+    }
+    assert_eq!(snapshot_status(0), Ok(None));
+    assert_eq!(snapshot_status(-3), Err(NativeError::Codec));
+    assert_eq!(snapshot_status(5), Err(NativeError::Codec));
+}
+
+#[test]
+fn retained_snapshot_exports_real_pixels_without_advancing_presentation() {
+    let units = units();
+    let surface = Surface::offscreen(128, 96).unwrap();
+    let mut decoder = HevcDecoder::new(
+        surface,
+        config(),
+        ProtocolLimits::ABSOLUTE,
+        &record(&units[0]),
+    )
+    .unwrap();
+    let expected = snapshot_stamp(0);
+    let maximum = presentation_snapshot::HEADER_BYTES + 128 * 96 * 4;
+    assert!(matches!(
+        decoder.read_presentation(expected, maximum),
+        Ok(Err(Absent::NoFrame))
+    ));
+    decoder.submit(&units[0]).unwrap();
+    let initial = decoder
+        .read_presentation(expected, maximum)
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.stamp(), expected);
+    assert_eq!((initial.width(), initial.height()), (128, 96));
+    assert_eq!(initial.pixels().len(), 128 * 96 * 4);
+    assert!(
+        initial
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[..3] != [0, 0, 0]),
+        "the real fixture must yield picture content, not an empty success raster"
+    );
+    assert!(
+        initial
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel[3] == 255)
+    );
+    assert_eq!(decoder.surface().presented(), 1);
+
+    // The native reference chain advances, while the retained viewport and
+    // its original successful presentation identity remain unchanged.
+    decoder.submit_unit(&units[1], false).unwrap();
+    let retained = decoder
+        .read_presentation(expected, maximum)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.stamp(), expected);
+    assert_eq!(retained.pixels(), initial.pixels());
+    assert_eq!(decoder.surface().presented(), 1);
+    assert!(matches!(
+        decoder.read_presentation(snapshot_stamp(1), maximum),
+        Ok(Err(Absent::NotCurrent))
+    ));
+
+    decoder.submit(&units[2]).unwrap();
+    assert!(matches!(
+        decoder.read_presentation(expected, maximum),
+        Ok(Err(Absent::NotCurrent))
+    ));
+    let next = decoder
+        .read_presentation(snapshot_stamp(2), maximum)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.stamp(), snapshot_stamp(2));
+    assert_eq!(decoder.surface().presented(), 2);
+}
+
+#[test]
+fn retained_snapshot_uses_the_presenters_remote_cursor_composition() {
+    let units = units();
+    let surface = Surface::offscreen(128, 96).unwrap();
+    let mut decoder = HevcDecoder::new(
+        surface,
+        config(),
+        ProtocolLimits::ABSOLUTE,
+        &record(&units[0]),
+    )
+    .unwrap();
+    decoder.submit(&units[0]).unwrap();
+    let expected = snapshot_stamp(0);
+    let maximum = presentation_snapshot::HEADER_BYTES + 128 * 96 * 4;
+    let original = decoder
+        .read_presentation(expected, maximum)
+        .unwrap()
+        .unwrap();
+    let interior = (11 * 128 + 11) * 4;
+    let original_pixel = &original.pixels()[interior..interior + 4];
+    let cursor_pixel = [
+        255 - original_pixel[0],
+        255 - original_pixel[1],
+        255 - original_pixel[2],
+        255,
+    ];
+    let rgba = [cursor_pixel[2], cursor_pixel[1], cursor_pixel[0], 255].repeat(16);
+    decoder
+        .surface()
+        .cursor(&CursorUpdate::Shape {
+            x: 10,
+            y: 10,
+            width: 4,
+            height: 4,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            rgba: &rgba,
+        })
+        .unwrap();
+    let composed = decoder
+        .read_presentation(expected, maximum)
+        .unwrap()
+        .unwrap();
+    assert_eq!(&composed.pixels()[interior..interior + 4], &cursor_pixel);
+    assert_ne!(composed.pixels(), original.pixels());
+    assert_eq!(composed.stamp(), original.stamp());
+    decoder.surface().cursor(&CursorUpdate::Hidden).unwrap();
+    let hidden = decoder
+        .read_presentation(expected, maximum)
+        .unwrap()
+        .unwrap();
+    assert_eq!(hidden.pixels(), original.pixels());
+    assert_eq!(decoder.surface().presented(), 1);
+}
+
+#[test]
+fn retained_snapshot_refuses_wrong_stamp_and_credit_but_exports_real_retina_dimensions() {
+    let units = units();
+    let surface = Surface::offscreen(128, 96).unwrap();
+    let mut decoder = HevcDecoder::new(
+        surface,
+        config(),
+        ProtocolLimits::ABSOLUTE,
+        &record(&units[0]),
+    )
+    .unwrap();
+    decoder.submit(&units[0]).unwrap();
+    let expected = snapshot_stamp(0);
+    let maximum = presentation_snapshot::HEADER_BYTES + 128 * 96 * 4;
+    for wrong in [
+        Stamp {
+            configuration: CodecConfigurationGeneration::from_raw(999),
+            ..expected
+        },
+        Stamp {
+            recovery: RecoveryGeneration::from_raw(999),
+            ..expected
+        },
+    ] {
+        assert!(matches!(
+            decoder.read_presentation(wrong, maximum),
+            Ok(Err(Absent::NotCurrent))
+        ));
+    }
+    assert!(matches!(
+        decoder.read_presentation(expected, maximum - 1),
+        Ok(Err(Absent::TooLarge))
+    ));
+    let mut geometry = SnapshotGeometry::default();
+    // SAFETY: this test owns the live surface and a writable scalar output.
+    assert_eq!(
+        unsafe {
+            fr_mac_renderer_snapshot_geometry(decoder.surface.raw.as_ptr(), 1, &raw mut geometry)
+        },
+        0
+    );
+    geometry.revision += 1;
+    let mut pixels = vec![0; 128 * 96 * 4];
+    // SAFETY: exact viewport storage and live original renderer. The altered
+    // comparison revision must refuse before any GPU work or copy occurs.
+    assert_eq!(
+        unsafe {
+            fr_mac_renderer_snapshot(
+                decoder.surface.raw.as_ptr(),
+                1,
+                &raw const geometry,
+                pixels.as_mut_ptr(),
+                pixels.len(),
+            )
+        },
+        2
+    );
+    assert!(pixels.iter().all(|byte| *byte == 0));
+
+    let surface = Surface::offscreen(256, 200).unwrap();
+    let mut enlarged = HevcDecoder::new(
+        surface,
+        config(),
+        ProtocolLimits::ABSOLUTE,
+        &record(&units[0]),
+    )
+    .unwrap();
+    enlarged.submit(&units[0]).unwrap();
+    assert!(matches!(
+        enlarged.read_presentation(expected, maximum),
+        Ok(Err(Absent::TooLarge))
+    ));
+    let retina = enlarged
+        .read_presentation(expected, presentation_snapshot::MAX_BODY_BYTES)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retina.stamp(), expected);
+    assert_eq!((retina.width(), retina.height()), (256, 200));
+    assert_eq!(retina.pixels().len(), 256 * 200 * 4);
+    assert!(retina.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255));
+    // The actual viewport includes the four-pixel top/bottom letterboxes.
+    assert!(
+        retina.pixels()[..256 * 4 * 4]
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0, 255])
+    );
+    assert!(
+        retina.pixels()[256 * 196 * 4..]
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0, 255])
+    );
+    assert_eq!(enlarged.surface().presented(), 1);
+}
+
 /// A canonical-layout record carrying `sps` between the fixture's own VPS
 /// and PPS.
 fn record_with_sps(sps: &[u8]) -> Vec<u8> {

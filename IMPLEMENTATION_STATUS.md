@@ -1,5 +1,44 @@
 # Implementation status
 
+## Screenshots from the original macOS observation (2026-11-22)
+
+An explicit macOS foreground view opened with `--publish-observations` can now
+answer `fr robot observe NODE --connection-id ID --screenshot PATH`. The exact
+original observer installs its bounded snapshot handle before publishing its
+first receipt. Authenticated local IPC retains the existing two-second request,
+single export reservation, generation checks and final success seal. The
+requester writes the PNG only after validating that complete original reply.
+No new remote connection, input authority, host capture or automatic recording
+is created.
+
+The local presenter accepts `ReadPresentation` on its existing drained native
+task. On-demand Metal readback uses the same admitted picture, color range,
+fitted viewport and remote cursor composition as normal presentation. Frame
+identity and native geometry revision are checked before and after GPU/CPU
+work. Decode-only reference progress cannot relabel the retained image. Routine
+absence, insufficient credit and allocation failure leave viewing usable;
+native faults retain the original failure and cleanup requirements.
+
+Retina and enlarged viewports report their actual physical dimensions separately
+from the remote source. Only explicit snapshot replies receive the independent
+32 MiB pixel ceiling; ordinary media/control limits are unchanged. Exact declared
+viewport dimensions and frame/configuration/recovery identity are validated
+before publication. Existing-file refusal, private new-file permissions and
+unknown host freshness/physical visibility remain explicit.
+
+Passed: 1,288 actual `fr-client`/`fr-media` tests; 17 actual-source Mac callback
+and retained-snapshot policy tests; 21 actual-source CLI screenshot parser,
+metadata and PNG tests; strict all-target component Clippy; cross-target Rust
+decoder-wrapper Clippy against `x86_64-apple-darwin`; pinned formatting and
+whitespace checks. The wrapper check includes real foreign declarations and no
+FFI stubs, but omits AppKit/native linking and the full Mac session module.
+Scoped UBS review found no new production defect. The pinned Asupersync build
+attempts hit executor memory limits before the new worker tests could execute;
+the lower-memory metadata-only check was also blocked in that dependency.
+Runtime worker/media tests, full native Cargo gates, Apple SDK,
+Metal/VideoToolbox and live-tailnet qualification remain open. Plan §§16.1 and
+18.2; tracking `fr-a6gp`; [usage](docs/native-client-cli.md#screenshots-from-an-existing-foreground-owner).
+
 ## Native-app microphone controls (2026-11-22)
 
 The macOS machine picker exposes the existing microphone owner through a fresh,

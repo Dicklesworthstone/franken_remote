@@ -24,21 +24,13 @@ impl Presenter {
             {
                 return Err(Error::InvalidFrame);
             }
-            let deadline =
-                worker::Deadline::after(cx, super::presentation::NATIVE_REQUEST_CEILING)?;
-            let source_bytes = u64::from(self.configuration.width)
-                .checked_mul(u64::from(self.configuration.height))
-                .and_then(|pixels| pixels.checked_mul(4))
-                .ok_or(Error::InvalidFrame)?;
-            let pixels = source_bytes.min(presentation_snapshot::MAX_PIXEL_BYTES as u64);
-            let maximum = usize::try_from(pixels)
-                .map_err(|_| Error::InvalidFrame)?
-                .checked_add(presentation_snapshot::HEADER_BYTES)
-                .ok_or(Error::InvalidFrame)?;
-            Ok((deadline, maximum))
+            Ok(worker::Deadline::after(
+                cx,
+                super::presentation::NATIVE_REQUEST_CEILING,
+            )?)
         })();
         async move {
-            let (deadline, maximum) = prepared?;
+            let deadline = prepared?;
             let mut operation = MediaOperation::new(&mut self.worker);
             let reply = operation
                 .worker
@@ -46,7 +38,11 @@ impl Presenter {
                     cx,
                     Kind::ReadPresentation,
                     expected.encode().to_vec(),
-                    Some(maximum),
+                    // The composited viewport can exceed the decoded source
+                    // (Retina, local resize or letterboxing). Only this explicit
+                    // export gets its independent bounded reply reservation;
+                    // encoded pictures and ordinary commands keep their limits.
+                    Some(presentation_snapshot::MAX_BODY_BYTES),
                     deadline,
                 )
                 .await?;
@@ -57,10 +53,7 @@ impl Presenter {
                 }
                 Kind::PresentationPixels => {
                     let snapshot = Snapshot::decode(reply.into_body())?;
-                    if snapshot.stamp() != expected
-                        || snapshot.width() > self.configuration.width
-                        || snapshot.height() > self.configuration.height
-                    {
+                    if snapshot.stamp() != expected {
                         return Err(Error::InvalidFrame);
                     }
                     Some(snapshot)
@@ -72,3 +65,7 @@ impl Presenter {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "snapshot/tests.rs"]
+mod tests;

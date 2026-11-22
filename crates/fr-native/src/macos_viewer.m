@@ -1,7 +1,9 @@
 // macOS viewer glue (fr-5a4w): one AppKit window, VideoToolbox HEVC decode
 // into IOSurface-backed NV12 pixel buffers, and a Metal pass that converts
 // BT.709 YCbCr and aspect-fits the picture into a CAMetalLayer. Pixels never
-// cross the CPU. Rust admits every parameter set and access unit before any
+// cross the CPU during ordinary playback. An explicit snapshot reads back one
+// bounded retained viewport on the media worker. Rust admits every parameter set
+// and access unit before any
 // byte reaches VideoToolbox; this file only binds the OS frameworks.
 //
 // Threads: window creation, event polling and freeing run on the main thread.
@@ -117,6 +119,25 @@ typedef struct {
     uint64_t redraw;       // also changes for an expose of unchanged geometry
 } FrGeometry;
 
+// Exact ABI of macos.rs::SnapshotGeometry. The frame token travels separately.
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint64_t revision;
+} FrMacSnapshotGeometry;
+_Static_assert(sizeof(FrMacSnapshotGeometry) == 16, "fixed snapshot geometry ABI");
+
+// Same absolute export ceilings as presentation_snapshot.rs / ProtocolLimits.
+// Native checks again before allocating a render target or staging buffer.
+#define FR_MAC_SNAPSHOT_BYTES (32u * 1024u * 1024u)
+#define FR_MAC_SNAPSHOT_DIMENSION 8192u
+enum {
+    FR_MAC_SNAPSHOT_NO_FRAME = 1,
+    FR_MAC_SNAPSHOT_NOT_CURRENT = 2,
+    FR_MAC_SNAPSHOT_BUSY = 3,
+    FR_MAC_SNAPSHOT_TOO_LARGE = 4,
+};
+
 // Pure geometry only. No Objective-C, driver call or retained object belongs
 // under the short geometry lock shared with the window/event thread.
 static void fr_refit(FrGeometry *g) {
@@ -142,6 +163,7 @@ static void fr_refit(FrGeometry *g) {
     os_unfair_lock geometryLock;  // plain state only; never waits on native work
     FrGeometry geometry;
     uint64_t submittedRevision;
+    uint64_t submittedToken;      // original successfully presented frame + 1
     BOOL submittedPicture;
     BOOL redrawPending;
     uint64_t presented;           // read under geometryLock, not the native lock
@@ -176,31 +198,17 @@ static void fr_refit(FrGeometry *g) {
     if (cache) CFRelease(cache);
 }
 
-// Caller holds the media lock. The geometry snapshot is released before ANY
-// driver work; a stalled drawable/texture/command never holds up local input.
-// Success means command submission of the retained picture, not GPU completion.
-- (int)drawLocked {
-    os_unfair_lock_lock(&geometryLock);
-    FrGeometry g = geometry;
-    os_unfair_lock_unlock(&geometryLock);
-    if (!last) return FR_MAC_UNAVAILABLE;
-    if (g.drawable.width < 1 || g.drawable.height < 1 ||
-        g.fit.size.width < 1 || g.fit.size.height < 1)
-        return FR_MAC_GEOMETRY;
-    if (appliedScale != g.scale) {
-        layer.contentsScale = g.scale;
-        appliedScale = g.scale;
-    }
-    if (!CGSizeEqualToSize(appliedDrawable, g.drawable)) {
-        layer.drawableSize = g.drawable;
-        appliedDrawable = g.drawable;
-    }
-    id<CAMetalDrawable> target = [layer nextDrawable];
-    if (!target) return FR_MAC_UNAVAILABLE;
-    id<MTLTexture> targetTexture = target.texture;
-    if (!targetTexture) return FR_MAC_ALLOCATION;
-    id<MTLCommandBuffer> commands = [queue commandBuffer];
-    if (!commands) return FR_MAC_ALLOCATION;
+// The ordinary presentation and explicit snapshot share the exact render pass:
+// range conversion, source crop, fit, sampling, letterboxing and remote cursor.
+// Caller owns the media lock and returned CV texture references. No command is
+// committed here; the caller retains those references until GPU completion.
+- (int)encodeLocked:(id<MTLCommandBuffer>)commands target:(id<MTLTexture>)targetTexture
+           geometry:(const FrGeometry *)geometryValue luma:(CVMetalTextureRef *)outLuma
+             chroma:(CVMetalTextureRef *)outChroma {
+    FrGeometry g = *geometryValue;
+    *outLuma = NULL;
+    *outChroma = NULL;
+    if (!last || !commands || !targetTexture) return FR_MAC_UNAVAILABLE;
     if (CVPixelBufferGetPlaneCount(last) != 2) return FR_MAC_CODEC;
     size_t w0 = CVPixelBufferGetWidthOfPlane(last, 0), h0 = CVPixelBufferGetHeightOfPlane(last, 0);
     size_t w1 = CVPixelBufferGetWidthOfPlane(last, 1), h1 = CVPixelBufferGetHeightOfPlane(last, 1);
@@ -251,6 +259,42 @@ static void fr_refit(FrGeometry *g) {
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [self drawCursorLocked:encoder geometry:&g];
     [encoder endEncoding];
+    *outLuma = luma;
+    *outChroma = chroma;
+    return FR_MAC_OK;
+}
+
+// Caller holds the media lock. The geometry snapshot is released before ANY
+// driver work; a stalled drawable/texture/command never holds up local input.
+// Success means command submission of the retained picture, not GPU completion.
+- (int)drawLocked {
+    uint64_t originalToken = submittedToken;
+    submittedToken = 0; // A failed redraw cannot export an unsubmitted composition.
+    os_unfair_lock_lock(&geometryLock);
+    FrGeometry g = geometry;
+    os_unfair_lock_unlock(&geometryLock);
+    if (!last) return FR_MAC_UNAVAILABLE;
+    if (g.drawable.width < 1 || g.drawable.height < 1 ||
+        g.fit.size.width < 1 || g.fit.size.height < 1)
+        return FR_MAC_GEOMETRY;
+    if (appliedScale != g.scale) {
+        layer.contentsScale = g.scale;
+        appliedScale = g.scale;
+    }
+    if (!CGSizeEqualToSize(appliedDrawable, g.drawable)) {
+        layer.drawableSize = g.drawable;
+        appliedDrawable = g.drawable;
+    }
+    id<CAMetalDrawable> target = [layer nextDrawable];
+    if (!target) return FR_MAC_UNAVAILABLE;
+    id<MTLTexture> targetTexture = target.texture;
+    if (!targetTexture) return FR_MAC_ALLOCATION;
+    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    if (!commands) return FR_MAC_ALLOCATION;
+    CVMetalTextureRef luma = NULL, chroma = NULL;
+    int encoded = [self encodeLocked:commands target:targetTexture geometry:&g
+                              luma:&luma chroma:&chroma];
+    if (encoded != FR_MAC_OK) return encoded;
     // The Metal textures keep the IOSurface alive until the GPU finishes.
     CVMetalTextureRef keepLuma = luma, keepChroma = chroma;
     [commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
@@ -271,6 +315,7 @@ static void fr_refit(FrGeometry *g) {
     // needs its own draw; an older submission cannot clear that newer request.
     if (geometry.redraw == g.redraw) redrawPending = NO;
     os_unfair_lock_unlock(&geometryLock);
+    submittedToken = originalToken;
     return FR_MAC_OK;
 }
 
@@ -297,12 +342,14 @@ static void fr_refit(FrGeometry *g) {
     [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
 
-- (int)present:(CVPixelBufferRef)picture {
+- (int)present:(CVPixelBufferRef)picture token:(uint64_t)token {
     os_unfair_lock_lock(&lock);
+    submittedToken = 0;
     if (last) CVPixelBufferRelease(last);
     last = CVPixelBufferRetain(picture);
     int status = [self drawLocked];
     if (status == FR_MAC_OK) {
+        submittedToken = token;
         os_unfair_lock_lock(&geometryLock);
         presented++;
         os_unfair_lock_unlock(&geometryLock);
@@ -3051,6 +3098,136 @@ int fr_mac_renderer_refresh(void *handle) {
     }
 }
 
+// Caller owns only the media lock. The geometry lock protects plain scalar
+// snapshots and never survives an allocation, Metal call, wait or pixel copy.
+static int snapshot_geometry_locked(FrRenderer *r, uint64_t token,
+                                    FrMacSnapshotGeometry *out, FrGeometry *geometry) {
+    if (!r->last || r->submittedToken == 0) return FR_MAC_SNAPSHOT_NO_FRAME;
+    if (token == 0 || token != r->submittedToken) return FR_MAC_SNAPSHOT_NOT_CURRENT;
+    os_unfair_lock_lock(&r->geometryLock);
+    FrGeometry g = r->geometry;
+    BOOL current = r->submittedPicture && r->submittedRevision == g.revision;
+    os_unfair_lock_unlock(&r->geometryLock);
+    if (!current || g.revision == 0) return FR_MAC_SNAPSHOT_NOT_CURRENT;
+    double width = g.drawable.width, height = g.drawable.height;
+    if (!isfinite(width) || !isfinite(height) || width < 1 || height < 1 ||
+        width > FR_MAC_SNAPSHOT_DIMENSION || height > FR_MAC_SNAPSHOT_DIMENSION ||
+        floor(width) != width || floor(height) != height ||
+        width * height * 4 > FR_MAC_SNAPSHOT_BYTES)
+        return FR_MAC_SNAPSHOT_TOO_LARGE;
+    if (!isfinite(g.fit.origin.x) || !isfinite(g.fit.origin.y) ||
+        !isfinite(g.fit.size.width) || !isfinite(g.fit.size.height) ||
+        g.fit.origin.x < 0 || g.fit.origin.y < 0 ||
+        g.fit.size.width < 1 || g.fit.size.height < 1 ||
+        g.fit.origin.x + g.fit.size.width > width ||
+        g.fit.origin.y + g.fit.size.height > height)
+        return FR_MAC_SNAPSHOT_NOT_CURRENT;
+    *out = (FrMacSnapshotGeometry){(uint32_t)width, (uint32_t)height, g.revision};
+    if (geometry) *geometry = g;
+    return FR_MAC_OK;
+}
+
+static bool snapshot_same(FrMacSnapshotGeometry a, FrMacSnapshotGeometry b) {
+    return a.width == b.width && a.height == b.height && a.revision == b.revision;
+}
+
+// Query without allocating pixels. The Rust owner checks the exact caller's
+// response credit and absolute viewport bounds before admitting the export.
+int fr_mac_renderer_snapshot_geometry(void *handle, uint64_t token, FrMacSnapshotGeometry *out) {
+    if (!handle || !out) return FR_MAC_INVALID;
+    if ([NSThread isMainThread]) return FR_MAC_THREAD;
+    *out = (FrMacSnapshotGeometry){0};
+    FrRenderer *r = (__bridge FrRenderer *)handle;
+    if (!os_unfair_lock_trylock(&r->lock)) return FR_MAC_SNAPSHOT_BUSY;
+    int status = snapshot_geometry_locked(r, token, out, NULL);
+    os_unfair_lock_unlock(&r->lock);
+    return status;
+}
+
+static int snapshot_copy_locked(FrRenderer *r, uint64_t token, FrMacSnapshotGeometry expected,
+                                const FrGeometry *geometry, uint8_t *pixels, size_t length) {
+    // Three bounded allocations exist only for this explicit request: one
+    // private GPU target, one shared staging buffer and the caller's response.
+    // No layer drawable is acquired or submitted and no receipt is advanced.
+    MTLTextureDescriptor *descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                         width:expected.width
+                                                        height:expected.height
+                                                     mipmapped:NO];
+    if (!descriptor) return FR_MAC_ALLOCATION;
+    descriptor.storageMode = MTLStorageModePrivate;
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> target = [r->device newTextureWithDescriptor:descriptor];
+    id<MTLBuffer> staging = [r->device newBufferWithLength:length options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> commands = [r->queue commandBuffer];
+    if (!target || !staging || !commands || staging.length < length) return FR_MAC_ALLOCATION;
+    CVMetalTextureRef luma = NULL, chroma = NULL;
+    int status = [r encodeLocked:commands target:target geometry:geometry luma:&luma chroma:&chroma];
+    if (status != FR_MAC_OK) return status;
+    id<MTLBlitCommandEncoder> copy = [commands blitCommandEncoder];
+    if (!copy) {
+        // Nothing was committed, so no GPU still owns these borrowed planes.
+        CFRelease(luma);
+        CFRelease(chroma);
+        return FR_MAC_ALLOCATION;
+    }
+    // BGRA8 rows need a multiple of the four-byte pixel size. The 2D image
+    // stride is zero, as specified by MTLBlitCommandEncoder's copy contract.
+    [copy copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(expected.width, expected.height, 1) toBuffer:staging
+        destinationOffset:0 destinationBytesPerRow:(NSUInteger)expected.width * 4
+        destinationBytesPerImage:0];
+    [copy endEncoding];
+    [commands commit];
+    // Apple's "Reading pixel data from a drawable texture" requires waiting
+    // for the render and blit completion before the CPU reads the shared buffer:
+    // https://developer.apple.com/documentation/metal/reading-pixel-data-from-a-drawable-texture
+    // This is the original drained media task, never AppKit or authority.
+    // Its supervisor fences timeout/cancellation independently and waits for
+    // real retirement if a foreign call hangs; there is no early resource free.
+    [commands waitUntilCompleted];
+    CFRelease(luma);
+    CFRelease(chroma);
+    if (commands.status != MTLCommandBufferStatusCompleted) return FR_MAC_CODEC;
+    FrMacSnapshotGeometry current = {0};
+    status = snapshot_geometry_locked(r, token, &current, NULL);
+    if (status != FR_MAC_OK) return status;
+    if (!snapshot_same(current, expected)) return FR_MAC_SNAPSHOT_NOT_CURRENT;
+    const void *source = staging.contents;
+    if (!source) return FR_MAC_UNAVAILABLE;
+    memcpy(pixels, source, length);
+    // A concurrent native resize during the copy also refuses the result.
+    // Rust does not publish any bytes from an unconfirmed native response.
+    status = snapshot_geometry_locked(r, token, &current, NULL);
+    if (status != FR_MAC_OK) return status;
+    return snapshot_same(current, expected) ? FR_MAC_OK : FR_MAC_SNAPSHOT_NOT_CURRENT;
+}
+
+int fr_mac_renderer_snapshot(void *handle, uint64_t token, const FrMacSnapshotGeometry *expected,
+                             uint8_t *pixels, size_t length) {
+    if (!handle || !expected || !pixels || !expected->width || !expected->height)
+        return FR_MAC_INVALID;
+    if ([NSThread isMainThread]) return FR_MAC_THREAD;
+    if (expected->width > FR_MAC_SNAPSHOT_DIMENSION ||
+        expected->height > FR_MAC_SNAPSHOT_DIMENSION ||
+        length > FR_MAC_SNAPSHOT_BYTES ||
+        (uint64_t)expected->width * expected->height * 4 != length)
+        return FR_MAC_SNAPSHOT_TOO_LARGE;
+    @autoreleasepool {
+        FrRenderer *r = (__bridge FrRenderer *)handle;
+        if (!os_unfair_lock_trylock(&r->lock)) return FR_MAC_SNAPSHOT_BUSY;
+        FrMacSnapshotGeometry current = {0};
+        FrGeometry geometry = {0};
+        int status = snapshot_geometry_locked(r, token, &current, &geometry);
+        if (status == FR_MAC_OK && !snapshot_same(current, *expected))
+            status = FR_MAC_SNAPSHOT_NOT_CURRENT;
+        if (status == FR_MAC_OK)
+            status = snapshot_copy_locked(r, token, *expected, &geometry, pixels, length);
+        os_unfair_lock_unlock(&r->lock);
+        return status;
+    }
+}
+
 uint64_t fr_mac_renderer_presented(void *handle) {
     if (!handle) return 0;
     FrRenderer *r = (__bridge FrRenderer *)handle;
@@ -3207,6 +3384,7 @@ int fr_mac_decoder_new(void *renderer_handle, const uint8_t *vps, size_t vps_len
             return FR_MAC_UNAVAILABLE;
         VTSessionSetProperty(d->session, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
         os_unfair_lock_lock(&d->renderer->lock);
+        d->renderer->submittedToken = 0;
         d->renderer->fullRange = full_range ? YES : NO;
         os_unfair_lock_lock(&d->renderer->geometryLock);
         FrGeometry *g = &d->renderer->geometry;
@@ -3284,7 +3462,7 @@ int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_
         if (status == kVTInvalidSessionErr) return FR_MAC_SESSION_LOST;
         if (output_result == FR_APPLE_OUTPUT_GEOMETRY) return FR_MAC_GEOMETRY;
         if (output_result != FR_APPLE_OUTPUT_OK) return FR_MAC_CODEC;
-        if (present) result = [d->renderer present:decoded];
+        if (present) result = [d->renderer present:decoded token:(uint64_t)token];
         CVPixelBufferRelease(decoded);
     }
     return result;
