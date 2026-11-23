@@ -1,7 +1,12 @@
-//! One native common-file dialog on its own thread. The viewer keeps drawing
-//! while the modal OS picker owns local input. The worker holds no authority;
-//! it only pins one explicitly selected batch after native cleanup.
-use crate::file_choice::{Choice, Error, Focus as FocusPolicy, MAX_PATH_UNITS, selected_paths};
+//! One native file-selection/preparation worker. The viewer keeps drawing
+//! during a dialog or delayed clipboard rendering. The worker holds no
+//! authority; it pins one explicitly selected batch after native cleanup.
+#[path = "copied_files.rs"]
+mod copied_files;
+use super::Source;
+use crate::file_choice::{
+    Choice, Error, Focus as FocusPolicy, MAX_PATH_UNITS, copied_paths, selected_paths,
+};
 use fr_mobile_ffi::session::{FileChoiceContext, PreparedUpload, Shared, Upload};
 use std::{
     cell::{Cell, RefCell},
@@ -53,6 +58,10 @@ pub(super) fn ticks() -> u64 {
     unsafe { GetTickCount64() }
 }
 
+pub(super) fn clipboard_sequence() -> u32 {
+    copied_files::sequence()
+}
+
 pub(super) struct Selected {
     choice: Choice,
     prepared: PreparedUpload,
@@ -92,6 +101,7 @@ impl Picker {
         context: FileChoiceContext,
         owner: HWND,
         lifetime: u64,
+        source: Source,
     ) -> Result<Self, Error> {
         collect_retiring();
         if RUNNING
@@ -100,7 +110,10 @@ impl Picker {
         {
             return Err(Error::Cleanup);
         }
-        let choice = match Choice::new(opened) {
+        let choice = match match &source {
+            Source::Dialog => Choice::new(opened),
+            Source::Copied(_) => Choice::from_gesture(opened, ticks()),
+        } {
             Ok(choice) => choice,
             Err(error) => {
                 RUNNING.store(false, Ordering::SeqCst);
@@ -130,6 +143,11 @@ impl Picker {
                 // No native window can activate before the UI publishes this
                 // exact Picker/Focus into its original choice registration.
                 started.recv().map_err(|_| Error::Cancelled)?;
+                if let Source::Copied(sequence) = source {
+                    // No dialog owns local input. In particular, never give
+                    // this worker thread the dialog's activation exemption.
+                    return choose_copied(choice, worker_focus, sequence);
+                }
                 // SAFETY: identify this worker before creating any native UI.
                 let worker = unsafe { GetCurrentThreadId() };
                 if !worker_focus
@@ -305,6 +323,48 @@ fn collect_retiring() {
         }
         RUNNING.store(false, Ordering::SeqCst);
     }
+}
+
+fn check_copied(choice: &mut Choice, focus: &Focus) -> Result<(), Error> {
+    if focus.stop.load(Ordering::SeqCst)
+        || focus.original.frames.app_id(0) != focus.attempt
+        || !focus
+            .original
+            .file_choice_ready(&focus.context)
+            .is_ok_and(|ready| ready)
+        || !focus.owner_foreground()
+    {
+        return choice.refuse(Error::Cancelled);
+    }
+    // Read the original acceptance clock after all source/foreground locks.
+    choice.check(ticks())
+}
+
+fn choose_copied(mut choice: Choice, focus: Arc<Focus>, sequence: u32) -> Result<Selected, Error> {
+    check_copied(&mut choice, &focus)?;
+    let bytes = copied_files::read(sequence, || {
+        // No authority/source lock spans a clipboard borrow or delayed render.
+        if focus.stop.load(Ordering::SeqCst) {
+            return choice.refuse(Error::Cancelled);
+        }
+        choice.check(ticks())
+    })?;
+    check_copied(&mut choice, &focus)?;
+    let paths: Vec<PathBuf> = copied_paths(&bytes)?
+        .iter()
+        .map(|path| PathBuf::from(OsString::from_wide(path)))
+        .collect();
+    check_copied(&mut choice, &focus)?;
+    // The borrowed clipboard handle and pointer are already unlocked/closed.
+    // Reuse the exact regular-file custody and batch validation owner; never
+    // send a partial selection or reopen names after their handles are pinned.
+    let prepared = Upload::prepare_many(&paths).map_err(|_| Error::Selection)?;
+    check_copied(&mut choice, &focus)?;
+    Ok(Selected {
+        choice,
+        prepared,
+        focus,
+    })
 }
 
 struct Native {

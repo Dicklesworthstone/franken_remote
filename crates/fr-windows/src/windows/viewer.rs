@@ -1463,12 +1463,12 @@ impl Viewer {
             && self.session.shared().controlled()
     }
 
-    fn open_file(&mut self, message: u32) {
+    fn open_file(&mut self, message: u32, source: upload::Source) {
         if self.choosing_file() || !self.can_choose_file() {
             return;
         }
-        // Native selection runs on its own UI thread; this thread continues
-        // presenting fresh pictures and servicing the original session.
+        // Native selection and clipboard rendering share one bounded worker;
+        // this thread keeps presenting and servicing the original session.
         self.release_everything();
         let available = self.can_choose_file();
         if let Some(menu) = &mut self.upload_menu
@@ -1477,6 +1477,7 @@ impl Viewer {
                 control::lifetime(),
                 message,
                 available,
+                source,
             )
         {
             eprintln!("fr-windows: file_choice_expired_or_unavailable");
@@ -2043,7 +2044,13 @@ extern "system" fn window_proc(
         }
         WM_COMMAND if wparam.0 & 0xffff == upload::OPEN => {
             let time = current_message_time();
-            with_viewer(|v| v.open_file(time));
+            with_viewer(|v| v.open_file(time, upload::Source::Dialog));
+            true
+        }
+        WM_COMMAND if wparam.0 & 0xffff == upload::COPIED => {
+            let time = current_message_time();
+            let source = upload::copied_source();
+            with_viewer(|v| v.open_file(time, source));
             true
         }
         WM_COMMAND if wparam.0 & 0xffff == download::CANCEL => {

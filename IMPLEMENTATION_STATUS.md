@@ -1,5 +1,37 @@
 # Implementation status
 
+## Windows explicit copied-file uploads (2026-11-23)
+
+The connected Windows viewer now offers **File transfer → Send copied files**.
+An explicit local menu gesture reads Explorer's Unicode file list on the
+existing bounded selection/preparation worker, pins all selected source files,
+and submits through the original controlled upload owner. The same progress,
+host publication receipts, pause, resume and cancellation controls apply.
+Content-free selection status is visible in the menu, including clipboard
+busy, changed selection, no copied files and expired choice.
+
+The original gesture age, control/view context, connection attempt and native
+lifetime survive clipboard access, file preparation and final admission.
+Copied-file work receives no dialog focus exemption. A changed selection,
+backgrounded viewer, cancellation or expired original context cannot authorize
+a later send. Native memory is bounded to 128 KiB before copying, with at most
+eight files and 32,768 total UTF-16 path units. Clipboard-owned handles remain
+borrowed and are unlocked and closed before source handles are prepared.
+Malformed, ANSI, unsafe or excessive lists refuse the complete selection.
+
+The full portable `fr-windows` Cargo suite passes all 259 tests, including nine
+new parser, original-deadline and focus regressions; strict all-target Clippy
+also passes. The exact production clipboard boundary and portable policies pass
+all-target check and strict Clippy for `x86_64-pc-windows-gnu`, with the pinned
+compiler, real Windows bindings, and dependency versions/checksums matching
+`Cargo.lock`. These component checks do not establish a complete Windows viewer
+build or live Explorer, delayed-rendering and end-to-end host publication
+qualification. The existing clipboard bridge's strict-Clippy `manual_let_else`
+finding is also corrected without changing its refusal behavior.
+
+Plan §§15.3, 15.6, 16.1 and 19; tracking `fr-dd5h`;
+[Windows usage](docs/windows-client.md).
+
 ## Video send capacity, transfer refill and Linux upload choice (2026-11-23)
 
 Native QUIC video admission now reserves a packet for actual pending reliable

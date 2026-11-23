@@ -401,9 +401,8 @@ impl Bridge {
             let reason = self.retirement_reason(q);
             return self.on_refusal(q, reason);
         }
-        let retained = match self.lane.retained_send_records(q) {
-            Ok(records) => records,
-            Err(_) => return self.on_refusal(q, Error::Closed),
+        let Ok(retained) = self.lane.retained_send_records(q) else {
+            return self.on_refusal(q, Error::Closed);
         };
         let charged = self.inflight.iter().flatten().count();
         let Some(completed) = charged.checked_sub(retained) else {

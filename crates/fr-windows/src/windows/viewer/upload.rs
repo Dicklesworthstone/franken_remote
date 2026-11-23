@@ -27,11 +27,24 @@ pub(super) const CANCEL: usize = 0x4680;
 pub(super) const OPEN: usize = 0x4685;
 pub(super) const PAUSE: usize = 0x4686;
 pub(super) const RESUME: usize = 0x4687;
+pub(super) const COPIED: usize = 0x4688;
 const PHASE: usize = 0x4681;
 const BYTES: usize = 0x4682;
 const RECEIPT: usize = 0x4683;
 const CLEANUP: usize = 0x4684;
+const CHOICE: usize = 0x4689;
 type BatchChoice = Choice<(Weak<Upload>, u8)>;
+
+pub(super) enum Source {
+    Dialog,
+    Copied(u32),
+}
+
+/// Sample only for an explicit command, before it can wait for a viewer or
+/// source lock. Reading the content happens later on the one original worker.
+pub(super) fn copied_source() -> Source {
+    Source::Copied(file_picker::clipboard_sequence())
+}
 
 thread_local! {
     // Each popup captures the exact batch it displayed; late Cancel/pacing
@@ -144,7 +157,16 @@ impl Menu {
                 OPEN,
                 w!("&Pick and send files…"),
             )
+            .and_then(|()| {
+                AppendMenuW(
+                    popup,
+                    MF_STRING | MF_GRAYED,
+                    COPIED,
+                    w!("&Send copied files"),
+                )
+            })
             .and_then(|()| AppendMenuW(popup, MF_SEPARATOR, 0, w!("")))
+            .and_then(|()| AppendMenuW(popup, MF_STRING | MF_GRAYED, CHOICE, w!("Selection: none")))
             .and_then(|()| AppendMenuW(popup, MF_STRING | MF_GRAYED, PHASE, w!("No file selected")))
             .and_then(|()| AppendMenuW(popup, MF_STRING | MF_GRAYED, BYTES, w!("Bytes")))
             .and_then(|()| {
@@ -215,6 +237,7 @@ impl Menu {
         lifetime: u64,
         message: u32,
         available: bool,
+        source: Source,
     ) -> bool {
         let Some(mut choice) = self.choice.take() else {
             return false;
@@ -232,12 +255,14 @@ impl Menu {
         let Ok(context) = shared.begin_file_choice() else {
             return false;
         };
+        self.displayed = None;
         let Ok(picker) = file_picker::Picker::open(
             request.at,
             Arc::clone(&request.original),
             context.clone(),
             self.hwnd,
             request.lifetime,
+            source,
         ) else {
             self.last_choice = "native_unavailable";
             return false;
@@ -302,6 +327,9 @@ impl Menu {
                         "expired"
                     }
                     Err(crate::file_choice::Error::Cleanup) => "cleanup_failed",
+                    Err(crate::file_choice::Error::ClipboardBusy) => "clipboard_busy",
+                    Err(crate::file_choice::Error::ClipboardChanged) => "clipboard_changed",
+                    Err(crate::file_choice::Error::NoCopiedFiles) => "no_copied_files",
                     Err(_) => "selection_refused",
                 };
                 self.cleanup_failed |= matches!(result, Err(crate::file_choice::Error::Cleanup));
@@ -373,6 +401,10 @@ impl Menu {
             )
         };
         let entries = [
+            (
+                CHOICE,
+                format!("Selection: {}", self.last_choice.replace('_', " ")),
+            ),
             (PHASE, phase),
             (BYTES, bytes),
             (RECEIPT, format!("Host receipt: {receipt}")),
@@ -414,6 +446,7 @@ impl Menu {
             let snapshot = report.snapshot;
             for (id, enabled) in [
                 (OPEN, self.available),
+                (COPIED, self.available),
                 (
                     PAUSE,
                     !terminal && snapshot.is_some_and(|s| !s.pause_requested),

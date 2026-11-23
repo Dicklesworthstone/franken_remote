@@ -724,6 +724,58 @@ cleanup is checked separately from file selection. Closing the viewer gives
 that original cancelled worker a bounded collection interval; an unresolved
 or failed cleanup cannot count as successful completion or permit replacement.
 
+### Send files copied in Explorer
+
+Copy up to eight regular files in Explorer, return to the controlling viewer,
+then choose **File transfer → Send copied files**. This action selects the
+copied file list once and submits it through the same ordered upload owner,
+quotas, progress, host receipts, **Pause**, **Resume** and **Cancel this upload**
+controls described below. Every member must pass the existing retained-handle
+checks; one invalid or over-budget file refuses the whole selection. Directories,
+virtual Shell items without ordinary local file paths, network paths and unsafe
+path spellings remain unavailable. The original host must have granted control
+and negotiated its optional file lane before the action becomes available.
+The menu's **Selection** row reports a busy or changed clipboard, no copied
+files, an expired gesture or a refused selection without showing any path.
+
+Only this explicit action reads the clipboard's Unicode file list. Opening the
+menu or connecting does not read it, and copied text is never interpreted as a
+file path. This action also works with text clipboard sharing off. The local
+clipboard contents and ownership remain unchanged; file paths and contents do
+not enter completion reports or diagnostics.
+
+The command keeps its original two-second gesture bound through a busy
+clipboard, delayed rendering, source-handle preparation, worker collection and
+actual Send admission. A clipboard replacement before the original read is
+refused; there is no automatic retry against a newer selection. This operation
+uses the same single worker as the native chooser, so neither another file
+choice nor a second preparation worker can accumulate behind it. The worker
+copies at most 128 KiB of native clipboard allocation and accepts at most
+32,768 UTF-16 units across all selected paths, including their terminators.
+
+Clipboard handles are borrowed only long enough to copy the bounded list;
+unlocking and closing must finish before any local source is opened. The
+decoder validates the complete double-NUL-terminated Unicode list, byte
+offsets, path count and spelling before handing paths to the existing
+regular-file owner. Windows permits allocator padding after that list and may
+increment the clipboard sequence while rendering the original delayed format;
+neither is mistaken for another selected file. These details follow Microsoft's
+[DROPFILES](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/ns-shlobj_core-dropfiles),
+[clipboard handle ownership](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getclipboarddata),
+[sequence-number](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getclipboardsequencenumber)
+and [allocation-size](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalsize)
+contracts.
+
+No dialog opens for this action, so it receives no file-dialog focus exemption:
+switching away from the original viewer cancels an unsent choice. A delayed
+clipboard read cannot spend a new connection, view, control grant or window
+lifetime. A blocked native render stays charged to the original worker until
+it actually returns; cancellation does not claim to have interrupted that
+Windows call. The viewer's existing cleanup deadline still controls whether a
+replacement may start. Live Explorer clipboard, delayed-render and host-receipt
+qualification requires a Windows desktop and is separate from portable parser
+and freshness tests or Windows compilation.
+
 ### Select the first batch on the command line
 
 ```powershell
@@ -777,8 +829,8 @@ the containing session under its existing rules.
 A command retains at most nine explicit batches of up to eight files, including
 an initial `--send` batch. The host's existing cumulative byte and 64-transfer
 session limits still apply, including failed attempts. After a batch finishes,
-**Pick and send files…** becomes available again only if the original lane
-remains ready. Earlier publication
+**Pick and send files…** and **Send copied files** become available again only
+if the original lane remains ready. Earlier publication
 receipts and failures remain in bounded history. A cancelled or failed batch
 is never silently repeated.
 

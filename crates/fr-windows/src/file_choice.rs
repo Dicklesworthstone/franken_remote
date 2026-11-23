@@ -2,8 +2,12 @@
 //! gesture age survive native cleanup, descriptor opening and UI delivery.
 #![forbid(unsafe_code)]
 
+#[path = "file_choice/copied.rs"]
+mod copied;
 #[path = "file_choice/selection.rs"]
 mod selection;
+#[cfg(any(windows, test))]
+pub use copied::{MAX_COPIED_BYTES, copied_paths};
 pub use selection::MAX_SELECTED_FILES;
 #[cfg(any(windows, test))]
 pub use selection::selected_paths;
@@ -111,6 +115,9 @@ pub enum Error {
     Expired,
     Clock,
     InvalidPath,
+    ClipboardBusy,
+    ClipboardChanged,
+    NoCopiedFiles,
     Native,
     Selection,
     Cleanup,
@@ -136,6 +143,17 @@ impl Choice {
             refused: None,
             consumed: false,
         })
+    }
+
+    /// An explicit menu gesture has already passed `MenuChoice::take`, which
+    /// charges native message age and rounding. Keep that original timestamp
+    /// through clipboard waits, handle preparation and final submission; a
+    /// copied-file action has no later dialog acceptance to renew its age.
+    pub fn from_gesture(at: u64, now: u64) -> Result<Self, Error> {
+        let mut choice = Self::new(at)?;
+        choice.accepted = Some(at);
+        choice.check(now)?;
+        Ok(choice)
     }
 
     pub fn check(&mut self, now: u64) -> Result<(), Error> {
@@ -254,6 +272,54 @@ mod tests {
         for (thread, lifetime) in [(0, 5), (21, 5), (20, 6)] {
             assert!(!focus.allows_picker(thread, lifetime));
         }
+    }
+
+    #[test]
+    fn a_copied_file_worker_has_no_dialog_focus_exemption() {
+        let mut focus = Focus::new(10, 100, 5).unwrap();
+        assert!(focus.publish());
+        assert!(focus.current(5));
+        assert!(!focus.current(6));
+        assert!(focus.owner_foreground(10, 100));
+        assert!(focus.foreground(10, 100));
+        for thread in [0, 10, 20] {
+            assert!(!focus.allows_picker(thread, 5));
+            assert!(!focus.register_dialog(thread, 200));
+            assert!(!focus.foreground(thread, 200));
+        }
+    }
+
+    #[test]
+    fn copied_files_keep_the_original_menu_age_without_charging_rounding_twice() {
+        let mut choice = Choice::from_gesture(1_984, 2_000).unwrap();
+        assert!(choice.selected());
+        choice.check(3_983).unwrap();
+        choice.finish(3_983).unwrap();
+        assert_eq!(choice.finish(3_983), Err(Error::Used));
+        let mut expired = Choice::from_gesture(1_984, 2_000).unwrap();
+        assert_eq!(expired.finish(3_984), Err(Error::Expired));
+        assert_eq!(expired.finish(4_000), Err(Error::Expired));
+    }
+
+    #[test]
+    fn a_queued_or_cancelled_copied_choice_never_gets_a_fresh_budget() {
+        assert!(matches!(
+            Choice::from_gesture(1_000, 3_000),
+            Err(Error::Expired)
+        ));
+        assert!(matches!(
+            Choice::from_gesture(1_000, 999),
+            Err(Error::Clock)
+        ));
+        let mut choice = Choice::from_gesture(1_000, 1_001).unwrap();
+        assert_eq!(choice.refuse(Error::Cancelled), Err(Error::Cancelled));
+        assert_eq!(choice.finish(1_002), Err(Error::Cancelled));
+        let mut changed = Choice::from_gesture(1_000, 1_001).unwrap();
+        assert_eq!(
+            changed.refuse(Error::ClipboardChanged),
+            Err(Error::ClipboardChanged)
+        );
+        assert_eq!(changed.finish(1_002), Err(Error::ClipboardChanged));
     }
 
     #[test]

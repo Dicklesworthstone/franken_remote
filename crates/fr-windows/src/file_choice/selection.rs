@@ -25,10 +25,7 @@ pub fn selected_paths(units: &[u16], file_offset: usize) -> Result<Vec<Vec<u16>>
             .rposition(|unit| *unit == SEPARATOR)
             .map(|index| index + 1)
             .ok_or(Error::InvalidPath)?;
-        if file_offset != name_start
-            || !directory(&path[..name_start])
-            || !component(&path[name_start..])
-        {
+        if file_offset != name_start || !file_path(path) {
             return Err(Error::InvalidPath);
         }
         return Ok(vec![path.to_vec()]);
@@ -75,6 +72,17 @@ pub fn selected_paths(units: &[u16], file_offset: usize) -> Result<Vec<Vec<u16>>
         paths.push(path);
         remaining = &remaining[end + 1..];
     }
+}
+
+/// Shared by the native dialog and the clipboard's complete absolute paths.
+/// This only validates spelling; the existing retained-handle owner still
+/// decides whether the path names an admissible regular local file.
+pub(super) fn file_path(path: &[u16]) -> bool {
+    path.iter()
+        .rposition(|unit| *unit == SEPARATOR)
+        .is_some_and(|separator| {
+            directory(&path[..=separator]) && component(&path[separator + 1..])
+        })
 }
 
 /// Match the ordinary drive paths accepted by the retained-handle boundary.
