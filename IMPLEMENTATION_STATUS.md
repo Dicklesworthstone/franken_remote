@@ -1,5 +1,49 @@
 # Implementation status
 
+## Native file outcomes and Linux receiving-folder choice (2026-11-23)
+
+The native app now checks the original upload outcome as well as the receiving
+disk owner before opening another viewer. Its notice distinguishes host
+publication, refusal and unconfirmed durability. Unknown publication,
+contradictory or missing receipts, and unconfirmed source cleanup stop the app;
+known effects from both transfer directions remain in terminal output. A
+cancelled batch may have an unstarted suffix: batch completion is not proof that
+every selection started or that any file was published. Commit `82f2fee` adds
+this behavior and preserves an opted-in empty upload's explicit terminal state.
+
+Linux desktop builds now offer a fresh local receiving-folder choice through
+the installed XDG FileChooser portal, using the same one-connection consent and
+safe pinned-directory receiver as macOS. The private bus checks the original
+same-user portal owner, exact request handle and terminal response. Setup,
+choice and cleanup have fixed deadlines; cancellation, expiry, ambiguous
+selection and unconfirmed cleanup cannot open a remote session. The directory
+is pinned before transfer setup, and a later choice cannot reuse its consent.
+Explicit `--receive DIR` remains available. Local setup failures retain an
+explicit receive-not-started result; a diagnostics-export error after a completed
+Linux session retains that session's original closure and transfer evidence.
+This does not add Wayland hosting.
+
+The exact current app completion and terminal source passes 30 focused tests
+(17 upload, 11 receive and two terminal projection tests), plus strict
+pedantic component Clippy. The exact native portal and URI/drop sources pass
+25 tests, including 13 exchanges through real libsystemd and a private
+`dbus-daemon`; test and production component Clippy pass with warnings denied.
+The actual standalone `fr-native` library passes Cargo check and strict Cargo
+Clippy with `--no-default-features --features linux-directory-picker`. The
+complete current runtime and chooser wrapper pass a production type check,
+strict Clippy and four focused tests against the real pinned Asupersync runtime.
+Three preflight/terminal component tests also pass against the original type
+declarations and receive-summary methods. Whole-workspace formatting and
+whitespace checks pass.
+The private test broker uses anonymous TCP because the executor cannot create
+Unix sockets; production still requires the local Unix bus and same-user
+identity. These checks do not exercise a graphical desktop chooser or a live
+file transfer. Full Cargo attempts were interrupted under shared-memory
+pressure before tests; UBS reported an incomplete Rust analyzer run. Full CLI,
+platform and live-peer qualification remain open. Plan §§7.3, 15.6, 16.1 and
+19; tracking `fr-19fv` and `fr-8ieq`;
+[usage](docs/native-client-cli.md#desktop-application-fr-app).
+
 ## Original application owners during video recovery (2026-11-22)
 
 Controlled video recovery now services the exact existing file and clipboard

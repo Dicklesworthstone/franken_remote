@@ -74,10 +74,14 @@ fn invalid() -> Failure {
     )
 }
 
-/// Native macOS can acquire a fresh destination in the selected viewer. Other
-/// platforms retain the explicit launch-time destination route.
+/// Native Linux and macOS acquire a fresh destination in the selected viewer.
+/// A missing desktop portal is a typed pre-start refusal, not permission to
+/// reuse another connection's destination.
 pub(super) fn directory_picker_available() -> bool {
-    cfg!(all(target_os = "macos", feature = "macos-desktop"))
+    cfg!(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))
 }
 
 pub(super) fn available(pending: Option<&Receiving>) -> bool {

@@ -58,7 +58,7 @@ microphone build (on Linux, also select a source at launch); it\n\
 opens the muted panel for this connection only; choose Allow microphone, then\n\
 Talk there. This choice starts off in every picker. With control, select Send\n\
 files to allow file drops\n\
-onto this viewer only. On macOS, select Receive files to choose a private\n\
+onto this viewer only. On Linux or macOS, select Receive files to choose a private\n\
 folder before connecting. Both choices start off in every new picker. Closing the\n\
 viewer returns to the picker with the outcome; Cancel or Escape quits. Viewing\n\
 preferences are remembered. An unused\n\

@@ -70,7 +70,10 @@ fn ordinary_app_receiving_requires_a_fresh_local_choice_for_every_viewer() {
     let native = receiving::directory_picker_available();
     assert_eq!(
         native,
-        cfg!(all(target_os = "macos", feature = "macos-desktop"))
+        cfg!(any(
+            all(target_os = "linux", feature = "linux-desktop"),
+            all(target_os = "macos", feature = "macos-desktop")
+        ))
     );
     assert_eq!(receiving::available(None), native);
     assert!(receiving::available(pending().as_ref()));

@@ -181,13 +181,28 @@ mod macos_text;
 #[path = "macos/files.rs"]
 pub mod macos_files;
 
+#[cfg(all(target_os = "linux", feature = "linux-directory-picker"))]
+pub mod directory_picker;
+
 // One bounded local-drop parser and selection worker for both native desktops.
 // These contain no window-system calls or alternate transfer implementation.
 #[cfg(any(
     test,
     all(target_os = "linux", feature = "linux-viewer-window"),
+    all(target_os = "linux", feature = "linux-directory-picker"),
     all(target_os = "macos", feature = "macos-desktop")
 ))]
+// Picker-only builds reuse URI parsing; the window-owned drop inbox is dormant.
+// Keep its normal dead-code checks in desktop builds and all test builds.
+#[cfg_attr(
+    all(
+        not(test),
+        target_os = "linux",
+        feature = "linux-directory-picker",
+        not(feature = "linux-viewer-window")
+    ),
+    allow(dead_code)
+)]
 #[path = "viewer_window/file_drop.rs"]
 pub(crate) mod file_drop;
 #[cfg(any(

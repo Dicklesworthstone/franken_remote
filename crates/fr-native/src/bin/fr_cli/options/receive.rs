@@ -50,7 +50,11 @@ pub(super) fn keep_both(value: &str) -> Result<bool, Failure> {
 impl ReceiveOptions {
     /// A native chooser supplies only a path, never policy. Keep the actual
     /// receiver's default budgets and reject existing destinations.
-    #[cfg(any(all(target_os = "macos", feature = "macos-desktop"), test))]
+    #[cfg(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    ))]
     pub(crate) fn chosen_directory(directory: PathBuf) -> Result<Self, Failure> {
         if !directory.is_absolute()
             || directory.as_os_str().len() > 4096

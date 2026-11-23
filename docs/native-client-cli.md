@@ -174,7 +174,7 @@ original viewer cleanup requirement; a single source's cleanup never certifies
 other batches. Nothing is resent automatically, and no file names or paths enter
 these notices.
 
-On macOS, choose **View and control**, then select **Receive files**. After
+On Linux or macOS, choose **View and control**, then select **Receive files**. After
 confirming the host, the viewer opens a native folder chooser before remote
 lookup or connection. Choose one existing private local directory. Cancel or
 timeout opens no connection. The original chooser confirms cleanup, and the
@@ -182,11 +182,22 @@ receiver immediately validates and pins that directory before any upload
 chooser can open. The graphical route uses the receiver's actual default
 limits and rejects existing destination names.
 
+The Linux desktop build uses the installed XDG FileChooser portal (version 3
+or later), on the current user's local session bus. It first resolves the
+existing portal, makes at most one activation attempt if absent, and validates
+the original service owner before opening the chooser. Setup has a five-second
+limit; the original folder choice expires after two minutes. A cancellation
+waits at most two seconds for the original request to finish or acknowledge
+Close. An unavailable portal, an ambiguous or remote URI, an expired choice,
+or unconfirmed chooser cleanup opens no remote connection. An explicit
+`--receive DIR` remains available without a portal. This adds a local Linux
+folder choice; it does not add Wayland screen capture or input hosting.
+
 The checkbox starts unchecked in every new picker. Switching to **View only**
 clears and disables receiving; switching back to control requires a fresh
 check. File sending and receiving are independent choices and can both be
 enabled for the same controlling connection. After the viewer ends, a new
-macOS receiving choice opens a new directory chooser. Neither consent nor the
+receiving choice opens a new directory chooser. Neither consent nor the
 previous directory is reused.
 
 For an explicit destination and custom receive policy, launch the macOS or
@@ -202,15 +213,14 @@ or leaving **Receive files** unchecked discards that pending destination.
 Selecting receiving uses that exact configured path and policy, without a
 replacement chooser. Unused picker refreshes preserve the pending destination,
 with receiving still unchecked; Cancel or quitting drops it. After consumption,
-macOS can request a new native folder choice; Linux requires a new
-`fr app --receive` launch because it has no directory chooser adapter.
+Linux and macOS can request a new native folder choice.
 
 Reconnect and display replacement do not restore the original receive
 authority. No destination or receive permission is saved in preferences or
 installed launchers. The host picker carries only availability and explicit
 consent, and the picker and completion reports never contain a destination path.
 
-The direct macOS command `fr connect NODE --control --experimental-native
+The direct Linux or macOS command `fr connect NODE --control --experimental-native
 --display only --choose-receive-directory` uses the same local chooser.
 It cannot be combined with `--receive`, receive-policy overrides, view-only,
 or `--pick-only`. Other platforms refuse the chooser before initializing a

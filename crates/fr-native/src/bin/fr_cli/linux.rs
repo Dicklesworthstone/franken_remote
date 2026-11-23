@@ -8,6 +8,9 @@ mod audio;
 #[path = "linux/control.rs"]
 mod control;
 #[cfg(feature = "linux-desktop")]
+#[path = "linux/directory_choice.rs"]
+mod directory_choice;
+#[cfg(feature = "linux-desktop")]
 #[path = "linux/display_change.rs"]
 mod display_change;
 #[path = "linux/displays.rs"]
@@ -308,28 +311,38 @@ fn receive_before_start(options: &Options, failure: Failure) -> Failure {
         all(target_os = "linux", feature = "linux-desktop"),
         all(target_os = "macos", feature = "macos-desktop")
     ))]
-    if let Command::Connect(connection) = &options.command
-        && (connection.receive.is_some() || connection.choose_receive_directory)
-    {
-        let mut failure = failure;
-        crate::file_reports::download::Summary::unavailable("files_receive_not_started")
-            .preserve(&mut failure);
-        return failure;
+    if let Command::Connect(connection) = &options.command {
+        return receive_connection_before_start(connection, failure);
     }
     let _ = options;
     failure
 }
 
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+fn receive_connection_before_start(connection: &Connection, mut failure: Failure) -> Failure {
+    if connection.receive.is_some() || connection.choose_receive_directory {
+        crate::file_reports::download::Summary::unavailable("files_receive_not_started")
+            .preserve(&mut failure);
+    }
+    failure
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
-    #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+    #[cfg(not(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    )))]
     if matches!(&options.command, Command::Connect(connection) if connection.choose_receive_directory)
     {
         return Err(receive_before_start(
             options,
             Failure::new(
                 "receive_directory_picker_unavailable",
-                "--choose-receive-directory requires the native macOS desktop build; use --receive DIR on this platform. No connection was opened.",
+                "--choose-receive-directory requires a native Linux or macOS desktop build; use --receive DIR where available. No connection was opened.",
                 2,
             ),
         ));
@@ -465,41 +478,65 @@ fn connect(
     json: bool,
     automation: bool,
 ) -> Result<String, Failure> {
+    let before_start = |error| receive_connection_before_start(connection, error);
     let selected = if connection.choose_host {
         if automation {
-            return Err(Failure::new(
+            return Err(before_start(Failure::new(
                 "interactive_host_choice_required",
                 "Use fr connect --choose-host for a local human choice; foreground automation requires an explicit host identity.",
                 2,
-            ));
+            )));
         }
-        host_choice::select(runtime, cx, shutdown, stopped, &api, connection, json)?
+        host_choice::select(runtime, cx, shutdown, stopped, &api, connection, json)
+            .map_err(before_start)?
     } else {
-        super::saved_hosts::select(&connection.target)?
+        super::saved_hosts::select(&connection.target).map_err(before_start)?
     };
     // `--pick-only` (fr app): the selection report is the whole result; the
     // application starts the connection as a separate command.
     if connection.pick.is_some() {
         return Ok(String::new());
     }
-    let roots = read_roots(&connection.target.roots)?;
-    let mut client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
-        failure(
-            "invalid_native_configuration",
-            "Verify the locally provisioned trust store and native connection policy.",
-        )
-    })?;
-    // Classify every --send path by type before any network I/O.
-    let sends = files::select(
-        &connection.upload.paths,
-        connection.upload.file_drop,
-        connection.upload.file_commands,
-    )?;
-    let downloads = files::download::select(connection.receive.as_ref())?;
-    let configuration = desktop_configuration(cx, connection)?;
-    let audio_output = audio::resolve(connection.audio.as_ref())?;
-    let microphone = microphone::resolve(connection.microphone.as_ref(), || x_display(connection))?
-        .map(|local| Rc::new(RefCell::new(local)));
+    let prepared = (|| {
+        let roots = read_roots(&connection.target.roots)?;
+        let client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
+            failure(
+                "invalid_native_configuration",
+                "Verify the locally provisioned trust store and native connection policy.",
+            )
+        })?;
+        let downloads = if connection.choose_receive_directory {
+            let path = directory_choice::select(runtime, cx, shutdown, stopped)?;
+            // Pin the original choice immediately. Later local preparation or
+            // remote lookup must not resolve this pathname again.
+            let chosen = super::options::ReceiveOptions::chosen_directory(path)?;
+            files::download::select(Some(&chosen))?
+        } else {
+            files::download::select(connection.receive.as_ref())?
+        };
+        // Classify every --send path by type before any network I/O.
+        let sends = files::select(
+            &connection.upload.paths,
+            connection.upload.file_drop,
+            connection.upload.file_commands,
+        )?;
+        let configuration = desktop_configuration(cx, connection)?;
+        let audio_output = audio::resolve(connection.audio.as_ref())?;
+        let microphone =
+            microphone::resolve(connection.microphone.as_ref(), || x_display(connection))?
+                .map(|local| Rc::new(RefCell::new(local)));
+        Ok((
+            client,
+            sends,
+            downloads,
+            configuration,
+            audio_output,
+            microphone,
+        ))
+    })()
+    .map_err(before_start)?;
+    let (mut client, sends, downloads, configuration, audio_output, microphone) = prepared;
+    let receiving = downloads.is_some();
     let state = Rc::new(RefCell::new(Progress {
         control: connection.control.then(|| control::Counters {
             clipboard: connection
@@ -517,7 +554,7 @@ fn connect(
     }));
     let clipboard = if connection.clipboard {
         Some(control::Clipboard {
-            display: x_display(connection)?,
+            display: x_display(connection).map_err(before_start)?,
             cx: cx.clone(),
         })
     } else {
@@ -568,25 +605,31 @@ fn connect(
     let local = runtime
         .handle()
         .try_request_cx_with_budget(Budget::INFINITE)
-        .map_err(|_| failure("runtime_unavailable", "Check local runtime resources."))?;
+        .map_err(|_| failure("runtime_unavailable", "Check local runtime resources."))
+        .map_err(before_start)?;
     let mut owner = runtime
         .block_on(session_control::Owner::bind(&local, &selected.node))
-        .map_err(robot::local_failure)?;
+        .map_err(robot::local_failure)
+        .map_err(before_start)?;
     state.borrow_mut().quality = owner.quality_publisher();
     if let Some(files) = state.borrow_mut().files.as_mut() {
         files.command_connection(&owner.info().instance);
     }
     if automation {
-        state.borrow_mut().automation =
-            Some(owner.enable_input(&local).map_err(robot::local_failure)?);
+        state.borrow_mut().automation = Some(
+            owner
+                .enable_input(&local)
+                .map_err(robot::local_failure)
+                .map_err(before_start)?,
+        );
     }
     let result = if connection.control {
-        let offer = if connection.receive.is_some() && connection.uploads() {
+        let offer = if receiving && connection.uploads() {
             fr_client::native::control_offer_with_duplex(
                 connection.clipboard,
                 connection.audio.is_some(),
             )
-        } else if connection.receive.is_some() {
+        } else if receiving {
             fr_client::native::control_offer_with_download(
                 connection.clipboard,
                 connection.audio.is_some(),
@@ -605,7 +648,7 @@ fn connect(
                 "microphone_capability_limit",
                 "This microphone combination exceeds the fixed native capability limit; reduce the explicitly selected optional file/audio features before connecting.",
                 2,
-            ))?
+            )).map_err(before_start)?
         } else {
             offer
         };
@@ -618,7 +661,7 @@ fn connect(
                 "The native control profile cannot fit its bounded committed-text capability offer.",
                 2,
             )
-        })?;
+        }).map_err(before_start)?;
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
@@ -667,7 +710,7 @@ fn connect(
         )
         && outcome.is_ok()
     {
-        return Err(export_err);
+        return preserve_completion(Err(export_err), &application, &state.borrow());
     }
     outcome
 }
@@ -746,6 +789,17 @@ fn completed(
     json: bool,
 ) -> Result<String, Failure> {
     let result = completed_result(application, result, stopped, progress, json);
+    preserve_completion(result, application, progress)
+}
+
+/// The same original owners supply evidence for a viewer failure and a later
+/// diagnostics-write failure. Export cannot discard already completed effects.
+#[cfg(feature = "linux-desktop")]
+fn preserve_completion<T>(
+    result: Result<T, Failure>,
+    application: &Session<Interface>,
+    progress: &Progress,
+) -> Result<T, Failure> {
     // Preserve the original host report even when local native cleanup or the
     // supervisor failed. A failure status must not erase known external effects.
     // Name earlier attempts' ends too: a reconnect's own end can hide them.
@@ -1954,6 +2008,187 @@ mod tests {
             )
         }
         #[test]
+        fn all_pre_connection_failures_account_for_original_receive_consent() {
+            for receive in [
+                "",
+                " --receive /private/receive",
+                " --choose-receive-directory",
+            ] {
+                let options = crate::options::parse(
+                    &format!(
+                        "connect nHOST --control --experimental-native --display only{receive}"
+                    )
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                let Command::Connect(connection) = options.command else {
+                    panic!("expected native connection");
+                };
+                for original in [
+                    Failure::new("display_unavailable", "Select the local display.", 1),
+                    Failure::new("runtime_unavailable", "Inspect the local runtime.", 1),
+                    Failure::new("text_capability_limit", "Inspect the local offer.", 2),
+                    Failure::new(
+                        "receive_directory_choice_cancelled",
+                        "Choice cancelled.",
+                        130,
+                    ),
+                    Failure::new(
+                        "native_cleanup_incomplete",
+                        "Inspect the original owner.",
+                        1,
+                    )
+                    .uncertain(),
+                ] {
+                    let failure = receive_connection_before_start(&connection, original);
+                    assert_eq!(
+                        (failure.code, failure.exit, failure.unknown_effect),
+                        (original.code, original.exit, original.unknown_effect)
+                    );
+                    let output: serde_json::Value =
+                        serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+                    if receive.is_empty() {
+                        assert!(output.get("files_receive_requested").is_none());
+                    } else {
+                        assert_eq!(output["files_receive_requested"], true);
+                        assert_eq!(output["files_receive_absence"], "files_receive_not_started");
+                        assert_eq!(output["files_receive_cleanup"], "not_started");
+                        assert_eq!(output["files_received"], serde_json::json!([]));
+                    }
+                }
+            }
+        }
+        #[test]
+        fn diagnostics_failure_uses_the_completed_sessions_original_control_and_upload_history() {
+            let application = unused_session();
+            let mut progress = Progress {
+                control: Some(control::Counters::default()),
+                files: files::select(&[], true, false).unwrap(),
+                ..Progress::default()
+            };
+            progress.begin(2);
+            progress.ended.push(1, "host_permission_lost");
+            progress.control.as_mut().unwrap().spend_request();
+            let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
+            let original = completed(
+                &application,
+                Err(reconnect::Failure::Notification),
+                false,
+                &progress,
+                true,
+            )
+            .unwrap();
+            let original: serde_json::Value = serde_json::from_str(&original).unwrap();
+            let export = crate::diagnostics::export_session(
+                Path::new("relative-diagnostics.json"),
+                None,
+                fr_client::diagnostics::CodecPathKind::Unknown,
+                fr_client::diagnostics::TransportKind::NativeQuic,
+                None,
+            )
+            .unwrap_err();
+            let failure =
+                preserve_completion(Err::<String, _>(export), &application, &progress).unwrap_err();
+            assert_eq!((failure.code, failure.exit), ("diagnostics_unsafe_path", 2));
+            let output: serde_json::Value =
+                serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+            for field in [
+                "control_requested",
+                "control_request_attempt",
+                "files_requested",
+                "files_sent",
+                "files_refused",
+                "files_absence",
+            ] {
+                assert_eq!(output[field], original[field], "{field}");
+            }
+            assert_eq!(output["files_absence"], "files_not_started");
+            assert_eq!(
+                output["attempts_ended"],
+                serde_json::json!([
+                    {"attempt":1,"code":"host_permission_lost"}
+                ])
+            );
+            assert!(crate::terminal::output(failure, false).contains("host_permission_lost"));
+        }
+        #[test]
+        fn late_completion_failure_keeps_original_publication_and_closure_evidence() {
+            use fr_files::{
+                receive::Publication, session, wire::ResultReceipt, worker::Completion,
+            };
+            use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+            use frd::{
+                native_files::{ReceivePhase, ReceiveStatus},
+                session_startup::FileSendOutcome,
+            };
+            let mut original = Failure::new(
+                "diagnostics_io_failed",
+                "Check the original destination.",
+                1,
+            );
+            original.closure = Some(crate::closure::Report::test_report(
+                true,
+                false,
+                Some(Closed {
+                    reason: ClosedReason::HostStopping,
+                    cleanup: Cleanup::Incomplete,
+                    effects: OutstandingEffects::Known {
+                        pending: 2,
+                        uncertain: 1,
+                    },
+                }),
+            ));
+            crate::file_reports::upload::reported(
+                &[Some(17)],
+                [FileSendOutcome::HostPublished {
+                    bytes: 17,
+                    publication: Publication::DurabilityUnknown,
+                }]
+                .into_iter(),
+            )
+            .preserve(&mut original);
+            files::download::Summary::from_status(&ReceiveStatus {
+                phase: ReceivePhase::Ended,
+                absence: None,
+                progress: None,
+                results: vec![ResultReceipt {
+                    id: 1,
+                    outcome: Ok(Completion::Published(session::Receipt {
+                        id: 1,
+                        bytes: 23,
+                        publication: Publication::DurabilityUnknown,
+                    })),
+                }],
+                results_truncated: false,
+                cancel_requested: false,
+                cleanup: Some(Ok(())),
+            })
+            .preserve(&mut original);
+            let failure = preserve_completion(
+                Err::<String, _>(original),
+                &unused_session(),
+                &Progress::default(),
+            )
+            .unwrap_err();
+            assert_eq!(failure, original);
+            let output: serde_json::Value =
+                serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+            assert_eq!(output["files_sent"][0]["bytes"], 17);
+            assert_eq!(output["files_sent"][0]["durable"], false);
+            assert_eq!(output["files_received"][0]["bytes"], 23);
+            assert_eq!(output["files_received"][0]["durable"], false);
+            assert_eq!(
+                output["close_exchange"]["host_report"]["cleanup_stage"],
+                "incomplete"
+            );
+            assert_eq!(
+                output["close_exchange"]["host_report"]["outstanding_effects"]["uncertain"],
+                1
+            );
+        }
+        #[test]
         fn automation_focus_causes_survive_cleanup_status_and_keep_control_evidence() {
             for (reason, code) in [
                 (StopReason::FocusLost, "control_focus_lost"),
@@ -2556,7 +2791,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+    #[cfg(not(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    )))]
     fn receive_directory_chooser_refuses_before_any_runtime_or_local_api() {
         let options = crate::options::parse(
             &"connect nHOST --control --experimental-native --display only --choose-receive-directory --socket /private/not-a-tailscale-socket"
@@ -2568,13 +2806,6 @@ mod tests {
         let failure = run_mode(&options, false).unwrap_err();
         assert_eq!(failure.code, "receive_directory_picker_unavailable");
         assert!(!failure.unknown_effect);
-        #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
-        {
-            let value: serde_json::Value =
-                serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
-            assert_eq!(value["files_receive_requested"], true);
-            assert_eq!(value["files_receive_cleanup"], "not_started");
-        }
     }
 
     // Linux without its desktop feature. The macOS desktop build also compiles

@@ -193,8 +193,8 @@ pub struct PickOnly {
     pub clipboard: bool,
     /// Initial playback preference only; it never opens an audio device.
     pub playback_audio: bool,
-    /// The parent retained a local receive destination; no path or permission
-    /// to receive is held by this selection-only child.
+    /// The parent retained a local receive destination or can open a native
+    /// directory chooser; this selection-only child holds no receive authority.
     pub receive_available: bool,
     /// The app retained one explicit source; this child has no device access.
     pub microphone_available: bool,
