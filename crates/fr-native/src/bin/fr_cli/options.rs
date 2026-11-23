@@ -182,6 +182,10 @@ pub struct Connection {
 /// The desktop application's picker request. Its choices are only initial
 /// preferences for the window; the report carries what the user confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent local preferences and availability hints, not session state"
+)]
 pub struct PickOnly {
     /// Explicit app-only capability sweep; advertisements never grant a role.
     pub probe: bool,
@@ -192,6 +196,8 @@ pub struct PickOnly {
     /// The parent retained a local receive destination; no path or permission
     /// to receive is held by this selection-only child.
     pub receive_available: bool,
+    /// The app retained one explicit source; this child has no device access.
+    pub microphone_available: bool,
     /// `--app-notice TEXT`: the previous session's outcome, shown above the list.
     pub notice: Option<String>,
 }
@@ -829,6 +835,7 @@ fn parse_command(
     let (mut pick_only, mut app_notice) = (false, None);
     let mut app_probe = false;
     let mut app_receive_available = false;
+    let mut app_microphone_available = false;
     let mut diagnostics_out = None;
     while index < args.len() {
         let flag = args[index].as_str();
@@ -933,6 +940,9 @@ fn parse_command(
             "--pick-only" if connect && choose_host => pick_only = true,
             "--app-probe" if connect && choose_host => app_probe = true,
             "--app-receive-available" if connect && choose_host => app_receive_available = true,
+            "--app-microphone-available" if connect && choose_host => {
+                app_microphone_available = true;
+            }
             "--diagnostics-out" if connect => diagnostics_out = Some(next_path(args, &mut index)?),
             "--app-notice" if connect && choose_host => {
                 let text = next_arg(args, &mut index)?;
@@ -949,7 +959,7 @@ fn parse_command(
             _ => return Err(usage()),
         }
     }
-    if ((app_notice.is_some() || app_receive_available || app_probe) && !pick_only)
+    if ((app_notice.is_some() || app_receive_available || app_microphone_available || app_probe) && !pick_only)
         // `fr app` uses the installed endpoint. Do not accidentally probe a
         // different daemon from a directly invoked custom-socket picker.
         || (app_probe && socket.is_some())
@@ -1160,6 +1170,7 @@ fn parse_command(
                     clipboard: clipboard.unwrap_or(true),
                     playback_audio: audio,
                     receive_available: app_receive_available,
+                    microphone_available: app_microphone_available,
                     notice: app_notice,
                 }),
                 diagnostics_out,
@@ -1197,6 +1208,7 @@ mod tests {
                 clipboard: true,
                 playback_audio: false,
                 receive_available: false,
+                microphone_available: false,
                 notice: None,
             })
         );

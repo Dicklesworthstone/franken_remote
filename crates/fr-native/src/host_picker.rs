@@ -44,8 +44,10 @@ pub struct Choices {
     pub receive_available: bool,
     /// Explicit receive opt-in for this controlling connection only.
     pub receive_files: bool,
-    /// Microphone controls are unavailable in this Linux picker. A true
-    /// request is refused before starting a native window.
+    /// The caller retained one explicit source for this choice. No device
+    /// identity, microphone permission or source enters this native adapter.
+    pub microphone_available: bool,
+    /// Show the muted panel; native Allow microphone and Talk are still required.
     pub microphone_controls: bool,
 }
 impl Choices {
@@ -58,10 +60,22 @@ impl Choices {
             | (u32::from(self.receive_files) << 5)
             | (u32::from(self.microphone_controls) << 6)
     }
-    const fn from_bits(bits: u32, receive_available: bool) -> Option<Self> {
-        if bits & !63 != 0
-            || (bits & 0b11_0000 != 0 && bits & 1 == 0)
+    fn initial_bits(self) -> u32 {
+        Self {
+            microphone_controls: false,
+            ..self
+        }
+        .bits()
+    }
+    const fn from_bits(
+        bits: u32,
+        receive_available: bool,
+        microphone_available: bool,
+    ) -> Option<Self> {
+        if bits & !127 != 0
+            || (bits & 0b111_0000 != 0 && bits & 1 == 0)
             || (bits & 32 != 0 && !receive_available)
+            || (bits & 64 != 0 && !microphone_available)
         {
             return None;
         }
@@ -73,7 +87,8 @@ impl Choices {
             send_files: bits & 16 != 0,
             receive_available,
             receive_files: bits & 32 != 0,
-            microphone_controls: false,
+            microphone_available,
+            microphone_controls: bits & 64 != 0,
         })
     }
 }
@@ -306,9 +321,11 @@ impl HostPicker {
         notice: Option<&str>,
     ) -> Result<Self, Error> {
         validate(display, rows)?;
-        if choices.is_some_and(|choice| choice.microphone_controls) {
-            return Err(Error::NativeUnavailable);
-        }
+        let choices = choices.map(|mut choice| {
+            choice.microphone_available &= cfg!(feature = "linux-microphone");
+            choice.microphone_controls = false;
+            choice
+        });
         let notice = notice
             .map(|text| {
                 if text.is_empty()

@@ -63,6 +63,10 @@ pub(super) fn select(
             send_files: choices.send_files,
             receive_available: choices.receive_available,
             receive_files: choices.receive_files,
+            microphone_available: connection
+                .pick
+                .as_ref()
+                .is_some_and(|pick| pick.microphone_available),
             microphone_controls: choices.microphone_controls,
         }),
         notice(connection),

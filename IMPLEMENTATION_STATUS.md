@@ -1,5 +1,39 @@
 # Implementation status
 
+## One-use microphone selection in the native app (2026-11-22)
+
+`fr app --microphone-source NAME [--microphone-server PATH]` now retains an
+explicit source for the next confirmed machine choice. A Linux microphone
+build exposes **Show microphone controls** in the picker (F8); the choice
+starts off, requires control and is cleared by a role downgrade. The existing
+supervised viewer opens its muted panel, with separate **Allow microphone**
+and **Talk** gates. Playback or a successful connection never starts capture.
+
+Only availability reaches the selection-only child. Source names and server
+paths stay out of picker reports and saved preferences. Declining, selecting
+view-only, validation failure or a failed viewer launch consumes the source;
+an unused picker refresh retains it. Unsupported builds refuse explicit source
+options before opening the picker. Existing macOS per-choice default-device
+pinning is preserved, and an explicit source can override it for one choice.
+
+The complete actual app/options/terminal sources pass 133 tests with the Linux
+microphone feature enabled and the same 133 tests with it disabled, plus strict
+all-target Clippy in both modes, including nine new source-custody, grammar and
+parent-report cases. This source-component
+harness uses exact supporting excerpts and real portable dependencies; it
+does not execute the full native CLI, live capture or runtime orchestration.
+The complete actual Linux picker and native adapter pass 12 tests linked to
+the current C implementation and real X11/XCB libraries. Both native C files
+compile with strict C11 warnings. The complete `fr-client` crate passes its
+615 tests. Whole-workspace formatting and whitespace checks pass. Scoped UBS
+was attempted; changed-line findings were reviewed without identifying a new
+defect, but Rust analysis remains incomplete because the command-executable
+detector cannot analyze existing native-callable escapes in app/options. The
+same limitation reproduces on the original source. Native picker interaction,
+live microphone forwarding and full
+CLI/platform qualification remain separate gates. Plan §§15.4 and 16.1;
+tracking `fr-dyhq`; [usage](docs/native-client-cli.md#desktop-application-fr-app).
+
 ## Original Windows keyboard-hook delivery (2026-11-22)
 
 The native shortcut hook now retains the physical event timestamp in a fixed

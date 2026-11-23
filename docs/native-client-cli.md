@@ -88,10 +88,11 @@ cannot be combined with `--port`.
 Choose **View only** or **View and control**, clipboard sharing, which display
 to show, and **Play host audio** before connecting. Playback starts off and
 works with either viewing role. On Linux, F2 toggles control, F3 clipboard,
-F4 display selection, F5 playback, F6 file sending, and F7 file receiving;
+F4 display selection, F5 playback, F6 file sending, F7 file receiving, and
+F8 microphone controls;
 clicking the options also works.
 Clipboard remains available only with control. The confirmed preferences are
-remembered for the next picker, except file sending and receiving, which
+remembered for the next picker, except file sending, receiving and microphone controls, which
 always start off.
 
 **Play host audio** requests the existing `--audio` session. The host must have
@@ -121,6 +122,35 @@ No microphone choice is stored in preferences or carried into a later picker.
 The parent checks a successful selection-only report, its role and the local
 build before launching the ordinary connector. The selection-only picker never
 prepares a microphone device. See [macOS microphone forwarding](macos-microphone.md).
+
+On Linux, a `linux-desktop,linux-microphone` build exposes the same
+**Show microphone controls** choice when this launch has an explicitly named
+PulseAudio source:
+
+```sh
+fr app --microphone-source alsa_input.example
+# Optional explicit local server instead of PULSE_SERVER/XDG_RUNTIME_DIR:
+fr app --microphone-source alsa_input.example --microphone-server /run/user/1000/pulse/native
+```
+
+Replace the example source with the exact local source name. The existing
+viewer checks the selected local socket and matching `fr-audio-worker` before
+connecting. Selecting the checkbox opens its muted panel; **Allow microphone**
+and a fresh **Talk** action remain required. Playback, host readiness and a
+successful connection cannot start capture. The host must separately enable
+and approve its qualified microphone endpoint.
+
+The source and optional server belong to the **next confirmed machine choice**,
+including a decline or view-only choice. They remain available across an unused
+picker refresh, but are consumed before launching that viewer and never survive
+a failed launch, a completed connection or a return to the picker. Every picker
+starts with microphone controls unchecked. The picker receives only an
+availability flag; source names and server paths never enter its report or saved
+preferences. A build without microphone support refuses explicit source options
+before opening the picker. These options cannot accompany launcher installation
+or removal. On macOS, `--microphone-source UID` can similarly select one explicit
+input for the next choice; without it the existing per-choice default-device
+pinning remains available.
 
 With **View and control**, select **Send files** to allow file drops onto that
 viewer through the existing `--file-drop` transfer path. This choice applies

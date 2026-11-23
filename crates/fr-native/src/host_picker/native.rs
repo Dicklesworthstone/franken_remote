@@ -46,6 +46,7 @@ unsafe extern "C" {
         choices: u32,
         playback_audio_available: c_int,
         receive_available: c_int,
+        microphone_available: c_int,
         notice: *const c_char,
         window: *mut u32,
     ) -> *mut c_void;
@@ -88,9 +89,10 @@ pub(super) fn run(
                 display.as_ptr(),
                 rows.as_ptr(),
                 count,
-                choices.map_or(NO_CHOICES, Choices::bits),
+                choices.map_or(NO_CHOICES, Choices::initial_bits),
                 c_int::from(cfg!(feature = "linux-audio")),
                 c_int::from(choices.is_some_and(|choice| choice.receive_available)),
+                c_int::from(choices.is_some_and(|choice| choice.microphone_available)),
                 notice.map_or(core::ptr::null(), |notice| notice.as_ptr()),
                 &raw mut window,
             )
@@ -148,6 +150,7 @@ pub(super) fn run(
                             Choices::from_bits(
                                 chosen,
                                 choices.is_some_and(|choice| choice.receive_available),
+                                choices.is_some_and(|choice| choice.microphone_available),
                             )
                             .ok_or(Error::NativeChanged)?,
                         )

@@ -32,6 +32,12 @@ use child::Finished;
 #[path = "app/receiving.rs"]
 mod receiving;
 use receiving::Receiving;
+#[path = "app/microphone.rs"]
+mod microphone;
+use microphone::Microphone;
+#[cfg(test)]
+#[path = "app/microphone_app_tests.rs"]
+mod microphone_app_tests;
 #[path = "app/receive_completion.rs"]
 mod receive_completion;
 #[cfg(test)]
@@ -45,7 +51,8 @@ const USAGE: &str = "fr app [--probe] [--port PORT] [--receive DIR [RECEIVE_OPTI
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
 View only or View and control, Share clipboard text, Ask which display to\n\
 show and Play host audio, then Connect. Audio starts off; enabling it never\n\
-enables your microphone. On a macOS microphone build, Show microphone controls\n\
+enables your microphone. Show microphone controls is available with a local\n\
+microphone build (on Linux, also select a source at launch); it\n\
 opens the muted panel for this connection only; choose Allow microphone, then\n\
 Talk there. This choice starts off in every picker. With control, select Send\n\
 files to allow file drops\n\
@@ -67,6 +74,10 @@ hour unused, fr app quits.\n\n\
 --receive-max-file-bytes N     optional positive per-file receive limit.\n\
 --receive-max-session-bytes N  optional positive total receive limit.\n\
 --receive-conflict POLICY      reject (default) or keep-both; never overwrite.\n\
+--microphone-source NAME  use this explicit local source on the next selected\n\
+               connection only; choose Show microphone controls, then Allow and Talk.\n\
+               Linux requires a named PulseAudio source. macOS can pin default.\n\
+--microphone-server PATH  optional local PulseAudio socket on Linux.\n\
 --install    add FrankenRemote to ~/Applications (macOS) or the desktop\n\
              applications menu (Linux); it runs this fr with `app`.\n\
 --uninstall  remove that launcher (nothing else).\n";
@@ -93,8 +104,9 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
         AppCommand::Open {
             port,
             receiving,
+            microphone,
             probe,
-        } => application(port, receiving, probe),
+        } => application(port, receiving, microphone, probe),
         AppCommand::Help => Ok(USAGE.to_owned()),
         AppCommand::Install => install(),
         AppCommand::Uninstall => uninstall(),
@@ -106,6 +118,7 @@ enum AppCommand {
     Open {
         port: u16,
         receiving: Option<Receiving>,
+        microphone: Option<Microphone>,
         probe: bool,
     },
     Help,
@@ -129,6 +142,9 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
     let mut port = None;
     let mut action = None;
     let mut receive_args = Vec::new();
+    let mut microphone_args = Vec::new();
+    let mut microphone_source = false;
+    let mut microphone_server = false;
     let mut json = false;
     let mut probe = false;
     let mut rest = args.iter().skip(1);
@@ -148,6 +164,16 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
                         .ok_or_else(invalid)?,
                 );
             }
+            "--microphone-source" if !microphone_source => {
+                microphone_source = true;
+                microphone_args.push(arg.clone());
+                microphone_args.push(rest.next().ok_or_else(invalid)?.clone());
+            }
+            "--microphone-server" if !microphone_server => {
+                microphone_server = true;
+                microphone_args.push(arg.clone());
+                microphone_args.push(rest.next().ok_or_else(invalid)?.clone());
+            }
             "--receive"
             | "--receive-max-file-bytes"
             | "--receive-max-session-bytes"
@@ -161,14 +187,16 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
             _ => return Err(invalid()),
         }
     }
-    if action.is_some() && (!receive_args.is_empty() || probe) {
+    if action.is_some() && (!receive_args.is_empty() || !microphone_args.is_empty() || probe) {
         return Err(invalid());
     }
     let receiving = Receiving::parse(receive_args)?;
+    let microphone = Microphone::parse(microphone_args)?;
     match (action, port) {
         (None, port) => Ok(AppCommand::Open {
             port: port.unwrap_or(DEFAULT_SERVICE_PORT),
             receiving,
+            microphone,
             probe,
         }),
         (Some(action), None) => Ok(action),
@@ -434,7 +462,22 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
     (linux_end || macos_end).then_some(Report::Ended)
 }
 
+#[cfg(test)]
 fn picker_report(picked: &Finished, expected_port: u16, receive_available: bool) -> Option<Report> {
+    picker_report_with_microphone(
+        picked,
+        expected_port,
+        receive_available,
+        microphone::available(None),
+    )
+}
+
+fn picker_report_with_microphone(
+    picked: &Finished,
+    expected_port: u16,
+    receive_available: bool,
+    microphone_available: bool,
+) -> Option<Report> {
     match last_report(&picked.stdout) {
         Some(Report::Selected {
             port,
@@ -444,7 +487,7 @@ fn picker_report(picked: &Finished, expected_port: u16, receive_available: bool)
         }) if !picked.status.success()
             || port != expected_port
             || (receive_files && !receive_available)
-            || (microphone_controls && !microphone_controls_available()) =>
+            || (microphone_controls && !microphone_available) =>
         {
             None
         }
@@ -582,36 +625,25 @@ fn probed_pick_args(
     port: u16,
     receive_available: bool,
     probe: bool,
+    microphone_available: bool,
 ) -> Vec<String> {
     let mut arguments = pick_args(settings, notice, port, receive_available);
     if probe {
         arguments.push("--app-probe".to_owned());
     }
+    if microphone_available {
+        arguments.push("--app-microphone-available".to_owned());
+    }
     arguments
 }
 
+#[cfg(test)]
 fn microphone_controls_available() -> bool {
-    cfg!(all(target_os = "macos", feature = "macos-microphone"))
+    microphone::available(None)
 }
-
-/// Fresh picker consent only exposes the existing muted microphone panel.
-/// The selected viewer pins the current native input device before connecting;
-/// OS permission and a later explicit Talk remain separate operations.
-fn microphone_arguments(mut arguments: Vec<String>, consent: bool) -> Result<Vec<String>, Failure> {
-    if !consent {
-        return Ok(arguments);
-    }
-    if !microphone_controls_available() {
-        return Err(Failure::new(
-            "app_microphone_unavailable",
-            "Microphone controls require a macOS desktop build with macos-microphone. No connection was opened.",
-            2,
-        ));
-    }
-    arguments.extend(["--microphone", "--microphone-source", "default"].map(str::to_owned));
-    // The ordinary parser enforces control and all existing device rules.
-    crate::options::parse(&arguments)?;
-    Ok(arguments)
+#[cfg(test)]
+fn microphone_arguments(arguments: Vec<String>, consent: bool) -> Result<Vec<String>, Failure> {
+    microphone::take_for_choice(&mut None, arguments, consent)
 }
 
 /// Only a terminal report can return the app to its picker. A launcher exit
@@ -779,6 +811,7 @@ fn child_failed(error: child::Error) -> Failure {
 fn application(
     port: u16,
     mut receiving: Option<Receiving>,
+    mut microphone: Option<Microphone>,
     probe: bool,
 ) -> Result<String, Failure> {
     let launcher = Launcher::new()?;
@@ -798,10 +831,16 @@ fn application(
                 port,
                 receiving::available(receiving.as_ref()),
                 probe,
+                microphone::available(microphone.as_ref()),
             ),
             idle_expiries == 0,
         )?;
-        let report = picker_report(&picked, port, receiving::available(receiving.as_ref()));
+        let report = picker_report_with_microphone(
+            &picked,
+            port,
+            receiving::available(receiving.as_ref()),
+            microphone::available(microphone.as_ref()),
+        );
         refuse_uncertain_report(report.as_ref())?;
         let (node, name, send_files, receive_files, microphone_controls) = match report {
             Some(Report::Selected {
@@ -865,7 +904,8 @@ fn application(
         let receive_expected = receive_files;
         let arguments = receiving::take_for_app_choice(
             &mut receiving,
-            microphone_arguments(
+            microphone::take_for_choice(
+                &mut microphone,
                 session_args(&node, &settings, port, send_files),
                 microphone_controls,
             )?,
@@ -1061,6 +1101,7 @@ mod tests {
             AppCommand::Open {
                 port: 9443,
                 receiving: None,
+                microphone: None,
                 probe: true
             }
         );
@@ -1073,8 +1114,14 @@ mod tests {
         }
         let settings = Settings::default();
         for probe in [false, true] {
-            let arguments =
-                probed_pick_args(&settings, Some("Previous outcome"), 9443, false, probe);
+            let arguments = probed_pick_args(
+                &settings,
+                Some("Previous outcome"),
+                9443,
+                false,
+                probe,
+                false,
+            );
             let crate::options::Command::Connect(connection) =
                 crate::options::parse(&arguments).unwrap().command
             else {
@@ -1146,6 +1193,7 @@ mod tests {
             AppCommand::Open {
                 port: DEFAULT_SERVICE_PORT,
                 receiving: None,
+                microphone: None,
                 probe: false,
             }
         );
@@ -1156,6 +1204,7 @@ mod tests {
                 AppCommand::Open {
                     port,
                     receiving: None,
+                    microphone: None,
                     probe: false,
                 }
             );
@@ -1164,6 +1213,7 @@ mod tests {
                 AppCommand::Open {
                     port,
                     receiving: None,
+                    microphone: None,
                     probe: false,
                 }
             );
@@ -1213,6 +1263,7 @@ mod tests {
             AppCommand::Open {
                 port: DEFAULT_SERVICE_PORT,
                 receiving: None,
+                microphone: None,
                 probe: false,
             }
         );

@@ -28,48 +28,42 @@ fn complete(control: &Control) {
 }
 
 #[test]
-fn choices_bound_file_consent_to_control_and_the_original_receive_availability() {
-    for available in [false, true] {
-        for bits in 0..64 {
-            if (bits & 0b11_0000 != 0 && bits & 1 == 0) || (bits & 32 != 0 && !available) {
-                assert_eq!(Choices::from_bits(bits, available), None);
-                continue;
+fn choices_bind_file_and_microphone_consent_to_control_and_local_availability() {
+    for receive_available in [false, true] {
+        for microphone_available in [false, true] {
+            for bits in 0..128 {
+                let invalid = (bits & 0b111_0000 != 0 && bits & 1 == 0)
+                    || (bits & 32 != 0 && !receive_available)
+                    || (bits & 64 != 0 && !microphone_available);
+                let choice = Choices::from_bits(bits, receive_available, microphone_available);
+                if invalid {
+                    assert_eq!(choice, None);
+                } else {
+                    let choice = choice.unwrap();
+                    assert_eq!(choice.bits(), bits);
+                    assert_eq!(choice.receive_available, receive_available);
+                    assert_eq!(choice.microphone_available, microphone_available);
+                    assert_eq!(choice.microphone_controls, bits & 64 != 0);
+                }
             }
-            let choices = Choices::from_bits(bits, available).unwrap();
-            assert_eq!(choices.bits(), bits);
-            assert_eq!(choices.receive_available, available);
-            assert!(!choices.microphone_controls);
+            assert_eq!(
+                Choices::from_bits(128, receive_available, microphone_available),
+                None
+            );
+            assert_eq!(
+                Choices::from_bits(NO_CHOICES, receive_available, microphone_available),
+                None
+            );
         }
-        assert_eq!(Choices::from_bits(64, available), None);
-        assert_eq!(Choices::from_bits(NO_CHOICES, available), None);
     }
-    let choices = Choices {
-        control: true,
-        clipboard: false,
-        choose_display: true,
-        playback_audio: true,
-        send_files: true,
-        receive_available: true,
-        receive_files: true,
-        microphone_controls: false,
-    };
-    assert_eq!(choices.bits(), 61);
 }
 
 #[test]
-fn microphone_controls_are_refused_before_any_linux_window_opens() {
-    let rows = [Row::new("alpha.tail.example", "n-alpha", PathHint::Direct).unwrap()];
-    for control in [false, true] {
-        let choices = Choices {
-            control,
-            microphone_controls: true,
-            ..Choices::default()
-        };
-        assert_eq!(
-            HostPicker::start_with(":0", &rows, Some(choices), None).err(),
-            Some(Error::NativeUnavailable)
-        );
-        assert_eq!(Choices::from_bits(choices.bits(), false), None);
+fn every_picker_starts_muted_even_if_a_previous_choice_is_reused() {
+    for bits in 0..128 {
+        if let Some(choice) = Choices::from_bits(bits, true, true) {
+            assert_eq!(choice.initial_bits(), bits & !64);
+        }
     }
 }
 
