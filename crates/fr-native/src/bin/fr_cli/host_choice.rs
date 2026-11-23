@@ -31,6 +31,9 @@ pub(super) struct Choices {
     /// Open this controlling connection's muted microphone controls. Native
     /// permission and a separate fresh Talk action are still required.
     pub microphone_controls: bool,
+    /// Capture system shortcuts in this Mac controlling window only. This
+    /// always starts off and is never a remembered application preference.
+    pub capture_system_shortcuts: bool,
 }
 impl Choices {
     /// The window's initial choices, only for a `--pick-only` request.
@@ -44,6 +47,7 @@ impl Choices {
             receive_available: pick.receive_available,
             receive_files: false,
             microphone_controls: false,
+            capture_system_shortcuts: false,
         })
     }
 }
@@ -157,11 +161,15 @@ pub(super) fn selected_report(
                 "microphone_controls".into(),
                 choices.microphone_controls.into(),
             );
+            object.insert(
+                "capture_system_shortcuts".into(),
+                choices.capture_system_shortcuts.into(),
+            );
         }
         format!("{report}\n")
     } else if let Some(choices) = choices {
         format!(
-            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}, file sending {}, file receiving {}, microphone controls {}.\n",
+            "Selected {} ({}), port {port}: {}, clipboard {}, {}, host audio {}, file sending {}, file receiving {}, microphone controls {}, system-shortcut capture {}.\n",
             candidate.certificate_name(),
             candidate.stable_id(),
             if choices.control {
@@ -196,6 +204,11 @@ pub(super) fn selected_report(
             },
             if choices.control && choices.microphone_controls {
                 "requested (starts muted; Allow microphone and Talk required)"
+            } else {
+                "off"
+            },
+            if choices.control && choices.capture_system_shortcuts {
+                "requested for this connection (Accessibility permission required)"
             } else {
                 "off"
             }
@@ -305,6 +318,7 @@ mod tests {
             assert!(!initial.send_files);
             assert!(!initial.receive_files);
             assert!(!initial.microphone_controls);
+            assert!(!initial.capture_system_shortcuts);
             assert!(initial.playback_audio);
         }
     }
@@ -327,6 +341,7 @@ mod tests {
                 receive_available: false,
                 receive_files: false,
                 microphone_controls,
+                capture_system_shortcuts: false,
             };
             let report: serde_json::Value =
                 serde_json::from_str(&selected_report(&candidate, 8443, true, Some(choices)))

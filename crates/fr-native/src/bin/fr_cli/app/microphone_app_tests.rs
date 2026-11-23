@@ -115,7 +115,7 @@ fn parent_requires_retained_availability_and_a_successful_original_picker() {
         "certificate_name": "original.tail.example", "port": 9443,
         "control": true, "clipboard": true, "choose_display": false,
         "playback_audio": false, "send_files": false, "receive_files": false,
-        "microphone_controls": true, "selection_only": true,
+        "microphone_controls": true, "capture_system_shortcuts": false, "selection_only": true,
         "fresh_lookup_required": true, "remote_session_started": false,
         "input_requested": false
     });

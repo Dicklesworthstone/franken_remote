@@ -22,15 +22,28 @@ consumed by its first input attachment, so a recovered viewer and a later F8
 request cannot reinstall a retired tap. Input-source closure and actual native
 callback removal are separate cleanup facts, both required before reuse.
 
+The ordinary `fr app` machine picker now exposes **Capture system shortcuts**
+for a controlling connection in a `macos-desktop` build. It starts unchecked
+on every opening, clears when switching to viewing only, and never becomes a
+saved preference. A successful, typed picker report carries the choice to
+exactly one selected connector invocation; missing, malformed, unsupported or
+viewing-only consent refuses before launch. The picker itself never installs
+an event tap or requests Accessibility permission.
+
 Validation so far: exact-source component validation passes 24 tests (seven
 deadline/custody cases, fourteen viewport-sizing cases and three actual
-key/modifier translation cases), with strict component Clippy. Full local
-workspace check/test compilation could not finish
-under shared memory pressure; the actual daemon metadata compile was killed.
+key/modifier translation cases). Another 79 tests cover the real picker Rust
+boundary (eight) and application consent/report policy plus CLI parsing
+(71); strict component Clippy passes for both slices. The application tests
+ran on Linux, so they execute the unsupported-build refusal rather than the
+positive Mac-only argument branch. Full local workspace check/test compilation
+could not finish under shared memory pressure; the actual daemon metadata
+compile was killed.
 This environment has no macOS SDK, so the Objective-C bridge, complete Mac Rust
-integration and live Accessibility/interception/Off behavior are **not yet
-qualified**. No successful native interception or hardware claim follows from
-portable tests. Bead `fr-cwcp` retains this qualification work.
+integration, native picker interaction and live Accessibility/interception/Off
+behavior are **not yet qualified**. No successful native interception or
+hardware claim follows from portable tests. Bead `fr-cwcp` retains this
+qualification work.
 
 ## Windows explicit copied-file uploads (2026-11-23)
 

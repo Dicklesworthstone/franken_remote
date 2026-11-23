@@ -23,6 +23,7 @@ const CHOICE_LIMIT: Duration = Duration::from_secs(120);
 /// Native "no choices row" marker; must match `FR_CHOICE_NONE`.
 const NO_CHOICES: u32 = u32::MAX;
 const MICROPHONE_AVAILABLE: bool = cfg!(all(target_os = "macos", feature = "macos-microphone"));
+const SYSTEM_SHORTCUTS_AVAILABLE: bool = cfg!(all(target_os = "macos", feature = "macos-desktop"));
 
 /// Local connection preferences shown beside the host list (`fr app`). They
 /// only shape the next command line; the connector still requests control
@@ -46,6 +47,9 @@ pub struct Choices {
     /// Show this controlling connection's muted microphone controls. This is
     /// neither microphone permission nor a request to start capturing.
     pub microphone_controls: bool,
+    /// Fresh opt-in to this controlling window's system-shortcut capture.
+    /// Native Accessibility permission remains a separate connection check.
+    pub capture_system_shortcuts: bool,
 }
 impl Choices {
     fn bits(self) -> u32 {
@@ -56,11 +60,13 @@ impl Choices {
             | (u32::from(self.send_files) << 4)
             | (u32::from(self.receive_files) << 5)
             | (u32::from(self.microphone_controls) << 6)
+            | (u32::from(self.capture_system_shortcuts) << 7)
     }
     fn initial_bits(self) -> u32 {
-        // Reusing a prior choice never preselects microphone controls.
+        // A prior choice never preselects microphone or system-shortcut capture.
         Self {
             microphone_controls: false,
+            capture_system_shortcuts: false,
             ..self
         }
         .bits()
@@ -69,11 +75,13 @@ impl Choices {
         bits: u32,
         receive_available: bool,
         microphone_available: bool,
+        system_shortcuts_available: bool,
     ) -> Option<Self> {
-        if bits & !127 != 0
-            || (bits & 0b111_0000 != 0 && bits & 1 == 0)
+        if bits & !255 != 0
+            || (bits & 0b1111_0000 != 0 && bits & 1 == 0)
             || (bits & 32 != 0 && !receive_available)
             || (bits & 64 != 0 && !microphone_available)
+            || (bits & 128 != 0 && !system_shortcuts_available)
         {
             return None;
         }
@@ -86,6 +94,7 @@ impl Choices {
             receive_available,
             receive_files: bits & 32 != 0,
             microphone_controls: bits & 64 != 0,
+            capture_system_shortcuts: bits & 128 != 0,
         })
     }
 }
@@ -129,6 +138,7 @@ unsafe extern "C" {
         playback_audio_available: c_int,
         receive_available: c_int,
         microphone_available: c_int,
+        system_shortcuts_available: c_int,
         notice: *const c_char,
         notice_len: usize,
         out: *mut *mut c_void,
@@ -205,6 +215,7 @@ impl Native {
                 c_int::from(cfg!(feature = "macos-audio")),
                 c_int::from(choices.is_some_and(|choice| choice.receive_available)),
                 c_int::from(MICROPHONE_AVAILABLE),
+                c_int::from(SYSTEM_SHORTCUTS_AVAILABLE),
                 notice_ptr,
                 notice_len,
                 &raw mut pointer,
@@ -330,7 +341,12 @@ impl Picker {
                     let choices = if bits == NO_CHOICES {
                         None
                     } else {
-                        Choices::from_bits(bits, self.receive_available, MICROPHONE_AVAILABLE)
+                        Choices::from_bits(
+                            bits,
+                            self.receive_available,
+                            MICROPHONE_AVAILABLE,
+                            SYSTEM_SHORTCUTS_AVAILABLE,
+                        )
                     };
                     if choices.is_some() == self.offered
                         && (bits == NO_CHOICES || choices.is_some())
@@ -507,7 +523,7 @@ mod tests {
             for microphone_available in [false, true] {
                 for bits in 0..128 {
                     let confirmed =
-                        Choices::from_bits(bits, receive_available, microphone_available);
+                        Choices::from_bits(bits, receive_available, microphone_available, false);
                     if (bits & 0b111_0000 != 0 && bits & 1 == 0)
                         || (bits & 32 != 0 && !receive_available)
                         || (bits & 64 != 0 && !microphone_available)
@@ -520,11 +536,11 @@ mod tests {
                     assert_eq!(choices.receive_available, receive_available);
                 }
                 assert_eq!(
-                    Choices::from_bits(128, receive_available, microphone_available),
+                    Choices::from_bits(256, receive_available, microphone_available, true),
                     None
                 );
                 assert_eq!(
-                    Choices::from_bits(NO_CHOICES, receive_available, microphone_available),
+                    Choices::from_bits(NO_CHOICES, receive_available, microphone_available, true),
                     None
                 );
             }
@@ -539,15 +555,33 @@ mod tests {
 
     #[test]
     fn every_new_picker_requires_a_fresh_microphone_controls_choice() {
-        let confirmed = Choices::from_bits(125, true, true).unwrap();
+        let confirmed = Choices::from_bits(125, true, true, true).unwrap();
         assert!(confirmed.microphone_controls);
         assert_eq!(confirmed.initial_bits(), 61);
         assert!(!Choices::default().microphone_controls);
         assert!(
-            !Choices::from_bits(confirmed.initial_bits(), true, true)
+            !Choices::from_bits(confirmed.initial_bits(), true, true, true)
                 .unwrap()
                 .microphone_controls
         );
+    }
+
+    #[test]
+    fn system_shortcut_consent_requires_control_and_an_available_native_feature() {
+        assert!(Choices::from_bits(128, true, true, true).is_none());
+        assert!(Choices::from_bits(129, true, true, false).is_none());
+        let selected = Choices::from_bits(129, false, false, true).unwrap();
+        assert!(selected.control && selected.capture_system_shortcuts);
+        assert!(!selected.send_files && !selected.receive_files && !selected.microphone_controls);
+        assert_eq!(selected.bits(), 129);
+        assert_eq!(selected.initial_bits(), 1);
+        let reopened = Choices::from_bits(selected.initial_bits(), false, false, true).unwrap();
+        assert!(!reopened.capture_system_shortcuts);
+        assert!(!Choices::default().capture_system_shortcuts);
+        // All explicitly selected choices fit without aliasing an old bit.
+        let all = Choices::from_bits(255, true, true, true).unwrap();
+        assert!(all.capture_system_shortcuts && all.microphone_controls && all.receive_files);
+        assert_eq!(all.initial_bits() & (64 | 128), 0);
     }
 
     #[test]

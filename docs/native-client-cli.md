@@ -92,8 +92,22 @@ F4 display selection, F5 playback, F6 file sending, F7 file receiving, and
 F8 microphone controls;
 clicking the options also works.
 Clipboard remains available only with control. The confirmed preferences are
-remembered for the next picker, except file sending, receiving and microphone controls, which
-always start off.
+remembered for the next picker, except file sending, receiving, microphone
+controls and system-shortcut capture, which always start off.
+
+On a `macos-desktop` build, select **Capture system shortcuts** with
+**View and control** to send Cmd+Tab and Cmd+Space from the focused viewer.
+This checkbox starts unchecked in every picker and clears when switching to
+**View only**. It applies only to the selected connection and is never saved
+in preferences or inherited by a later connection. The connector checks
+Accessibility permission before dialing; the picker itself installs no event
+tap. The connected viewer exposes a local **Off** control. See the
+[capture and cleanup boundaries](#macos-system-shortcut-capture) below.
+
+The exact Rust picker and application/parser component suites pass 79 tests,
+including fresh consent, malformed reports, viewing-only refusal and the
+unsupported-build path. Native AppKit interaction, the complete Mac application
+loop and live shortcut interception still require macOS qualification.
 
 **Play host audio** requests the existing `--audio` session. The host must have
 locally enabled playback capture, and its normal admission and approval rules
@@ -621,7 +635,10 @@ once a second during a session) use the status/WhoIs/status sequence above over
 the loopback `LocalAPI`, about 12 ms of CPU per lookup. The signed-CLI
 transport it replaced used 60-80 ms of CPU per read.
 
-System-shortcut capture on macOS is explicitly selected with
+### macOS system-shortcut capture
+
+System-shortcut capture on macOS is explicitly selected in the app's machine
+picker or with
 `fr connect NODE --control --experimental-native --capture-system-shortcuts`.
 Accessibility permission is checked locally before a connection starts and
 again when the original control owner installs its modifying CoreGraphics

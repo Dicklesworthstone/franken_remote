@@ -53,6 +53,7 @@ pub(super) fn select(
             receive_available: choices.receive_available,
             receive_files: choices.receive_files,
             microphone_controls: choices.microphone_controls,
+            capture_system_shortcuts: choices.capture_system_shortcuts,
         }),
         host_choice::notice(connection),
     )
@@ -80,6 +81,7 @@ pub(super) fn select(
         receive_available: choices.receive_available,
         receive_files: choices.receive_files,
         microphone_controls: choices.microphone_controls,
+        capture_system_shortcuts: choices.capture_system_shortcuts,
     });
     if confirmed.is_some() != initial.is_some() {
         return Err(unavailable());

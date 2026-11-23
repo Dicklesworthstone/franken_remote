@@ -46,6 +46,9 @@ mod receive_tests;
 #[cfg(test)]
 #[path = "app/receiving_tests.rs"]
 mod receiving_tests;
+#[cfg(test)]
+#[path = "app/shortcut_tests.rs"]
+mod shortcut_tests;
 #[path = "app/upload_completion.rs"]
 mod upload_completion;
 
@@ -56,7 +59,10 @@ show and Play host audio, then Connect. Audio starts off; enabling it never\n\
 enables your microphone. Show microphone controls is available with a local\n\
 microphone build (on Linux, also select a source at launch); it\n\
 opens the muted panel for this connection only; choose Allow microphone, then\n\
-Talk there. This choice starts off in every picker. With control, select Send\n\
+Talk there. This choice starts off in every picker. On macOS, Capture system\n\
+shortcuts is a separate choice for the next controlling connection, requiring\n\
+Accessibility access. It starts off in every picker; the viewer has a local Off\n\
+button. With control, select Send\n\
 files to allow file drops\n\
 onto this viewer only. On Linux or macOS, select Receive files to choose a private\n\
 folder before connecting. Both choices start off in every new picker. Closing the\n\
@@ -354,6 +360,7 @@ enum Report {
         send_files: bool,
         receive_files: bool,
         microphone_controls: bool,
+        capture_system_shortcuts: bool,
     },
     Failed {
         code: String,
@@ -406,6 +413,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             Some(send_files),
             Some(receive_files),
             Some(microphone_controls),
+            Some(capture_system_shortcuts),
         ) = (
             text("node_id").filter(|id| valid_id(id)),
             text("certificate_name"),
@@ -416,11 +424,14 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             flag("send_files"),
             flag("receive_files"),
             flag("microphone_controls"),
+            flag("capture_system_shortcuts"),
         )
         else {
             return None;
         };
-        if (send_files || receive_files || microphone_controls) && !control {
+        if (send_files || receive_files || microphone_controls || capture_system_shortcuts)
+            && !control
+        {
             return None;
         }
         return Some(Report::Selected {
@@ -436,6 +447,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             send_files,
             receive_files,
             microphone_controls,
+            capture_system_shortcuts,
         });
     }
     // These are the actual Linux and macOS connect completion formats. A
@@ -485,11 +497,13 @@ fn picker_report_with_microphone(
             port,
             receive_files,
             microphone_controls,
+            capture_system_shortcuts,
             ..
         }) if !picked.status.success()
             || port != expected_port
             || (receive_files && !receive_available)
-            || (microphone_controls && !microphone_available) =>
+            || (microphone_controls && !microphone_available)
+            || (capture_system_shortcuts && !system_shortcuts_available()) =>
         {
             None
         }
@@ -619,6 +633,33 @@ fn session_args(node: &str, settings: &Settings, port: u16, send_files: bool) ->
         args.push("--file-drop".to_owned());
     }
     args
+}
+
+const fn system_shortcuts_available() -> bool {
+    cfg!(all(target_os = "macos", feature = "macos-desktop"))
+}
+
+/// Fresh picker consent belongs only to the selected connection. It never
+/// enters remembered settings, a later picker, or a viewing-only invocation.
+fn session_args_with_shortcuts(
+    node: &str,
+    settings: &Settings,
+    port: u16,
+    send_files: bool,
+    capture_system_shortcuts: bool,
+) -> Result<Vec<String>, Failure> {
+    if capture_system_shortcuts && (!settings.control || !system_shortcuts_available()) {
+        return Err(Failure::new(
+            "app_system_shortcuts_unavailable",
+            "Choose system-shortcut capture only for a new controlling connection in the macOS desktop app.",
+            2,
+        ));
+    }
+    let mut args = session_args(node, settings, port, send_files);
+    if capture_system_shortcuts {
+        args.push("--capture-system-shortcuts".into());
+    }
+    Ok(args)
 }
 
 fn probed_pick_args(
@@ -871,60 +912,69 @@ fn application(
             microphone::available(microphone.as_ref()),
         );
         refuse_uncertain_report(report.as_ref())?;
-        let (node, name, send_files, receive_files, microphone_controls) = match report {
-            Some(Report::Selected {
-                node,
-                name,
-                control,
-                clipboard,
-                choose_display,
-                playback_audio,
-                send_files,
-                receive_files,
-                microphone_controls,
-                ..
-            }) => {
-                settings.control = control;
-                settings.clipboard = clipboard;
-                settings.choose_display = choose_display;
-                settings.playback_audio = playback_audio;
-                settings.last_machine = Some(node.clone());
-                save(&path, &settings);
-                (node, name, send_files, receive_files, microphone_controls)
-            }
-            // Closing the picker quits.
-            Some(Report::Failed { code, .. }) if code == "host_choice_cancelled" => {
-                return Ok(String::new());
-            }
-            // A choice expires after two minutes, with its machine snapshot.
-            // Reopen with a fresh one, as the Windows app refreshes in place,
-            // but quit once the picker has gone unused for half an hour.
-            Some(Report::Failed { code, .. }) if code == "host_choice_expired" => {
-                idle_expiries += 1;
-                if idle_expiries >= MAX_IDLE_EXPIRIES {
+        let (node, name, send_files, receive_files, microphone_controls, capture_system_shortcuts) =
+            match report {
+                Some(Report::Selected {
+                    node,
+                    name,
+                    control,
+                    clipboard,
+                    choose_display,
+                    playback_audio,
+                    send_files,
+                    receive_files,
+                    microphone_controls,
+                    capture_system_shortcuts,
+                    ..
+                }) => {
+                    settings.control = control;
+                    settings.clipboard = clipboard;
+                    settings.choose_display = choose_display;
+                    settings.playback_audio = playback_audio;
+                    settings.last_machine = Some(node.clone());
+                    save(&path, &settings);
+                    (
+                        node,
+                        name,
+                        send_files,
+                        receive_files,
+                        microphone_controls,
+                        capture_system_shortcuts,
+                    )
+                }
+                // Closing the picker quits.
+                Some(Report::Failed { code, .. }) if code == "host_choice_cancelled" => {
                     return Ok(String::new());
                 }
-                continue;
-            }
-            other => {
-                // A second failure in a row would only reopen a failing window.
-                picker_failures += 1;
-                let next = match other {
-                    Some(Report::Failed { next, .. }) if !next.is_empty() => next,
-                    _ => "The machine picker could not open.".to_owned(),
-                };
-                if picker_failures > 1 {
-                    eprintln!("fr app: {next}");
-                    return Err(Failure::new(
-                        "app_picker_unavailable",
-                        "The machine picker could not open. Run fr connect --choose-host --view-only --experimental-native --display only in a terminal from your desktop session to see why.",
-                        1,
-                    ));
+                // A choice expires after two minutes, with its machine snapshot.
+                // Reopen with a fresh one, as the Windows app refreshes in place,
+                // but quit once the picker has gone unused for half an hour.
+                Some(Report::Failed { code, .. }) if code == "host_choice_expired" => {
+                    idle_expiries += 1;
+                    if idle_expiries >= MAX_IDLE_EXPIRIES {
+                        return Ok(String::new());
+                    }
+                    continue;
                 }
-                notice = Some(notice_text(&next));
-                continue;
-            }
-        };
+                other => {
+                    // A second failure in a row would only reopen a failing window.
+                    picker_failures += 1;
+                    let next = match other {
+                        Some(Report::Failed { next, .. }) if !next.is_empty() => next,
+                        _ => "The machine picker could not open.".to_owned(),
+                    };
+                    if picker_failures > 1 {
+                        eprintln!("fr app: {next}");
+                        return Err(Failure::new(
+                            "app_picker_unavailable",
+                            "The machine picker could not open. Run fr connect --choose-host --view-only --experimental-native --display only in a terminal from your desktop session to see why.",
+                            1,
+                        ));
+                    }
+                    notice = Some(notice_text(&next));
+                    continue;
+                }
+            };
         picker_failures = 0;
         idle_expiries = 0;
         // Consume the original local choice before validating or launching the
@@ -935,7 +985,13 @@ fn application(
             &mut receiving,
             microphone::take_for_choice(
                 &mut microphone,
-                session_args(&node, &settings, port, send_files),
+                session_args_with_shortcuts(
+                    &node,
+                    &settings,
+                    port,
+                    send_files,
+                    capture_system_shortcuts,
+                )?,
                 microphone_controls,
             )?,
             receive_files,
@@ -1381,7 +1437,7 @@ mod tests {
             "schema_version": 1, "event": "host_selected", "node_id": "nHOST",
             "certificate_name": "host.tail.ts.net", "port": 9443,
             "control": false, "clipboard": false, "choose_display": false,
-            "playback_audio": false, "send_files": false, "receive_files": false, "microphone_controls": false,
+            "playback_audio": false, "send_files": false, "receive_files": false, "microphone_controls": false, "capture_system_shortcuts": false,
             "selection_only": true, "fresh_lookup_required": true,
             "remote_session_started": false, "input_requested": false,
         });
@@ -1539,7 +1595,7 @@ mod tests {
     fn microphone_controls_require_fresh_consent_and_never_become_preferences() {
         let available = microphone_controls_available();
         let mut settings = Settings::from_json(
-            br#"{"version":1,"microphone":true,"microphone_controls":true,"microphone_source":"old-device"}"#,
+            br#"{"version":1,"microphone":true,"microphone_controls":true,"capture_system_shortcuts":false,"microphone_source":"old-device"}"#,
         );
         assert!(!settings.to_json().contains("microphone"));
         for control in [false, true] {
@@ -1600,7 +1656,7 @@ mod tests {
             "remote_session_started": false, "input_requested": false,
             "control": true, "clipboard": false, "choose_display": false,
             "playback_audio": false, "send_files": false, "receive_files": false,
-            "microphone_controls": false,
+            "microphone_controls": false, "capture_system_shortcuts": false,
         });
         for control in [false, true] {
             for consent in [false, true] {
@@ -1638,7 +1694,7 @@ mod tests {
     #[test]
     fn file_sending_is_one_use_control_only_and_never_a_saved_picker_preference() {
         let mut settings = Settings::from_json(
-            br#"{"version":1,"send_files":true,"receive_files":false,"microphone_controls":false,"file_drop":true}"#,
+            br#"{"version":1,"send_files":true,"receive_files":false,"microphone_controls":false,"capture_system_shortcuts":false,"file_drop":true}"#,
         );
         let saved: Value = serde_json::from_str(&settings.to_json()).unwrap();
         assert!(saved.get("send_files").is_none() && saved.get("file_drop").is_none());
@@ -1676,7 +1732,7 @@ mod tests {
 
     #[test]
     fn child_reports_become_selections_exits_and_notices() {
-        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":true,"send_files":true,"receive_files":false,"microphone_controls":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
+        let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":true,"send_files":true,"receive_files":false,"microphone_controls":false,"capture_system_shortcuts":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
 "#;
         assert_eq!(
             last_report(selected),
@@ -1691,6 +1747,7 @@ mod tests {
                 send_files: true,
                 receive_files: false,
                 microphone_controls: false,
+                capture_system_shortcuts: false,
             })
         );
         let mut malformed: Value = serde_json::from_slice(selected).unwrap();
@@ -1899,7 +1956,7 @@ mod tests {
             "clipboard": false,
             "choose_display": false,
             "playback_audio": false,
-            "send_files": false, "receive_files": false, "microphone_controls": false,
+            "send_files": false, "receive_files": false, "microphone_controls": false, "capture_system_shortcuts": false,
             "selection_only": true,
             "fresh_lookup_required": true,
             "remote_session_started": false,

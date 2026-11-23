@@ -29,7 +29,8 @@ enum {
 #define FR_CHOICE_FILES 16u
 #define FR_CHOICE_RECEIVE 32u
 #define FR_CHOICE_MICROPHONE 64u
-#define FR_CHOICE_ALL 127u
+#define FR_CHOICE_SHORTCUTS 128u
+#define FR_CHOICE_ALL 255u
 
 // Must match RawRow in macos/picker.rs. Each byte range is borrowed only for
 // fr_mac_picker_open; NSString makes its own immutable copy before return.
@@ -83,6 +84,7 @@ typedef struct {
     NSButton *sendFiles;
     NSButton *receiveFiles;
     NSButton *microphoneControls;
+    NSButton *captureSystemShortcuts;
     NSArray<NSString *> *titles;
     NSArray<NSString *> *details;
     int outcome;
@@ -92,6 +94,7 @@ typedef struct {
     BOOL playbackAudioAvailable;
     BOOL receiveAvailable;
     BOOL microphoneAvailable;
+    BOOL systemShortcutsAvailable;
     uint32_t choices;
 }
 - (BOOL)fresh:(NSEvent *)event;
@@ -185,6 +188,8 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     receiveFiles.state = (choices & FR_CHOICE_RECEIVE) ? NSControlStateValueOn : NSControlStateValueOff;
     microphoneControls.enabled = control && microphoneAvailable;
     microphoneControls.state = (choices & FR_CHOICE_MICROPHONE) ? NSControlStateValueOn : NSControlStateValueOff;
+    captureSystemShortcuts.enabled = control && systemShortcutsAvailable;
+    captureSystemShortcuts.state = (choices & FR_CHOICE_SHORTCUTS) ? NSControlStateValueOn : NSControlStateValueOff;
 }
 // A fresh local click on one of the choice controls changes only the local
 // preference; it never confirms a row. Returns YES when the event was used.
@@ -203,10 +208,12 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
         if (receiveFiles.enabled) choices ^= FR_CHOICE_RECEIVE;
     } else if (fr_picker_hit(microphoneControls, event)) {
         if (microphoneControls.enabled) choices ^= FR_CHOICE_MICROPHONE;
+    } else if (fr_picker_hit(captureSystemShortcuts, event)) {
+        if (captureSystemShortcuts.enabled) choices ^= FR_CHOICE_SHORTCUTS;
     } else return NO;
-    // Returning to control still requires fresh file and microphone choices.
+    // Returning to control requires fresh file, microphone and shortcut choices.
     if (!(choices & FR_CHOICE_CONTROL))
-        choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE);
+        choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
     [self showChoices];
     return YES;
 }
@@ -305,6 +312,7 @@ static NSString *fr_picker_string(const char *bytes, size_t length) {
 
 int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uint32_t initial,
                        int playback_audio_available, int receive_available, int microphone_available,
+                       int system_shortcuts_available,
                        const char *notice_bytes, size_t notice_len, void **out) {
     if (!out) return FR_PICK_INVALID;
     *out = NULL;
@@ -315,6 +323,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
     if (playback_audio_available != 0 && playback_audio_available != 1) return FR_PICK_INVALID;
     if (receive_available != 0 && receive_available != 1) return FR_PICK_INVALID;
     if (microphone_available != 0 && microphone_available != 1) return FR_PICK_INVALID;
+    if (system_shortcuts_available != 0 && system_shortcuts_available != 1) return FR_PICK_INVALID;
     if ((notice_len && kind != 1) || (!notice_bytes && notice_len)) return FR_PICK_INVALID;
     if (![NSThread isMainThread]) return FR_PICK_THREAD;
     if (!NSApp || !NSScreen.mainScreen) return FR_PICK_NATIVE;
@@ -339,8 +348,8 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         }
         if (!isfinite(columnWidth) || columnWidth > 8192) return FR_PICK_INVALID;
         NSRect available = NSScreen.mainScreen.visibleFrame;
-        // Room for the optional notice line and five choices rows.
-        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 150 : 0);
+        // Room for the optional notice line and six choices rows.
+        CGFloat extra = (notice ? 26 : 0) + (hasChoices ? 180 : 0);
         CGFloat width = fmin(760, available.size.width - 40);
         CGFloat height = fmin(520 + extra, available.size.height - 60);
         if (width < (hasChoices ? 720 : 360) || height < 240 + extra) return FR_PICK_NATIVE;
@@ -352,12 +361,13 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         owner->validAfter = NSProcessInfo.processInfo.systemUptime;
         owner->hasChoices = hasChoices;
         owner->choices = hasChoices ? initial : 0;
-        // Neither receive nor microphone opt-in survives opening a new picker.
-        // This choice only opens muted controls; Allow and Talk stay separate.
-        owner->choices &= ~(FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE);
+        // Sensitive opt-ins never survive opening a new picker. Microphone
+        // controls still require their separate Allow and Talk actions.
+        owner->choices &= ~(FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
         if (!(owner->choices & FR_CHOICE_CONTROL))
-            owner->choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE);
+            owner->choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
         owner->microphoneAvailable = microphone_available != 0;
+        owner->systemShortcutsAvailable = system_shortcuts_available != 0;
         owner->receiveAvailable = receive_available != 0;
         if (!owner->receiveAvailable) owner->choices &= ~FR_CHOICE_RECEIVE;
         owner->playbackAudioAvailable = playback_audio_available != 0;
@@ -391,7 +401,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             line.lineBreakMode = NSLineBreakByTruncatingTail;
             [content addSubview:line];
         }
-        CGFloat bottom = hasChoices ? 228 : 78;
+        CGFloat bottom = hasChoices ? 258 : 78;
         if (hasChoices) {
             owner->viewOnly = [NSButton radioButtonWithTitle:@"View only" target:nil action:nil];
             owner->viewOnly.frame = NSMakeRect(20, 50, 110, 24);
@@ -411,8 +421,12 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             owner->microphoneControls = [NSButton checkboxWithTitle:owner->microphoneAvailable
                 ? @"Show microphone controls" : @"Microphone unavailable in this build" target:nil action:nil];
             owner->microphoneControls.frame = NSMakeRect(20, 170, 260, 24);
+            owner->captureSystemShortcuts = [NSButton checkboxWithTitle:owner->systemShortcutsAvailable
+                ? @"Capture system shortcuts" : @"System shortcuts unavailable in this build" target:nil action:nil];
+            owner->captureSystemShortcuts.frame = NSMakeRect(20, 200, 275, 24);
             for (NSButton *choice in @[owner->viewOnly, owner->viewControl, owner->clipboard, owner->chooseDisplay,
-                                      owner->playbackAudio, owner->sendFiles, owner->receiveFiles, owner->microphoneControls])
+                                      owner->playbackAudio, owner->sendFiles, owner->receiveFiles, owner->microphoneControls,
+                                      owner->captureSystemShortcuts])
                 [content addSubview:choice];
             NSTextField *audioHint = [NSTextField labelWithString:@"Host sound only; your microphone stays off."];
             audioHint.frame = NSMakeRect(295, 82, width - 315, 20);
@@ -437,6 +451,12 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             microphoneHint.font = [NSFont systemFontOfSize:11];
             microphoneHint.textColor = NSColor.secondaryLabelColor;
             [content addSubview:microphoneHint];
+            NSTextField *shortcutsHint = [NSTextField labelWithString:
+                @"Focused viewer only. Accessibility access required; local Off."];
+            shortcutsHint.frame = NSMakeRect(295, 202, width - 315, 20);
+            shortcutsHint.font = [NSFont systemFontOfSize:11];
+            shortcutsHint.textColor = NSColor.secondaryLabelColor;
+            [content addSubview:shortcutsHint];
             [owner showChoices];
         }
         owner->scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, bottom, width - 40,
