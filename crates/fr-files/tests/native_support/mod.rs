@@ -1,4 +1,5 @@
 //! Explicit admission/authority fixtures around the real UDP/TLS transport.
+pub mod download;
 #[allow(dead_code)]
 #[path = "../../../fr-transport/tests/support/mod.rs"]
 mod support;

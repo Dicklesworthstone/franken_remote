@@ -13,7 +13,11 @@ use crate::{
 use asupersync::{cx::Cx, time::TimerDriverHandle};
 use fr_core::input_submission::InputSession;
 use fr_transport::quic::{self, ConnectionBinding, Disposition, QuicRecords, files::FilesChannel};
-use std::time::Duration;
+use fr_wire::sync_job_state::{self, SyncJobState, SyncPhase};
+use std::{
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 pub struct Configuration {
     pub directory: DropDirectory,
@@ -56,6 +60,7 @@ pub struct HostReceiver {
     reply_lifetime: u64,
     sent: bool,
     state: State,
+    sync_tracker: Option<Arc<AtomicU64>>,
 }
 /// Receive into the approved endpoint for the selected Files direction.
 pub type Receiver = HostReceiver;
@@ -117,6 +122,7 @@ impl HostReceiver {
                 .try_reserve_exact(maximum)
                 .map_err(|_| Error::Limits)?;
             reply.resize(maximum, 0);
+            let sync_tracker = config.directory.conflict_tracker();
             let (receiver, task) = wire::HostReceiver::spawn_with_authority(
                 cx.clone(),
                 authority,
@@ -130,10 +136,10 @@ impl HostReceiver {
                 },
             )
             .map_err(Error::File)?;
-            Ok((clock, reply_lifetime, reply, receiver, task))
+            Ok((clock, reply_lifetime, reply, receiver, task, sync_tracker))
         })();
         match setup {
-            Ok((clock, reply_lifetime, reply, receiver, task)) => Ok(Self {
+            Ok((clock, reply_lifetime, reply, receiver, task, sync_tracker)) => Ok(Self {
                 cx,
                 clock,
                 connection: q.binding(),
@@ -146,6 +152,7 @@ impl HostReceiver {
                 reply_deadline: 0,
                 sent: false,
                 state: State::Active,
+                sync_tracker,
             }),
             Err(error) => {
                 lane.retire(q, &cx).map_err(Error::Transport)?;
@@ -228,6 +235,33 @@ impl HostReceiver {
         q: &mut QuicRecords,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<State, Error> {
+        self.service_inner(q, &mut authorize, None, &mut |_| Err(()))
+    }
+
+    /// The original sync owner supplies both the ATP admission gate and the
+    /// state handler. An ordinary receiver never accepts job state merely
+    /// because the negotiated transport understands its envelope.
+    pub(crate) fn service_sync(
+        &mut self,
+        q: &mut QuicRecords,
+        mut authorize: impl FnMut() -> bool,
+        allow_files: bool,
+        mut sync: impl FnMut(SyncJobState) -> Result<Disposition, ()>,
+    ) -> Result<State, Error> {
+        self.check_identity(q)?;
+        if !self.lane.sync_selected() {
+            return Err(Error::WrongRole);
+        }
+        self.service_inner(q, &mut authorize, Some(allow_files), &mut sync)
+    }
+
+    fn service_inner(
+        &mut self,
+        q: &mut QuicRecords,
+        authorize: &mut impl FnMut() -> bool,
+        allow_files: Option<bool>,
+        sync: &mut impl FnMut(SyncJobState) -> Result<Disposition, ()>,
+    ) -> Result<State, Error> {
         self.check_identity(q)?;
         if self.state == State::Retired {
             self.collect_after_close()?;
@@ -245,7 +279,7 @@ impl HostReceiver {
             self.retire(q)?;
             return Err(Error::Transport(error));
         }
-        let result = self.turn(q, &mut authorize);
+        let result = self.turn(q, authorize, allow_files, sync);
         if result.is_err() {
             self.receiver.stop();
             self.retire(q)?;
@@ -256,6 +290,8 @@ impl HostReceiver {
         &mut self,
         q: &mut QuicRecords,
         authorize: &mut impl FnMut() -> bool,
+        allow_files: Option<bool>,
+        sync: &mut impl FnMut(SyncJobState) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
         let now = self.clock.now().as_nanos() / 1000;
         if self.sent && self.lane.send_drained(q).map_err(Error::Transport)? {
@@ -299,7 +335,7 @@ impl HostReceiver {
             // A next-record FileCancel can still fence the disk owner; ordinary
             // data remains transport-owned until the reply slot is free.
             return if self.state == State::Active {
-                self.receive_one(q, authorize, true)
+                self.receive_one(q, authorize, true, allow_files, sync)
             } else {
                 Ok(())
             };
@@ -310,17 +346,20 @@ impl HostReceiver {
         if self.state == State::Draining {
             return Ok(());
         }
-        self.receive_one(q, authorize, false)
+        self.receive_one(q, authorize, false, allow_files, sync)
     }
     fn receive_one(
         &mut self,
         q: &mut QuicRecords,
         authorize: &mut impl FnMut() -> bool,
         cancel_only: bool,
+        allow_files: Option<bool>,
+        sync: &mut impl FnMut(SyncJobState) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
         let incoming = self.lane.incoming();
         let limits = self.lane.limits();
         let receiver = &mut self.receiver;
+        let sync_selected = self.lane.sync_selected();
         let mut refusal = None;
         self.lane
             .dispatch(q, &self.cx, &mut *authorize, |bytes| {
@@ -330,15 +369,46 @@ impl HostReceiver {
                 if receiver.has_pending_offer_refusal() {
                     return Ok(Disposition::Blocked);
                 }
-                if cancel_only
-                    && !matches!(
-                        fr_wire::files::decode(bytes, incoming, limits),
-                        Ok(fr_wire::files::Message {
-                            body: fr_wire::files::Body::Cancel(_),
-                            ..
-                        })
-                    )
+                if sync_selected && let Ok(state) = sync_job_state::decode(bytes, incoming, limits)
                 {
+                    let terminal = matches!(state.phase, SyncPhase::Cancelled | SyncPhase::Failed);
+                    if cancel_only && !terminal {
+                        return Ok(Disposition::Blocked);
+                    }
+                    if terminal {
+                        receiver.stop();
+                    }
+                    return match sync(state) {
+                        Ok(disposition) => Ok(disposition),
+                        Err(()) => {
+                            refusal = Some(wire::Error::Wire(fr_wire::WireError::InvalidValue));
+                            Ok(Disposition::Consumed)
+                        }
+                    };
+                }
+                let message = fr_wire::files::decode(bytes, incoming, limits);
+                let cancellation = matches!(
+                    message,
+                    Ok(fr_wire::files::Message {
+                        body: fr_wire::files::Body::Cancel(_),
+                        ..
+                    })
+                );
+                if allow_files == Some(false) && !cancellation {
+                    refusal = Some(wire::Error::Wire(fr_wire::WireError::InvalidValue));
+                    return Ok(Disposition::Consumed);
+                }
+                if allow_files.is_some()
+                    && matches!(message, Ok(fr_wire::files::Message {
+                        body: fr_wire::files::Body::Offer { profile, .. }, ..
+                    }) if profile != fr_wire::files::ATP_PORTABLE_FULL)
+                {
+                    // This standing job transfers bounded regular files from
+                    // one directory level. It never silently admits a tree.
+                    refusal = Some(wire::Error::Wire(fr_wire::WireError::UnsupportedVersion));
+                    return Ok(Disposition::Consumed);
+                }
+                if cancel_only && !cancellation {
                     return Ok(Disposition::Blocked);
                 }
                 match receiver.receive(bytes) {
@@ -369,6 +439,52 @@ impl HostReceiver {
             Ok(())
         } else {
             Err(Error::WrongConnection)
+        }
+    }
+
+    pub(crate) fn sync_clock(&self, q: &QuicRecords) -> Result<u64, Error> {
+        self.check_identity(q)?;
+        self.cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        self.lane.check(q).map_err(Error::Transport)?;
+        if !self.lane.sync_selected() {
+            return Err(Error::WrongRole);
+        }
+        Ok(self.clock.now().as_nanos() / 1000)
+    }
+
+    pub(crate) fn sync_tracks(&self, directory: &DropDirectory) -> bool {
+        self.sync_tracker
+            .as_ref()
+            .zip(directory.conflict_tracker().as_ref())
+            .is_some_and(|(original, candidate)| Arc::ptr_eq(original, candidate))
+    }
+
+    /// No active staging operation, unpublished worker result, original proof
+    /// buffer or native application record may be bypassed by a round boundary.
+    pub(crate) fn sync_idle(&self, q: &QuicRecords) -> Result<bool, Error> {
+        self.check_identity(q)?;
+        Ok(self.state == State::Active
+            && self.reply_len == 0
+            && !self.sent
+            && !self.receiver.is_busy()
+            && self.receiver.progress().is_none()
+            && self.lane.send_drained(q).map_err(Error::Transport)?)
+    }
+
+    pub(crate) fn send_sync(
+        &mut self,
+        q: &mut QuicRecords,
+        state: &SyncJobState,
+        deadline: u64,
+        authorize: impl FnMut() -> bool,
+    ) -> Result<bool, Error> {
+        if !self.sync_idle(q)? {
+            return Ok(false);
+        }
+        match self.lane.send_sync(q, &self.cx, state, deadline, authorize) {
+            Ok(()) => Ok(true),
+            Err(quic::Error::Backpressure) => Ok(false),
+            Err(error) => Err(Error::Transport(error)),
         }
     }
 }

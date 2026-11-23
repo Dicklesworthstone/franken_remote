@@ -586,6 +586,7 @@ dependencies = [
  "asupersync",
  "fr-client",
  "fr-core",
+ "fr-media",
  "fr-transport",
  "fr-winsys",
  "fr-wire",

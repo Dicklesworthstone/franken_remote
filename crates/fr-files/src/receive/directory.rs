@@ -249,7 +249,12 @@ impl super::DropDirectory {
         if cfg!(windows) {
             return Err(Error::Io(std::io::ErrorKind::Unsupported));
         }
-        let mut reservation = Reservation::new(self.0.clone(), manifest.size, self.2.clone())?;
+        let mut reservation = Reservation::new(
+            self.0.clone(),
+            manifest.size,
+            self.2.clone(),
+            self.3.clone(),
+        )?;
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Io(std::io::ErrorKind::Other))?;
         let nonce = u128::from_be_bytes(random);
@@ -492,6 +497,7 @@ impl PendingDirectory {
         // A successful rename commits the ENTIRE tree. Even a failed root sync
         // must not allow Drop to unlink children through their still-open fds.
         self.state = State::Published;
+        self.reservation.published_conflict(attempt != 0);
         let publication = if fs::fsync(&self.reservation.root.fd).is_ok() {
             Publication::Durable
         } else {

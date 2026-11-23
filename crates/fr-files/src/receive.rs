@@ -36,7 +36,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -155,7 +155,12 @@ fn open_root(path: &Path) -> Result<OwnedFd, Error> {
 /// Renaming/replacing the original path does not redirect writes to another
 /// directory. Clones share both its descriptor and its aggregate reservations.
 #[derive(Clone)]
-pub struct DropDirectory(Arc<Root>, ConflictPolicy, Option<CleanupStatus>);
+pub struct DropDirectory(
+    Arc<Root>,
+    ConflictPolicy,
+    Option<CleanupStatus>,
+    Option<Arc<AtomicU64>>,
+);
 
 /// Per-worker evidence from the final disposition of each owned reservation.
 /// This is separate from the shared root/quota, so another worker's orphan
@@ -207,6 +212,7 @@ impl DropDirectory {
             }),
             ConflictPolicy::Reject,
             None,
+            None,
         ))
     }
 
@@ -247,6 +253,31 @@ impl DropDirectory {
         self
     }
 
+    pub const fn conflict_policy(&self) -> ConflictPolicy {
+        self.1
+    }
+
+    /// Start an independent publication counter for one original receive owner.
+    /// Its descendants share this counter, while unrelated clones retain their
+    /// own evidence. The pinned root and aggregate reservation budget are unchanged.
+    #[must_use]
+    pub fn with_conflict_tracking(mut self) -> Self {
+        self.3 = Some(Arc::new(AtomicU64::new(0)));
+        self
+    }
+
+    /// Actual successful keep-both publications through this tracked lineage.
+    /// Failed candidates, cancelled staging and other receive owners do not count.
+    pub fn conflicts_kept(&self) -> u64 {
+        self.3
+            .as_ref()
+            .map_or(0, |count| count.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn conflict_tracker(&self) -> Option<Arc<AtomicU64>> {
+        self.3.clone()
+    }
+
     /// Reserve a declared object before creating any temporary file. The caller
     /// must already hold separately approved file-receive permission. `expected`
     /// is ATP's domain-separated `ContentId`, NOT a plain SHA-256 file digest.
@@ -285,7 +316,7 @@ impl DropDirectory {
         {
             return Err(Error::InvalidName);
         }
-        let reservation = Reservation::new(self.0.clone(), size, self.2.clone())?;
+        let reservation = Reservation::new(self.0.clone(), size, self.2.clone(), self.3.clone())?;
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Io(io::ErrorKind::Other))?;
         let suffix = u128::from_be_bytes(random);
@@ -328,9 +359,15 @@ struct Reservation {
     // bypass. The directory must be inspected locally before reuse/reset.
     release: bool,
     cleanup: Option<CleanupStatus>,
+    conflicts: Option<Arc<AtomicU64>>,
 }
 impl Reservation {
-    fn new(root: Arc<Root>, size: u64, cleanup: Option<CleanupStatus>) -> Result<Self, Error> {
+    fn new(
+        root: Arc<Root>,
+        size: u64,
+        cleanup: Option<CleanupStatus>,
+        conflicts: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, Error> {
         {
             let mut held = root.reserved.lock().map_err(|_| Error::Retired)?;
             let total = held.bytes.checked_add(size).ok_or(Error::Quota)?;
@@ -348,7 +385,16 @@ impl Reservation {
             size,
             release: true,
             cleanup,
+            conflicts,
         })
+    }
+
+    fn published_conflict(&self, renamed: bool) {
+        if renamed && let Some(count) = &self.conflicts {
+            let _ = count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                Some(old.saturating_add(1))
+            });
+        }
     }
 }
 impl Drop for Reservation {
@@ -537,6 +583,7 @@ impl PendingFile {
         // After publication succeeds, cleanup MUST NOT unlink this destination even
         // if the directory sync fails. Publication uncertainty is not rollback.
         self.state = State::Published;
+        self.reservation.published_conflict(attempt != 0);
         let publication = if fs::fsync(&self.reservation.root.fd).is_ok() {
             Publication::Durable
         } else {

@@ -84,6 +84,15 @@ fn open_regular(root: BorrowedFd<'_>, name: &str) -> Result<File, SyncError> {
     Ok(file)
 }
 
+/// Retain precisely the file version inspected by this bounded scan. The
+/// transfer worker hashes it again and compares the expected digest before
+/// offering it, so edits between scan and send cannot advance the wrong ledger.
+pub(super) fn select(root: BorrowedFd<'_>, manifest: &ManifestFile) -> Result<File, SyncError> {
+    let file = open_regular(root, &manifest.name)?;
+    unchanged(&file, &manifest.original)?;
+    Ok(file)
+}
+
 pub(super) fn scan<F>(
     root: BorrowedFd<'_>,
     revision: u64,

@@ -54,6 +54,37 @@ fn verified(root: &DropDirectory, name: &str, data: &[u8]) -> PendingFile {
     file.verify().unwrap();
     file
 }
+
+#[test]
+fn conflict_counts_belong_to_the_original_receive_lineage_and_only_committed_effects() {
+    let scratch = Scratch::new();
+    let root = scratch
+        .open()
+        .with_conflict_policy(ConflictPolicy::KeepBoth);
+    let tracked = root.clone().with_conflict_tracking();
+    let same_owner = tracked.clone();
+    let other_owner = root.with_conflict_tracking();
+    assert_eq!(tracked.conflict_policy(), ConflictPolicy::KeepBoth);
+    fs::write(scratch.0.join("item"), b"existing").unwrap();
+    let refused =
+        verified(&tracked, "item", b"cancelled").publish_named_checked(|| Err(Error::Retired));
+    assert!(matches!(refused, Err(Error::Retired)));
+    assert_eq!(tracked.conflicts_kept(), 0);
+    verified(&tracked, "unique", b"first").publish().unwrap();
+    assert_eq!(tracked.conflicts_kept(), 0);
+    let renamed = verified(&same_owner, "item", b"incoming")
+        .publish_named()
+        .unwrap();
+    assert!(renamed.was_renamed());
+    assert_eq!(tracked.conflicts_kept(), 1);
+    assert_eq!(other_owner.conflicts_kept(), 0);
+    verified(&other_owner, "item", b"independent")
+        .publish()
+        .unwrap();
+    assert_eq!(tracked.conflicts_kept(), 1);
+    assert_eq!(other_owner.conflicts_kept(), 1);
+    assert_eq!(fs::read(scratch.0.join("item")).unwrap(), b"existing");
+}
 #[test]
 fn exhausted_conflict_candidates_fail_bounded_without_changing_existing_entries() {
     let scratch = Scratch::new();

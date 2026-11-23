@@ -9,6 +9,7 @@ mod flow;
 #[cfg(all(test, target_os = "linux"))]
 mod reply_tests;
 mod source;
+mod sync;
 use crate::{
     atp,
     receive::{MAX_CHUNK_BYTES, Publication},
@@ -168,6 +169,9 @@ struct Transfer {
     completion_admitted: bool,
     result: Option<Receipt>,
     cleanup: Option<Result<(), Error>>,
+    /// A sync scan selects a particular source version. Re-hashing may never
+    /// silently substitute a later version before recording its publication.
+    expected_source: Option<(u64, String)>,
 }
 
 /// Exclusive borrow prevents independent senders from recreating the channel's
@@ -438,6 +442,7 @@ impl<'a> Sender<'a> {
             completion_admitted: false,
             result: None,
             cleanup: None,
+            expected_source: None,
         });
         Ok(id)
     }
@@ -741,6 +746,14 @@ fn packet(
 }
 impl Transfer {
     fn prepared(&mut self, manifest: &TransferManifest) -> Result<(), Error> {
+        if let Some((size, hash)) = &self.expected_source
+            && (manifest.is_directory
+                || manifest.entries.len() != 1
+                || manifest.total_bytes != *size
+                || manifest.entries[0].sha256_hex != *hash)
+        {
+            return Err(Error::SourceChanged);
+        }
         if self.stage != Stage::Preparing
             || manifest.is_directory != (self.profile == files::ATP_PORTABLE_DIRECTORY_FULL)
         {

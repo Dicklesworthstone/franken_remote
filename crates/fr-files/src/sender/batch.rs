@@ -15,6 +15,7 @@ struct Selected {
     file: File,
     name: String,
     directory: bool,
+    expected_source: Option<(u64, String)>,
 }
 /// Only already selected local descriptors can enter a batch. Construction does
 /// not inspect, hash or read them. Names are destination basenames, never paths.
@@ -53,6 +54,23 @@ impl Selection {
     pub fn push_directory(&mut self, directory: File, name: &str) -> Result<(), Error> {
         self.push_selected(directory, name, true)
     }
+    pub(crate) fn push_expected(
+        &mut self,
+        file: File,
+        name: &str,
+        size: u64,
+        sha256: &str,
+    ) -> Result<(), Error> {
+        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(Error::Source);
+        }
+        self.push_selected(file, name, false)?;
+        self.files
+            .back_mut()
+            .expect("selection just inserted")
+            .expected_source = Some((size, sha256.to_owned()));
+        Ok(())
+    }
     fn push_selected(&mut self, file: File, name: &str, directory: bool) -> Result<(), Error> {
         if self.files.len() == MAX_FILES {
             return Err(Error::Limits);
@@ -74,6 +92,7 @@ impl Selection {
             file,
             name: owned,
             directory,
+            expected_source: None,
         });
         Ok(())
     }
@@ -280,6 +299,10 @@ impl Sender<'_> {
             self.settle_batch();
             return Err(error);
         }
+        self.transfer
+            .as_mut()
+            .expect("selected transfer just started")
+            .expected_source = selected.expected_source;
         let batch = self.batch.as_mut().expect("original batch retained");
         batch.report.started += 1;
         batch.recorded_current = false;
