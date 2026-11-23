@@ -174,7 +174,11 @@ impl Operation {
     /// One bounded part of the original scroll. Preserve horizontal-then-
     /// vertical order, signs and exact distance without allocating or retaining
     /// an input queue. Later parts still need their original owner's gates.
-    #[cfg(any(feature = "linux-desktop", test))]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    ))]
     pub fn scroll_lines(&self, index: u8) -> Option<(i32, i32)> {
         let Self::Scroll { dx, dy, .. } = *self else {
             return None;
@@ -198,7 +202,11 @@ impl Operation {
         ))
     }
     /// Only the first and sole pointer state of an absolute move is encodable.
-    #[cfg(any(feature = "linux-desktop", test))]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    ))]
     pub fn pointer(&self, index: u8) -> Option<fr_core::input::DesktopPoint> {
         match *self {
             Self::Move { x, y } if index == 0 => Some(fr_core::input::DesktopPoint { x, y }),

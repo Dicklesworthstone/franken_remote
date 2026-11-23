@@ -38,8 +38,8 @@ capture, reconnect or grant input. Receipt age is local metadata age, NOT host
 source freshness. On macOS, the first receipt keeps its original local timestamp
 across bootstrap acknowledgement waits; duplicate callbacks do not refresh it.
 No frame is reported before a real receipt, or after retirement. Old callbacks
-cannot republish a retired attempt. macOS needs a local graphical session;
-robot input remains unavailable there.
+cannot republish a retired attempt. macOS needs a local graphical session. Robot input requires a separate, explicit
+--accept-input control owner; this publisher remains read-only.
 Display changes and resizes that need a new Mac native view end the original
 observation without another dial; start a new explicit publisher for that view.
 Linux also accepts --worker and --x-display to select its installed media worker
@@ -58,7 +58,7 @@ actual physical viewport dimensions, separately from the remote display.
 The 32 MiB ceiling still applies; a larger viewport needs a smaller window or
 --fit. GPU failure, resize or stale identity refuses.
 
-A Linux foreground control owner explicitly opened with --accept-input also accepts
+A Linux or macOS foreground control owner opened with --accept-input also accepts
 --connection-id ID --screenshot PATH. Its result includes control_authority with
 the ORIGINAL lease comparison handle, observation_id, next_request_id, all view
 generations, frame and bounded source age. Use those same handles for input;

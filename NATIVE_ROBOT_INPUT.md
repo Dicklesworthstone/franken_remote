@@ -1,7 +1,7 @@
 # Bounded input on the original foreground owner
 
-The Linux native desktop CLI can explicitly accept bounded robot input on its
-original authenticated control session. It supports an absolute pointer move,
+The Linux and macOS native desktop CLIs can explicitly accept bounded robot
+input on their original authenticated control session. It supports an absolute pointer move,
 a click, a bounded drag, integer line scrolling, modifier-held mouse gestures,
 a physical key tap, or a modifier shortcut. The owner retains the host lease,
 input ticket, original viewport and transport; local commands receive comparison
@@ -14,8 +14,8 @@ application accepted an action.
 
 ## Open and address the owner
 
-Build `fr` with `--features linux-desktop` and use the existing qualified native
-host profile with an input agent. The canonical native connection options still
+Build `fr` with `--features linux-desktop` on Linux or `--features macos-desktop`
+on macOS. Use a native host profile that offers the required input capabilities. The canonical native connection options still
 control trust roots, Tailscale LocalAPI selection, worker selection and display
 selection. Start the owner in a foreground terminal:
 
@@ -387,3 +387,38 @@ The complete foreground CLI-to-host regression is wired into the existing
 namespace verification lane. Full native Cargo validation and real two-machine
 qualification remain separate gates. Application-semantic assertions and an
 atomic observe/act transaction remain separate work.
+
+
+## macOS foreground automation (2026-11-22)
+
+The macOS `--accept-input` path now connects the existing authenticated local
+action ledger to the original AppKit/Metal foreground control session. The
+opening command above selects one explicit machine and display, one connection
+attempt, and an exclusive robot producer. It does not forward local keyboard or
+mouse events alongside robot actions. Clipboard, file directions, audio,
+microphone, interactive machine/display pickers and system-shortcut capture
+are excluded from this explicit automation profile. Ordinary native connections
+retain their existing behavior.
+
+Pointer moves, clicks, drags, modifier gestures, physical key taps, line scrolling
+and explicit Unicode text use the existing controller, original view
+preconditions and host receipt attribution. The first screenshot handle keeps
+its original renderer receipt time even when installing the local owner takes
+longer. Later status queries cannot make a retained picture younger or refresh
+an accepted action. A read-only observation publisher remains read-only.
+
+Keep the viewer focused while a same-user command process submits actions.
+Any focus-loss event permanently retires this automation owner, including a
+loss and regain in the same native event batch. Hiding, closing, a changed
+geometry, local stop, expiry and cleanup also fence it before another action.
+Display switches, window reopens and reconnects cannot reuse the original
+`--accept-input` choice; opening another automation owner requires a new explicit
+command and fresh observation. Existing partial/unknown effects stay in the
+original bounded result ledger and are never replayed.
+
+Actual-source regression tests cover the exclusive profile, original renderer
+timestamp, focus-loss batches, cleanup fencing and refused replacement attempts.
+Native macOS compilation and execution, a real AppKit/Metal view and live host
+input remain separate qualification requirements; this source integration is not
+optical or application-effect evidence. Plan §§15.1 and 18.1–18.2; tracking
+`fr-hth2`.

@@ -220,14 +220,18 @@ fn retained_snapshot_exports_real_pixels_without_advancing_presentation() {
     assert!(
         initial
             .pixels()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| pixel[..3] != [0, 0, 0]),
         "the real fixture must yield picture content, not an empty success raster"
     );
     assert!(
         initial
             .pixels()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .all(|pixel| pixel[3] == 255)
     );
     assert_eq!(decoder.surface().presented(), 1);
@@ -349,8 +353,8 @@ fn retained_snapshot_refuses_wrong_stamp_and_credit_but_exports_real_retina_dime
         Ok(Err(Absent::TooLarge))
     ));
     let mut geometry = SnapshotGeometry::default();
-    // SAFETY: this test owns the live surface and a writable scalar output.
     assert_eq!(
+        // SAFETY: this test owns the live surface and a writable scalar output.
         unsafe {
             fr_mac_renderer_snapshot_geometry(decoder.surface.raw.as_ptr(), 1, &raw mut geometry)
         },
@@ -358,9 +362,9 @@ fn retained_snapshot_refuses_wrong_stamp_and_credit_but_exports_real_retina_dime
     );
     geometry.revision += 1;
     let mut pixels = vec![0; 128 * 96 * 4];
-    // SAFETY: exact viewport storage and live original renderer. The altered
-    // comparison revision must refuse before any GPU work or copy occurs.
     assert_eq!(
+        // SAFETY: exact viewport storage and live original renderer. The altered
+        // comparison revision must refuse before any GPU work or copy occurs.
         unsafe {
             fr_mac_renderer_snapshot(
                 decoder.surface.raw.as_ptr(),
@@ -394,17 +398,28 @@ fn retained_snapshot_refuses_wrong_stamp_and_credit_but_exports_real_retina_dime
     assert_eq!(retina.stamp(), expected);
     assert_eq!((retina.width(), retina.height()), (256, 200));
     assert_eq!(retina.pixels().len(), 256 * 200 * 4);
-    assert!(retina.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255));
+    assert!(
+        retina
+            .pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 255)
+    );
     // The actual viewport includes the four-pixel top/bottom letterboxes.
     assert!(
         retina.pixels()[..256 * 4 * 4]
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0, 0, 0, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [0, 0, 0, 255])
     );
     assert!(
         retina.pixels()[256 * 196 * 4..]
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0, 0, 0, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [0, 0, 0, 255])
     );
     assert_eq!(enlarged.surface().presented(), 1);
 }

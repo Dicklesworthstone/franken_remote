@@ -11,6 +11,7 @@ use fr_wire::display::Display;
 use std::time::Instant;
 
 impl Shared {
+    #[cfg(feature = "linux-desktop")]
     pub fn bind_snapshot(
         &self,
         handle: Handle,
@@ -18,11 +19,23 @@ impl Shared {
         frame: u64,
         evidence: Evidence,
     ) -> Result<(), ()> {
+        self.bind_snapshot_at(handle, display, frame, evidence, Instant::now())
+    }
+    /// Preserve the original renderer receipt across bootstrap acknowledgment
+    /// waits. Installing the local endpoint must not make those pixels younger.
+    pub fn bind_snapshot_at(
+        &self,
+        handle: Handle,
+        display: Display,
+        frame: u64,
+        evidence: Evidence,
+        received_at: Instant,
+    ) -> Result<(), ()> {
         let mut observation = Observation::default();
         observation.begin(1).map_err(|_| ())?;
         observation.authenticated().map_err(|_| ())?;
         observation
-            .ready(display, frame, evidence, Instant::now())
+            .ready(display, frame, evidence, received_at)
             .map_err(|_| ())?;
         let mut state = self.locked();
         if state.stopped || state.snapshots.is_some() {

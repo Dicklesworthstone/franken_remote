@@ -29,7 +29,7 @@ use frd::session_agent::{
     SubmissionRefusal,
 };
 
-/// Test-owned macOS CGEvent poster (never exported from `frd` production library).
+/// Test-owned macOS `CGEvent` poster (never exported from `frd` production library).
 #[derive(Default)]
 struct TestMacOsPoster {
     has_permission: bool,

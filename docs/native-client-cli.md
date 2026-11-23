@@ -557,8 +557,10 @@ network I/O. Explicit foreground view publishers now expose
 [live observation metadata and screenshots](#macos-live-observation-metadata)
 through the original authenticated local owner. macOS also supports
 [one-shot native observation](#one-shot-native-screenshots) with an optional PNG.
-Robot input remains unavailable on macOS. Local status identifies the
-foreground invocation; it does not infer a remote grant or host quality.
+Explicit macOS robot control uses a separate
+[`--accept-input` owner](../NATIVE_ROBOT_INPUT.md#macos-foreground-automation-2026-11-22).
+Local status identifies the foreground invocation; it does not infer a remote
+grant or host quality.
 The controlling text clipboard is default-on; microphone forwarding requires
 its explicit [macOS microphone build and local enable](macos-microphone.md).
 
@@ -673,8 +675,8 @@ path is never replaced. See [screenshots from an existing foreground owner](#scr
 for output metadata, age bounds and file-error behavior.
 
 Use [`--native-once`](#one-shot-native-screenshots) for a separate finite macOS
-observation that closes after its first receipt. Robot input remains unavailable
-on macOS. These view-only screenshots have no input precondition or control
+observation that closes after its first receipt. macOS robot input requires an
+explicit `--accept-input` control owner. These view-only screenshots have no input precondition or control
 authority, and do not establish an application-level result or physical visibility.
 
 **Verification scope:** nine tests of the actual production publication adapter
@@ -1908,9 +1910,10 @@ device, desktop PipeWire session and live-tailnet qualification remain untested.
 
 ## Bounded robot shortcuts on the original foreground owner
 
-These robot input commands use the Linux native desktop. On macOS,
-[live observation metadata](#macos-live-observation-metadata) is read-only and
-does not enable this automation owner.
+These robot input commands use the Linux or macOS native desktop. On both,
+an explicit `--accept-input` control owner is required. The existing
+[live observation publisher](#macos-live-observation-metadata) remains read-only
+and does not grant input authority.
 
 Open an explicit automation owner in one foreground process:
 

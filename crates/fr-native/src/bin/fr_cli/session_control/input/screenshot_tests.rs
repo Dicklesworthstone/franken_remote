@@ -29,7 +29,25 @@ fn image() -> fr_media::worker::presentation_snapshot::Snapshot {
     use fr_media::worker::presentation_snapshot::Snapshot;
     Snapshot::decode(Snapshot::encode(stamp(), 2, 2, &[0, 0, 0, 255].repeat(4)).unwrap()).unwrap()
 }
+fn display() -> Display {
+    Display {
+        handle: 17,
+        geometry: DisplayGeometryGeneration::INITIAL,
+        x: -800,
+        y: 0,
+        pixel_width: 800,
+        pixel_height: 600,
+        logical_width: 800,
+        logical_height: 600,
+        scale_numerator: 1,
+        scale_denominator: 1,
+        rotation: 0,
+    }
+}
 fn ready() -> (Shared, Channel) {
+    ready_at(Instant::now())
+}
+fn ready_at(received_at: Instant) -> (Shared, Channel) {
     let shared = Shared::new([1; 16], [2; 16]).unwrap();
     shared.locked().live = Some(Candidate {
         capabilities: fr_core::input_submission::Capabilities::default()
@@ -63,26 +81,55 @@ fn ready() -> (Shared, Channel) {
     let (channel, handle) = Channel::new();
     channel.publish(Some(stamp()));
     shared
-        .bind_snapshot(
+        .bind_snapshot_at(
             handle,
-            Display {
-                handle: 17,
-                geometry: DisplayGeometryGeneration::INITIAL,
-                x: -800,
-                y: 0,
-                pixel_width: 800,
-                pixel_height: 600,
-                logical_width: 800,
-                logical_height: 600,
-                scale_numerator: 1,
-                scale_denominator: 1,
-                rotation: 0,
-            },
+            display(),
             7,
             Evidence::SubmittedToCompositor,
+            received_at,
         )
         .unwrap();
     (shared, channel)
+}
+#[test]
+fn installing_the_original_snapshot_preserves_its_renderer_receipt_age() {
+    let received_at = Instant::now();
+    let now = received_at + std::time::Duration::from_millis(200);
+    let (shared, _channel) = ready_at(received_at);
+    let snapshot = shared.locked().observation.snapshot(now).unwrap();
+    let original = snapshot.frame.as_ref().unwrap();
+    assert_eq!(original.frame_serial, 7);
+    assert_eq!(original.receipt_age_ms, 200);
+
+    // A later bootstrap receipt for the same picture cannot reset its clock.
+    shared
+        .presented(7, Evidence::SubmittedToCompositor)
+        .unwrap();
+    let snapshot = shared.locked().observation.snapshot(now).unwrap();
+    assert_eq!(snapshot.frame.as_ref().unwrap().receipt_age_ms, 200);
+
+    let (_, replacement) = Channel::new();
+    assert_eq!(
+        shared.bind_snapshot_at(
+            replacement,
+            display(),
+            7,
+            Evidence::SubmittedToCompositor,
+            now,
+        ),
+        Err(())
+    );
+    assert_eq!(
+        shared
+            .locked()
+            .observation
+            .snapshot(now)
+            .unwrap()
+            .frame
+            .unwrap()
+            .receipt_age_ms,
+        200
+    );
 }
 fn poll<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))

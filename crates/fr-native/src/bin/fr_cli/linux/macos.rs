@@ -7,6 +7,8 @@
 //! authenticated foreground owner and wait for its actual native cleanup.
 //! Explicit --send/--receive choices, --file-drop native selections and opt-in
 //! local upload commands use the original controlled file lanes.
+#[path = "macos_automation.rs"]
+mod automation;
 #[path = "macos_clipboard.rs"]
 mod clipboard;
 #[path = "macos_file_choice.rs"]
@@ -141,6 +143,7 @@ pub(super) fn observe(
                 minimum,
                 screenshot,
             }),
+            false,
         );
     }
     let publication = Publication {
@@ -158,6 +161,7 @@ pub(super) fn observe(
         connection,
         json,
         Some(Observation::Live(&publication)),
+        false,
     )
     .map_err(|mut error| {
         // Preserve actual cleanup, host refusal and closure evidence. Only the
@@ -291,11 +295,11 @@ pub(super) fn connect(
     automation: bool,
 ) -> Result<String, Failure> {
     if automation {
-        return Err(unsupported(
-            "Native robot input is not implemented on macOS. A foreground view may explicitly publish read-only observation metadata.",
-        ));
+        automation::check(connection)?;
     }
-    connect_profile(runtime, cx, shutdown, stopped, api, connection, json, None)
+    connect_profile(
+        runtime, cx, shutdown, stopped, api, connection, json, None, automation,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -308,6 +312,7 @@ fn connect_profile(
     connection: &Connection,
     json: bool,
     observation: Option<Observation<'_>>,
+    automation: bool,
 ) -> Result<String, Failure> {
     let prepared = (|| {
         check(connection)?;
@@ -357,6 +362,7 @@ fn connect_profile(
         audio.as_ref(),
         microphone,
         observation,
+        automation,
     )
     .map_err(|mut error| {
         pending.preserve(&mut error);
@@ -380,6 +386,7 @@ fn connect_selected(
     audio: Option<&playback::Report>,
     microphone: Option<microphone::Prepared>,
     observation: Option<Observation<'_>>,
+    automation: bool,
 ) -> Result<String, Failure> {
     fr_native::macos::initialize_application().map_err(|_| {
         failure(
@@ -414,14 +421,22 @@ fn connect_selected(
     // The screen's 1:1 box below the title bar, the 44-point sharing strip
     // and explicitly selected text/audio controls, before the host sizes video.
     let reserved =
-        44 + if connection.control { 76 } else { 0 } + if audio.is_some() { 44 } else { 0 };
+        44 + if connection.control && !automation {
+            76
+        } else {
+            0
+        } + if audio.is_some() { 44 } else { 0 };
     let picture_box = fr_native::macos::window_box(reserved);
     let mut session = Session::new(
         connection.control.then(ControlPolicy::default),
         ObserverPolicy::default(),
         choose,
         epoch,
-        format!("FrankenRemote: {}", selected.node),
+        format!(
+            "FrankenRemote{}: {}",
+            if automation { " automation" } else { "" },
+            selected.node
+        ),
     )
     .with_fit_window(connection.fit_window)
     .with_picture_box(picture_box)
@@ -469,6 +484,15 @@ fn connect_selected(
     let mut owner = runtime
         .block_on(session_control::Owner::bind(&local, &selected.node))
         .map_err(robot::local_failure)?;
+    if automation {
+        let input = owner.enable_input(&local).map_err(robot::local_failure)?;
+        session = session.with_automation(automation::Original(input)).map_err(|_| {
+            failure(
+                "robot_input_owner_unavailable",
+                "The original foreground session could not install its exclusive robot producer. No replacement connection was opened.",
+            )
+        })?;
+    }
     if let Some(Observation::Live(publication)) = observation {
         owner = owner.with_observations(publication.publisher.clone());
         let sink = publication.clone();
@@ -870,6 +894,45 @@ mod tests {
             panic!("connection required")
         };
         connection
+    }
+
+    #[test]
+    fn automation_admits_only_the_explicit_single_attempt_exclusive_profile() {
+        let explicit = |flags: &str| connection(&format!("--attempts 1 {flags}"));
+        let original = explicit("--no-clipboard");
+        assert!(automation::check(&original).is_ok());
+        let mut by_handle = explicit("--no-clipboard");
+        by_handle.display = DisplayChoice::Handle(17);
+        assert!(automation::check(&by_handle).is_ok());
+
+        for forbidden in [
+            "",
+            "--no-clipboard --audio",
+            "--no-clipboard --send /private/chosen",
+            "--no-clipboard --receive /private/inbox",
+            "--no-clipboard --choose-receive-directory",
+            "--no-clipboard --file-drop",
+            "--no-clipboard --file-commands",
+            "--no-clipboard --choose-files",
+            "--no-clipboard --capture-system-shortcuts",
+        ] {
+            assert_eq!(
+                automation::check(&explicit(forbidden)).err().unwrap().code,
+                "robot_input_profile_invalid"
+            );
+        }
+        let mut retry = explicit("--no-clipboard");
+        retry.attempts = 2;
+        assert!(automation::check(&retry).is_err());
+        let mut ungranted = explicit("--no-clipboard");
+        ungranted.control = false;
+        assert!(automation::check(&ungranted).is_err());
+        let mut choose_host = explicit("--no-clipboard");
+        choose_host.choose_host = true;
+        assert!(automation::check(&choose_host).is_err());
+        let mut choose_display = explicit("--no-clipboard");
+        choose_display.display = DisplayChoice::Choose;
+        assert!(automation::check(&choose_display).is_err());
     }
 
     #[test]

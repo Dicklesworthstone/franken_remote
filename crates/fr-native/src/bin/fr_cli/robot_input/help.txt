@@ -1,5 +1,5 @@
 
-Explicit foreground robot control (Linux native desktop):
+Explicit foreground robot control (Linux / macOS native desktop):
 fr robot session open NODE_ID --foreground --role control --accept-input
     --experimental-native --display HANDLE|only [native trust/display options] [--json]
 fr robot input NODE_ID --connection-id ID --status [--json]

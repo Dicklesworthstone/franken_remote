@@ -768,6 +768,26 @@ impl Default for MicrophoneReport {
 }
 type MicrophoneSlot = Rc<RefCell<Option<Box<dyn Microphone>>>>;
 
+/// One explicitly enabled local robot producer on this foreground connection.
+/// The authenticated local owner keeps the action ledger and original view
+/// preconditions. The session supplies only its own receipts and granted
+/// controller; native keyboard/mouse forwarding is never attached alongside it.
+pub trait Automation {
+    fn ready(
+        &self,
+        snapshot: fr_client::robot::snapshot::Handle,
+        display: Display,
+        initial: Presentation,
+        received_at: Instant,
+    ) -> Result<(), CallbackError>;
+    fn presented(&self, frame: Presentation) -> Result<(), CallbackError>;
+    fn turn(&self, viewer: &mut ControlledViewer);
+    fn result(&self, result: fr_client::input::ResultEvent);
+    /// Fence before entering native cleanup; retained effects remain queryable
+    /// through the original local owner until its ordinary bounded retirement.
+    fn retire(&self);
+}
+
 // These facts have independent owners: chooser configuration, actual service
 // completion, startup ownership and positively completed cleanup.
 #[allow(clippy::struct_excessive_bools)]
@@ -794,6 +814,7 @@ pub struct Session {
     observer: Option<NativeObserver>,
     observations: Option<macos_live_observation::Publisher>,
     once: Option<Once>,
+    automation: Option<Rc<dyn Automation>>,
     input: Rc<RefCell<Option<Input>>>,
     files: Rc<RefCell<files::Files>>,
     clipboard: Rc<RefCell<clipboard::Clipboard>>,
@@ -819,6 +840,9 @@ impl Drop for Session {
         // teardown. This does not claim that mandatory cleanup completed.
         if let Some(observations) = &self.observations {
             let _ = observations.retire(Phase::Stopped);
+        }
+        if let Some(automation) = &self.automation {
+            automation.retire();
         }
         if let Some(observer) = &self.observer {
             observer.control().stop();
@@ -864,6 +888,7 @@ impl Session {
             observer: None,
             observations: None,
             once: None,
+            automation: None,
             input: Rc::default(),
             files: Rc::default(),
             clipboard: Rc::default(),
@@ -920,6 +945,7 @@ impl Session {
     fn one_shot_profile(&self) -> bool {
         self.control.is_none()
             && self.observations.is_none()
+            && self.automation.is_none()
             && !self.display_picker
             && self.audio_install.is_none()
             && self.microphone.borrow().is_none()
@@ -937,6 +963,7 @@ impl Session {
     ) -> Result<Self, CallbackError> {
         if self.control.is_some()
             || self.once.is_some()
+            || self.automation.is_some()
             || self.started
             || self.native_started.get()
             || self.observer.is_some()
@@ -947,6 +974,37 @@ impl Session {
         }
         self.observations = Some(macos_live_observation::Publisher::new(publish));
         Ok(self)
+    }
+    /// Exclusive foreground robot control, installed before the single original
+    /// attempt. No auxiliary consent, display chooser, publisher or finite
+    /// observation can share this producer. Callers still negotiate ordinary
+    /// host control and must preserve its exact authorization/preconditions.
+    pub fn with_automation(
+        mut self,
+        automation: impl Automation + 'static,
+    ) -> Result<Self, CallbackError> {
+        if !self.automation_profile()
+            || self.automation.is_some()
+            || self.started
+            || self.native_started.get()
+            || self.observer.is_some()
+            || self.report.borrow().attempts != 0
+        {
+            return Err(CallbackError);
+        }
+        self.automation = Some(Rc::new(automation));
+        Ok(self)
+    }
+    fn automation_profile(&self) -> bool {
+        self.control.is_some()
+            && self.once.is_none()
+            && self.observations.is_none()
+            && !self.display_picker
+            && self.audio_install.is_none()
+            && self.microphone.borrow().is_none()
+            && !self.files.borrow().has_upload()
+            && !self.files.borrow().has_download()
+            && !self.clipboard.borrow().available()
     }
     /// Supply an explicitly requested local output for each fresh original
     /// observer, before serving it. The installer handles an unselected audio
@@ -1369,6 +1427,14 @@ fn terminal_event(events: &[WindowEvent]) -> Option<LocalStop> {
     }
 }
 
+fn producer_terminal_event(events: &[WindowEvent], automation: bool) -> Option<LocalStop> {
+    terminal_event(events).or_else(|| {
+        // Robot authority cannot survive an app switch, even when focus was
+        // regained in this same batch. Ordinary native input still pauses.
+        (automation && events.contains(&WindowEvent::FocusPaused)).then_some(LocalStop::FocusLost)
+    })
+}
+
 /// The longest a resize seal waits for `AppKit` to finish a full-screen
 /// animation (about 0.5-0.8 s), inside the resize receipt's 2 s bound.
 const FULL_SCREEN_SETTLE: Duration = Duration::from_millis(1500);
@@ -1384,6 +1450,7 @@ fn service(
     reopen_intent: &RefCell<ReopenIntent>,
     resize: &Rc<ResizeIntent>,
     can_resize: bool,
+    automation: bool,
     closed: &Cell<bool>,
     stop: &StreamingViewerControl,
     files: &RefCell<files::Files>,
@@ -1498,7 +1565,7 @@ fn service(
             opened.poll(Duration::ZERO, events);
             // Native terminal callbacks defer IME cleanup. Fence owners before
             // state, clipboard or sharing can enter another native call.
-            terminal_event(events)
+            producer_terminal_event(events, automation)
         }
     };
     if terminal.is_none() && resize.changed() {
@@ -1530,6 +1597,7 @@ fn service(
         } else {
             intent.suspend();
             if reason == LocalStop::NativeFailure
+                || automation
                 || input.is_some()
                 || intent.requested()
                 || reopen_intent.borrow().pending()
@@ -1619,7 +1687,8 @@ fn service(
     }
     if let Some(reason) = reason {
         intent.suspend();
-        if input.is_some()
+        if automation
+            || input.is_some()
             || intent.requested()
             || (reopen_intent.borrow().pending() && reason != LocalStop::PictureChanged)
         {
@@ -1692,6 +1761,11 @@ fn service(
     if !sharing_ok {
         intent.invalidate();
         halt(LocalStop::NativeFailure, &mut input, &mut report);
+        return;
+    }
+    if automation {
+        // The local window retains escape, stop, focus and geometry handling.
+        // Only the authenticated robot ledger may produce remote actions.
         return;
     }
     // Ordinary input still samples time after native chrome work; the earlier
@@ -1884,6 +1958,7 @@ fn attach(
     window: &RefCell<Option<Window>>,
     slot: &Rc<RefCell<Option<Input>>>,
     resize: &ResizeIntent,
+    native_events: bool,
 ) -> Result<bool, ()> {
     let window = window.borrow();
     let window = window.as_ref().ok_or(())?;
@@ -1904,6 +1979,11 @@ fn attach(
     let area = SurfaceRect::new(0, 0, width, height).map_err(|_| ())?;
     let layout = viewer.configure_viewport(source, area).map_err(|_| ())?;
     viewer.confirm_viewport(&layout).map_err(|_| ())?;
+    if !native_events {
+        // Robot input uses this exact displayed mapping directly; attaching a
+        // second native Source would interleave unrelated held-state owners.
+        return Ok(true);
+    }
     // The layout is valid for this size only. The independently armed native
     // watcher fences it synchronously on the next real geometry change.
     window.claim_input().map_err(|_| ())?;
@@ -1953,6 +2033,12 @@ impl Application for Session {
         }
     }
     fn offer(&mut self, attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
+        if let Some(automation) = &self.automation
+            && (attempt != 1 || self.report.borrow().attempts != 0 || !self.automation_profile())
+        {
+            automation.retire();
+            return Err(CallbackError);
+        }
         if let Some(once) = &self.once {
             if !once.accepts_attempt(attempt) || !self.one_shot_profile() {
                 return Err(CallbackError);
@@ -2013,6 +2099,12 @@ impl Application for Session {
         if one_shot && !self.one_shot_profile() {
             return Err(ObserverError::Order);
         }
+        if let Some(automation) = &self.automation
+            && (attempt != 1 || self.report.borrow().attempts != 0 || !self.automation_profile())
+        {
+            automation.retire();
+            return Err(ObserverError::Order);
+        }
         if let Some(once) = &mut self.once {
             once.begin(attempt).map_err(|()| ObserverError::Order)?;
         }
@@ -2037,13 +2129,16 @@ impl Application for Session {
         let stop_control_requested = self.control.is_some() && self.close_cx.is_some();
         let audio_owner = self.audio_owner.clone();
         let microphone = self.microphone.clone();
+        let automation = self.automation.clone();
+        let automated = automation.is_some();
         let file_directions = sharing::flags(&files.borrow()).count_ones();
         let file_selections = files.borrow().file_drop_requested();
-        let text_requested = self
-            .control
-            .is_some_and(|policy| policy.capabilities.contains(Capability::Text));
+        let text_requested = !automated
+            && self
+                .control
+                .is_some_and(|policy| policy.capabilities.contains(Capability::Text));
         let sharing_flags = sharing::flags(&files.borrow())
-            | if one_shot { 0 } else { 4 }
+            | if one_shot || automated { 0 } else { 4 }
             | (u32::from(clipboard_requested) << 3)
             | if file_selections {
                 super::FILE_SELECTION_FLAG
@@ -2199,6 +2294,7 @@ impl Application for Session {
                 &reopen_intent,
                 &resize,
                 can_resize.get(),
+                automated,
                 &closed,
                 &stop,
                 &files,
@@ -2206,6 +2302,11 @@ impl Application for Session {
                 &mut sharing,
                 &mut events,
             );
+            if let Some(automation) = &automation
+                && (stop.is_stopped() || closed.get() || reopen_intent.borrow().pending())
+            {
+                automation.retire();
+            }
             service_audio(
                 &window,
                 &audio_owner,
@@ -2272,6 +2373,16 @@ impl Application for Session {
                 )
                 .map_err(|()| ObserverError::Application)?;
         }
+        if let Some(automation) = &self.automation {
+            automation
+                .ready(
+                    observer.snapshot_handle()?,
+                    display,
+                    observer.initial_presentation(),
+                    observer.initial_presentation_received_at(),
+                )
+                .map_err(|_| ObserverError::Application)?;
+        }
         if let Some(install) = &mut self.audio_install {
             *self.audio_owner.borrow_mut() = Some(Rc::from(install(observer)));
         }
@@ -2288,9 +2399,13 @@ impl Application for Session {
         // Per attempt: the gap before a reopened window's first picture is
         // not a frame interval.
         let mut previous: Option<std::time::Instant> = None;
+        let frame_automation = self.automation.clone();
         let mut frames = move |frame: Option<Presentation>| {
             if let Some(frame) = frame {
                 let now = Instant::now();
+                if let Some(automation) = &frame_automation {
+                    automation.presented(frame).map_err(|_| ())?;
+                }
                 if let Some(observation) = &observation {
                     observation.presented(
                         frame.frame.as_raw(),
@@ -2356,6 +2471,9 @@ impl Application for Session {
                 let results = report.clone();
                 let ui_resize = resize.clone();
                 let ui_microphone = self.microphone.clone();
+                let ui_automation = self.automation.clone();
+                let result_automation = self.automation.clone();
+                let ui_stop = stop.clone();
                 let mut ui = move |state: InteractiveViewerState<'_>, frame| {
                     frames(frame)?;
                     let eligible = switchable
@@ -2438,8 +2556,29 @@ impl Application for Session {
                                 last_shown = Some(frame);
                             }
                             if !attached {
-                                attached =
-                                    attach(viewer, display, &ui_window, &ui_input, &ui_resize)?;
+                                attached = attach(
+                                    viewer,
+                                    display,
+                                    &ui_window,
+                                    &ui_input,
+                                    &ui_resize,
+                                    ui_automation.is_none(),
+                                )?;
+                            }
+                            if let Some(automation) = &ui_automation {
+                                let current = ui_window
+                                    .borrow()
+                                    .as_ref()
+                                    .and_then(|window| window.state().ok())
+                                    .is_some_and(super::WindowState::input_ready);
+                                if !current || ui_stop.is_stopped() || ui_resize.changed() {
+                                    automation.retire();
+                                    viewer.close();
+                                    return Err(());
+                                }
+                                if attached {
+                                    automation.turn(viewer);
+                                }
                             }
                             if let Some(input) = ui_input.borrow_mut().as_mut() {
                                 input.refresh_text(viewer)?;
@@ -2453,6 +2592,9 @@ impl Application for Session {
                     Ok(std::ops::ControlFlow::Continue(()))
                 };
                 let result = move |result| {
+                    if let Some(automation) = &result_automation {
+                        automation.result(result);
+                    }
                     let mut report = results.borrow_mut();
                     report.input_results = report.input_results.saturating_add(1);
                     report.input_receipts.observe(result);
@@ -2505,6 +2647,9 @@ impl Application for Session {
             .observations
             .as_ref()
             .is_none_or(|publisher| publisher.retire(Phase::Cleaning).is_ok());
+        if let Some(automation) = &self.automation {
+            automation.retire();
+        }
         self.input.borrow_mut().take();
         if let Some(observer) = &self.observer {
             observer.control().stop();
@@ -2605,8 +2750,24 @@ impl Application for Session {
         }
     }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
+        if let Some(automation) = &self.automation
+            && !matches!(
+                status,
+                Status::Connecting { .. } | Status::Authenticated { .. }
+            )
+        {
+            automation.retire();
+        }
         match status {
             Status::Connecting { attempt } => {
+                if let Some(automation) = &self.automation
+                    && (attempt != 1
+                        || self.report.borrow().attempts != 0
+                        || !self.automation_profile())
+                {
+                    automation.retire();
+                    return Err(CallbackError);
+                }
                 if self
                     .once
                     .as_ref()
@@ -2671,6 +2832,7 @@ impl Application for Session {
         // or clear the original receipt/cleanup evidence in a new Connecting.
         if self.once.is_some()
             || self.observations.is_some()
+            || self.automation.is_some()
             || !self.reopen_intent.borrow().pending()
         {
             return Ok(CompletionAction::Finish);
@@ -2730,7 +2892,7 @@ impl Application for Session {
         &mut self,
         failure: reconnect::Failure,
     ) -> Result<Option<LocalLayoutChange>, CallbackError> {
-        if self.once.is_some() || self.observations.is_some() {
+        if self.once.is_some() || self.observations.is_some() || self.automation.is_some() {
             return Ok(None);
         }
         Ok(self.window_resize_action(failure, super::event_time()))
@@ -3072,6 +3234,153 @@ mod tests {
         assert_eq!(resize.report().local_stop, original.local_stop);
         assert_eq!(resize.report().window_resizes, 0);
         assert!(resize.fit_window.is_none());
+    }
+
+    #[derive(Clone, Default)]
+    struct AutomationFence(Rc<Cell<bool>>);
+    impl Automation for AutomationFence {
+        fn ready(
+            &self,
+            _: fr_client::robot::snapshot::Handle,
+            _: Display,
+            _: Presentation,
+            _: Instant,
+        ) -> Result<(), CallbackError> {
+            panic!("lifecycle fixture creates no renderer");
+        }
+        fn presented(&self, _: Presentation) -> Result<(), CallbackError> {
+            panic!("lifecycle fixture creates no renderer");
+        }
+        fn turn(&self, _: &mut ControlledViewer) {
+            panic!("lifecycle fixture creates no granted controller");
+        }
+        fn result(&self, _: fr_client::input::ResultEvent) {
+            panic!("lifecycle fixture submits no input");
+        }
+        fn retire(&self) {
+            self.0.set(true);
+        }
+    }
+
+    fn automation_session() -> Session {
+        Session::new(
+            Some(ControlPolicy::default()),
+            ObserverPolicy::default(),
+            Box::new(|_| Ok(None)),
+            1,
+            "automation lifecycle fixture".to_owned(),
+        )
+    }
+
+    #[test]
+    fn automation_requires_exclusive_control_before_the_original_attempt() {
+        assert!(
+            automation_session()
+                .with_automation(AutomationFence::default())
+                .is_ok()
+        );
+        let mut viewing = automation_session();
+        viewing.control = None;
+        assert!(viewing.with_automation(AutomationFence::default()).is_err());
+        let mut observing = automation_session();
+        observing.observations = Some(macos_live_observation::Publisher::new(|_| Ok(())));
+        assert!(
+            observing
+                .with_automation(AutomationFence::default())
+                .is_err()
+        );
+        let mut once = automation_session();
+        once.once = Some(Once::new(false));
+        assert!(once.with_automation(AutomationFence::default()).is_err());
+        let mut choosing = automation_session();
+        choosing.display_picker = true;
+        assert!(
+            choosing
+                .with_automation(AutomationFence::default())
+                .is_err()
+        );
+        let mut started = automation_session();
+        started.started = true;
+        assert!(started.with_automation(AutomationFence::default()).is_err());
+        let previous = automation_session();
+        previous.report.borrow_mut().attempts = 1;
+        assert!(
+            previous
+                .with_automation(AutomationFence::default())
+                .is_err()
+        );
+
+        let automated = automation_session()
+            .with_automation(AutomationFence::default())
+            .unwrap();
+        assert!(automated.with_observations(|_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn automation_never_reopens_or_resets_original_attempt_evidence() {
+        for action in [ReopenAction::ChangeDisplay, ReopenAction::StopControl] {
+            let mut session = selected_action(action);
+            session.control = Some(ControlPolicy::default());
+            let fence = AutomationFence::default();
+            session.automation = Some(Rc::new(fence.clone()));
+            let original = session.report();
+            assert_eq!(session.completion_action(), Ok(CompletionAction::Finish));
+            for attempt in [2, 1] {
+                assert_eq!(
+                    session.status(Status::Connecting { attempt }),
+                    Err(CallbackError)
+                );
+                assert!(fence.0.get());
+                assert!(session.cleanup_confirmed());
+                assert_eq!(session.report().attempts, original.attempts);
+                assert_eq!(session.report().close_exchange, original.close_exchange);
+                assert_eq!(session.report().lease_revocation, original.lease_revocation);
+            }
+            assert_eq!(session.report().display_changes, 0);
+        }
+        let mut resized = resized_session();
+        resized.automation = Some(Rc::new(AutomationFence::default()));
+        let original = resized.report();
+        assert_eq!(
+            resized.local_layout_change(reconnect::Failure::Cancelled),
+            Ok(None)
+        );
+        assert_eq!(resized.report().local_stop, original.local_stop);
+        assert_eq!(resized.report().window_resizes, 0);
+        assert!(resized.fit_window.is_none());
+    }
+
+    #[test]
+    fn automation_retires_before_cleanup_is_polled_and_before_status_refusal() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let deadline = Deadline::after(&cx, Duration::from_secs(1)).unwrap();
+        let fence = AutomationFence::default();
+        let mut session = automation_session().with_automation(fence.clone()).unwrap();
+        let cleanup = session.cleanup(&cx, deadline);
+        assert!(
+            fence.0.get(),
+            "fence must not wait for cleanup to be polled"
+        );
+        drop(cleanup);
+        assert!(!session.cleanup_confirmed());
+
+        let mut closing = selected_close();
+        let fence = AutomationFence::default();
+        closing.automation = Some(Rc::new(fence.clone()));
+        assert_eq!(
+            closing.status(Status::Reconnecting {
+                attempt: 2,
+                delay: Duration::ZERO,
+                failure: reconnect::Failure::Cancelled,
+            }),
+            Err(CallbackError)
+        );
+        assert!(fence.0.get());
+
+        let fence = AutomationFence::default();
+        drop(automation_session().with_automation(fence.clone()).unwrap());
+        assert!(fence.0.get());
     }
 
     #[test]
@@ -3605,6 +3914,35 @@ mod tests {
         // host's must still be released before input continues.
         assert_eq!(focus_step(false, false, true), FocusStep::Pause);
         assert_eq!(focus_step(true, false, true), FocusStep::Resume);
+    }
+
+    #[test]
+    fn automation_fences_every_focus_pause_without_changing_native_input_policy() {
+        let events = [WindowEvent::FocusPaused];
+        assert_eq!(producer_terminal_event(&events, false), None);
+        assert_eq!(
+            producer_terminal_event(&events, true),
+            Some(LocalStop::FocusLost)
+        );
+        assert_eq!(
+            producer_terminal_event(
+                &[WindowEvent::FocusPaused, WindowEvent::CloseRequested],
+                true
+            ),
+            Some(LocalStop::WindowClosed)
+        );
+        let escape = WindowEvent::Key {
+            usage: 0x29,
+            pressed: true,
+            repeat: true,
+            captured: None,
+            modifiers: (1 << 17) | (1 << 18) | (1 << 19),
+        };
+        assert_eq!(
+            producer_terminal_event(&[WindowEvent::FocusPaused, escape], true),
+            Some(LocalStop::LocalEscape)
+        );
+        assert_eq!(producer_terminal_event(&[], true), None);
     }
 
     #[test]

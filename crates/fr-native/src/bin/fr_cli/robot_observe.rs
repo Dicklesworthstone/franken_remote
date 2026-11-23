@@ -27,6 +27,7 @@ pub(super) enum Minimum {
     SubmittedToCompositor,
 }
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[derive(Clone, Copy)]
 pub(super) enum NativeMode<'a> {
     Live,
     Once {

@@ -698,7 +698,10 @@ pub(super) async fn respond(
         .map_err(|_| Error::Unavailable)
 }
 
-#[cfg(feature = "linux-desktop")]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "input/live.rs"]
 mod live;
 
