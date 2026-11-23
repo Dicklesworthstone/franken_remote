@@ -8,15 +8,61 @@
 //! viewer's rate: while some paths are queued and others are clear, the rate
 //! holds. With `--adaptive-capture` the same evidence reaches that pacing's
 //! own rate controller instead.
-use super::{Error, MAX_SUBSCRIBERS, MediaError, Members, ObservationControl, Publisher};
+use super::{Entry, Error, MAX_SUBSCRIBERS, MediaError, Members, ObservationControl, Publisher};
+use fr_core::authority::SessionAuthority;
 use fr_media::bitrate::{self, PathEvidence};
-use fr_wire::decoder::Binding;
+use std::sync::{Arc, Mutex, Weak};
+
+/// Original observation owners, each immutably bound to one connection at
+/// subscriber admission. Weak identities cannot retain or renew their consent.
+/// A recovery changes decoder bindings, not this transport cohort.
+#[derive(Default)]
+pub(super) struct PathCohort {
+    owners: [Option<Weak<Mutex<SessionAuthority>>>; MAX_SUBSCRIBERS],
+}
+impl PathCohort {
+    pub(super) fn observe(
+        &mut self,
+        controller: &mut bitrate::Controller,
+        members: &Members,
+        now: u64,
+    ) -> Result<(), Error> {
+        let owners = std::array::from_fn(|slot| {
+            members.entries[slot]
+                .as_ref()
+                .filter(|entry| entry.path_eligible())
+                .map(|entry| Arc::downgrade(&entry.control.authority))
+        });
+        if self
+            .owners
+            .iter()
+            .zip(&owners)
+            .any(|(old, current)| match (old, current) {
+                (Some(old), Some(current)) => !Weak::ptr_eq(old, current),
+                (None, None) => false,
+                _ => true,
+            })
+        {
+            controller.reset_evidence().map_err(bitrate_error)?;
+            self.owners = owners;
+        }
+        observe(controller, now, members.paths(now)).map_err(bitrate_error)
+    }
+}
+
+impl Entry {
+    fn path_eligible(&self) -> bool {
+        self.failure.is_none()
+            && self.starting.is_none()
+            && (self.join.is_none() || self.recovery.is_some())
+    }
+}
 
 /// The rate controller of a source without adaptive pacing.
 pub(super) struct PathRate {
     controller: bitrate::Controller,
     capture: Option<bitrate::Capture>,
-    views: [Option<Binding>; MAX_SUBSCRIBERS],
+    cohort: PathCohort,
 }
 
 /// The paths of the viewers a source serves, in one service turn.
@@ -24,7 +70,7 @@ pub(super) struct PathRate {
 enum Paths {
     /// Every eligible viewer has recent acknowledged busy delivery, no queue.
     Clear,
-    /// No queue, but idle or missing delivery evidence cannot justify a probe.
+    /// No queue, but idle, recovering or missing delivery evidence cannot probe.
     Unmeasured,
     /// Every eligible viewer's path holds one. The lowest delivery any of them
     /// measured while busy, or 0 when none did.
@@ -62,23 +108,26 @@ fn classify(paths: impl Iterator<Item = PathEvidence>) -> Paths {
 
 impl Members {
     fn paths(&self, now: u64) -> Paths {
-        classify(
+        let paths = classify(
             self.entries
                 .iter()
                 .flatten()
-                .filter(|entry| entry.pacing_eligible())
+                .filter(|entry| entry.path_eligible())
                 .map(|entry| entry.path.evidence(now)),
-        )
-    }
-    fn rate_views(&self) -> [Option<Binding>; MAX_SUBSCRIBERS] {
-        let mut views = [None; MAX_SUBSCRIBERS];
-        for (view, entry) in views.iter_mut().zip(&self.entries) {
-            *view = entry
-                .as_ref()
-                .filter(|entry| entry.pacing_eligible())
-                .map(|entry| entry.view);
+        );
+        if paths == Paths::Clear
+            && self
+                .entries
+                .iter()
+                .flatten()
+                .any(|entry| entry.path_eligible() && !entry.pacing_eligible())
+        {
+            // A recovered connection can drain before the replacement picture
+            // is usable. Its ACKs are not permission to raise the source rate.
+            Paths::Unmeasured
+        } else {
+            paths
         }
-        views
     }
 }
 
@@ -105,21 +154,17 @@ impl PathRate {
         Ok(Self {
             controller: bitrate::Controller::new(initial).map_err(bitrate_error)?,
             capture: None,
-            views: [None; MAX_SUBSCRIBERS],
+            cohort: PathCohort::default(),
         })
     }
     pub(super) const fn controller(&self) -> &bitrate::Controller {
         &self.controller
     }
-    /// A change of viewers voids the evidence: an unsent proposal is cancelled,
-    /// and a target native work already kept is restored on the next capture.
-    pub(super) fn observe_views(&mut self, members: &Members) -> Result<(), Error> {
-        let views = members.rate_views();
-        if views != self.views {
-            self.controller.reset_evidence().map_err(bitrate_error)?;
-            self.views = views;
-        }
-        Ok(())
+    /// A change of original owners voids the evidence; reference recovery on
+    /// those same connections retains measured congestion and native intent.
+    pub(super) fn observe_members(&mut self, members: &Members) -> Result<(), Error> {
+        self.cohort
+            .observe(&mut self.controller, members, members.last)
     }
     /// The rate this capture requests. Only actual pool and member credit may
     /// begin one.
@@ -197,10 +242,9 @@ impl Publisher {
         // same lock, so a fresh sample cannot appear to come from the future.
         let now = now.max(members.last);
         if let Some(rate) = &mut self.path_rate {
-            rate.observe_views(&members)?;
-            observe(&mut rate.controller, now, members.paths(now)).map_err(bitrate_error)?;
-        } else if let Some(controller) = self.adaptive.as_mut().and_then(|a| a.bitrate_mut()) {
-            observe(controller, now, members.paths(now)).map_err(bitrate_error)?;
+            rate.cohort.observe(&mut rate.controller, &members, now)?;
+        } else if let Some(adaptive) = &mut self.adaptive {
+            adaptive.observe_paths(&members, now)?;
         }
         Ok(())
     }
@@ -208,6 +252,35 @@ impl Publisher {
 
 fn bitrate_error(error: bitrate::Error) -> Error {
     Error::Media(MediaError::Bitrate(error))
+}
+
+#[cfg(test)]
+impl Publisher {
+    pub(crate) fn capture_interval_for_test(&mut self, now: u64) -> Result<Option<u64>, Error> {
+        self.capture_interval(now)
+    }
+
+    /// Explicit estimator fixture on real admitted owners. Each pair is a
+    /// baseline and a fresh ACK snapshot; only this measurement is synthetic.
+    /// Session clocks, membership, capture credit and IPC remain production.
+    pub(crate) fn sample_paths_for_test(
+        &mut self,
+        loads: &[(fr_transport::quic::PathLoad, fr_transport::quic::PathLoad)],
+    ) -> Result<(), Error> {
+        let now = {
+            let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
+            members.tick()?;
+            let now = members.last;
+            assert_eq!(members.entries.iter().flatten().count(), loads.len());
+            for (entry, (baseline, fresh)) in members.entries.iter_mut().flatten().zip(loads) {
+                entry.path.observe(None, now.saturating_sub(1));
+                entry.path.observe(Some(*baseline), now.saturating_sub(1));
+                entry.path.observe(Some(*fresh), now);
+            }
+            now
+        };
+        self.observe_paths(now)
+    }
 }
 
 #[cfg(test)]

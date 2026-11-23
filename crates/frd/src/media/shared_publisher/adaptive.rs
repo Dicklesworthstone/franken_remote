@@ -99,6 +99,7 @@ pub(super) struct CapturePacing {
     last_work: Option<(u64, u64)>,
     observation: Option<Observation>,
     receiver_views: [Option<Binding>; super::MAX_SUBSCRIBERS],
+    path_cohort: super::path_rate::PathCohort,
 }
 impl CapturePacing {
     pub(super) fn quality_point(&self) -> Option<crate::media::quality_decision::Point> {
@@ -125,6 +126,7 @@ impl CapturePacing {
             last_work: None,
             observation: None,
             receiver_views: [None; super::MAX_SUBSCRIBERS],
+            path_cohort: super::path_rate::PathCohort::default(),
         })
     }
     pub(super) fn interval_us(&self) -> u64 {
@@ -147,7 +149,14 @@ impl CapturePacing {
                 .filter(|entry| entry.pacing_eligible())
                 .map(|entry| entry.view)
         });
-        self.observe_receiver_views(&views)
+        self.observe_receiver_views(&views)?;
+        self.observe_paths(members, members.last)
+    }
+    pub(super) fn observe_paths(&mut self, members: &Members, now: u64) -> Result<(), Error> {
+        if let Some(bitrate) = &mut self.bitrate {
+            self.path_cohort.observe(bitrate, members, now)?;
+        }
+        Ok(())
     }
     fn observe_receiver_views(
         &mut self,
@@ -156,10 +165,10 @@ impl CapturePacing {
         if self.receiver_views != *views {
             self.controller.reset_receiver_evidence();
             if let Some(bitrate) = &mut self.bitrate {
-                // Cancel an unsent proposal, or explicitly restore the applied
-                // target on the next capture if native work already retained it.
-                // An in-flight token still owns its eventual actual result.
-                bitrate.reset_evidence().map_err(bitrate_error)?;
+                // Receiver bindings change during recovery while the original
+                // transport cohort survives. Clear local evidence and probes,
+                // but retain a conservative cut justified by those same paths.
+                bitrate.reset_receiver_evidence().map_err(bitrate_error)?;
             }
             self.receiver_views = *views;
         }
@@ -465,10 +474,17 @@ impl Publisher {
             .and_then(|n| n.checked_add(fr_media::worker::UNIT_PREFIX_BYTES))
             .ok_or(Error::InvalidBudget)?;
         let ready = self.pool.can_share_capacity(capacity);
-        let peers = {
+        let (now, peers) = {
             let members = self.members.lock().map_err(|_| Error::Poisoned)?;
+            // A subscriber may have advanced the owner clock since this
+            // publisher turn began. Path and pacing samples must share that
+            // same effective instant, including the policy call after unlock.
+            let now = now.max(members.last);
             adaptive.observe_receivers(&members)?;
-            members.peer_evidence(now, adaptive.controller.interval_us())
+            (
+                now,
+                members.peer_evidence(now, adaptive.controller.interval_us()),
+            )
         };
         let interval = adaptive.sample(now, ready, peers)?;
         self.members.lock().map_err(|_| Error::Poisoned)?.quality = adaptive.quality_point();

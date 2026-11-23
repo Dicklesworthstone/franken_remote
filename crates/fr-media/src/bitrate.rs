@@ -517,6 +517,28 @@ impl Controller {
     pub fn reset_evidence(&mut self) -> Result<(), Error> {
         self.check_open()?;
         self.clear_measurements();
+        self.cancel_native_intent()
+    }
+
+    /// A decoder/view replacement on the SAME original transport cohort
+    /// invalidates local sender/receiver evidence and every optimistic probe.
+    /// It does not erase a measured path queue or its conservative pending cut.
+    /// A changed transport/member cohort must use `reset_evidence` instead.
+    /// Original capture tokens and already installed native effects are retained.
+    pub fn reset_receiver_evidence(&mut self) -> Result<(), Error> {
+        self.check_open()?;
+        self.clear_local_measurements();
+        self.path_clear_since = None;
+        if self
+            .pending
+            .is_some_and(|change| change.reason == Reason::PathQueue)
+        {
+            return Ok(());
+        }
+        self.cancel_native_intent()
+    }
+
+    fn cancel_native_intent(&mut self) -> Result<(), Error> {
         if self
             .pending
             .is_some_and(|change| change.reason == Reason::EvidenceReset)

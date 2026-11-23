@@ -101,6 +101,51 @@ it was the last source owner. A decode report never grants visibility or input.
 Control-intent sessions do not use this observation-only path. Existing transport
 namespace exhaustion still refuses rather than recycling retired bindings.
 
+## Bitrate during reference recovery (fr-ktuc)
+
+An established viewer remains part of the shared encoder's path measurements
+while its reference chain is fenced, replacement attachments are pending, or the
+new decoder is waiting for its first picture. Those states still exclude it
+from ordinary decoder/send pacing evidence. This distinction lets a sole viewer,
+or a whole recovering cohort, lower the recovery IDR's bitrate after its original
+connections keep measuring a queue. Both the default path controller and optional
+adaptive capture use this rule. Initial startup and new late joins supply no path
+evidence until their own startup completes.
+
+A healthy or unmeasured sibling still vetoes a cut justified only by the failing
+viewer. Upward probes require every path participant to have completed decoder
+startup and supplied current clear-path evidence; draining during recovery does
+not demonstrate usable headroom. The cohort is tied to weak identities of the
+original admitted observation owners, each bound to its original connection.
+Replacing decoder generations does not replace that cohort; replacing or removing
+an owner discards its old evidence and cancels its pending rate intent.
+
+Decoder recovery clears local sender/receiver pressure and optimistic probes,
+while preserving a conservative target already justified by those same paths.
+A static native observation may defer the lower rate, and the later recovery
+capture carries that target on the original source credit. Only the original
+worker's actual reply confirms a change. A result already in flight remains
+accounted for even if membership changes while it runs; any owed restoration
+continues through the normal explicit-rate transaction. Source, session, consent,
+capture, replacement and media deadlines retain their original bounds.
+When a subscriber advances the shared clock after a publisher turn begins,
+path and pacing updates use that same latest owner time rather than regressing
+the controller's clock at the later pacing call.
+
+The shared recovery regressions exercise real session negotiation, QUIC replacement
+attachments, shared ownership and worker IPC, including static deferral, a
+healthy sibling's veto and a subscriber advancing a lagged publisher turn.
+Their path snapshots, encoded bytes and decoder replies are explicit fixtures.
+The bitrate policy regressions cover retained pressure,
+cancelled local pressure and probes, true cohort replacement and in-flight native
+effects. These are ownership and controller checks, not new native encoder or
+impaired-network performance measurements.
+
+```sh
+cargo test -p fr-media --test bitrate_receiver_reset --locked
+cargo test -p frd --lib shared::tests::recovery::path_rate_tests --locked
+```
+
 ## Playback audio during video recovery
 
 Video reference recovery preserves an established audio-down attachment, its

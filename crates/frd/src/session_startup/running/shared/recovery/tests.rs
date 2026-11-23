@@ -8,6 +8,9 @@ use fr_wire::recovery_request as wire;
 #[path = "metrics_tests.rs"]
 mod metrics_tests;
 
+#[path = "path_rate_tests.rs"]
+mod path_rate_tests;
+
 fn request(p: &Member) -> Vec<u8> {
     let mut view = p.media.binding();
     view.parent = p.shared.as_ref().unwrap().session.binding();

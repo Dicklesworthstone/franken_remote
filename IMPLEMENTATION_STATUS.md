@@ -1,5 +1,42 @@
 # Implementation status
 
+## Shared encoder bitrate through reference recovery (2026-11-23)
+
+An established viewer's original connection now remains in the shared encoder's
+path measurements while its decoder is fenced, replacement attachments are
+pending, or the replacement waits for its first picture. A persistent queue
+across the participating paths can therefore lower the next recovery IDR's
+bitrate. Both the default path controller and adaptive capture use this rule.
+Healthy or unmeasured siblings still veto a cut justified only by another
+viewer's queue; recovering paths cannot justify optimistic upward probes.
+
+Decoder replacement clears local sender/receiver evidence and probes without
+discarding a conservative cut justified by the same original connections.
+Actual membership changes still clear the complete evidence scope. A static
+native observation may defer a rate change until recovery; only the original
+worker's actual reply confirms it. Pending native effects remain accounted for
+through membership changes. Weak owner identities retain no authority, and
+capture, consent, replacement and media deadlines retain their original bounds.
+Pacing carries the shared owner's latest clock through the whole policy update,
+including when a subscriber advances it after the publisher's turn begins.
+
+The complete portable `fr-media` Cargo suite passes all 668 tests, including
+five new receiver-reset regressions, and strict all-target Clippy passes.
+On baseline `40788b6` with this change, the wire, transport, tailnet, media,
+client, files and web dependency libraries also compile with the pinned
+compiler and locked third-party inputs.
+Four shared-session regressions cover recovery rate cuts, static deferral,
+healthy-sibling veto and a lagged publisher clock; their execution evidence is
+still being collected. Full daemon code generation and production Clippy were
+killed under shared resource pressure; a focused test build exceeded its
+bounded memory allowance. These are not successful daemon or workspace gates.
+The regressions use real sessions, replacement attachments and worker IPC,
+while acknowledged-path snapshots, encoded bytes and decoder replies are
+explicit fixtures. No new WAN or native encoder qualification is claimed.
+
+Plan §§12.3 and 13.3; tracking `fr-ktuc`;
+[shared recovery](SHARED_RECOVERY.md#bitrate-during-reference-recovery-fr-ktuc).
+
 ## Explicit native one-way folder jobs (2026-11-23)
 
 The previously local-only folder engine now has original-connection host and

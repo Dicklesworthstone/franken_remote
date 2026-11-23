@@ -488,7 +488,7 @@ impl Publisher {
                 adaptive.observe_receivers(&members)?;
             }
             if let Some(rate) = &mut self.path_rate {
-                rate.observe_views(&members)?;
+                rate.observe_members(&members)?;
             }
             admitted
         };
@@ -540,6 +540,15 @@ impl Publisher {
                         m.quality = adaptive.quality_point();
                         Ok(interval)
                     });
+                if let Err(error) = sample {
+                    return Poll::Ready(Err(error));
+                }
+            } else if let Some(rate) = &mut self.path_rate {
+                let sample = self
+                    .members
+                    .lock()
+                    .map_err(|_| Error::Poisoned)
+                    .and_then(|members| rate.observe_members(&members));
                 if let Err(error) = sample {
                     return Poll::Ready(Err(error));
                 }
