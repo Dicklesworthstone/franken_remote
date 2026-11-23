@@ -4,10 +4,132 @@ use fr_core::{
     limits::ProtocolLimits,
 };
 use fr_wire::{
-    WireError,
+    WireError, attachment,
     files::{Context, Direction, Lane, Limits, Reason, Role},
+    negotiation::{Capability, Offer, Role as SessionRole},
     sync_job_state::{self, ConflictPolicy, RECORD_BYTES, SyncDirection, SyncJobState, SyncPhase},
 };
+
+const SYNC_CAPABILITIES: [(&str, u16); 6] = [
+    (sync_job_state::CAPABILITY, sync_job_state::VERSION),
+    (attachment::CAPABILITY, attachment::VERSION),
+    (attachment::INPUT_CAPABILITY, attachment::INPUT_VERSION),
+    (attachment::FILES_CAPABILITY, attachment::FILES_VERSION),
+    (fr_wire::files::CAPABILITY, fr_wire::files::VERSION),
+    (
+        fr_wire::files::DOWNLOAD_CAPABILITY,
+        fr_wire::files::DOWNLOAD_VERSION,
+    ),
+];
+
+fn sync_offer() -> Offer {
+    let mut capabilities: Vec<_> = SYNC_CAPABILITIES
+        .iter()
+        .map(|&(name, version)| Capability {
+            name: name.into(),
+            version,
+            required: false,
+        })
+        .collect();
+    capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    Offer {
+        versions: vec![0],
+        profile: 1,
+        profile_version: 0,
+        role: SessionRole::RequestControl,
+        limits: ProtocolLimits::ABSOLUTE,
+        capabilities,
+    }
+}
+
+#[test]
+fn native_download_sync_requires_bilateral_exact_profiles_without_enabling_upload() {
+    let complete = sync_offer().select().unwrap();
+    assert!(sync_job_state::selected(&complete));
+    assert!(!fr_wire::files::duplex_selected(&complete));
+    for (name, _) in SYNC_CAPABILITIES {
+        for unknown_version in [false, true] {
+            let mut peer = sync_offer();
+            if unknown_version {
+                peer.capabilities
+                    .iter_mut()
+                    .find(|cap| cap.name == name)
+                    .unwrap()
+                    .version += 1;
+            } else {
+                peer.capabilities.retain(|cap| cap.name != name);
+            }
+            let selected = sync_offer().intersect(&peer).unwrap().select().unwrap();
+            assert!(!sync_job_state::selected(&selected), "missing exact {name}");
+        }
+    }
+    let mut observer = complete.clone();
+    observer.role = SessionRole::Observe;
+    assert!(!sync_job_state::selected(&observer));
+    let mut duplicate = complete.clone();
+    duplicate
+        .capabilities
+        .push(duplicate.capabilities[0].clone());
+    assert!(!sync_job_state::selected(&duplicate));
+    let mut unordered = complete;
+    unordered.capabilities.reverse();
+    assert!(!sync_job_state::selected(&unordered));
+}
+
+#[test]
+fn explicit_offer_helper_is_idempotent_and_never_drops_required_capabilities() {
+    let mut plain = sync_offer();
+    plain
+        .capabilities
+        .retain(|cap| cap.name != sync_job_state::CAPABILITY);
+    let prepared = sync_job_state::prepare_offer(plain.clone()).unwrap();
+    assert!(sync_job_state::selected(&prepared.select().unwrap()));
+    assert_eq!(
+        sync_job_state::prepare_offer(prepared.clone()).unwrap(),
+        prepared
+    );
+    for (name, _) in SYNC_CAPABILITIES
+        .into_iter()
+        .filter(|(name, _)| *name != sync_job_state::CAPABILITY)
+    {
+        let mut missing = plain.clone();
+        missing.capabilities.retain(|cap| cap.name != name);
+        assert!(sync_job_state::prepare_offer(missing).is_err());
+    }
+    let mut full = plain;
+    while full.capabilities.len() < fr_wire::negotiation::MAX_CAPABILITIES {
+        full.capabilities.push(Capability {
+            name: format!("zz-required-{}", full.capabilities.len()),
+            version: 1,
+            required: true,
+        });
+    }
+    full.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    full.validate().unwrap();
+    assert!(sync_job_state::prepare_offer(full.clone()).is_err());
+    // A diagnostic boundary can yield its optional slot, not a required gate.
+    let cap = full.capabilities.last_mut().unwrap();
+    cap.name = fr_wire::quality_decision::CAPABILITY.into();
+    cap.required = false;
+    full.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    let prepared = sync_job_state::prepare_offer(full.clone()).unwrap();
+    assert_eq!(
+        prepared.capabilities.len(),
+        fr_wire::negotiation::MAX_CAPABILITIES
+    );
+    assert!(
+        !prepared
+            .capabilities
+            .iter()
+            .any(|cap| cap.name == fr_wire::quality_decision::CAPABILITY)
+    );
+    assert!(
+        full.capabilities
+            .iter()
+            .filter(|cap| cap.required)
+            .all(|cap| prepared.capabilities.contains(cap))
+    );
+}
 
 fn limits() -> Limits {
     Limits::new(&ProtocolLimits::ABSOLUTE, 4096).unwrap()
@@ -83,6 +205,41 @@ fn golden_round_trip_and_truncation_matrix() {
             "must refuse truncation at {cut}"
         );
     }
+}
+
+#[test]
+fn job_reports_cannot_cross_the_original_session_lease_handle_or_channel() {
+    let original = context(Role::Host);
+    let bytes = fixture();
+    for changed in [
+        Context {
+            session: RemoteSessionId::from_raw(91),
+            ..original
+        },
+        Context {
+            lease: InputLeaseId::from_raw(92),
+            ..original
+        },
+        Context {
+            handle: 93,
+            ..original
+        },
+        Context {
+            channel: 94,
+            ..original
+        },
+    ] {
+        assert_eq!(
+            sync_job_state::decode(&bytes, changed, limits()),
+            Err(WireError::InvalidBinding)
+        );
+    }
+    let mut trailing = bytes;
+    trailing.push(0);
+    assert_eq!(
+        sync_job_state::decode(&trailing, original, limits()),
+        Err(WireError::TrailingBytes)
+    );
 }
 
 #[test]

@@ -8,6 +8,7 @@ use fr_wire::{
     attachment::MediaRole,
     files::{self, Context, Lane, Limits, Role},
     negotiation::ControlBinding,
+    sync_job_state::{self, SyncJobState},
 };
 use std::cell::Cell;
 
@@ -41,12 +42,14 @@ impl FilesChannel {
             let routes = attachment.completed_on(q)?;
             let parent = attachment.completed_parent(q)?;
             let protocol = attachment.completed_limits(q)?;
+            let messages = attachment.application_messages(attachment.host);
             if !routes.descriptor.role.is_files()
                 || (routes.descriptor.role == MediaRole::FilesDownload
                     && attachment.files_direction != files::Direction::ToController)
                 || routes.datagram.is_some()
-                || routes.outbound.messages != Messages::Files
-                || routes.inbound.messages != Messages::Files
+                || !matches!(messages, Messages::Files | Messages::FilesSync)
+                || routes.outbound.messages != messages
+                || routes.inbound.messages != messages
                 || routes.outbound.priority != Priority::Bulk
                 || routes.inbound.priority != Priority::Bulk
             {
@@ -110,6 +113,13 @@ impl FilesChannel {
     }
     pub const fn limits(&self) -> Limits {
         self.limits
+    }
+    /// This original download attachment positively selected bounded job state.
+    /// Local job configuration, acceptance and filesystem authority remain the
+    /// file owner's responsibility; ordinary file consent is not sync consent.
+    pub fn sync_selected(&self) -> bool {
+        self.routes.outbound.messages == Messages::FilesSync
+            && self.outgoing.direction == files::Direction::ToController
     }
     pub fn owns_inbound(&self, route: Route) -> bool {
         route == Route::Stream(self.routes.inbound)
@@ -206,7 +216,7 @@ impl FilesChannel {
         authorize: impl FnMut() -> bool,
     ) -> Result<(), Error> {
         self.check(q)?;
-        files::decode(bytes, self.outgoing, self.limits).map_err(|_| Error::Malformed)?;
+        self.validate_record(bytes, self.outgoing)?;
         let result = q.send(
             cx,
             Route::Stream(self.routes.outbound),
@@ -222,6 +232,37 @@ impl FilesChannel {
                 Err(Error::SendExpired)
             }
             other => other,
+        }
+    }
+    /// Send one canonical state under its original deadline and the SAME file
+    /// queue accounting as ATP records. The exclusive file owner must wait for
+    /// its earlier payload/proof custody to drain before using this operation;
+    /// this does not create a separate queue or an uncharged metadata prefix.
+    pub fn send_sync(
+        &self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        state: &SyncJobState,
+        deadline_us: u64,
+        authorize: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        self.check(q)?;
+        if !self.sync_selected() {
+            return Err(Error::WrongRoute);
+        }
+        let mut bytes = [0; sync_job_state::RECORD_BYTES];
+        let length = sync_job_state::encode(state, self.outgoing, self.limits, &mut bytes)
+            .map_err(|_| Error::Malformed)?;
+        self.send(q, cx, &bytes[..length], deadline_us, authorize)
+    }
+
+    fn validate_record(&self, bytes: &[u8], context: Context) -> Result<(), Error> {
+        if files::decode(bytes, context, self.limits).is_ok()
+            || (self.sync_selected() && sync_job_state::decode(bytes, context, self.limits).is_ok())
+        {
+            Ok(())
+        } else {
+            Err(Error::Malformed)
         }
     }
     /// At most one record per turn; Blocked retains the SAME transport-owned
@@ -241,7 +282,7 @@ impl FilesChannel {
             |route| ready.get() && self.owns_inbound(route),
             |_, bytes| {
                 ready.set(false);
-                files::decode(bytes, self.incoming, self.limits).map_err(|_| ())?;
+                self.validate_record(bytes, self.incoming).map_err(|_| ())?;
                 consume(bytes)
             },
         )?;

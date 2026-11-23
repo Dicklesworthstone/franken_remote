@@ -193,6 +193,9 @@ pub enum Messages {
     Clipboard,
     /// Separately attached file records, never an input/control parser exception.
     Files,
+    /// Positively selected host-download file records and bounded job states.
+    /// An ordinary upload or unnegotiated download retains `Files`.
+    FilesSync,
     /// Decoder configuration and first-frame acknowledgements, one ordered lane.
     DecoderReplies,
     /// The host's reliable media-configuration lane: `DecoderConfiguration`
@@ -219,6 +222,7 @@ impl Messages {
             Self::InputFeedback => matches!(kind, 0x0017 | 0x0048),
             Self::Clipboard => matches!(kind, 0x0050..=0x0053),
             Self::Files => matches!(kind, 0x0070..=0x0074),
+            Self::FilesSync => matches!(kind, 0x0070..=0x0075),
             Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
             Self::MediaConfiguration => matches!(kind, 0x0030 | 0x0038),
             Self::AudioControl => matches!(kind, 0x0060 | 0x0063),

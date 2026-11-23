@@ -177,6 +177,9 @@ pub struct MediaChannel {
     credit: bool,
     pub(super) files_direction: FileDirection,
     files_duplex: bool,
+    /// Fixed by this connection's complete folder-sync selection. Only its
+    /// host-to-controller file pair can carry job state.
+    files_sync: bool,
     /// Sibling dispatch cannot defer a microphone offer absent from this
     /// original connection's positive selection.
     audio_up: bool,
@@ -451,7 +454,8 @@ impl QuicRecords {
         if (d.role == MediaRole::Clipboard || d.role.is_files())
             && (self.attachments.iter().any(|r| r.role == d.role)
                 || self.streams.iter().any(|stream| {
-                    stream.messages == messages(d.role, true)
+                    (stream.messages == messages(d.role, true)
+                        || (d.role.is_files() && stream.messages == Messages::FilesSync))
                         && !(d.role.is_files()
                             && self.attachments.iter().any(|r| {
                                 r.binding == stream.binding && r.role.is_files() && r.role != d.role
@@ -838,6 +842,7 @@ impl MediaChannel {
             allowance,
             credit: attachment::credit::selected(scope.selection),
             files_duplex: fr_wire::files::duplex_selected(scope.selection),
+            files_sync: fr_wire::sync_job_state::selected(scope.selection),
             audio_up: fr_wire::audio_up::uplink_selected(scope.selection),
             files_direction: if descriptor.role == MediaRole::FilesDownload
                 || (!fr_wire::files::duplex_selected(scope.selection)
@@ -853,6 +858,17 @@ impl MediaChannel {
     }
     pub const fn deadline_us(&self) -> u64 {
         self.until
+    }
+
+    pub(super) fn application_messages(&self, host_direction: bool) -> Messages {
+        if self.files_sync
+            && self.descriptor.role.is_files()
+            && self.files_direction == FileDirection::ToController
+        {
+            Messages::FilesSync
+        } else {
+            messages(self.descriptor.role, host_direction)
+        }
     }
     pub const fn descriptor(&self) -> Descriptor {
         self.descriptor
@@ -1326,12 +1342,12 @@ impl MediaChannel {
                 return Err(Error::TooLarge);
             }
             let outbound = StreamRoute {
-                messages: messages(self.descriptor.role, self.host),
+                messages: self.application_messages(self.host),
                 maximum,
                 ..self.pair.outbound
             };
             let inbound = StreamRoute {
-                messages: messages(self.descriptor.role, !self.host),
+                messages: self.application_messages(!self.host),
                 maximum,
                 ..self.pair.inbound
             };

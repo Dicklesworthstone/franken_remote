@@ -24,6 +24,99 @@ pub const VERSION: u16 = 1;
 pub const RECORD_BYTES: usize =
     HEADER_BYTES + 16 + 16 + 16 + 8 + 1 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 8 + 8;
 
+const DOWNLOAD_REQUIREMENTS: [(&str, u16); 5] = [
+    (crate::attachment::CAPABILITY, crate::attachment::VERSION),
+    (
+        crate::attachment::INPUT_CAPABILITY,
+        crate::attachment::INPUT_VERSION,
+    ),
+    (
+        crate::attachment::FILES_CAPABILITY,
+        crate::attachment::FILES_VERSION,
+    ),
+    (crate::files::CAPABILITY, crate::files::VERSION),
+    (
+        crate::files::DOWNLOAD_CAPABILITY,
+        crate::files::DOWNLOAD_VERSION,
+    ),
+];
+
+/// Add only the optional sync boundary to an already configured native download
+/// offer. Call only for explicit local sync configuration, after other offer
+/// extensions. Existing control/privacy gates are never removed to make space.
+/// The host offer's role is descriptive; the peer's selected role still must be
+/// controlling. Client entry points separately require a control request.
+pub fn prepare_offer(
+    mut offer: crate::negotiation::Offer,
+) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+    use crate::{
+        attachment,
+        negotiation::{self, Capability},
+    };
+    offer.validate()?;
+    if !DOWNLOAD_REQUIREMENTS.iter().all(|(name, version)| {
+        offer
+            .capabilities
+            .iter()
+            .any(|cap| cap.name == *name && cap.version == *version)
+    }) {
+        return Err(negotiation::Error::RequiredCapability);
+    }
+    if let Some(existing) = offer.capabilities.iter().find(|cap| cap.name == CAPABILITY) {
+        return if existing.version == VERSION && !existing.required {
+            Ok(offer)
+        } else {
+            Err(negotiation::Error::RequiredCapability)
+        };
+    }
+    for optional in [
+        crate::quality_decision::CAPABILITY,
+        attachment::BULK_RECORD_CAPABILITY,
+        attachment::credit::CAPABILITY,
+    ] {
+        if offer.capabilities.len() < negotiation::MAX_CAPABILITIES {
+            break;
+        }
+        offer
+            .capabilities
+            .retain(|cap| cap.name != optional || cap.required);
+    }
+    if offer.capabilities.len() >= negotiation::MAX_CAPABILITIES {
+        return Err(negotiation::Error::Invalid);
+    }
+    offer
+        .capabilities
+        .try_reserve_exact(1)
+        .map_err(|_| negotiation::Error::Allocation)?;
+    offer.capabilities.push(Capability {
+        name: CAPABILITY.into(),
+        version: VERSION,
+        required: false,
+    });
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer.validate()?;
+    Ok(offer)
+}
+
+/// Positive selection of job state on the original host-to-controller file
+/// lane. This permits either the legacy download pair or a duplex download
+/// pair; it never enables an upload or grants either endpoint a local path.
+pub fn selected(selection: &crate::negotiation::Selection) -> bool {
+    use crate::negotiation::Role;
+    selection.role == Role::RequestControl
+        && selection.validate().is_ok()
+        && selection.limits.max_control_message_bytes() as usize >= RECORD_BYTES
+        && DOWNLOAD_REQUIREMENTS
+            .iter()
+            .chain([(CAPABILITY, VERSION)].iter())
+            .all(|(name, version)| {
+                selection
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == *name && cap.version == *version)
+            })
+}
+
 /// Direction of a locally configured folder-synchronization job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
