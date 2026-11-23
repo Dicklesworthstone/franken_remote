@@ -150,7 +150,8 @@ pub struct Connection {
     /// False only with the explicit `--view-only`; never a silent default.
     pub control: bool,
     /// `--capture-system-shortcuts` (with `--control` only): request one
-    /// keyboard grab from the original X11 input owner, after control is granted.
+    /// native keyboard capture from the original input owner after control is
+    /// granted (X11 grab or an Accessibility-authorized macOS event tap).
     pub capture_system_shortcuts: bool,
     /// Default-on with `--control`, disabled by `--no-clipboard`: let the
     /// UTF-8 text clipboard follow the control lease in both directions when

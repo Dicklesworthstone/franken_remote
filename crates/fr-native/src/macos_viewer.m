@@ -50,6 +50,7 @@ enum {
     FR_MAC_FOCUS_LOST = 9,
     FR_MAC_FOCUS_GAINED = 10,
     FR_MAC_FOCUS_PAUSED = 11,
+    FR_MAC_MODIFIERS_RESET = 12,
 };
 
 // Must match `RawEvent` in macos.rs.
@@ -64,6 +65,7 @@ typedef struct {
     uint32_t flags;
     uint32_t reserved;
     double timestamp;
+    uint64_t shortcut_until;
 } FrMacEvent;
 
 #define FR_MAC_QUEUE 1024
@@ -477,7 +479,8 @@ enum {
     FR_MAC_FILE_SELECTION = 32,
     FR_MAC_AUDIO = 64,
     FR_MAC_STOP_CONTROL = 128,
-    FR_MAC_SHARE_ALL = 255,
+    FR_MAC_SYSTEM_SHORTCUTS = 256,
+    FR_MAC_SHARE_ALL = 511,
 };
 // Must match macos_switch::Action. One original action occupies the latch.
 enum {
@@ -488,6 +491,10 @@ enum {
 #define FR_MAC_TEXT_HEIGHT 76.0
 #define FR_MAC_AUDIO_HEIGHT 44.0
 #define FR_MAC_AUDIO_MIN_WIDTH 320.0
+#define FR_MAC_SHORTCUTS_HEIGHT 44.0
+#define FR_MAC_SHORTCUTS_MIN_WIDTH 480.0
+#define FR_MAC_SHORTCUTS_WATCHDOG 0.050
+#define FR_MAC_SHORTCUTS_EVENTS 64
 #define FR_MAC_TEXT_MIN_WIDTH 480.0
 #define FR_MAC_TEXT_BYTES 4096
 #define FR_MAC_TEXT_AGE 0.100
@@ -517,6 +524,9 @@ typedef int (*FrFileSelectionReady)(void *);
 typedef int (*FrFileSelectionSubmit)(void *, const uint8_t *, size_t, double);
 typedef void (*FrFileSelectionStop)(void *);
 typedef void (*FrFileSelectionRelease)(void *);
+typedef int (*FrShortcutsStopped)(void *);
+typedef void (*FrShortcutsStop)(void *, uint32_t);
+typedef void (*FrShortcutsRelease)(void *);
 
 static BOOL fr_sharing_status(uint32_t status) {
     return status <= 5;
@@ -560,14 +570,16 @@ static double fr_sharing_width(uint32_t flags) {
                    ((flags & FR_MAC_FILE_SELECTION) ? FR_MAC_FILE_SELECTION_WIDTH : 0);
     if (flags & FR_MAC_TEXT_COMPOSER) width = fmax(width, FR_MAC_TEXT_MIN_WIDTH);
     if (flags & FR_MAC_AUDIO) width = fmax(width, FR_MAC_AUDIO_MIN_WIDTH);
+    if (flags & FR_MAC_SYSTEM_SHORTCUTS) width = fmax(width, FR_MAC_SHORTCUTS_MIN_WIDTH);
     return width;
 }
 
 static double fr_sharing_height(uint32_t flags) {
-    double height = (flags & ~FR_MAC_AUDIO)
+    double height = (flags & ~(FR_MAC_AUDIO | FR_MAC_SYSTEM_SHORTCUTS))
         ? FR_MAC_SHARING_HEIGHT + ((flags & FR_MAC_TEXT_COMPOSER) ? FR_MAC_TEXT_HEIGHT : 0)
         : 0;
-    return height + ((flags & FR_MAC_AUDIO) ? FR_MAC_AUDIO_HEIGHT : 0);
+    return height + ((flags & FR_MAC_AUDIO) ? FR_MAC_AUDIO_HEIGHT : 0) +
+        ((flags & FR_MAC_SYSTEM_SHORTCUTS) ? FR_MAC_SHORTCUTS_HEIGHT : 0);
 }
 
 static NSUInteger fr_held_modifiers(NSUInteger flags) {
@@ -658,6 +670,21 @@ static BOOL fr_any_key(const BOOL *keys) {
     uint32_t audioState, audioVolume;
     BOOL audioMuted, audioInitialized, audioDirty, audioRedraw;
     double audioPreferencesSince;
+    NSTextField *shortcutsLabel;
+    FrSharingButton *shortcutsOff;
+    CFMachPortRef shortcutsTap;
+    CFRunLoopSourceRef shortcutsSource;
+    void *shortcutsContext;
+    FrShortcutsStopped shortcutsStopped;
+    FrShortcutsStop shortcutsStop;
+    FrShortcutsRelease shortcutsRelease;
+    BOOL shortcutsBound, shortcutsReady, shortcutsEnded;
+    double shortcutsSince, shortcutsUntil;
+    uint32_t shortcutsSerial;
+    uint64_t shortcutsClientUntil;
+    BOOL shortcutsLocalKeys[256];
+    CGEventFlags shortcutsLocalModifiers;
+    size_t shortcutsEvents;
     FrSharingButton *sendCopiedFiles;
     void *fileSelectionContext;
     FrFileSelectionReady fileSelectionReady;
@@ -728,6 +755,11 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)retireUploadPacing;
 - (void)changeAudio:(id)sender;
 - (void)updateAudioControls;
+- (void)disableShortcuts:(id)sender;
+- (void)stopShortcuts:(uint32_t)reason;
+- (void)pauseShortcuts;
+- (void)retireShortcuts;
+- (void)updateShortcutsControls;
 - (void)cancelDownload:(id)sender;
 - (void)changeDisplay:(id)sender;
 - (void)stopControl:(id)sender;
@@ -752,6 +784,7 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)retireText:(NSString *)message;
 - (void)cleanupRetiredText;
 - (void)stopNativeInput:(NSString *)message;
+- (void)pauseFocus;
 - (void)cancelResize;
 - (void)clearText:(NSString *)message;
 - (void)openText:(id)sender;
@@ -1142,6 +1175,173 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     return sample;
 }
 
+// A tap is global to the login session, but its filter is scoped to this exact
+// viewer. No event is retained or suppressed for another app/window. Native
+// geometry/focus notifications fence or pause this owner before any later pump.
+static BOOL fr_shortcuts_focused(FrWindowOwner *owner) {
+    NSWindow *window = owner->window;
+    return window && NSApp.isActive && window.isKeyWindow && window.isVisible &&
+        NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == getpid() &&
+        !window.isMiniaturized && window.isOnActiveSpace &&
+        (window.occlusionState & NSWindowOcclusionStateVisible) &&
+        !owner->nativeStopPending && !owner->fullScreenMoving &&
+        !owner->reopenAt && !owner->overflow &&
+        !atomic_load_explicit(&owner->lifetime->unavailable, memory_order_acquire);
+}
+
+static BOOL fr_shortcuts_keys_clear(FrWindowOwner *owner) {
+    if (fr_any_key(owner->physicalKeys) || fr_any_key(owner->localTextKeys) ||
+        fr_any_key(owner->shortcutsLocalKeys) || owner->shortcutsLocalModifiers ||
+        owner->physicalModifiers || owner->localTextModifiers ||
+        fr_held_modifiers(NSEvent.modifierFlags) || NSEvent.pressedMouseButtons)
+        return NO;
+    // Fixed work, only at a paused-to-ready boundary. Background-held keys
+    // may have no event in this app's queue. Caps Lock is a latched state,
+    // represented by fresh FlagsChanged events, never adopted as a held key.
+    for (unsigned key = 0; key < 256; key++) {
+        if (key != 0x39 && CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState,
+                                               (CGKeyCode)key)) return NO;
+    }
+    return YES;
+}
+
+// Track local pass-through at the tap, before AppKit queue transit. A passed
+// Down cannot lose its matching Up merely because the OS key-state snapshot
+// became clear before either event was dispatched to its local recipient.
+static CGEventRef fr_shortcuts_local(FrWindowOwner *owner, CGEventType type, CGEventRef event) {
+    int64_t key = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+    owner->shortcutsLocalModifiers = CGEventGetFlags(event) &
+        (kCGEventFlagMaskShift | kCGEventFlagMaskControl |
+         kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand);
+    if (key >= 0 && key < 256 && type != kCGEventFlagsChanged)
+        owner->shortcutsLocalKeys[key] = type == kCGEventKeyDown;
+    return event;
+}
+
+static void fr_shortcuts_failure(FrWindowOwner *owner, uint32_t reason) {
+    // Stop is an atomic write to the ORIGINAL Rust capture before any other
+    // native callback, property update, resource cleanup or event dispatch.
+    [owner stopShortcuts:reason];
+    [owner stopNativeInput:@"System shortcut capture ended. Reconnect to request control again."];
+}
+
+static CGEventRef fr_shortcuts_event(CGEventTapProxy proxy, CGEventType type,
+                                    CGEventRef event, void *context) {
+    (void)proxy;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)context;
+    if (!owner || ![NSThread isMainThread]) return event;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (owner->shortcutsContext && owner->shortcutsStopped && !owner->shortcutsEnded &&
+            !owner->shortcutsStopped(owner->shortcutsContext))
+            fr_shortcuts_failure(owner, 2);
+        return event; // never automatically re-enable a disabled tap
+    }
+    if (!event || !owner->shortcutsContext || !owner->shortcutsStopped ||
+        owner->shortcutsEnded) return event;
+    if (owner->shortcutsStopped(owner->shortcutsContext)) {
+        [owner stopShortcuts:0];
+        return event;
+    }
+    if (type != kCGEventKeyDown && type != kCGEventKeyUp && type != kCGEventFlagsChanged)
+        return event;
+    // Count every keyboard callback, including another app's keys, local
+    // composition and paused capture. They all spend this main-loop turn even
+    // when no NSEvent is delivered to our window. Exhaustion disables this
+    // original tap and passes the current event back to its local recipient.
+    owner->shortcutsEvents++;
+    if (owner->shortcutsEvents >= FR_MAC_SHORTCUTS_EVENTS) {
+        fr_shortcuts_failure(owner, 4);
+        return event;
+    }
+    int64_t target = CGEventGetIntegerValueField(event, kCGEventTargetUnixProcessID);
+    if ((target != 0 && target != getpid()) || !fr_shortcuts_focused(owner)) {
+        // This can run before AppKit's resign-key notification. Publish the
+        // existing pause/release event instead of capturing a background key.
+        if (owner->shortcutsReady) [owner pauseFocus];
+        return fr_shortcuts_local(owner, type, event);
+    }
+    // Frozen before native preparation. Reentrant native work cannot relabel
+    // this event with a renewed input context or a later send deadline.
+    uint32_t originalContext = owner->shortcutsSerial;
+    uint64_t originalUntil = owner->shortcutsClientUntil;
+    double originalNativeUntil = owner->shortcutsUntil;
+    @autoreleasepool {
+        // Apple's conversion keeps the ORIGINAL capture timestamp. It does
+        // not enqueue/repost a synthetic event or create remote input itself.
+        NSEvent *native = [NSEvent eventWithCGEvent:event];
+        if (!native) {
+            fr_shortcuts_failure(owner, 4);
+            return event;
+        }
+        NSUInteger escapeFlags = NSEventModifierFlagShift | NSEventModifierFlagControl |
+                                 NSEventModifierFlagOption;
+        if (type == kCGEventKeyDown && native.keyCode == 53 &&
+            (native.modifierFlags & escapeFlags) == escapeFlags) {
+            FrMacEvent escaped = {0};
+            escaped.kind = FR_MAC_KEY_DOWN;
+            escaped.code = native.keyCode;
+            escaped.modifiers = native.modifierFlags;
+            escaped.timestamp = native.timestamp;
+            escaped.flags = native.isARepeat ? 1 : 0;
+            [owner stopNativeInput:@"Local emergency release."];
+            [owner push:escaped];
+            return NULL;
+        }
+        // Local AppKit composition owns its original key events, including
+        // local shortcuts. No intercepted or copied version enters the remote
+        // queue while the editor, pending Send or held-key quarantine is live.
+        if (owner->textActive || owner->textPending || owner->textQuarantine ||
+            !owner->shortcutsReady) return fr_shortcuts_local(owner, type, event);
+        double now = NSProcessInfo.processInfo.systemUptime;
+        if (!isfinite(now) || now < owner->shortcutsSince ||
+            now >= originalNativeUntil || !originalContext || !originalUntil) {
+            fr_shortcuts_failure(owner, 3);
+            return event;
+        }
+        if (owner->count >= FR_MAC_QUEUE || native.keyCode >= 256 ||
+            !isfinite(native.timestamp) || native.timestamp <= 0 ||
+            native.timestamp > now) {
+            fr_shortcuts_failure(owner, 4);
+            return event;
+        }
+        // Keys already queued before this focused original readiness epoch
+        // cannot acquire its authority. Suppress them locally without replay.
+        if (native.timestamp < owner->shortcutsSince) return NULL;
+        FrMacEvent translated = {0};
+        translated.code = native.keyCode;
+        translated.modifiers = native.modifierFlags;
+        translated.timestamp = native.timestamp;
+        translated.reserved = originalContext;
+        translated.shortcut_until = originalUntil;
+        owner->physicalModifiers = fr_held_modifiers(native.modifierFlags);
+        if (type == kCGEventFlagsChanged) {
+            translated.kind = FR_MAC_MODIFIERS;
+        } else {
+            BOOL down = type == kCGEventKeyDown;
+            owner->physicalKeys[native.keyCode] = down;
+            translated.kind = down ? FR_MAC_KEY_DOWN : FR_MAC_KEY_UP;
+            translated.flags = down && native.isARepeat ? 1 : 0;
+        }
+        // Preparation above consumes the same deadline, and a simultaneous
+        // source cancellation wins before the bounded native queue accepts it.
+        now = NSProcessInfo.processInfo.systemUptime;
+        if (owner->shortcutsStopped(owner->shortcutsContext)) {
+            [owner stopShortcuts:0];
+            return event;
+        }
+        if (!isfinite(now) || now < native.timestamp || now >= originalNativeUntil ||
+            !owner->shortcutsReady || originalContext != owner->shortcutsSerial ||
+            originalUntil != owner->shortcutsClientUntil) {
+            fr_shortcuts_failure(owner, 3);
+            return event;
+        }
+        [owner push:translated];
+        // An active filter deletes the original event here. AppKit therefore
+        // cannot dispatch a second copy of the same remotely captured key.
+        return NULL;
+    }
+}
+
 @implementation FrWindowOwner
 
 - (void)dealloc {
@@ -1325,6 +1525,15 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         audioUp.enabled = NO;
         audioMute.enabled = NO;
     }
+    if (sharingFlags & FR_MAC_SYSTEM_SHORTCUTS) {
+        shortcutsLabel = fr_sharing_label(sharing, @"System shortcuts: Waiting for control");
+        shortcutsOff = fr_sharing_button(sharing, @"Turn Off", self,
+                                         @selector(disableShortcuts:));
+        shortcutsOff.accessibilityLabel = @"Stop sending system shortcuts and end remote control";
+        shortcutsOff.toolTip = @"Stops this original control session. Reconnect explicitly to enable system shortcut capture again. Control+Option+Shift+Escape always releases locally.";
+        shortcutsLabel.toolTip = @"When this viewer is focused, macOS system keys such as Command+Tab go to the remote host. Local text editing and other apps keep their own keyboard input.";
+        shortcutsOff.enabled = NO;
+    }
 }
 - (void)layoutSharing {
     if (!sharing || !sharingFlags) return;
@@ -1373,13 +1582,90 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     }
     if (audioLabel) {
         double width = NSWidth(sharing.bounds);
-        double y = fr_sharing_height(sharingFlags & ~FR_MAC_AUDIO);
+        double y = fr_sharing_height(sharingFlags & ~(FR_MAC_AUDIO | FR_MAC_SYSTEM_SHORTCUTS));
         audioLabel.frame = NSMakeRect(8, y + 14, fmax(1, width - 210), 17);
         audioDown.frame = NSMakeRect(width - 194, y + 8, 28, 28);
         audioVolumeLabel.frame = NSMakeRect(width - 162, y + 14, 44, 17);
         audioUp.frame = NSMakeRect(width - 114, y + 8, 28, 28);
         audioMute.frame = NSMakeRect(width - 78, y + 8, 70, 28);
     }
+    if (shortcutsLabel) {
+        double width = NSWidth(sharing.bounds);
+        double y = fr_sharing_height(sharingFlags & ~FR_MAC_SYSTEM_SHORTCUTS);
+        shortcutsLabel.frame = NSMakeRect(8, y + 14, fmax(1, width - 104), 17);
+        shortcutsOff.frame = NSMakeRect(width - 92, y + 8, 84, 28);
+    }
+}
+
+- (void)stopShortcuts:(uint32_t)reason {
+    // No AppKit work precedes this original atomic cancellation callback.
+    if (shortcutsContext && shortcutsStop) shortcutsStop(shortcutsContext, reason);
+    shortcutsReady = NO;
+    shortcutsUntil = 0;
+    shortcutsSerial = 0;
+    shortcutsClientUntil = 0;
+    shortcutsEnded = YES;
+    if (shortcutsTap) CGEventTapEnable(shortcutsTap, false);
+}
+
+- (void)pauseShortcuts {
+    BOOL active = shortcutsReady;
+    shortcutsReady = NO;
+    shortcutsUntil = 0;
+    shortcutsSerial = 0;
+    shortcutsClientUntil = 0;
+    if (active) {
+        // Preserve event order and all old context/deadline metadata. A
+        // queued old modifier press may later be refused by Rust's source;
+        // its translation state must not suppress the next epoch's new Down.
+        // This marker resets only local HID translation, never host input,
+        // control authority, focus, or the local text composition owner.
+        FrMacEvent reset = {0};
+        reset.kind = FR_MAC_MODIFIERS_RESET;
+        [self push:reset];
+    }
+}
+
+- (void)retireShortcuts {
+    [self stopShortcuts:0];
+    CFMachPortRef tap = shortcutsTap;
+    CFRunLoopSourceRef source = shortcutsSource;
+    shortcutsTap = NULL;
+    shortcutsSource = NULL;
+    if (tap) CFMachPortInvalidate(tap);
+    if (source) {
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+        CFRunLoopSourceInvalidate(source);
+        CFRelease(source);
+    }
+    if (tap) CFRelease(tap);
+    // Main-run-loop-only callback: invalidation and source removal above
+    // precede clearing the slots and the sole positive retirement witness.
+    void *context = shortcutsContext;
+    FrShortcutsRelease release = shortcutsRelease;
+    shortcutsContext = NULL;
+    shortcutsStopped = NULL;
+    shortcutsStop = NULL;
+    shortcutsRelease = NULL;
+    if (context && release) release(context);
+}
+
+- (void)updateShortcutsControls {
+    if (!shortcutsLabel) return;
+    shortcutsLabel.stringValue = shortcutsEnded
+        ? @"System shortcuts: Off · reconnect to enable"
+        : (!shortcutsBound ? @"System shortcuts: Waiting for control"
+           : (shortcutsReady ? @"System shortcuts: Remote · ⌃⌥⇧Esc releases"
+                             : @"System shortcuts: Local (remote input paused)"));
+    shortcutsOff.enabled = shortcutsContext && !shortcutsEnded && !nativeStopPending;
+}
+
+- (void)disableShortcuts:(id)sender {
+    if (sender != shortcutsOff || !shortcutsOff.enabled) return;
+    // Revocation is negative authority; it cannot submit a remote key or
+    // reacquire a source, even when invoked without an input gesture.
+    fr_shortcuts_failure(self, 1);
+    [self updateShortcutsControls];
 }
 
 - (void)updateAudioControls {
@@ -1588,6 +1874,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     }
 }
 - (void)stopNativeInput:(NSString *)message {
+    [self stopShortcuts:0];
     [self retireUploadPacing];
     audioDirty = NO;
     audioRedraw = NO;
@@ -1613,6 +1900,10 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         textActive || textPending || !textContext || !textUntil || !textEligible ||
         ![self textWindowReady] || ![self textPhysicalClear] || ![self textGesture:event])
         return;
+    // Native text mode starts a new keyboard epoch immediately, even if its
+    // open/close both occur before Rust's next pump. Queued editor keys cannot
+    // inherit the former tap activation when composition later ends.
+    [self pauseShortcuts];
     uint64_t context = textContext;
     double captured = event.timestamp;
     [self cleanupRetiredText];
@@ -1981,6 +2272,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 // payload still needs the original grant, view and bilateral readiness.
 - (void)pauseFocus {
     if (nativeStopPending) return;
+    [self pauseShortcuts];
     textContext = 0;
     textUntil = 0;
     textEligible = NO;
@@ -2151,6 +2443,16 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
             // owns it. A consumed key-up never reaches the remote HID stream.
             return dispatch;
         }
+        if (shortcutsBound) {
+            // Captured tap events were deleted before AppKit. Anything which
+            // reaches this path belongs to local pause/quarantine or predates
+            // the original tap; it cannot gain remote authority on dispatch.
+            // Track releases so the next tap activation has a clear baseline.
+            physicalModifiers = fr_held_modifiers(event.modifierFlags);
+            if (event.type != NSEventTypeFlagsChanged)
+                physicalKeys[event.keyCode] = event.type == NSEventTypeKeyDown;
+            return YES;
+        }
         physicalModifiers = fr_held_modifiers(event.modifierFlags);
         if (event.type == NSEventTypeFlagsChanged) {
             e.kind = FR_MAC_MODIFIERS;
@@ -2261,6 +2563,137 @@ int fr_mac_window_box(uint32_t reserved, uint32_t *width, uint32_t *height, uint
 // Return the current value separately so a queued key retains its original age.
 double fr_mac_event_time(void) {
     return NSProcessInfo.processInfo.systemUptime;
+}
+
+int fr_mac_system_shortcuts_permission(void) {
+    // Active (modifying) taps require Accessibility, not merely the passive
+    // Input Monitoring permission. Preflight never opens a prompt/settings.
+    return [NSThread isMainThread] && CGPreflightPostEventAccess() ? 1 : 0;
+}
+
+int fr_mac_window_shortcuts_bind(void *handle, void *context,
+        FrShortcutsStopped stopped, FrShortcutsStop stop, FrShortcutsRelease release) {
+    if (!handle || !context || !stopped || !stop || !release) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!(owner->sharingFlags & FR_MAC_SYSTEM_SHORTCUTS) || !owner->shortcutsLabel ||
+        !owner->shortcutsOff || owner->shortcutsBound || owner->shortcutsEnded)
+        return FR_MAC_INVALID;
+    owner->shortcutsBound = YES; // the original attachment cannot retry setup
+    if (stopped(context) || !fr_shortcuts_focused(owner) || !CGPreflightPostEventAccess()) {
+        owner->shortcutsEnded = YES;
+        [owner updateShortcutsControls];
+        return FR_MAC_UNAVAILABLE;
+    }
+    CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp) |
+                       CGEventMaskBit(kCGEventFlagsChanged);
+    // Session-level capture works without privileged HID-level access. It is
+    // modifying because listen-only taps cannot keep Cmd+Tab on the remote PC.
+    CFMachPortRef tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
+        kCGEventTapOptionDefault, mask, fr_shortcuts_event, (__bridge void *)owner);
+    CFRunLoopSourceRef source = tap ? CFMachPortCreateRunLoopSource(NULL, tap, 0) : NULL;
+    if (!tap || !source || !CFMachPortIsValid(tap) || !CFRunLoopSourceIsValid(source) ||
+        !CGEventTapIsEnabled(tap) || stopped(context) ||
+        !fr_shortcuts_focused(owner) || !CGPreflightPostEventAccess()) {
+        if (tap) {
+            CGEventTapEnable(tap, false);
+            CFMachPortInvalidate(tap);
+        }
+        if (source) {
+            CFRunLoopSourceInvalidate(source);
+            CFRelease(source);
+        }
+        if (tap) CFRelease(tap);
+        owner->shortcutsEnded = YES;
+        [owner updateShortcutsControls];
+        return FR_MAC_UNAVAILABLE; // no Rust pointer was adopted on failure
+    }
+    // Publish all original custody before the run loop can invoke a callback.
+    owner->shortcutsTap = tap;
+    owner->shortcutsSource = source;
+    owner->shortcutsContext = context;
+    owner->shortcutsStopped = stopped;
+    owner->shortcutsStop = stop;
+    owner->shortcutsRelease = release;
+    owner->shortcutsReady = NO;
+    owner->shortcutsUntil = 0;
+    owner->shortcutsSince = 0;
+    CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+    [owner updateShortcutsControls];
+    return FR_MAC_OK; // after adoption only explicit retirement releases it
+}
+
+int fr_mac_window_shortcuts_update(void *handle, uint32_t context,
+                                   uint64_t client_until, double until) {
+    if (!handle || ((context == 0) != (client_until == 0))) return FR_MAC_INVALID;
+    BOOL ready = context != 0;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->shortcutsContext) return ready ? FR_MAC_UNAVAILABLE : FR_MAC_OK;
+    if (owner->shortcutsStopped(owner->shortcutsContext) || owner->shortcutsEnded) {
+        [owner stopShortcuts:0];
+        [owner updateShortcutsControls];
+        return ready ? FR_MAC_UNAVAILABLE : FR_MAC_OK;
+    }
+    double now = NSProcessInfo.processInfo.systemUptime;
+    if (!isfinite(now) || (owner->shortcutsReady &&
+        (now < owner->shortcutsSince || now >= owner->shortcutsUntil))) {
+        fr_shortcuts_failure(owner, 3);
+        return FR_MAC_UNAVAILABLE;
+    }
+    if (!ready || context != owner->shortcutsSerial) {
+        // A source-context change is an admission boundary, even when the
+        // viewer and clock values happen to match. Old queued events retain
+        // their old serial/deadline and cannot inherit this new snapshot.
+        [owner pauseShortcuts];
+    }
+    if (!CFMachPortIsValid(owner->shortcutsTap) ||
+        !CFRunLoopSourceIsValid(owner->shortcutsSource) ||
+        !CGEventTapIsEnabled(owner->shortcutsTap) || !CGPreflightPostEventAccess()) {
+        fr_shortcuts_failure(owner, 2);
+        return FR_MAC_UNAVAILABLE;
+    }
+    BOOL eligible = ready && fr_shortcuts_focused(owner) &&
+        !owner->textActive && !owner->textPending && !owner->textQuarantine;
+    if (eligible && (!owner->sharing || owner->sharing.isHidden ||
+        !NSContainsRect(owner->sharing.visibleRect, owner->shortcutsOff.frame))) {
+        fr_shortcuts_failure(owner, 4);
+        return FR_MAC_UNAVAILABLE;
+    }
+    if (eligible && !owner->shortcutsReady && !fr_shortcuts_keys_clear(owner))
+        eligible = NO;
+    // Native preflight and the bounded clear-state scan spend the ORIGINAL
+    // bound. No subsequent native sample may replace its caller's deadline.
+    now = NSProcessInfo.processInfo.systemUptime;
+    if (owner->shortcutsStopped(owner->shortcutsContext)) {
+        [owner stopShortcuts:0];
+        return ready ? FR_MAC_UNAVAILABLE : FR_MAC_OK;
+    }
+    if (eligible && (!isfinite(until) || !isfinite(now) || until <= now ||
+        (owner->shortcutsReady && now >= owner->shortcutsUntil))) {
+        fr_shortcuts_failure(owner, 3);
+        return FR_MAC_UNAVAILABLE;
+    }
+    if (eligible) {
+        if (!owner->shortcutsReady) owner->shortcutsSince = now;
+        owner->shortcutsUntil = fmin(until, now + FR_MAC_SHORTCUTS_WATCHDOG);
+        owner->shortcutsSerial = context;
+        owner->shortcutsClientUntil = client_until;
+        owner->shortcutsReady = YES;
+    } else {
+        [owner pauseShortcuts];
+    }
+    [owner updateShortcutsControls];
+    return FR_MAC_OK;
+}
+
+int fr_mac_window_shortcuts_stop(void *handle) {
+    if (!handle) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    [owner retireShortcuts];
+    [owner updateShortcutsControls];
+    return FR_MAC_OK;
 }
 
 int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
@@ -2816,6 +3249,7 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     if (!handle || ![NSThread isMainThread]) return 0;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
     size_t dequeued = 0;
+    owner->shortcutsEvents = 0;
     [owner checkSessionUnavailable];
     @autoreleasepool {
         NSDate *until = timeout > 0 ? [NSDate dateWithTimeIntervalSinceNow:timeout]
@@ -2850,6 +3284,8 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     // may remain uninspected. Fail closed before granting or exporting input.
     // An exactly-full batch with an empty AppKit queue is conservatively
     // treated as incomplete too; checking that would require another poll.
+    if (owner->shortcutsEvents >= FR_MAC_SHORTCUTS_EVENTS)
+        fr_shortcuts_failure(owner, 4);
     if (owner->count == FR_MAC_QUEUE || dequeued == FR_MAC_PUMP_EVENTS) {
         owner->overflow = YES;
         [owner stopNativeInput:@"Text cancelled: native input overflow."];
@@ -3245,6 +3681,9 @@ void fr_mac_window_free(void *handle) {
     if (!handle) return;
     @autoreleasepool {
         FrWindowOwner *owner = (__bridge_transfer FrWindowOwner *)handle;
+        // Invalidate the callback before any window/resource owner disappears.
+        // This final safety net retains the exact original cleanup witness.
+        [owner retireShortcuts];
         // Clear the original geometry callbacks before our own native teardown
         // generates focus/layout changes. No late callback can reach a new window.
         void *resizeContext = owner->resizeContext;
@@ -3315,6 +3754,8 @@ void fr_mac_window_free(void *handle) {
         owner->audioDown = nil;
         owner->audioUp = nil;
         owner->audioMute = nil;
+        owner->shortcutsLabel = nil;
+        owner->shortcutsOff = nil;
         owner->sendCopiedFiles = nil;
         // A failed independent panel close retains only its original privacy
         // custody. Do not retain decoded screen pixels on that account.

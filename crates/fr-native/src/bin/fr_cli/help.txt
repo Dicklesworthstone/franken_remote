@@ -126,11 +126,10 @@ checked host geometry change, --attempts can reconnect VIEWING ONLY after proven
 cleanup; control/clipboard/files never repeat. In a --control viewing window,
 press and release F8 for new control. Ctrl+Alt+Shift+F7 reopens the display picker;
 resize reopens viewing at its new size. Both end input/clipboard/file choices.
-Linux X11 --capture-system-shortcuts requires --control and grabs the keyboard
-after the grant for Alt+Tab etc.; the title identifies this mode.
-Ctrl+Alt+Shift+Escape releases locally; focus/input fences release the grab.
-Otherwise shortcuts stay local. Unavailable capture ends control with
-system_shortcuts_unavailable. Reserved X-server shortcuts remain limited.
+--capture-system-shortcuts requires --control: X11 keyboard grab; Mac requires
+Accessibility. Mode is visible. Ctrl+Alt+Shift+Escape releases locally. Mac adds
+a 44-point Off strip, keeps Send Text local, and never re-enables capture on
+reconnect. Focus/input fences release capture; some OS shortcuts remain local.
 
 Clipboard:
 --control defaults to UTF-8 sharing with linux-clipboard on Linux, or with

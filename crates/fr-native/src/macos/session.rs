@@ -23,9 +23,9 @@
 //! Main thread only: `AppKit` owns the window and its event loop, which this
 //! session services between network turns of the same runtime.
 use super::{
-    AUDIO_FLAG, HevcDecoder, PicturePoint, STOP_CONTROL_FLAG, Surface, TEXT_COMPOSER_FLAG,
-    TextCommit, TextRetireMode, TextRetirement, TextTaken, Window, WindowEvent, clipboard,
-    event_time, files, picker, sharing,
+    AUDIO_FLAG, HevcDecoder, PicturePoint, STOP_CONTROL_FLAG, SYSTEM_SHORTCUTS_FLAG, Surface,
+    TEXT_COMPOSER_FLAG, TextCommit, TextRetireMode, TextRetirement, TextTaken, Window, WindowEvent,
+    clipboard, event_time, files, picker, sharing,
 };
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
@@ -64,8 +64,8 @@ use frd::{
         ObserverError, ObserverPolicy, Presentation, StreamingViewerControl, StreamingViewerError,
         Viewer,
         viewer_events::{
-            Error as CaptureError, Event, Layout, LocalPoint, Located, MAX_EVENT_AGE_US,
-            NativeCapture, PositionedAction, Source, TextContext,
+            Error as CaptureError, Event, InputContext, Layout, LocalPoint, Located,
+            MAX_EVENT_AGE_US, NativeCapture, PositionedAction, Source, TextContext,
         },
     },
     worker::{Deadline, Launch, LocalPresenter},
@@ -125,6 +125,9 @@ pub enum LocalStop {
     PictureChanged,
     Overflow,
     NativeFailure,
+    SystemShortcutsUnavailable,
+    SystemShortcutsStopped,
+    SystemShortcutsOff,
 }
 
 /// Content-free tallies for the CLI's completion line.
@@ -198,6 +201,7 @@ type Choose = Box<dyn FnMut(&Catalog) -> Result<Option<u128>, ()>>;
 struct Capture {
     stop: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
+    shortcuts: Option<super::ShortcutRetirement>,
 }
 impl NativeCapture for Capture {
     fn stop(&self) {
@@ -205,6 +209,10 @@ impl NativeCapture for Capture {
     }
     fn try_reap(&mut self) -> bool {
         self.released.load(Ordering::SeqCst)
+            && self
+                .shortcuts
+                .as_ref()
+                .is_none_or(super::ShortcutRetirement::is_complete)
     }
 }
 impl Drop for Capture {
@@ -228,6 +236,12 @@ struct Input {
     text_context: Option<TextContext>,
     text_serial: Option<u64>,
     text_until: u64,
+    /// Original ticket/view deadline, independently of optional text support.
+    capture_until: u64,
+    shortcuts: Option<super::ShortcutRetirement>,
+    shortcut_context: Option<InputContext>,
+    shortcut_serial: u32,
+    shortcut_local_failure: Cell<bool>,
     /// The window lost focus or was covered: everything held was released and
     /// nothing is delivered until it is key and visible again.
     paused: bool,
@@ -237,6 +251,7 @@ struct Input {
 }
 impl Drop for Input {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
         self.source.stop();
         self.released.store(true, Ordering::SeqCst);
     }
@@ -248,7 +263,7 @@ impl Input {
 
     /// Sample the real original input owner's send bound. This does not mint a
     /// ticket; the source context and final admission still check continuity.
-    fn refresh_text(&mut self, viewer: &mut ControlledViewer) -> Result<(), ()> {
+    fn refresh_capture(&mut self, viewer: &mut ControlledViewer) -> Result<(), ()> {
         if viewer.input_result_binding() != self.binding {
             return Err(());
         }
@@ -256,6 +271,22 @@ impl Input {
             .input_capture_context()
             .ok()
             .map(|(_, until)| until.0);
+        self.capture_until = until.unwrap_or(0);
+        if self.shortcuts.is_some() {
+            let context = self.source.input_context().map_err(|_| ())?;
+            if context != self.shortcut_context {
+                // A release may have remained local while native capture was
+                // paused. Do not carry held transitions into a resumed view.
+                if self.keys.iter().any(|held| *held) || self.buttons.iter().any(|held| *held) {
+                    self.shortcut_local_failure.set(true);
+                    self.source.stop();
+                    self.stop.store(true, Ordering::SeqCst);
+                    return Err(());
+                }
+                self.shortcut_serial = self.shortcut_serial.checked_add(1).ok_or(())?;
+                self.shortcut_context = context;
+            }
+        }
         // The check above publishes any actual suspension before this token is
         // read. A compositor gap keeps the same opaque context but disables Send.
         self.text_status();
@@ -265,6 +296,49 @@ impl Input {
             0
         };
         Ok(())
+    }
+
+    /// Sample native time before the source clock. Adding only the remaining
+    /// original ticket lifetime cannot extend it while crossing clock domains.
+    /// The native owner separately caps each renewal to its pump watchdog.
+    fn shortcut_snapshot(&self) -> Option<(u32, u64, Duration)> {
+        if self.shortcuts.is_none() || self.paused || self.stopped() {
+            return None;
+        }
+        let native = event_time();
+        let client = self.source.clock().ok().map(|now| now.0);
+        let ready = self
+            .shortcut_context
+            .as_ref()
+            .is_some_and(|context| self.source.input_context_ready(context).unwrap_or(false));
+        let until = ready
+            .then(|| crate::macos_shortcuts::native_deadline(native, client, self.capture_until))
+            .flatten();
+        let Some(until) = until else {
+            // Even a same-context compositor gap may keep key-up local while
+            // capture is paused. The original lease cleanup must release held
+            // state before another view can resume, never guess at that key-up.
+            if self.keys.iter().any(|held| *held) || self.buttons.iter().any(|held| *held) {
+                self.shortcut_local_failure.set(true);
+                self.stop.store(true, Ordering::SeqCst);
+                self.source.stop();
+            }
+            return None;
+        };
+        Some((self.shortcut_serial, self.capture_until, until))
+    }
+
+    fn shortcut_stop(&self) -> Option<LocalStop> {
+        if self.shortcut_local_failure.get() {
+            return Some(LocalStop::SystemShortcutsStopped);
+        }
+        self.shortcuts.as_ref()?.reason().map(|reason| {
+            if reason == crate::macos_shortcuts::Stop::DisabledByUser {
+                LocalStop::SystemShortcutsOff
+            } else {
+                LocalStop::SystemShortcutsStopped
+            }
+        })
     }
 
     /// Keep native composition attached to its original source and uninterrupted
@@ -385,6 +459,7 @@ impl Input {
             _ => return Ok(()),
         };
         let mut sampled = ClientInstant(self.capture_clock.map(captured.ok_or(())?).ok_or(())?);
+        let original_shortcut = self.shortcut_admission(event, sampled, now)?;
         if !matches!(event, WindowEvent::Scroll { .. }) {
             // A fractional scroll never crosses a key, move or button action.
             self.scroll.reset();
@@ -464,7 +539,43 @@ impl Input {
             }
             _ => return Ok(()),
         };
-        self.source.push(event, sampled).map_err(|_| ())
+        if let Some((context, until)) = original_shortcut {
+            self.source
+                .push_in_context_until(&context, event, sampled, until)
+                .map_err(|_| ())
+        } else {
+            self.source.push(event, sampled).map_err(|_| ())
+        }
+    }
+
+    /// Recover only the snapshot published before this native key callback.
+    /// Missing or stale metadata never falls back to ordinary key admission.
+    fn shortcut_admission(
+        &self,
+        event: &WindowEvent,
+        sampled: ClientInstant,
+        now: ClientInstant,
+    ) -> Result<Option<(InputContext, ClientInstant)>, ()> {
+        let WindowEvent::Key { shortcut, .. } = event else {
+            return Ok(None);
+        };
+        match (self.shortcuts.is_some(), shortcut) {
+            (true, Some(original)) => {
+                let until = crate::macos_shortcuts::captured_deadline(
+                    original.context,
+                    self.shortcut_serial,
+                    original.until,
+                    sampled.0,
+                    now.0,
+                    MAX_EVENT_AGE_US,
+                )
+                .ok_or(())?;
+                let context = self.shortcut_context.clone().ok_or(())?;
+                Ok(Some((context, ClientInstant(until))))
+            }
+            (false, None) => Ok(None),
+            _ => Err(()),
+        }
     }
 
     fn scroll_event(
@@ -793,6 +904,9 @@ pub trait Automation {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Session {
     control: Option<ControlPolicy>,
+    /// Explicit invocation consent is spent by the first capture attachment.
+    /// Recovery and later F8 requests never reinstall a retired event tap.
+    system_shortcuts: Rc<Cell<bool>>,
     policy: ObserverPolicy,
     choose: Choose,
     display_picker: bool,
@@ -856,6 +970,11 @@ impl Drop for Session {
         if let Ok(mut input) = self.input.try_borrow_mut() {
             input.take();
         }
+        if let Ok(window) = self.window.try_borrow()
+            && let Some(window) = window.as_ref()
+        {
+            let _ = window.stop_system_shortcuts();
+        }
     }
 }
 impl Session {
@@ -872,6 +991,7 @@ impl Session {
     ) -> Self {
         Self {
             control,
+            system_shortcuts: Rc::default(),
             policy,
             choose,
             display_picker: false,
@@ -915,6 +1035,15 @@ impl Session {
             .request(enabled && self.control.is_some());
         self
     }
+
+    /// Enable system-shortcut capture for one original native control owner.
+    /// Accessibility permission and a real modifying event tap are still
+    /// required at attachment; this preference grants no remote authority.
+    #[must_use]
+    pub fn with_system_shortcuts(self, enabled: bool) -> Self {
+        self.system_shortcuts.set(enabled && self.control.is_some());
+        self
+    }
     /// Observe exactly one original native receipt, optionally export its
     /// viewport, then request `InspectionComplete` and perform ordinary cleanup.
     /// This finite mode cannot acquire control, auxiliary lanes, a publisher,
@@ -944,6 +1073,7 @@ impl Session {
     }
     fn one_shot_profile(&self) -> bool {
         self.control.is_none()
+            && !self.system_shortcuts.get()
             && self.observations.is_none()
             && self.automation.is_none()
             && !self.display_picker
@@ -997,6 +1127,7 @@ impl Session {
     }
     fn automation_profile(&self) -> bool {
         self.control.is_some()
+            && !self.system_shortcuts.get()
             && self.once.is_none()
             && self.observations.is_none()
             && !self.display_picker
@@ -1409,6 +1540,15 @@ fn retire_text(window: &RefCell<Option<Window>>, mode: TextRetireMode) -> Result
     Ok(())
 }
 
+/// Input is fenced before removing the original native callback. Retaining
+/// this window until removal completes keeps capture cleanup independently
+/// reportable; dropping a Source alone cannot acknowledge a live event tap.
+fn retire_shortcuts(window: &RefCell<Option<Window>>) -> Result<(), ()> {
+    window.borrow().as_ref().map_or(Ok(()), |opened| {
+        opened.stop_system_shortcuts().map_err(|_| ())
+    })
+}
+
 /// Select terminal batch evidence before any follow-up native call.
 fn terminal_event(events: &[WindowEvent]) -> Option<LocalStop> {
     if events.contains(&WindowEvent::CloseRequested) {
@@ -1488,6 +1628,7 @@ fn service(
         reopen_intent.borrow_mut().cancel();
         *input = None;
         stop.stop();
+        let _ = retire_shortcuts(window);
         let _ = retire_text(window, TextRetireMode::Fenced);
         files.borrow_mut().cancel();
         clipboard.borrow_mut().stop(window.borrow().as_ref());
@@ -1500,6 +1641,7 @@ fn service(
         }
         input.borrow_mut().take();
         stop.stop();
+        let _ = retire_shortcuts(window);
         intent.borrow_mut().retire_initial();
         reopen_intent.borrow_mut().cancel();
         report
@@ -1524,6 +1666,12 @@ fn service(
         let retired = {
             let mut slot = input.borrow_mut();
             if slot.as_ref().is_some_and(Input::stopped) {
+                if let Some(reason) = slot.as_ref().and_then(Input::shortcut_stop) {
+                    report.borrow_mut().local_stop.get_or_insert(reason);
+                    if reason == LocalStop::SystemShortcutsOff {
+                        closed.set(true);
+                    }
+                }
                 *slot = None;
                 true
             } else {
@@ -1548,6 +1696,7 @@ fn service(
         } else {
             TextRetireMode::Fenced
         };
+        retire_shortcuts(window)?;
         retire_text(window, mode)?;
         Ok(!pending)
     };
@@ -1581,13 +1730,29 @@ fn service(
                 .map_or((None, 0, false), Input::text_status);
             opened.text_update(context, until, ready).is_ok()
         };
+        let shortcut_snapshot = if reopen_intent.borrow().pending() {
+            None
+        } else {
+            input.borrow().as_ref().and_then(Input::shortcut_snapshot)
+        };
+        // No Source borrow or queue lock crosses the native boundary. An
+        // unbound viewer stays unbound; this operation cannot install a tap.
+        let (context, client_until, native_until) = shortcut_snapshot
+            .map_or((0, 0, 0.0), |(context, until, native)| {
+                (context, until, native.as_secs_f64())
+            });
+        let shortcuts_updated = opened
+            .update_system_shortcuts(context, client_until, native_until)
+            .is_ok();
         files.borrow().file_drop_ready(
             input
                 .borrow()
                 .as_ref()
                 .is_some_and(|input| !input.stopped() && !input.paused),
         );
-        if !text_updated
+        if !shortcuts_updated {
+            Some(LocalStop::SystemShortcutsStopped)
+        } else if !text_updated
             || opened.file_selection_update().is_err()
             || opened
                 .reopen_enabled(
@@ -1820,6 +1985,7 @@ fn service(
                 repeat,
                 captured,
                 modifiers,
+                ..
             } => intent.key(
                 Key {
                     usage,
@@ -1999,10 +2165,11 @@ fn attach(
     slot: &Rc<RefCell<Option<Input>>>,
     resize: &ResizeIntent,
     native_events: bool,
-) -> Result<bool, ()> {
+    system_shortcuts: &Cell<bool>,
+) -> Result<bool, LocalStop> {
     let window = window.borrow();
-    let window = window.as_ref().ok_or(())?;
-    let state = window.state().map_err(|_| ())?;
+    let window = window.as_ref().ok_or(LocalStop::NativeFailure)?;
+    let state = window.state().map_err(|_| LocalStop::NativeFailure)?;
     let (width, height) = state.picture;
     if !state.input_ready() || !resize.watching() {
         return Ok(false); // wait for a current picture and its independent native fence
@@ -2015,10 +2182,14 @@ fn attach(
         display.pixel_width,
         display.pixel_height,
     )
-    .ok_or(())?;
-    let area = SurfaceRect::new(0, 0, width, height).map_err(|_| ())?;
-    let layout = viewer.configure_viewport(source, area).map_err(|_| ())?;
-    viewer.confirm_viewport(&layout).map_err(|_| ())?;
+    .ok_or(LocalStop::NativeFailure)?;
+    let area = SurfaceRect::new(0, 0, width, height).map_err(|_| LocalStop::NativeFailure)?;
+    let layout = viewer
+        .configure_viewport(source, area)
+        .map_err(|_| LocalStop::NativeFailure)?;
+    viewer
+        .confirm_viewport(&layout)
+        .map_err(|_| LocalStop::NativeFailure)?;
     if !native_events {
         // Robot input uses this exact displayed mapping directly; attaching a
         // second native Source would interleave unrelated held-state owners.
@@ -2026,18 +2197,29 @@ fn attach(
     }
     // The layout is valid for this size only. The independently armed native
     // watcher fences it synchronously on the next real geometry change.
-    window.claim_input().map_err(|_| ())?;
+    window.claim_input().map_err(|_| LocalStop::NativeFailure)?;
     let binding = viewer.input_result_binding();
     let stop = Arc::new(AtomicBool::new(false));
     let released = Arc::new(AtomicBool::new(false));
-    let capture = Capture {
-        stop: stop.clone(),
-        released: released.clone(),
-    };
+    let mut failed = LocalStop::NativeFailure;
     viewer
         .capture_input_owned(&layout.clone(), |source| {
             let sampled = source.clock().map_err(|_| ())?;
             let capture_clock = CaptureClock::new(event_time().ok_or(())?, sampled.0);
+            // Spend this preference once, even if native installation fails.
+            // A replacement viewer never silently reactivates global capture.
+            let shortcuts = if system_shortcuts.replace(false) {
+                Some(window.bind_system_shortcuts(stop.clone()).map_err(|_| {
+                    failed = LocalStop::SystemShortcutsUnavailable;
+                })?)
+            } else {
+                None
+            };
+            let capture = Capture {
+                stop: stop.clone(),
+                released: released.clone(),
+                shortcuts: shortcuts.clone(),
+            };
             *slot.borrow_mut() = Some(Input {
                 source,
                 binding,
@@ -2052,12 +2234,17 @@ fn attach(
                 text_context: None,
                 text_serial: Some(0),
                 text_until: 0,
+                capture_until: 0,
+                shortcuts,
+                shortcut_context: None,
+                shortcut_serial: 0,
+                shortcut_local_failure: Cell::new(false),
                 paused: false,
                 last: None,
             });
             Ok::<_, ()>(capture)
         })
-        .map_err(|_| ())?;
+        .map_err(|_| failed)?;
     Ok(true)
 }
 
@@ -2166,6 +2353,8 @@ impl Application for Session {
         let clipboard = self.clipboard.clone();
         let clipboard_requested = clipboard.borrow().available();
         let audio_requested = self.audio_install.is_some();
+        let system_shortcuts = self.system_shortcuts.clone();
+        let shortcuts_requested = system_shortcuts.get();
         let stop_control_requested = self.control.is_some() && self.close_cx.is_some();
         let audio_owner = self.audio_owner.clone();
         let microphone = self.microphone.clone();
@@ -2193,6 +2382,11 @@ impl Application for Session {
             | if audio_requested { AUDIO_FLAG } else { 0 }
             | if stop_control_requested {
                 STOP_CONTROL_FLAG
+            } else {
+                0
+            }
+            | if shortcuts_requested {
+                SYSTEM_SHORTCUTS_FLAG
             } else {
                 0
             };
@@ -2253,7 +2447,7 @@ impl Application for Session {
                         Some((expected, points))
                     })
                     .unwrap_or((native, (display.logical_width, display.logical_height)));
-                let points = crate::macos_sizing::sharing_points_with_audio(
+                let points = crate::macos_sizing::sharing_points_with_shortcuts(
                     pixels,
                     logical,
                     fit_window,
@@ -2263,6 +2457,7 @@ impl Application for Session {
                     file_selections,
                     audio_requested,
                     stop_control_requested,
+                    shortcuts_requested,
                 )?;
                 // From this point onward, losing the observer is not proof
                 // that AppKit, the renderer or its worker finished cleanup.
@@ -2603,7 +2798,11 @@ impl Application for Session {
                                     &ui_input,
                                     &ui_resize,
                                     ui_automation.is_none(),
-                                )?;
+                                    &system_shortcuts,
+                                )
+                                .map_err(|reason| {
+                                    ui_report.borrow_mut().local_stop.get_or_insert(reason);
+                                })?;
                             }
                             if let Some(automation) = &ui_automation {
                                 let current = ui_window
@@ -2621,7 +2820,14 @@ impl Application for Session {
                                 }
                             }
                             if let Some(input) = ui_input.borrow_mut().as_mut() {
-                                input.refresh_text(viewer)?;
+                                input.refresh_capture(viewer).map_err(|()| {
+                                    if input.shortcuts.is_some() {
+                                        ui_report
+                                            .borrow_mut()
+                                            .local_stop
+                                            .get_or_insert(LocalStop::SystemShortcutsStopped);
+                                    }
+                                })?;
                             }
                             if let Some(microphone) = ui_microphone.borrow_mut().as_mut() {
                                 microphone.turn(viewer).map_err(|_| ())?;
@@ -2701,6 +2907,7 @@ impl Application for Session {
             microphone.stop();
             self.report.borrow_mut().microphone = Some(microphone.report());
         }
+        let shortcuts_retired = retire_shortcuts(&self.window).is_ok();
         self.seal_window_resize();
         let text_retired = retire_text(&self.window, TextRetireMode::Fenced).is_ok();
         self.intent.borrow_mut().invalidate();
@@ -2771,6 +2978,7 @@ impl Application for Session {
             if !result
                 || !observations_retired
                 || !text_retired
+                || !shortcuts_retired
                 || !picker_closed
                 || !commands
                 || !clipboard
@@ -3028,6 +3236,34 @@ fn reported_terminal(observer: &NativeObserver) -> Option<ObserverError> {
 mod tests {
     use super::*;
     use asupersync::{runtime::RuntimeBuilder, types::Budget};
+
+    #[test]
+    fn shortcut_consent_is_exclusive_to_a_native_control_owner() {
+        let selected = Session::new(
+            Some(ControlPolicy::default()),
+            ObserverPolicy::default(),
+            Box::new(|_| Ok(None)),
+            1,
+            "shortcuts".into(),
+        )
+        .with_system_shortcuts(true);
+        assert!(selected.system_shortcuts.get());
+        assert!(!selected.automation_profile());
+        // The capture installer consumes the preference before its native
+        // call, including a refused attempt. No fresh UI request can reset it.
+        assert!(selected.system_shortcuts.replace(false));
+        assert!(!selected.system_shortcuts.replace(false));
+        let viewing = Session::new(
+            None,
+            ObserverPolicy::default(),
+            Box::new(|_| Ok(None)),
+            1,
+            "view".into(),
+        )
+        .with_system_shortcuts(true);
+        assert!(!viewing.system_shortcuts.get());
+        assert!(viewing.one_shot_profile());
+    }
 
     #[test]
     fn the_opening_picture_counts_once_visible_even_late_and_a_clock_refusal_reports_it_again() {
@@ -3977,6 +4213,7 @@ mod tests {
             repeat: true,
             captured: None,
             modifiers: (1 << 17) | (1 << 18) | (1 << 19),
+            shortcut: None,
         };
         assert_eq!(
             producer_terminal_event(&[WindowEvent::FocusPaused, escape], true),
@@ -4075,6 +4312,7 @@ mod tests {
                 repeat: false,
                 captured: Some(Duration::from_millis(1)),
                 modifiers: 0,
+                shortcut: None,
             },
             WindowEvent::Overflow,
             WindowEvent::FocusLost,
@@ -4084,6 +4322,7 @@ mod tests {
                 repeat: true,
                 captured: None,
                 modifiers: (1 << 17) | (1 << 18) | (1 << 19),
+                shortcut: None,
             },
             WindowEvent::CloseRequested,
         ];

@@ -2,8 +2,8 @@
 //! offers and reconnect supervisor as Linux, with the `AppKit`/Metal session
 //! from `fr_native::macos::session` in place of the X11 desktop.
 //!
-//! Not implemented on macOS yet, and refused by name rather than ignored:
-//! system-shortcut capture. Local inspection and disconnect address the same
+//! Explicit system-shortcut capture uses the original focused input owner
+//! with Accessibility permission. Local inspection and disconnect address the same
 //! authenticated foreground owner and wait for its actual native cleanup.
 //! Explicit --send/--receive choices, --file-drop native selections and opt-in
 //! local upload commands use the original controlled file lanes.
@@ -41,10 +41,6 @@ use frd::{
     session_startup::ObserverPolicy,
 };
 use std::{cell::Cell, fmt::Write as _, path::Path, rc::Rc, time::Duration};
-
-fn unsupported(option: &'static str) -> Failure {
-    Failure::new("platform_unavailable", option, 2)
-}
 
 /// One explicit view publishes through its existing authenticated IPC owner.
 /// Its screenshot handle belongs to that same observer and grants no input
@@ -265,22 +261,30 @@ fn check(connection: &Connection) -> Result<(), Failure> {
         minimum_width = minimum_width.max(320);
         minimum_height += 44;
     }
+    minimum_height += shortcut_height(connection)?;
     if connection
         .fit_window
         .is_some_and(|(width, height)| width < minimum_width || height < minimum_height)
     {
         return Err(Failure::new(
             "viewer_fit_too_small",
-            "--fit must leave room for Change Display and visible sharing controls. Controlling windows reserve the text composer: minimum 480x184 points. Width is at least 152 plus 230 per file direction, 184 for clipboard and 144 for --file-drop; both file directions with clipboard and file-drop need 940x184. Viewing needs 152x108. --audio adds 44 points of height and requires at least 320 points of width. --no-clipboard removes only the clipboard strip.",
+            "--fit must leave room for Change Display and visible sharing controls. Controlling windows reserve the text composer: minimum 480x184 points. Width is at least 152 plus 230 per file direction, 184 for clipboard and 144 for --file-drop; both file directions with clipboard and file-drop need 940x184. Viewing needs 152x108. --audio adds 44 points of height and requires at least 320 points of width. --capture-system-shortcuts adds 44 points of height and requires at least 480 points of width. --no-clipboard removes only the clipboard strip.",
             2,
         ));
     }
-    let refused = if connection.capture_system_shortcuts {
-        Some("--capture-system-shortcuts is not implemented on macOS yet.")
-    } else {
-        None
-    };
-    refused.map_or(Ok(()), |next| Err(unsupported(next)))
+    Ok(())
+}
+
+fn shortcut_height(connection: &Connection) -> Result<u32, Failure> {
+    match (connection.capture_system_shortcuts, connection.control) {
+        (false, _) => Ok(0),
+        (true, true) => Ok(44), // controlling windows already require 480 points
+        (true, false) => Err(Failure::new(
+            "system_shortcuts_require_control",
+            "System-shortcut capture requires an explicit controlling connection.",
+            2,
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,6 +398,13 @@ fn connect_selected(
             "macOS refused to start the application (run fr from a logged-in graphical session, on the main thread).",
         )
     })?;
+    if connection.capture_system_shortcuts && !fr_native::macos::system_shortcuts_permission() {
+        return Err(Failure::new(
+            "system_shortcuts_permission_missing",
+            "Enable Accessibility access for FrankenRemote in System Settings, then start a new connection with --capture-system-shortcuts. No remote connection was started.",
+            2,
+        ));
+    }
     let selected = if connection.choose_host {
         host_choice::select(runtime, cx, shutdown, stopped, &api, connection, json)?
     } else {
@@ -425,7 +436,12 @@ fn connect_selected(
             76
         } else {
             0
-        } + if audio.is_some() { 44 } else { 0 };
+        } + if audio.is_some() { 44 } else { 0 }
+            + if connection.capture_system_shortcuts {
+                44
+            } else {
+                0
+            };
     let picture_box = fr_native::macos::window_box(reserved);
     let mut session = Session::new(
         connection.control.then(ControlPolicy::default),
@@ -441,6 +457,7 @@ fn connect_selected(
     .with_fit_window(connection.fit_window)
     .with_picture_box(picture_box)
     .with_files(selected_files)
+    .with_system_shortcuts(connection.capture_system_shortcuts)
     .clipboard(connection.control && connection.clipboard);
     session = playback::install(session, audio);
     session = microphone::install(session, microphone);
@@ -631,6 +648,9 @@ const fn stop_name(stop: LocalStop) -> &'static str {
         LocalStop::PictureChanged => "picture_changed",
         LocalStop::Overflow => "input_overflow",
         LocalStop::NativeFailure => "native_failure",
+        LocalStop::SystemShortcutsUnavailable => "system_shortcuts_unavailable",
+        LocalStop::SystemShortcutsStopped => "system_shortcuts_stopped",
+        LocalStop::SystemShortcutsOff => "system_shortcuts_off",
     }
 }
 
@@ -692,7 +712,7 @@ fn finish_result(
 ) -> Result<String, Failure> {
     let closed = matches!(
         report.local_stop,
-        Some(LocalStop::WindowClosed | LocalStop::LocalEscape)
+        Some(LocalStop::WindowClosed | LocalStop::LocalEscape | LocalStop::SystemShortcutsOff)
     );
     let result = super::macos_completion::checked(result, closed, cleanup_confirmed, terminal);
     if let Err(error) = result {
@@ -747,6 +767,14 @@ fn finish_result(
                 Some(LocalStop::PictureChanged) => failure(
                     "control_window_resized",
                     "The viewer's geometry changed and a checked fresh viewing attempt could not complete. The original input mapping and control ended; reconnect, then request control again with F8. Nothing is replayed.",
+                ),
+                Some(LocalStop::SystemShortcutsUnavailable) => failure(
+                    "system_shortcuts_unavailable",
+                    "macOS could not install the explicitly requested system-shortcut event tap. Check Accessibility permission and start a new connection; capture was not enabled on a replacement owner.",
+                ),
+                Some(LocalStop::SystemShortcutsStopped) => failure(
+                    "system_shortcuts_stopped",
+                    "The original system-shortcut capture stopped or lost its native deadline. Control ended and capture was not restarted; review cleanup before starting another connection.",
                 ),
                 _ => match error {
                         reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(
@@ -894,6 +922,32 @@ mod tests {
             panic!("connection required")
         };
         connection
+    }
+
+    #[test]
+    fn system_shortcuts_need_control_and_reserve_the_visible_off_surface() {
+        let selected = connection("--capture-system-shortcuts --fit 800x228");
+        assert!(check(&selected).is_ok());
+        let mut viewing = selected;
+        viewing.control = false;
+        assert_eq!(
+            check(&viewing).unwrap_err().code,
+            "system_shortcuts_require_control"
+        );
+        assert_eq!(
+            check(&connection("--capture-system-shortcuts --fit 800x227"))
+                .unwrap_err()
+                .code,
+            "viewer_fit_too_small"
+        );
+        if cfg!(feature = "macos-audio") {
+            assert!(
+                check(&connection(
+                    "--capture-system-shortcuts --audio --fit 800x272"
+                ))
+                .is_ok()
+            );
+        }
     }
 
     #[test]

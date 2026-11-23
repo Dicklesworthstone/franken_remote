@@ -509,12 +509,36 @@ fn modifier_changes_become_one_press_and_one_release() {
     let mut m = Modifiers::default();
     let mut events = Vec::new();
     // Left shift down (device bit 0x02 + shift flag), duplicate, then up.
-    m.change(0x38, (1 << 17) | 0x02, Some(Duration::ZERO), &mut events);
-    m.change(0x38, (1 << 17) | 0x02, Some(Duration::ZERO), &mut events);
+    m.change(
+        0x38,
+        (1 << 17) | 0x02,
+        Some(Duration::ZERO),
+        None,
+        &mut events,
+    );
+    m.change(
+        0x38,
+        (1 << 17) | 0x02,
+        Some(Duration::ZERO),
+        None,
+        &mut events,
+    );
     // Right shift down while left is held, then left up while right is held.
-    m.change(0x3c, (1 << 17) | 0x06, Some(Duration::ZERO), &mut events);
-    m.change(0x38, (1 << 17) | 0x04, Some(Duration::ZERO), &mut events);
-    m.change(0x3c, 0, Some(Duration::ZERO), &mut events);
+    m.change(
+        0x3c,
+        (1 << 17) | 0x06,
+        Some(Duration::ZERO),
+        None,
+        &mut events,
+    );
+    m.change(
+        0x38,
+        (1 << 17) | 0x04,
+        Some(Duration::ZERO),
+        None,
+        &mut events,
+    );
+    m.change(0x3c, 0, Some(Duration::ZERO), None, &mut events);
     let keys: Vec<_> = events
         .iter()
         .map(|e| match *e {
@@ -528,16 +552,58 @@ fn modifier_changes_become_one_press_and_one_release() {
     );
     // A keyboard with no device bits falls back to the shared flag.
     events.clear();
-    m.change(0x3b, 1 << 18, Some(Duration::ZERO), &mut events);
-    m.change(0x3b, 0, Some(Duration::ZERO), &mut events);
+    m.change(0x3b, 1 << 18, Some(Duration::ZERO), None, &mut events);
+    m.change(0x3b, 0, Some(Duration::ZERO), None, &mut events);
     assert_eq!(events.len(), 2);
     // Caps Lock reports a toggle; each change is one tap.
     events.clear();
-    m.change(0x39, 1 << 16, Some(Duration::ZERO), &mut events);
+    m.change(0x39, 1 << 16, Some(Duration::ZERO), None, &mut events);
     assert_eq!(events.len(), 2);
     events.clear();
-    m.change(0x3f, 1 << 23, Some(Duration::ZERO), &mut events);
+    m.change(0x3f, 1 << 23, Some(Duration::ZERO), None, &mut events);
     assert_eq!(events, [WindowEvent::UnmappedKey { keycode: 0x3f }]);
+}
+
+#[test]
+fn native_shortcut_metadata_cannot_fall_back_to_a_fresh_ordinary_context() {
+    assert_eq!(ShortcutCapture::from_native(0, 0), Ok(None));
+    assert_eq!(ShortcutCapture::from_native(3, 0), Err(()));
+    assert_eq!(ShortcutCapture::from_native(0, 8_000), Err(()));
+    assert_eq!(
+        ShortcutCapture::from_native(3, 8_000),
+        Ok(Some(ShortcutCapture {
+            context: 3,
+            until: 8_000
+        })),
+    );
+}
+
+#[test]
+fn modifier_expansion_keeps_the_original_shortcut_snapshot_and_time() {
+    let mut modifiers = Modifiers::default();
+    let mut events = Vec::new();
+    let original = Some(ShortcutCapture {
+        context: 7,
+        until: 4_000,
+    });
+    let captured = Some(Duration::from_micros(1_250));
+    modifiers.change(0x37, (1 << 20) | 0x08, captured, original, &mut events);
+    modifiers.change(0x39, 1 << 16, captured, original, &mut events);
+    assert_eq!(events.len(), 3, "Command down and the Caps Lock tap");
+    for event in events {
+        assert!(matches!(event, WindowEvent::Key {
+            shortcut, captured: at, ..
+        } if shortcut == original && at == captured));
+    }
+    let renewed = Some(ShortcutCapture {
+        context: 7,
+        until: 9_000,
+    });
+    let mut events = Vec::new();
+    modifiers.change(0x37, 0, captured, renewed, &mut events);
+    assert!(matches!(events.as_slice(), [WindowEvent::Key {
+        usage: 0xe3, pressed: false, shortcut, ..
+    }] if *shortcut == renewed));
 }
 
 #[test]

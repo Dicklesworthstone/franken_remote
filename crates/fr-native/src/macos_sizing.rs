@@ -227,12 +227,91 @@ pub(crate) fn sharing_points_with_audio(
     Ok((if audio { width.max(320) } else { width }, height))
 }
 
+/// Reserve the independently visible system-shortcut Off strip before fitting
+/// the picture. Its 44 points cannot be borrowed by video, text or audio UI.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+pub(crate) fn sharing_points_with_shortcuts(
+    pixels: (u32, u32),
+    logical: (u32, u32),
+    fit: Option<(u32, u32)>,
+    directions: u32,
+    clipboard: bool,
+    text: bool,
+    selections: bool,
+    audio: bool,
+    stop_control: bool,
+    shortcuts: bool,
+) -> Result<(u32, u32), ()> {
+    let fit = if shortcuts {
+        match fit {
+            Some((width, height)) if width >= 480 => {
+                Some((width, height.checked_sub(44).ok_or(())?))
+            }
+            Some(_) => return Err(()),
+            None => None,
+        }
+    } else {
+        fit
+    };
+    let (width, height) = sharing_points_with_audio(
+        pixels,
+        logical,
+        fit,
+        directions,
+        clipboard,
+        text,
+        selections,
+        audio,
+        stop_control,
+    )?;
+    Ok((if shortcuts { width.max(480) } else { width }, height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         WindowBox, points, scaled_picture_points, sharing_points, sharing_points_with_audio,
-        sharing_points_with_selections, sharing_points_with_text,
+        sharing_points_with_selections, sharing_points_with_shortcuts, sharing_points_with_text,
     };
+
+    #[test]
+    fn shortcut_off_surface_keeps_its_space_with_all_other_controls() {
+        for directions in 0..=2 {
+            for clipboard in [false, true] {
+                for audio in [false, true] {
+                    for selections in [false, true] {
+                        if selections && directions == 0 {
+                            continue;
+                        }
+                        let width = (152
+                            + 230 * directions
+                            + 136
+                            + u32::from(clipboard) * 184
+                            + u32::from(selections) * 144)
+                            .max(480);
+                        let reserved = 44 + 76 + 44 + u32::from(audio) * 44;
+                        let fit = |size| {
+                            sharing_points_with_shortcuts(
+                                (1920, 1080),
+                                (1920, 1080),
+                                Some(size),
+                                directions,
+                                clipboard,
+                                true,
+                                selections,
+                                audio,
+                                true,
+                                true,
+                            )
+                        };
+                        assert_eq!(fit((width, reserved + 64)), Ok((width, 64)));
+                        assert!(fit((width - 1, reserved + 64)).is_err());
+                        assert!(fit((width, reserved + 63)).is_err());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn playback_controls_reserve_space_before_every_selected_viewport() {

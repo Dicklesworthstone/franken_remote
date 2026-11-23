@@ -101,6 +101,12 @@ mod macos_clipboard_privacy;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-clipboard")))]
 mod macos_clipboard_state;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "macos-desktop")),
+    allow(dead_code)
+)]
+mod macos_shortcuts;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_snapshot;
 // Windows host capture: Desktop Duplication into Media Foundation HEVC.
 #[cfg(all(windows, feature = "windows-media"))]

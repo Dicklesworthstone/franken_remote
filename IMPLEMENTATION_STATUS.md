@@ -1,5 +1,37 @@
 # Implementation status
 
+## Original macOS system-shortcut capture (2026-11-23)
+
+The Mac native client now implements the previously refused
+`--capture-system-shortcuts` option. After explicit selection, Accessibility
+preflight and an actual control grant, the original viewer owns one modifying
+CoreGraphics session event tap. Physical keys, including Cmd+Tab and Cmd+Space,
+enter the existing bounded Rust input source with their original native
+timestamps, original view context and original client deadline. A later view
+or ticket renewal cannot reauthorize a key queued by an earlier callback.
+The tap filters only the current focused, visible viewer while
+its original input deadline remains valid. Local Send Text composition keeps
+its own keys. Fn/media/system-defined events are outside this keyboard slice.
+
+A separate visible Off strip is reserved before picture negotiation. Native
+focus, session and geometry checks, a 50 ms pump watchdog, a fixed callback
+budget, original timestamp floors and clear-held-state rearming prevent
+background or stale keys from acquiring fresh authority. Tap timeout or disable
+is terminal and never automatically re-enabled. Explicit capture consent is
+consumed by its first input attachment, so a recovered viewer and a later F8
+request cannot reinstall a retired tap. Input-source closure and actual native
+callback removal are separate cleanup facts, both required before reuse.
+
+Validation so far: exact-source component validation passes 24 tests (seven
+deadline/custody cases, fourteen viewport-sizing cases and three actual
+key/modifier translation cases), with strict component Clippy. Full local
+workspace check/test compilation could not finish
+under shared memory pressure; the actual daemon metadata compile was killed.
+This environment has no macOS SDK, so the Objective-C bridge, complete Mac Rust
+integration and live Accessibility/interception/Off behavior are **not yet
+qualified**. No successful native interception or hardware claim follows from
+portable tests. Bead `fr-cwcp` retains this qualification work.
+
 ## Windows explicit copied-file uploads (2026-11-23)
 
 The connected Windows viewer now offers **File transfer → Send copied files**.

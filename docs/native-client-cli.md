@@ -621,8 +621,31 @@ once a second during a session) use the status/WhoIs/status sequence above over
 the loopback `LocalAPI`, about 12 ms of CPU per lookup. The signed-CLI
 transport it replaced used 60-80 ms of CPU per read.
 
-System-shortcut capture remains unavailable on macOS and is refused before
-network I/O. Explicit foreground view publishers now expose
+System-shortcut capture on macOS is explicitly selected with
+`fr connect NODE --control --experimental-native --capture-system-shortcuts`.
+Accessibility permission is checked locally before a connection starts and
+again when the original control owner installs its modifying CoreGraphics
+session event tap. Missing permission produces
+`system_shortcuts_permission_missing`; a failed native attachment produces
+`system_shortcuts_unavailable`.
+
+While the original viewer is focused, visible and has a current input bound,
+the tap routes physical keyboard events, including Cmd+Tab and Cmd+Space,
+through the same bounded, timestamped Rust input source as ordinary keys.
+The local Send Text editor retains its own keyboard events. The visible
+shortcut strip has an Off control; Ctrl+Alt+Shift+Escape remains a local escape.
+Its separate 44-point row is reserved before negotiating the picture.
+
+Capture consent is consumed by the first native control attachment. Focus loss
+pauses capture, while a disabled tap, an expired native watchdog, explicit Off,
+or terminal cleanup fences the original source. A recovered or replacement
+viewer never reinstalls the tap from old consent. Cleanup requires removal of
+the native callback as well as retirement of the original input source.
+Source and portable policy evidence do not qualify macOS native interception;
+the Accessibility, event-tap, Cmd+Tab/Cmd+Space, focus, text-mode and Off paths
+still require execution on a real Mac.
+
+Explicit foreground view publishers expose
 [live observation metadata and screenshots](#macos-live-observation-metadata)
 through the original authenticated local owner. macOS also supports
 [one-shot native observation](#one-shot-native-screenshots) with an optional PNG.

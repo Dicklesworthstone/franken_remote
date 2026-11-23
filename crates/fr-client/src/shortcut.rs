@@ -179,8 +179,8 @@ impl PlatformCapabilityRow {
                 status: ShortcutSupportStatus::SupportedWithPermission {
                     permission_name: "Accessibility permissions in System Settings",
                 },
-                reserved_shortcuts_intercepted: &["Cmd+Tab", "Cmd+Space", "Mission Control"],
-                notes: "Requires AXIsProcessTrusted trust in macOS System Settings.",
+                reserved_shortcuts_intercepted: &["Cmd+Tab", "Cmd+Space"],
+                notes: "Explicit original-control CGSessionEventTap with Accessibility permission; native interception requires Mac qualification. Fn/media/system-defined events remain local.",
             },
             Self {
                 platform: PlatformId::Browser,

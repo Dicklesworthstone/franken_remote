@@ -26,6 +26,8 @@ pub(crate) const TEXT_COMPOSER_FLAG: u32 = 16;
 pub(crate) const FILE_SELECTION_FLAG: u32 = 32;
 pub(crate) const AUDIO_FLAG: u32 = 64;
 pub(crate) const STOP_CONTROL_FLAG: u32 = 128;
+pub(crate) const SYSTEM_SHORTCUTS_FLAG: u32 = 256;
+pub(crate) use crate::macos_shortcuts::Retirement as ShortcutRetirement;
 
 /// A consumed native slot, including a locally refused gesture. A native error
 /// is separate because it must fence the original owner before native cleanup.
@@ -62,6 +64,7 @@ struct RawEvent {
     flags: u32,
     reserved: u32,
     timestamp: f64,
+    shortcut_until: u64,
 }
 
 /// Native dimensions and geometry revision sampled under the renderer's lock.
@@ -76,6 +79,21 @@ struct SnapshotGeometry {
 
 unsafe extern "C" {
     fn fr_mac_app_init() -> c_int;
+    fn fr_mac_system_shortcuts_permission() -> c_int;
+    fn fr_mac_window_shortcuts_bind(
+        window: *mut c_void,
+        context: *mut c_void,
+        stopped: unsafe extern "C" fn(*mut c_void) -> c_int,
+        stop: unsafe extern "C" fn(*mut c_void, u32),
+        release: unsafe extern "C" fn(*mut c_void),
+    ) -> c_int;
+    fn fr_mac_window_shortcuts_update(
+        window: *mut c_void,
+        context: u32,
+        client_until: u64,
+        until: f64,
+    ) -> c_int;
+    fn fr_mac_window_shortcuts_stop(window: *mut c_void) -> c_int;
     fn fr_mac_window_box(
         reserved: u32,
         width: *mut u32,
@@ -296,6 +314,13 @@ pub(crate) fn event_time() -> Option<Duration> {
     Duration::try_from_secs_f64(unsafe { fr_mac_event_time() }).ok()
 }
 
+/// Check existing Accessibility authorization for a modifying event tap. This
+/// never prompts, opens settings, or grants permission. Binding rechecks it.
+pub fn system_shortcuts_permission() -> bool {
+    // SAFETY: main-thread permission preflight; no pointers or retained state.
+    unsafe { fr_mac_system_shortcuts_permission() == 1 }
+}
+
 /// A pointer position relative to the presented picture: (0, 0) is its
 /// top-left corner and (1, 1) its bottom-right. Outside the picture (the
 /// letterbox bars or beyond the window while dragging) `inside` is false.
@@ -324,6 +349,24 @@ impl PicturePoint {
 }
 
 /// One local input or window event, with keys already reduced to HID usages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortcutCapture {
+    /// Original input-context identity, assigned by the original source owner.
+    pub context: u32,
+    /// Original input owner's exclusive client-clock send deadline.
+    pub until: u64,
+}
+impl ShortcutCapture {
+    fn from_native(context: u32, until: u64) -> Result<Option<Self>, ()> {
+        match (context, until) {
+            (0, 0) => Ok(None),
+            (0, _) | (_, 0) => Err(()),
+            _ => Ok(Some(Self { context, until })),
+        }
+    }
+}
+
+/// One local input or window event, with keys already reduced to HID usages.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WindowEvent {
     /// A physical key (HID usage page 0x07) changed state.
@@ -335,6 +378,8 @@ pub enum WindowEvent {
         captured: Option<Duration>,
         /// `AppKit`'s device-independent modifier flags at capture time.
         modifiers: u64,
+        /// Immutable context/deadline from the original system-tap callback.
+        shortcut: Option<ShortcutCapture>,
     },
     /// A key with no HID keyboard usage (Fn, vendor keys). Never forwarded.
     UnmappedKey {
@@ -633,6 +678,58 @@ impl Window {
             .claim()
             .map_err(|()| NativeError::Unavailable)
     }
+    /// Install one explicit shortcut tap for this window's original capture.
+    /// It starts paused. Only `update_system_shortcuts` can publish a bounded
+    /// readiness snapshot; stop/timeout/Off can never rebind this attachment.
+    pub(crate) fn bind_system_shortcuts(
+        &self,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<ShortcutRetirement, NativeError> {
+        let (owner, retirement) = crate::macos_shortcuts::Owner::new(stop);
+        let context = Box::into_raw(Box::new(owner));
+        // SAFETY: the original main-thread window adopts this unique Box only
+        // on success. All callbacks are atomic-only, and native invalidates its
+        // tap and run-loop source before clearing and releasing the Box once.
+        let result = status(unsafe {
+            fr_mac_window_shortcuts_bind(
+                self.raw.as_ptr(),
+                context.cast(),
+                shortcuts_stopped,
+                shortcuts_stop,
+                shortcuts_release,
+            )
+        });
+        if result.is_err() {
+            // SAFETY: failed binding retains no callback/context or native tap.
+            let owner = unsafe { Box::from_raw(context) };
+            owner.complete();
+        }
+        result.map(|()| retirement)
+    }
+
+    /// Refresh the exact existing tap with a conservative original-source
+    /// deadline in native uptime seconds. Native also caps it to 50 ms and
+    /// rejects an already-expired prior active snapshot. Context zero pauses;
+    /// a different context must establish a fresh clear keyboard baseline.
+    pub(crate) fn update_system_shortcuts(
+        &self,
+        context: u32,
+        client_until: u64,
+        until: f64,
+    ) -> Result<(), NativeError> {
+        // SAFETY: live main-thread window and scalar metadata. No input source
+        // or lock is retained; native validates finite, future absolute bounds.
+        status(unsafe {
+            fr_mac_window_shortcuts_update(self.raw.as_ptr(), context, client_until, until)
+        })
+    }
+
+    /// Fence the original source before removing its native tap. Completion
+    /// is published only after callback invalidation and run-loop removal.
+    pub(crate) fn stop_system_shortcuts(&self) -> Result<(), NativeError> {
+        // SAFETY: original window on its owning thread, no borrowed outputs.
+        status(unsafe { fr_mac_window_shortcuts_stop(self.raw.as_ptr()) })
+    }
     /// Park only retires local state and probes for a veto. Fenced permits
     /// actual native cleanup; an already-observed negative is not cleanup failure.
     pub(crate) fn text_stopped(&self, mode: TextRetireMode) -> Result<TextRetirement, NativeError> {
@@ -849,6 +946,15 @@ impl Window {
         }
     }
     fn translate(&mut self, e: RawEvent, events: &mut Vec<WindowEvent>) {
+        let shortcut = match ShortcutCapture::from_native(e.reserved, e.shortcut_until) {
+            Ok(capture) if capture.is_none() || matches!(e.kind, 1..=3) => capture,
+            _ => {
+                // Inconsistent callback metadata is never downgraded to the
+                // ordinary path, where it could acquire a fresh input context.
+                events.push(WindowEvent::Overflow);
+                return;
+            }
+        };
         let at = PicturePoint {
             x: e.x,
             y: e.y,
@@ -864,6 +970,7 @@ impl Window {
                     repeat: e.kind == 1 && e.flags & 1 != 0,
                     captured: Duration::try_from_secs_f64(e.timestamp).ok(),
                     modifiers: e.modifiers,
+                    shortcut,
                 },
                 None => WindowEvent::UnmappedKey { keycode },
             }),
@@ -871,6 +978,7 @@ impl Window {
                 keycode,
                 e.modifiers,
                 Duration::try_from_secs_f64(e.timestamp).ok(),
+                shortcut,
                 events,
             ),
             4 => events.push(WindowEvent::Pointer(at)),
@@ -900,6 +1008,13 @@ impl Window {
                 self.modifiers = Modifiers::default();
                 events.push(WindowEvent::FocusPaused);
             }
+            12 => {
+                // Native capture paused or changed its original context. Old
+                // queued keys keep their own custody; only the local modifier
+                // translator resets, without manufacturing a remote release
+                // or cancelling the independent local text editor.
+                self.modifiers = Modifiers::default();
+            }
             _ => {}
         }
     }
@@ -909,6 +1024,33 @@ impl Drop for Window {
     fn drop(&mut self) {
         // SAFETY: unique owner of the +1 window reference, on the main thread.
         unsafe { fr_mac_window_free(self.raw.as_ptr()) };
+    }
+}
+
+unsafe extern "C" fn shortcuts_stopped(context: *mut c_void) -> c_int {
+    if context.is_null() {
+        return 1;
+    }
+    // SAFETY: native retains this unique original owner until tap invalidation
+    // and callback removal. This read is atomic-only and cannot block.
+    let owner = unsafe { &*context.cast::<crate::macos_shortcuts::Owner>() };
+    c_int::from(owner.stopped())
+}
+
+unsafe extern "C" fn shortcuts_stop(context: *mut c_void, reason: u32) {
+    if !context.is_null() {
+        // SAFETY: same original owner as above; both writes are atomic-only.
+        let owner = unsafe { &*context.cast::<crate::macos_shortcuts::Owner>() };
+        owner.native_stop(reason);
+    }
+}
+
+unsafe extern "C" fn shortcuts_release(context: *mut c_void) {
+    if !context.is_null() {
+        // SAFETY: exactly once after the main-thread native owner invalidated
+        // its tap/source and cleared all callback slots. No callback survives.
+        let owner = unsafe { Box::from_raw(context.cast::<crate::macos_shortcuts::Owner>()) };
+        owner.complete();
     }
 }
 
@@ -1044,6 +1186,7 @@ impl Modifiers {
         keycode: u16,
         flags: u64,
         captured: Option<Duration>,
+        shortcut: Option<ShortcutCapture>,
         events: &mut Vec<WindowEvent>,
     ) {
         if keycode == macos_keys::CAPS_LOCK {
@@ -1055,6 +1198,7 @@ impl Modifiers {
                     repeat: false,
                     captured,
                     modifiers: flags,
+                    shortcut,
                 });
             }
             return;
@@ -1079,6 +1223,7 @@ impl Modifiers {
             repeat: false,
             captured,
             modifiers: flags,
+            shortcut,
         });
     }
 }
