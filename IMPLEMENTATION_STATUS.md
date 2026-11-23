@@ -1,5 +1,45 @@
 # Implementation status
 
+## Original application owners during video recovery (2026-11-22)
+
+Controlled video recovery now services the exact existing file and clipboard
+application owners before each original parent transport turn. Queued
+acknowledgements are reconciled first, as in steady-state streaming. Local
+file Resume, Pause and Cancel commands, clipboard retirement and bounded
+cleanup no longer depend on receiving a replacement video configuration.
+
+Before detaching the old media binding, recovery reasserts its idempotent
+input-suspension fence and services optional application setup against that
+original binding. It retains the first suspension timestamp, original control
+lease, consent, worker, file receipts and cleanup state. It creates no new
+application owner, input grant or recovery deadline. Read-only recovery still
+has no controlling file or clipboard owner.
+
+The added real-transport regression deliberately withholds replacement video
+while resuming, pausing and cancelling an original two-file selection. It
+requires the first file's cancellation receipt and disk cleanup during the
+recovery wait, with the second file unstarted, intake closed, no input effect
+and no published destination. Video decode and the input sink are explicit
+fixtures. The regression and 13 adjacent recovery/audio tests remain
+**unexecuted**: the selected-test compiler was killed by signal 9 before
+producing a binary. An actual-source, production-only metadata check also
+failed on allocation under the 3 GiB virtual-memory cap; it produced no
+metadata. Neither attempt establishes a passing `frd` type check.
+
+That bounded attempt used genuine build inputs from successful integration
+run `45037551884` (`34628997`), with the exact matching nightly, Cargo.lock and
+Asupersync pin. Current `fr-client`, `fr-files`, `fr-tailnet` and `fr-web`
+compiled against that graph, as did the locked platform dependencies with
+the actual `frd` features. No production source, runtime or test assertion
+was substituted. Independent source review, whole-workspace formatting and
+whitespace checks pass. The exact full-workspace `cargo check --all-targets`,
+`cargo clippy --all-targets -- -D warnings` and `cargo test` each exited 101
+while the unchanged pinned Asupersync compiler failed a 276,824,080-byte
+allocation under the same 3 GiB cap. Those invocations reached no workspace
+test execution; the separately passing 1,804 portable tests are a different
+scope. Full runtime/platform qualification remains open.
+Plan §§7.3, 11–12 and 15.3/15.6; tracking `fr-bh6c`.
+
 ## One-use microphone selection in the native app (2026-11-22)
 
 `fr app --microphone-source NAME [--microphone-server PATH]` now retains an
@@ -54,7 +94,10 @@ The complete production key policy and mailbox pass 20 pinned-nightly tests
 (including 12 new hook cases), compilation with warnings denied, and strict
 pedantic component Clippy with the repository's existing allowances. These
 checks execute the actual portable sources, not Win32 or the full Shared
-runtime. Native Windows compilation/execution and the added Shared-owner
+runtime. A subsequent full Cargo run passes all 250 `fr-windows` tests on Linux;
+the combined `fr-core`, `fr-media`, `fr-client` and `fr-windows` baseline passes
+1,804 tests, including three compile-fail doctests. Native Windows
+compilation/execution and the added Shared-owner
 regressions remain separate, unrun gates. Formatting and scoped whitespace
 checks pass. Plan §§7.2–7.3 and 15.1; tracking `fr-j2dc`.
 

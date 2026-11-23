@@ -239,6 +239,8 @@ async fn turn(f: &mut Fixture) {
     let refused = Cell::new(None);
     let mut link = Link {
         parent: Parent::Observe(viewer),
+        clipboard: None,
+        files: None,
         audio: Some(audio),
         quality: None,
         refused: &refused,
@@ -379,6 +381,8 @@ fn cancelled_recovery_parent_cannot_poll_the_audio_output() {
         let refused = Cell::new(None);
         let mut link = Link {
             parent: Parent::Observe(&mut f.viewer),
+            clipboard: None,
+            files: None,
             audio: Some(&mut f.audio),
             quality: None,
             refused: &refused,
@@ -402,6 +406,8 @@ fn cancellation_inside_audio_service_fences_output_even_after_native_success() {
         let refused = Cell::new(None);
         let mut link = Link {
             parent: Parent::Observe(&mut f.viewer),
+            clipboard: None,
+            files: None,
             audio: Some(&mut f.audio),
             quality: None,
             refused: &refused,

@@ -105,6 +105,8 @@ fn exercise(native_failure: bool) {
         let result = during(
             &mut Link {
                 parent: Parent::Observe(&mut viewer),
+                clipboard: None,
+                files: None,
                 audio: None,
                 quality: None,
                 refused: &refused,

@@ -32,11 +32,13 @@ enum Parent<'a> {
     Viewing(&'a mut ViewerSession, &'a mut ViewingControl),
     Control(&'a mut ControlledViewer, &'a mut dyn FnMut(ResultEvent)),
 }
-/// The original parent and audio output stay together for EVERY recovery
-/// network turn. Receiving packets alone cannot make native playback progress.
-/// No audio generation, queue, deadline or decoder is created by video recovery.
+/// The original parent, optional applications and audio output stay together for
+/// EVERY recovery network turn. Receiving packets alone cannot service local
+/// file actions or native playback. Video recovery creates no replacement owner.
 pub(super) struct Link<'a> {
     parent: Parent<'a>,
+    clipboard: Option<&'a mut crate::native_clipboard::Application>,
+    files: Option<&'a mut super::files::Lane>,
     audio: Option<&'a mut super::audio::ViewerAudio>,
     quality: Option<&'a mut super::quality::ViewerQuality>,
     refused: &'a Cell<Option<Error>>,
@@ -55,10 +57,21 @@ impl Link<'_> {
     ) -> Result<(), Error> {
         let Self {
             parent,
+            clipboard,
+            files,
             audio,
             quality,
             refused,
         } = self;
+        if let Parent::Control(viewer, _) = parent {
+            // Recovery keeps the original controller's attached backends
+            // driving, so their application owners must keep driving too.
+            // In particular, local file Pause/Cancel and clipboard retirement
+            // cannot wait for another video configuration or decoded picture.
+            // Match the ordinary turn: reconcile queued acknowledgements before
+            // servicing these bounded owners, then use the SAME parent drive.
+            applications(viewer, clipboard.as_deref_mut(), files.as_deref_mut()).await?;
+        }
         let session = match parent {
             Parent::Observe(session) | Parent::Viewing(session, _) => &mut **session,
             Parent::Control(viewer, _) => viewer.session_mut(),
@@ -136,6 +149,30 @@ impl Link<'_> {
         budget.remaining()?;
         Ok(())
     }
+}
+
+/// Keep the exact application owners live before a recovery network turn.
+/// Their handlers retain original consent, result and cleanup state; this is
+/// neither another protocol pump nor a new native/control owner.
+async fn applications(
+    viewer: &mut ControlledViewer,
+    clipboard: Option<&mut crate::native_clipboard::Application>,
+    files: Option<&mut super::files::Lane>,
+) -> Result<(), Error> {
+    if clipboard.is_none() && files.is_none() {
+        return Ok(());
+    }
+    viewer
+        .reconcile_acknowledgements()
+        .await
+        .map_err(Error::Control)?;
+    if let Some(clipboard) = clipboard {
+        clipboard.viewer(viewer).map_err(Error::Clipboard)?;
+    }
+    if let Some(files) = files {
+        files.viewer(viewer);
+    }
+    Ok(())
 }
 
 /// This guard exists before polling, including before the first native await.
@@ -692,6 +729,16 @@ impl super::StreamingViewer {
             statistics: &mut self.statistics,
         };
         if let super::Peer::Control(viewer) = &mut self.peer {
+            // recovery::service already fenced this failed chain. Reassert
+            // that idempotent fence before servicing optional owners too:
+            // no unsent input may survive, and the first suspension deadline
+            // stays binding even if another caller enters this continuation.
+            viewer.enter_recovery().map_err(Error::Control)?;
+            // A missing reference may enter recovery on the first controlled
+            // turn. Install any unstarted optional expectation while its
+            // ORIGINAL media binding is still present, before detaching it.
+            // The same bounded owners service the resulting lanes below.
+            applications(viewer, self.clipboard.as_mut(), self.files.as_mut()).await?;
             let previous = match viewer.take_media_for_recovery(report_cursor) {
                 Ok(previous) => previous,
                 Err(error) => {
@@ -702,6 +749,8 @@ impl super::StreamingViewer {
             let (media, receipt) = resume(
                 Link {
                     parent: Parent::Control(viewer, result),
+                    clipboard: self.clipboard.as_mut(),
+                    files: self.files.as_mut(),
                     audio: self.audio.as_mut(),
                     quality: parts.quality.as_mut(),
                     refused: &refused,
@@ -745,6 +794,8 @@ impl super::StreamingViewer {
                 let (media, receipt) = resume(
                     Link {
                         parent: Parent::Observe(&mut session),
+                        clipboard: None,
+                        files: None,
                         audio: self.audio.as_mut(),
                         quality: parts.quality.as_mut(),
                         refused: &refused,
@@ -778,6 +829,8 @@ impl super::StreamingViewer {
                 let (media, receipt) = resume(
                     Link {
                         parent: Parent::Viewing(&mut session, &mut viewing),
+                        clipboard: None,
+                        files: None,
                         audio: self.audio.as_mut(),
                         quality: parts.quality.as_mut(),
                         refused: &refused,
