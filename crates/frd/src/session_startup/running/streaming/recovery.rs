@@ -244,6 +244,16 @@ impl<S: Services> Admission<'_, S> {
                     progress,
                     notified: false,
                 });
+                // Ordinary maintenance returned before its path sample. A
+                // failed reference does not stop this original connection's
+                // queue from growing or invalidate its transport evidence.
+                let current = self
+                    .video
+                    .control
+                    .check()
+                    .map_err(Error::Media)?
+                    .as_micros();
+                self.video.observe_path(q, current)?;
                 Ok(())
             }
             result => result,
@@ -259,6 +269,13 @@ impl<S: Services> Admission<'_, S> {
         if !self.permitted() {
             return Err(Error::Expired);
         }
+        let current = self
+            .video
+            .control
+            .check()
+            .map_err(Error::Media)?
+            .as_micros();
+        self.video.observe_path(q, current)?;
         if let Some(local) = &mut self.local_failure
             && !local.notified
         {
@@ -514,6 +531,8 @@ struct Waiting<'a, S> {
     obsolete: ObsoleteMetadata,
     repair: Route,
     other: &'a mut S,
+    path: &'a mut crate::media::shared_publisher::path_queue::PathQueue,
+    bitrate: Option<&'a mut fr_media::bitrate::Controller>,
 }
 impl<S: Services> Waiting<'_, S> {
     fn check(&mut self) -> Result<(), Error> {
@@ -549,7 +568,19 @@ impl<S: Services> Services for Waiting<'_, S> {
     ) -> Result<(), Error> {
         self.check()?;
         self.other.maintain(q, nonce)?;
-        self.check()
+        self.check()?;
+        // Attachment, native IDR and decoder waits are still real network
+        // turns on this exact connection. Keep measuring its pressure so the
+        // already scheduled recovery capture can carry a newly justified cut;
+        // idle/unknown samples also withdraw stale optimistic probes.
+        let current = self.control.check().map_err(Error::Media)?.as_micros();
+        path_rate::observe(
+            self.path,
+            self.bitrate.as_deref_mut(),
+            q.path_load(),
+            current,
+        )
+        .map_err(bitrate_error)
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
         self.check().map_err(|_| ())?;

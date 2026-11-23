@@ -48,6 +48,8 @@ pub(super) async fn replace(
     if let Some(acquisition) = acquisition.as_deref_mut() {
         acquisition.begin_recovery(&session.opened.transport, &media, until)?;
     }
+    let configuration = host.stream.capture_configuration();
+    let policy = host.stream.policy;
     let mut waiting = Waiting {
         control: &control,
         until,
@@ -62,9 +64,9 @@ pub(super) async fn replace(
         .map_err(|()| Error::Order)?,
         repair: host.stream.sender.stream_repair_route(),
         other,
+        path: &mut host.stream.path,
+        bitrate: host.stream.bitrate.as_mut(),
     };
-    let configuration = host.stream.capture_configuration();
-    let policy = host.stream.policy;
     waiting.check()?;
     let mut tickets = [Ticket(0); 3];
     for value in &mut tickets {
@@ -133,10 +135,9 @@ pub(super) async fn replace(
     // The normal sender may have lost capture credit with a measured cut still
     // pending. Carry that same decision on this already-scheduled recovery IDR;
     // neither its bitrate token nor its native request renews recovery allowance.
-    let rate_capture = host
-        .stream
+    let rate_capture = waiting
         .bitrate
-        .as_mut()
+        .as_deref_mut()
         .map(fr_media::bitrate::Controller::begin_capture)
         .transpose()
         .map_err(bitrate_error)?;
@@ -165,7 +166,7 @@ pub(super) async fn replace(
     // A validated native effect survives even if the original failure budget
     // expires before decoder admission. Old-rate replies acknowledge deferral.
     match (
-        &mut host.stream.bitrate,
+        waiting.bitrate.as_deref_mut(),
         rate_capture,
         update.applied_bitrate(),
     ) {

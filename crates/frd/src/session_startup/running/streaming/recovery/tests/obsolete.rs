@@ -439,6 +439,8 @@ fn exercise(reports_selected: bool) {
             .unwrap(),
             repair: records.repair,
             other: &mut other,
+            path: &mut host.stream.path,
+            bitrate: host.stream.bitrate.as_mut(),
         };
         let replacement = media
             .begin_replacement(

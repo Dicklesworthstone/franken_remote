@@ -5,6 +5,7 @@
 pub(super) mod acquisition;
 mod cursor;
 pub(in crate::session_startup) mod files;
+mod path_rate;
 mod recovery;
 mod send_evidence;
 use super::{ControlledHost, Error, HostSession, Services, now};
@@ -899,6 +900,18 @@ struct VideoServices<'a, S> {
     other: &'a mut S,
 }
 impl<S> VideoServices<'_, S> {
+    /// Sampling continues while a failed reference waits for recovery, using
+    /// this same connection and rate owner. It never starts a capture.
+    fn observe_path(&mut self, q: &QuicRecords, current: u64) -> Result<(), Error> {
+        path_rate::observe(
+            self.path,
+            self.bitrate.as_deref_mut(),
+            q.path_load(),
+            current,
+        )
+        .map_err(bitrate_error)
+    }
+
     fn checking_input_target(&self) -> bool {
         self.native_target_check
             .as_ref()
@@ -1167,14 +1180,9 @@ impl<S: Services> Services for VideoServices<'_, S> {
         // A capture, input-woken or not, waits while the viewer's path holds a
         // queue: on a link slower than the encoder, pictures would otherwise
         // queue until the session's own records expire behind them (fr-7al9).
-        self.path.observe(q.path_load(), current);
         // Below about half the encoder's rate skipping is not enough: a queue
         // the path keeps holding lowers the rate toward what it delivers.
-        if let Some(bitrate) = &mut self.bitrate {
-            bitrate
-                .observe_path_evidence(current, self.path.evidence(current))
-                .map_err(bitrate_error)?;
-        }
+        self.observe_path(q, current)?;
         let credit = self.sender.stream_credit(self.capacity);
         let interval = self.capture_interval(current, credit, observation)?;
         let wake = self.input_wake.due(

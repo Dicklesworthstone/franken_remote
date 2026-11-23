@@ -842,3 +842,30 @@ instead of a 2 Mbit/s reduction. The corrected canonical suite passes 27 tests,
 including deferred/in-flight cancellation, idle, stale evidence, late effects
 and preserved cooldowns (bead `fr-10bq`). These are deterministic production-policy
 tests, not a new hardware or impaired-tailnet performance measurement.
+
+
+## Continue bitrate adaptation during recovery (2026-11-22)
+
+The live native streaming owner keeps its original transport path tracker and
+encoder bitrate controller active while a failed reference waits for recovery.
+The first failed-reference maintenance turn, subsequent failure waiting,
+replacement-channel attachment, native IDR work and decoder startup all sample
+the same bounded path evidence after the existing permission and deadline checks.
+Previously these waits could stop the evidence needed to propose a smaller
+recovery picture, even while the connection continued to report congestion.
+
+A rate decision still uses the existing floor, configured ceiling, pressure
+dwell and change cooldown. It travels on the already scheduled capture credit;
+no extra capture, fresh recovery budget or input authority is created. A capture
+already in progress keeps its original token, and a native rate change remains
+unconfirmed until the original result supplies a valid IDR. Idle or unknown
+path evidence cannot justify an increase and withdraws an unsent optimistic
+probe. Sampling cannot make a stale picture fresh.
+
+Validation: 43 tests compiling the production path tracker, path-activity
+telemetry and bitrate policy passed, including five new recovery-sampling
+regressions. Three additional real TLS/UDP service regressions exercise the
+actual recovery wait and its permission/deadline fences; they await the full
+`frd` build. This is source/policy evidence, not a measured lossy-link operating
+point or hardware throughput qualification. Plan §§12.3 and 13.3–13.4; tracking
+`fr-e3jn`, related to `fr-xfvs` and `fr-7al9`.

@@ -72,6 +72,7 @@ fn early_failure(failure: Failure) {
         control.check().unwrap();
         let routes = session.opened.routes;
         let mut permission = Permission(!matches!(failure, Failure::Permission));
+        let mut path = crate::media::shared_publisher::path_queue::PathQueue::default();
         let mut waiting = Waiting {
             control: &control,
             until: now(&h).unwrap()
@@ -84,6 +85,8 @@ fn early_failure(failure: Failure) {
             obsolete: obsolete(&session),
             repair: Route::Stream(routes.inbound),
             other: &mut permission,
+            path: &mut path,
+            bitrate: None,
         };
         let dropped = Rc::new(Cell::new(None));
         let polls = Rc::new(Cell::new(0));
@@ -148,6 +151,7 @@ fn cancelling_an_in_flight_handoff_fences_before_the_native_future_is_dropped() 
         let control = session.observation().unwrap();
         let routes = session.opened.routes;
         let mut permission = Permission(true);
+        let mut path = crate::media::shared_publisher::path_queue::PathQueue::default();
         let mut waiting = Waiting {
             control: &control,
             until: now(&h).unwrap() + 2_000_000,
@@ -155,6 +159,8 @@ fn cancelling_an_in_flight_handoff_fences_before_the_native_future_is_dropped() 
             obsolete: obsolete(&session),
             repair: Route::Stream(routes.inbound),
             other: &mut permission,
+            path: &mut path,
+            bitrate: None,
         };
         let dropped = Rc::new(Cell::new(None));
         let polls = Rc::new(Cell::new(0));
@@ -193,6 +199,86 @@ fn cancelling_an_in_flight_handoff_fences_before_the_native_future_is_dropped() 
         viewer.close();
     });
 }
+
+fn recovery_path_service(allowed: bool, expired: bool) {
+    run(move |c, h| async move {
+        let (mut session, mut viewer) = pair_initialized(&c, &h, vec![], |_| {}).await;
+        let control = session.observation().unwrap();
+        let current = now(&h).unwrap();
+        let routes = session.opened.routes;
+        let mut permission = Permission(allowed);
+        let mut path = crate::media::shared_publisher::path_queue::PathQueue::default();
+        let mut bitrate = fr_media::bitrate::Controller::new(2_000_000).unwrap();
+        // Seed the old path's congested observation, then service the actual
+        // unchanged TLS/UDP owner's current snapshot. No I/O occurs between
+        // reading the low RTT here and Waiting's ordinary sampling below.
+        let low = session
+            .opened
+            .transport
+            .path_load()
+            .map_or(5_000, |load| load.latest_rtt_us);
+        let mut old = fr_transport::quic::PathLoad {
+            latest_rtt_us: low,
+            smoothed_rtt_us: low,
+            rtt_variation_us: 1,
+            bytes_in_flight: 24_000,
+            packets_acked: 0,
+            busy_packets_acked: 0,
+            busy_acked_at_us: None,
+        };
+        path.observe(Some(old), current);
+        old.latest_rtt_us += 200_000;
+        old.smoothed_rtt_us = old.latest_rtt_us;
+        old.packets_acked = 1;
+        path.observe(Some(old), current);
+        assert!(path.queued());
+        let mut waiting = Waiting {
+            control: &control,
+            until: if expired {
+                current
+            } else {
+                current + 2_000_000
+            },
+            routes,
+            obsolete: obsolete(&session),
+            repair: Route::Stream(routes.inbound),
+            other: &mut permission,
+            path: &mut path,
+            bitrate: Some(&mut bitrate),
+        };
+        let result = waiting.maintain(&mut session.opened.transport, &mut || Ok(100));
+        assert_eq!(
+            result,
+            if expired {
+                Err(Error::Expired)
+            } else if allowed {
+                Ok(())
+            } else {
+                Err(Error::Authority)
+            }
+        );
+        assert_eq!(waiting.path.queued(), expired || !allowed);
+        assert!(waiting.bitrate.as_ref().unwrap().pending().is_none());
+        session.close();
+        viewer.close();
+    });
+}
+
+#[test]
+fn an_authorized_recovery_wait_samples_its_original_live_path() {
+    recovery_path_service(true, false);
+}
+
+#[test]
+fn recovery_path_sampling_stops_at_permission_refusal() {
+    recovery_path_service(false, false);
+}
+
+#[test]
+fn recovery_path_sampling_stops_at_the_original_deadline() {
+    recovery_path_service(true, true);
+}
+
 /// An observation session's recovery: no control acquisition to service.
 /// The `Result` is the callback's required signature.
 #[allow(clippy::unnecessary_wraps)]
