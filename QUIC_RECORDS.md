@@ -444,3 +444,23 @@ sequences, reordered/duplicate motion, expiry, retirement and fixed byte bounds.
 The localhost UDP/TLS regressions exercise both readiness and handler
 backpressure while unrelated audio/video records progress. These are source
 regressions; native input and physical-path qualification remain separate.
+
+## Video admission at the congestion-window floor
+
+The native DATAGRAM owner charges one maximum protected packet for each queued
+datagram. It reserves an additional packet only while this original connection
+has reliable application records or native STREAM frames waiting to send. This
+keeps room for both critical and bulk reliable traffic without permanently
+withholding an empty packet from a video-only flight. At the two-packet loss
+floor, both video slots can therefore be used when no reliable work is pending.
+Already-transmitted reliable bytes remain charged by the native congestion
+controller; waiting for their acknowledgement does not reserve a second empty
+slot. Critical records admitted after video still stage first.
+
+The 128-datagram queue ceiling, packet-size bound, authority checks, original
+send expiry and native congestion/pacing checks are unchanged. Helper regressions
+cover partial windows, real reliable-work reservations and overflow-adjacent
+arithmetic. The UDP/TLS regressions use the original sender's actual opening
+window and cover complete admission, priority, expired sends and prepared-record
+refusal. These checks do not establish improved throughput on an impaired path;
+the wider `fr-xfvs` qualification remains open.

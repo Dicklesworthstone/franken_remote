@@ -53,6 +53,9 @@ macro_rules! run_test {
 #[path = "native_quic/reconciliation.rs"]
 mod reconciliation;
 
+#[path = "native_quic/datagram_window.rs"]
+mod datagram_window;
+
 #[test]
 fn authenticated_stream_reassembles_large_record_and_coalesced_records() {
     run_test!(cx, {

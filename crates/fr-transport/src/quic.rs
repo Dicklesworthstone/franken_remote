@@ -940,7 +940,15 @@ impl QuicRecords {
                 let available = path
                     .congestion_window_bytes
                     .saturating_sub(path.bytes_in_flight);
-                if queued >= MAX_QUEUED_DATAGRAMS || available < (queued as u64 + 2) * 1200 {
+                // Reserve a packet for real reliable work, not an empty slot
+                // on every video flight. At the two-packet congestion floor
+                // the latter reduces video to stop-and-wait. Critical work
+                // admitted later still stages before queued DATAGRAMs.
+                let reliable_pending = !self.pending_writes.is_empty()
+                    || native.connection().inner().has_pending_stream_frames();
+                if queued >= MAX_QUEUED_DATAGRAMS
+                    || !send_window::datagram_fits(available, queued as u64, reliable_pending)
+                {
                     return Err(Error::Backpressure);
                 }
             }

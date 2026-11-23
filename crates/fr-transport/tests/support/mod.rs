@@ -206,6 +206,14 @@ pub struct Pair {
     pub video: DatagramRoute,
 }
 pub fn pair(cx: &Cx, policy: Policy) -> Pin<Box<impl Future<Output = Pair> + '_>> {
+    Box::pin(async move { pair_with_send_room(cx, policy).await.0 })
+}
+/// The real sender's opening congestion room, before any application send.
+/// This is a transport snapshot, not an assumed handshake/window constant.
+pub fn pair_with_send_room(
+    cx: &Cx,
+    policy: Policy,
+) -> Pin<Box<impl Future<Output = (Pair, u64)> + '_>> {
     Box::pin(async move {
         let (c, s) = native_pair(cx, "localhost", ALPN).await;
         let (mut c, mut s) = (c.unwrap(), s.unwrap());
@@ -258,13 +266,20 @@ pub fn pair(cx: &Cx, policy: Policy) -> Pin<Box<impl Future<Output = Pair> + '_>
             policy,
         )
         .unwrap();
+        let path = s.connection().path_stats();
+        let room = path
+            .congestion_window_bytes
+            .saturating_sub(path.bytes_in_flight);
         let server = QuicRecords::new(s, cx, &routes, &[video], policy).unwrap();
-        Pair {
-            client,
-            server,
-            host_routes: routes,
-            video,
-        }
+        (
+            Pair {
+                client,
+                server,
+                host_routes: routes,
+                video,
+            },
+            room,
+        )
     })
 }
 pub fn drive<'a>(cx: &'a Cx, pair: &'a mut Pair) -> Pin<Box<impl Future<Output = ()> + 'a>> {
