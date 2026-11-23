@@ -482,7 +482,7 @@ impl Summary {
     /// not replace already-retained file receipts or cleanup evidence.
     #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
     pub(crate) fn preserve(&self, failure: &mut Failure) {
-        if self.requested == 0
+        if (self.requested == 0 && self.absence == Some("not_requested"))
             || failure
                 .control_history
                 .is_some_and(|history| history.json.contains(",\"files_requested\":"))
@@ -757,6 +757,22 @@ mod tests {
         });
         assert_eq!(refusal.code, "send_symlink");
         assert!(refusal.next.starts_with("--send #3 is a symbolic link"));
+    }
+
+    #[test]
+    fn opted_in_empty_upload_retains_its_original_terminal_state() {
+        let mut failure = Failure::new("host_not_heard", "Inspect the original attempt.", 1);
+        Summary::not_requested().preserve(&mut failure);
+        assert!(failure.control_history.is_none());
+        Summary::unavailable(&[], "files_not_started").preserve(&mut failure);
+        let output: serde_json::Value =
+            serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+        assert_eq!(output["files_requested"], 0);
+        assert_eq!(output["files_absence"], "files_not_started");
+        assert_eq!(output["files_sent"], serde_json::json!([]));
+        let original = failure.control_history;
+        Summary::unavailable(&[], "host_files_unavailable").preserve(&mut failure);
+        assert_eq!(failure.control_history, original);
     }
 
     #[test]

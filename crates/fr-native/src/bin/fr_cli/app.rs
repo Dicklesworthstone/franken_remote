@@ -46,6 +46,8 @@ mod receive_tests;
 #[cfg(test)]
 #[path = "app/receiving_tests.rs"]
 mod receiving_tests;
+#[path = "app/upload_completion.rs"]
+mod upload_completion;
 
 const USAGE: &str = "fr app [--probe] [--port PORT] [--receive DIR [RECEIVE_OPTIONS]] | --install | --uninstall\n\n\
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
@@ -664,21 +666,48 @@ fn session_notice(report: Option<Report>, name: &str, success: bool) -> Result<S
     }
 }
 
-/// The viewer process and its receive disk owner each owe terminal evidence.
-/// Validate both before another picker or viewer can start.
+#[cfg(test)]
 fn session_notice_checked(
     stdout: &CompletionCapture,
     name: &str,
     success: bool,
     receive_expected: bool,
 ) -> Result<String, Failure> {
+    session_notice_with_transfers(stdout, name, success, false, receive_expected)
+}
+
+/// The viewer, upload sources and receive disk owner each owe terminal evidence.
+/// Validate every owner before another picker or viewer can start.
+fn session_notice_with_transfers(
+    stdout: &CompletionCapture,
+    name: &str,
+    success: bool,
+    upload_expected: bool,
+    receive_expected: bool,
+) -> Result<String, Failure> {
     let report = last_report(stdout);
-    let receive = receive_completion::inspect(stdout, receive_expected, report.as_ref())?;
-    let notice = session_notice(report, name, success).map_err(|mut failure| {
-        receive.preserve(&mut failure);
+    // Inspect both directions even if either fails. Their original committed
+    // effects survive independently; an upload failure must not erase a known
+    // download, and a receiver failure must not erase host publication proof.
+    let upload = upload_completion::inspect(stdout, upload_expected, report.as_ref());
+    let receive = receive_completion::inspect(stdout, receive_expected, report.as_ref());
+    let upload = upload.map_err(|mut failure| {
+        match &receive {
+            Ok(receive) => receive.preserve(&mut failure),
+            Err(receive) => failure.files_receive = receive.files_receive,
+        }
         failure
     })?;
-    Ok(receive.with_session_notice(notice))
+    let receive = receive.map_err(|mut failure| {
+        upload.preserve(&mut failure);
+        failure
+    })?;
+    let notice = session_notice(report, name, success).map_err(|mut failure| {
+        receive.preserve(&mut failure);
+        upload.preserve(&mut failure);
+        failure
+    })?;
+    Ok(upload.with_session_notice(receive.with_session_notice(notice)))
 }
 
 fn refuse_uncertain_report(report: Option<&Report>) -> Result<(), Failure> {
@@ -912,10 +941,11 @@ fn application(
             receive_files,
         )?;
         let session = launcher.run(&arguments, true)?;
-        notice = Some(session_notice_checked(
+        notice = Some(session_notice_with_transfers(
             &session.stdout,
             short_name(&name),
             session.status.success(),
+            send_files,
             receive_expected,
         )?);
     }

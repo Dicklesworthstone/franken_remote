@@ -162,6 +162,18 @@ you explicitly drop files into the connected viewer. Host support and transfer
 policy still apply. Reconnects do not replay a selection or restore the old
 controller's file-transfer authority.
 
+After a file-sending session, the app carries the original host-publication
+receipts into the next picker. The notice distinguishes files published by the
+host, selections that were not published, and publication with unconfirmed
+durability. Locally queued bytes and cancellation requests are not publication
+proof. Unknown publication, contradictory or incomplete receipt history, or an
+explicitly pending/failed upload-source cleanup stops the app before another
+viewer starts. Earlier known publications remain in its terminal JSON and text
+even if receiving or the viewer also fails. Aggregate drop histories keep the
+original viewer cleanup requirement; a single source's cleanup never certifies
+other batches. Nothing is resent automatically, and no file names or paths enter
+these notices.
+
 On macOS, choose **View and control**, then select **Receive files**. After
 confirming the host, the viewer opens a native folder chooser before remote
 lookup or connection. Choose one existing private local directory. Cancel or
