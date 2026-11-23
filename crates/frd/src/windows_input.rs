@@ -40,6 +40,16 @@ pub enum Sent {
     Partly,
 }
 
+/// Result of inserting one Unicode scalar's ordered down/up pairs. Keep the
+/// exact native prefix: an odd prefix leaves its final UTF-16 unit pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSent {
+    All,
+    /// Number of events inserted before failure, less than the requested count.
+    /// An impossible count is uncertain and retains every possible release.
+    Prefix(usize),
+}
+
 /// What the sink asks of Windows; [`System`] is the real one.
 pub trait Native {
     /// A fully prepared absolute move. Construction may query Windows; moving
@@ -54,7 +64,10 @@ pub trait Native {
     /// The focused window belongs to a process this one cannot send input to.
     fn foreground_outranks_us(&mut self) -> bool;
     fn key(&mut self, key: Key, down: bool) -> Sent;
-    fn text(&mut self, scalar: char) -> Sent;
+    fn text(&mut self, scalar: char) -> TextSent;
+    /// Release only the exact Unicode unit a preceding text operation may hold.
+    /// This must never insert a key-down or complete/replay the original text.
+    fn release_text_unit(&mut self, unit: u16) -> Sent;
     fn prepare_move_to(&mut self, point: DesktopPoint)
     -> Result<Self::PreparedMove, PlatformError>;
     fn move_to(&mut self, prepared: Self::PreparedMove) -> Sent;
@@ -95,6 +108,9 @@ pub struct WindowsInput<N: Native> {
     /// happened counts as held until a release is confirmed.
     keys: [bool; 256],
     buttons: [bool; 5],
+    /// Unicode `SendInput` can stop between a unit's key-down and key-up. These
+    /// native-only obligations are independent of the core's scalar receipts.
+    text_units: [Option<u16>; 2],
     /// Where this owner last placed the pointer; presses and wheel turns act
     /// there. `None`: the real pointer, which must be on the display.
     position: Option<DesktopPoint>,
@@ -121,6 +137,7 @@ impl<N: Native> WindowsInput<N> {
             bounds,
             keys: [false; 256],
             buttons: [false; 5],
+            text_units: [None; 2],
             position: None,
             prepared: None,
             prepared_move: None,
@@ -128,7 +145,9 @@ impl<N: Native> WindowsInput<N> {
     }
 
     fn holding(&self) -> bool {
-        self.keys.contains(&true) || self.buttons.contains(&true)
+        self.keys.contains(&true)
+            || self.buttons.contains(&true)
+            || self.text_units.iter().any(Option::is_some)
     }
 
     /// Where a press or wheel turn acts; refused off the bound display.
@@ -145,6 +164,12 @@ impl<N: Native> WindowsInput<N> {
     }
 
     fn check(&mut self, op: Operation) -> Result<(), PlatformError> {
+        // Core input already ends on an uncertain scalar effect. Keep the
+        // native owner fail-closed too until every possible Unicode press has
+        // a confirmed release; preparation cannot overwrite that custody.
+        if self.text_units.iter().any(Option::is_some) && !op.is_release() {
+            return Err(PlatformError::Permission);
+        }
         match op {
             Operation::Key { key, transition } => {
                 native_key(key.usage()).ok_or(PlatformError::Unsupported)?;
@@ -266,7 +291,7 @@ impl<N: Native> WindowsInput<N> {
                 };
                 self.native.scroll(horizontal, vertical)
             }
-            Operation::Text(scalar) => self.native.text(scalar),
+            Operation::Text(scalar) => return self.send_text(scalar),
             _ => return Submission::NotSubmitted(PlatformError::Unsupported),
         };
         match sent {
@@ -276,11 +301,49 @@ impl<N: Native> WindowsInput<N> {
         }
     }
 
+    fn send_text(&mut self, scalar: char) -> Submission {
+        let mut units = [0; 2];
+        let units = scalar.encode_utf16(&mut units);
+        // Track before entering native code. A panic or impossible receipt
+        // cannot erase a possible press, even for the second surrogate unit.
+        for (slot, unit) in self.text_units.iter_mut().zip(units.iter()) {
+            *slot = Some(*unit);
+        }
+        match self.native.text(scalar) {
+            TextSent::All => {
+                self.text_units = [None; 2];
+                Submission::Submitted
+            }
+            TextSent::Prefix(0) => {
+                self.text_units = [None; 2];
+                Submission::NotSubmitted(PlatformError::Unavailable)
+            }
+            TextSent::Prefix(inserted) if inserted < units.len() * 2 => {
+                self.text_units = [None; 2];
+                if inserted % 2 != 0 {
+                    let index = inserted / 2;
+                    self.text_units[index] = Some(units[index]);
+                }
+                // A partial surrogate is not a completed scalar. Its effects
+                // remain unknown even when every inserted key-up completed.
+                Submission::Unknown
+            }
+            TextSent::Prefix(_) => Submission::Unknown,
+        }
+    }
+
     /// Release every key and button this owner holds. True when nothing is
     /// left held; false means a release was not confirmed.
     pub fn native_cleanup(&mut self) -> bool {
         self.prepared = None;
         self.prepared_move = None;
+        for index in 0..self.text_units.len() {
+            if let Some(unit) = self.text_units[index]
+                && self.native.release_text_unit(unit) == Sent::All
+            {
+                self.text_units[index] = None;
+            }
+        }
         for usage in 0..self.keys.len() {
             if self.keys[usage]
                 && let Some(key) = u16::try_from(usage).ok().and_then(native_key)
@@ -399,8 +462,14 @@ impl Native for System {
         };
         Self::sent(fr_winsys::input::key(key, down))
     }
-    fn text(&mut self, scalar: char) -> Sent {
-        Self::sent(fr_winsys::input::text(scalar))
+    fn text(&mut self, scalar: char) -> TextSent {
+        match fr_winsys::input::text(scalar) {
+            Ok(()) => TextSent::All,
+            Err(failure) => TextSent::Prefix(failure.inserted),
+        }
+    }
+    fn release_text_unit(&mut self, unit: u16) -> Sent {
+        Self::sent(fr_winsys::input::release_text_unit(unit))
     }
     fn prepare_move_to(
         &mut self,

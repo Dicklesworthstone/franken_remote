@@ -345,3 +345,32 @@ Formerly claimed test coverage (`crates/frd/tests/windows_host_adapter_test.rs`)
 - `test_dxgi_rotation_coordinates_mapping`: Verifies 90° and 180° rotation mapping.
 - `test_windows_qualification_matrix_coverage`: Verifies build classification and curated qualification table rows.
 - `test_send_input_keyboard_and_wheel_events`: Verifies scancode and `WHEEL_DELTA` translation.
+
+
+## Partial Unicode submission and retained cleanup (2026-11-22)
+
+The Windows input owner now retains the UTF-16 key-release obligations of an
+original committed-text submission. `SendInput` can accept only a prefix of the
+BMP or surrogate-pair event batch. Its exact inserted-event count identifies an
+unmatched Unicode key-down; an invalid count or unwind retains both possible
+units conservatively. Partial scalar effects remain unknown even when the
+inserted prefix contains complete key-down/key-up pairs. Earlier completed
+scalars keep their existing receipts and are never replayed.
+
+Cancellation and lease teardown submit only `KEYEVENTF_UNICODE | KEYEVENTF_KEYUP`
+for retained units. A failed or uncertain release remains owned for the next
+cleanup attempt, and `native_cleanup` cannot report success or make the seat
+available while any such obligation remains. Cleanup does not authorize another
+character press or erase an uncertain text effect. Text and wheel batches use
+fixed-size storage, avoiding heap allocation between the final authority check
+and native submission.
+
+Validation: 19 tests compiling the actual Windows input owner and `fr-core`
+passed, including the regression that failed against the original implementation,
+BMP and surrogate prefixes, uncertain native results, release retries,
+submission-time refusal and completed-scalar deduplication. The native record
+test checks release-only flags separately. These checks establish Rust policy
+and event construction, not Windows desktop execution, UIPI behavior or
+application-observed text. Native Windows qualification remains open.
+
+Plan §§7.3 and 15.1; tracking `fr-y8c4`.

@@ -3,12 +3,13 @@
 //! (that is the live check on a Windows host).
 use super::*;
 use fr_core::input::PhysicalKey;
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Call {
     Key(Key, bool),
     Text(char),
+    TextRelease(u16),
     Move(DesktopPoint),
     Button(PointerButton, bool),
     Scroll(i32, i32),
@@ -20,6 +21,8 @@ struct Fake {
     default_desktop: bool,
     elevated_foreground: bool,
     result: Sent,
+    text_results: VecDeque<TextSent>,
+    text_panics: bool,
     calls: Rc<RefCell<Vec<Call>>>,
     move_preparation: Option<Box<dyn FnMut() -> Result<(), PlatformError>>>,
 }
@@ -41,8 +44,20 @@ impl Native for Fake {
     fn key(&mut self, key: Key, down: bool) -> Sent {
         self.record(Call::Key(key, down))
     }
-    fn text(&mut self, scalar: char) -> Sent {
-        self.record(Call::Text(scalar))
+    fn text(&mut self, scalar: char) -> TextSent {
+        self.record(Call::Text(scalar));
+        assert!(
+            !self.text_panics,
+            "native text panicked after possible insertion"
+        );
+        self.text_results.pop_front().unwrap_or(match self.result {
+            Sent::All => TextSent::All,
+            Sent::Nothing => TextSent::Prefix(0),
+            Sent::Partly => TextSent::Prefix(1),
+        })
+    }
+    fn release_text_unit(&mut self, unit: u16) -> Sent {
+        self.record(Call::TextRelease(unit))
     }
     fn prepare_move_to(&mut self, point: DesktopPoint) -> Result<DesktopPoint, PlatformError> {
         if let Some(prepare) = &mut self.move_preparation {
@@ -94,6 +109,8 @@ impl Harness {
             default_desktop: true,
             elevated_foreground: false,
             result: Sent::All,
+            text_results: VecDeque::new(),
+            text_panics: false,
             calls: calls.clone(),
             move_preparation: None,
         };
@@ -140,6 +157,8 @@ fn a_lease_binds_only_an_exact_display_and_implemented_operations() {
                 default_desktop: true,
                 elevated_foreground: false,
                 result: Sent::All,
+                text_results: VecDeque::new(),
+                text_panics: false,
                 calls: h.calls.clone(),
                 move_preparation: None,
             },
@@ -445,6 +464,196 @@ fn uncertain_presses_stay_held_for_cleanup_and_failed_ones_do_not() {
     assert_eq!(h.taken().len(), 2);
     assert!(h.sink.native_cleanup());
     assert_eq!(h.taken(), []);
+}
+
+#[test]
+fn uncertain_unicode_input_keeps_native_cleanup_incomplete() {
+    let mut h = Harness::new();
+    h.fake().result = Sent::Partly;
+    assert_eq!(h.run(Operation::Text('😀')), Ok(Submission::Unknown));
+    h.taken();
+    // A failed Unicode batch may have inserted a key-down without its key-up.
+    // The core tracks scalar effects, so native custody must retain that release.
+    assert!(!h.sink.native_cleanup());
+}
+
+#[test]
+fn every_unicode_prefix_retains_only_its_unmatched_key_up() {
+    for scalar in ['é', '😀'] {
+        let mut units = [0; 2];
+        let units = scalar.encode_utf16(&mut units);
+        let total = units.len() * 2;
+        for inserted in 0..=total {
+            let mut h = Harness::new();
+            h.fake().text_results.push_back(if inserted == total {
+                TextSent::All
+            } else {
+                TextSent::Prefix(inserted)
+            });
+            let expected = if inserted == total {
+                Submission::Submitted
+            } else if inserted == 0 {
+                Submission::NotSubmitted(PlatformError::Unavailable)
+            } else {
+                Submission::Unknown
+            };
+            assert_eq!(h.run(Operation::Text(scalar)), Ok(expected));
+            assert_eq!(h.taken(), [Call::Text(scalar)]);
+            assert!(h.sink.native_cleanup());
+            let releases = if inserted % 2 == 0 {
+                vec![]
+            } else {
+                vec![Call::TextRelease(units[inserted / 2])]
+            };
+            assert_eq!(h.taken(), releases);
+            assert!(h.sink.native_cleanup());
+            assert_eq!(h.taken(), [], "confirmed releases are never repeated");
+        }
+    }
+}
+
+#[test]
+fn failed_unicode_cleanup_retains_custody_and_never_replays_text() {
+    for (prefix, pending_unit) in [(1, 0xD83D), (3, 0xDE00)] {
+        let mut h = Harness::new();
+        h.fake().text_results.push_back(TextSent::Prefix(prefix));
+        assert_eq!(h.run(Operation::Text('😀')), Ok(Submission::Unknown));
+        h.taken();
+        for failure in [Sent::Nothing, Sent::Partly] {
+            h.fake().result = failure;
+            assert!(!h.sink.native_cleanup());
+            assert_eq!(h.taken(), [Call::TextRelease(pending_unit)]);
+            // Neither native cancellation nor another preparation can discard
+            // an inserted unit or turn it into fresh positive input.
+            h.sink.cancel_prepared();
+            for operation in [
+                Operation::Text('x'),
+                key(A, KeyTransition::Press),
+                button(true),
+                Operation::Absolute(point(5, 5)),
+            ] {
+                assert_eq!(h.run(operation), Err(PlatformError::Permission));
+            }
+            assert_eq!(h.taken(), []);
+        }
+        // Loss of the ordinary desktop, the display or access to foreground
+        // input cannot suppress release-only cleanup.
+        h.fake().default_desktop = false;
+        h.fake().elevated_foreground = true;
+        h.fake().displays.clear();
+        h.fake().result = Sent::All;
+        assert!(h.sink.native_cleanup());
+        assert_eq!(h.taken(), [Call::TextRelease(pending_unit)]);
+        assert!(h.sink.native_cleanup());
+        assert_eq!(h.taken(), []);
+    }
+}
+
+#[test]
+fn an_invalid_native_text_count_keeps_every_possible_unit_for_cleanup() {
+    for scalar in ['é', '😀'] {
+        for count in [scalar.len_utf16() * 2, usize::MAX] {
+            let mut h = Harness::new();
+            h.fake().text_results.push_back(TextSent::Prefix(count));
+            assert_eq!(h.run(Operation::Text(scalar)), Ok(Submission::Unknown));
+            h.taken();
+            assert!(h.sink.native_cleanup());
+            let expected: Vec<_> = scalar
+                .encode_utf16(&mut [0; 2])
+                .iter()
+                .map(|&unit| Call::TextRelease(unit))
+                .collect();
+            assert_eq!(h.taken(), expected);
+        }
+    }
+}
+
+#[test]
+fn a_native_text_unwind_keeps_release_custody_before_drop() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let mut h = Harness::new();
+    h.fake().text_panics = true;
+    assert!(catch_unwind(AssertUnwindSafe(|| h.run(Operation::Text('😀')))).is_err());
+    assert_eq!(h.taken(), [Call::Text('😀')]);
+    h.sink.cancel_prepared();
+    h.fake().result = Sent::Nothing;
+    assert!(!h.sink.native_cleanup());
+    assert_eq!(
+        h.taken(),
+        [Call::TextRelease(0xD83D), Call::TextRelease(0xDE00)]
+    );
+    h.fake().result = Sent::All;
+    let calls = h.calls.clone();
+    drop(h);
+    assert_eq!(
+        *calls.borrow(),
+        [Call::TextRelease(0xD83D), Call::TextRelease(0xDE00)]
+    );
+}
+
+#[test]
+fn text_refused_at_final_authorization_has_no_native_release_obligation() {
+    use fr_core::input_submission::Refusal;
+
+    for refusal in [Refusal::Revoked, Refusal::ExpiredAtBoundary] {
+        let mut h = Harness::new();
+        let operation = Operation::Text('😀');
+        h.sink.prepare(operation).unwrap();
+        assert_eq!(
+            h.sink.submit_authorized(operation, &mut || Err(refusal)),
+            Err(refusal)
+        );
+        h.sink.cancel_prepared();
+        assert!(h.sink.native_cleanup());
+        assert_eq!(h.taken(), []);
+    }
+}
+
+#[test]
+fn partial_unicode_preserves_completed_scalar_receipts_and_deduplicates() {
+    use fr_core::{
+        input::{InputEvent, InputRequest},
+        input_sequence::InputOutcome,
+        input_submission::{Dispatch, Refusal},
+        time::HostInstant,
+    };
+
+    let (mut owner, credentials) = input_owner();
+    let mut h = Harness::new();
+    h.fake()
+        .text_results
+        .extend([TextSent::All, TextSent::Prefix(3)]);
+    let request = InputRequest {
+        credentials,
+        sequence: 0,
+        event: InputEvent::Text("a😀z"),
+    };
+    let clock = || HostInstant::from_micros(100);
+    let dispatched = owner.dispatch(request, &mut h.sink, clock).unwrap();
+    let Dispatch::Completed(receipt) = dispatched else {
+        panic!("the partial scalar must retain its original result");
+    };
+    assert_eq!(receipt.outcome, InputOutcome::EffectUnknown);
+    assert_eq!(receipt.submitted_operations, 1);
+    assert_eq!(receipt.refusal, Some(Refusal::UnknownEffect));
+    assert_eq!(h.taken(), [Call::Text('a'), Call::Text('😀')]);
+    assert!(owner.monitor().is_revoked());
+    assert_eq!(
+        owner.dispatch(request, &mut h.sink, clock),
+        Ok(Dispatch::Completed(receipt))
+    );
+    assert_eq!(h.taken(), [], "a duplicate cannot replay either scalar");
+
+    let cleanup = owner.cleanup(&mut h.sink);
+    assert_eq!(cleanup.remaining, 0, "core owns no Unicode key-up");
+    h.fake().result = Sent::Nothing;
+    assert!(!h.sink.native_cleanup());
+    assert_eq!(h.taken(), [Call::TextRelease(0xDE00)]);
+    h.fake().result = Sent::All;
+    assert!(h.sink.native_cleanup());
+    assert_eq!(h.taken(), [Call::TextRelease(0xDE00)]);
+    assert_eq!(owner.retained_receipt(0), Some(receipt));
 }
 
 #[test]

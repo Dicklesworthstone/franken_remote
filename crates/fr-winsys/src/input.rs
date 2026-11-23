@@ -253,17 +253,36 @@ pub fn key(key: Key, down: bool) -> Result<(), NotInserted> {
     send(&[input])
 }
 
+fn text_inputs(scalar: char) -> ([INPUT; 4], usize) {
+    let mut units = [0_u16; 2];
+    let units = scalar.encode_utf16(&mut units);
+    let mut inputs = [INPUT::default(); 4];
+    for (index, &unit) in units.iter().enumerate() {
+        inputs[index * 2] = keyboard(0, unit, KEYEVENTF_UNICODE);
+        inputs[index * 2 + 1] = text_release(unit);
+    }
+    (inputs, units.len() * 2)
+}
+
+fn text_release(unit: u16) -> INPUT {
+    keyboard(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+}
+
 /// Type one Unicode scalar (one or two UTF-16 units, each pressed and
 /// released) without a physical key: what the layout cannot produce still
-/// arrives as that character.
+/// arrives as that character. A failed insertion retains its exact event
+/// prefix; callers must release an unmatched key-down without replaying text.
 pub fn text(scalar: char) -> Result<(), NotInserted> {
-    let mut units = [0_u16; 2];
-    let mut inputs = Vec::with_capacity(4);
-    for &unit in scalar.encode_utf16(&mut units).iter() {
-        inputs.push(keyboard(0, unit, KEYEVENTF_UNICODE));
-        inputs.push(keyboard(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-    }
-    send(&inputs)
+    let (inputs, count) = text_inputs(scalar);
+    // No allocation or native preparation between the caller's final input
+    // authorization and SendInput. The exact inserted prefix is retained.
+    send(&inputs[..count])
+}
+
+/// Release one UTF-16 unit whose Unicode key-down may have been inserted by a
+/// partial text batch. This is release-only cleanup, never text completion.
+pub fn release_text_unit(unit: u16) -> Result<(), NotInserted> {
+    send(&[text_release(unit)])
 }
 
 /// One absolute move whose display enumeration and coordinate conversion are
@@ -331,18 +350,21 @@ pub fn button(button: Button, down: bool) -> Result<(), NotInserted> {
 /// axis sends nothing.
 pub fn scroll(horizontal: i32, vertical: i32) -> Result<(), NotInserted> {
     // mouseData carries the signed delta in its bits.
-    let inputs: Vec<INPUT> = [
+    let mut inputs = [INPUT::default(); 2];
+    let mut count = 0;
+    for (delta, flags) in [
         (horizontal, MOUSEEVENTF_HWHEEL),
         (vertical, MOUSEEVENTF_WHEEL),
-    ]
-    .into_iter()
-    .filter(|&(delta, _)| delta != 0)
-    .map(|(delta, flags)| mouse(0, 0, delta.cast_unsigned(), flags))
-    .collect();
-    if inputs.is_empty() {
+    ] {
+        if delta != 0 {
+            inputs[count] = mouse(0, 0, delta.cast_unsigned(), flags);
+            count += 1;
+        }
+    }
+    if count == 0 {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    send(&inputs)
+    send(&inputs[..count])
 }
 
 /// Where the pointer is, in physical virtual-desktop pixels.
@@ -446,6 +468,39 @@ pub fn foreground_outranks_us() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_unicode(input: &INPUT, unit: u16, released: bool) {
+        assert_eq!(input.r#type, INPUT_KEYBOARD);
+        // SAFETY: the checked tag identifies the initialized keyboard union
+        // member constructed by the production Unicode record functions.
+        let keyboard = unsafe { input.Anonymous.ki };
+        assert_eq!(keyboard.wVk, VIRTUAL_KEY(0));
+        assert_eq!(keyboard.wScan, unit);
+        assert_eq!(
+            keyboard.dwFlags,
+            KEYEVENTF_UNICODE
+                | if released {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS::default()
+                }
+        );
+        assert_eq!(keyboard.time, 0);
+        assert_eq!(keyboard.dwExtraInfo, 0);
+    }
+
+    #[test]
+    fn unicode_batches_pair_each_exact_unit_and_cleanup_never_presses() {
+        for (scalar, units) in [('é', &[0x00E9][..]), ('😀', &[0xD83D, 0xDE00][..])] {
+            let (inputs, count) = text_inputs(scalar);
+            assert_eq!(count, units.len() * 2);
+            for (index, &unit) in units.iter().enumerate() {
+                check_unicode(&inputs[index * 2], unit, false);
+                check_unicode(&inputs[index * 2 + 1], unit, true);
+                check_unicode(&text_release(unit), unit, true);
+            }
+        }
+    }
 
     #[test]
     fn normalized_coordinates_land_on_the_requested_pixel() {
