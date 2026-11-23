@@ -625,6 +625,7 @@ impl QuicRecords {
             empty: EmptySendState(empty),
             bytes: 0,
             records: 0,
+            setup_records: 0,
             until: None,
             staged: VecDeque::new(),
         });
@@ -1367,6 +1368,10 @@ impl MediaChannel {
             }
             q.inbound[slot].route = inbound;
             q.inbound[slot].framing = framing;
+            // Promotion is one-use and requires every setup record to be
+            // staged. Their retransmission custody survives on this stream,
+            // but no application record has yet been admitted on the new route.
+            q.senders[sender].setup_records = q.senders[sender].records;
             q.senders[sender].route = outbound;
             if let Some(route) = datagram {
                 q.attachments[reservation].datagram_maximum =

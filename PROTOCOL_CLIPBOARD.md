@@ -310,12 +310,17 @@ controller's authorization while accepted bytes remain retained.
 The application bridge retains at most eight original record permits and one
 bounded worker handoff. This count does not enlarge the native 128-KiB clipboard
 byte allowance: at most seven full 16-KiB chunks, including their headers, fit
-at once. The original lane's checked retained-record count releases only the
-fully acknowledged prefix of permits. Later records can remain in flight while
+at once. The checked count of retained application records on the original lane
+releases only the fully acknowledged prefix of permits. Later records can remain in flight while
 the producer refills freed slots. Enqueue and partial transmission release
 nothing, and an expired, foreign or closed lane cannot supply acknowledgement
-credit. The bridge begins with an empty lane and refuses impossible increases
-in retained-record accounting. Every retry retains the
+credit. The bridge begins with an empty application flight and refuses impossible
+increases in its retained-record accounting. The original attachment exchange
+may still lead the same stream: transport captures that setup prefix once at
+authenticated route promotion and keeps its full byte/count charges and original
+delivery deadlines until acknowledgement or retirement. Setup records consume
+no clipboard egress permits; their acknowledgement cannot release a later
+application permit. Every retry retains the
 original operation deadline; expiry retires this optional lane while control
 keeps its independent lifecycle. A newer local copy can discard an exclusively
 local unsent record, but records already accepted by transport keep their

@@ -1,5 +1,57 @@
 # Implementation status
 
+## Video send capacity, transfer refill and Linux upload choice (2026-11-23)
+
+Native QUIC video admission now reserves a packet for actual pending reliable
+work, rather than always withholding an empty packet. This makes both slots of
+the minimum congestion window usable when video is the only pending work.
+Native congestion control and pacing, critical-first scheduling, original
+deadlines and the 128-datagram bound remain authoritative. No impaired-path
+throughput improvement is claimed without a measurement.
+
+File and clipboard producers now release the exact fully acknowledged prefix
+of their bounded flights, allowing new records while later records are still
+retained. File maintenance reconciles acknowledged records before checking old
+permit expiry. The original absolute transfer lifetime, outstanding record
+deadlines and count/byte bounds remain in force; transport acknowledgement is
+not a file or clipboard publication receipt.
+
+Real clipboard regressions exposed an initial integration error: channel
+promotion can retain the original `Attached` record, which was incorrectly
+counted as preexisting application payload. The transport now captures this
+setup prefix once at authenticated promotion and retires it only on actual
+acknowledgement. It retains its original byte, count and deadline charges while
+being excluded from application flight credit. Both clipboard startup and host
+file downloads are covered; arbitrary preexisting application records still
+refuse an exclusive producer.
+
+Linux `fr connect --choose-files` now opens the installed FileChooser portal for
+one to eight initial upload files. It reuses the existing receiving-folder
+portal owner, with no new runtime, dependency, FFI surface or worker. The same
+exact service/request identity, original setup/choice/cleanup deadlines, local
+path validation and response-age limits apply. Receiving-directory pinning
+precedes upload selection, and selected sources are pinned before connection.
+Automation refuses interactive choice. See [CLI usage](docs/native-client-cli.md).
+
+The current transport passes all 116 unit tests and all 38 native UDP/TLS
+integration tests with the exact pinned compiler and byte-identical locked
+third-party build inputs. Focused tests using the current production libraries
+and actual UDP/TLS fixtures pass all five file flight, six clipboard batching
+and one host attachment regression (covering both download roles). Eight
+exact-source file-flight component tests also pass. The shared Linux portal and
+URI/drop suite passed 34 tests, including 22 real libsystemd/private-bus cases,
+and strict pedantic component Clippy; two later equivalent test assertion
+diagnostic changes passed Clippy but their binary rebuild hit ENOSPC.
+
+Whole-workspace formatting and scoped whitespace checks pass. Full Cargo
+check/test/Clippy qualification remains open: workspace attempts encountered
+disk exhaustion or compiler termination under shared resource limits. These
+component results do not establish a full native CLI build, graphical portal
+operation, live tailnet transfer, independent interoperability or WAN/hardware
+qualification. Plan §§11.2, 12.4, 15.3, 15.6, 16.1 and 19; tracking
+`fr-video-send-room-m13x`, `fr-transfer-ack-prefix-6xkv` and
+`fr-linux-upload-picker-cdg8`.
+
 ## File cancellation at receive publication boundaries (2026-11-23)
 
 The original disk worker now checks the runtime's published cancellation atomic

@@ -404,6 +404,10 @@ struct Sender {
     empty: EmptySendState,
     bytes: usize,
     records: usize,
+    /// Original attachment records still leading this stream. Captured only
+    /// when its authenticated handshake route is promoted, before payload
+    /// admission; included in every ordinary byte/count/deadline charge.
+    setup_records: usize,
     until: Option<u64>,
     staged: VecDeque<Staged>,
 }
@@ -539,6 +543,7 @@ impl QuicRecords {
                     empty: EmptySendState(s.clone()),
                     bytes: 0,
                     records: 0,
+                    setup_records: 0,
                     until: None,
                     staged: VecDeque::new(),
                 });
@@ -715,6 +720,7 @@ impl QuicRecords {
         for s in &mut self.senders {
             s.bytes = 0;
             s.records = 0;
+            s.setup_records = 0;
             s.until = None;
             s.staged.clear();
         }
@@ -1246,6 +1252,9 @@ impl QuicRecords {
             {
                 sender.bytes -= record.bytes;
                 sender.records -= 1;
+                // Setup is the proven original prefix, never an application
+                // permit. Both kinds retain custody until their actual ACK.
+                sender.setup_records = sender.setup_records.saturating_sub(1);
                 retired = true;
             }
             if retired {

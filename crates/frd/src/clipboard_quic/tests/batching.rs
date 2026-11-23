@@ -71,6 +71,53 @@ fn assert_chunk(f: &Fixture, bytes: &[u8], index: u32) {
 }
 
 #[test]
+fn original_attachment_custody_does_not_consume_a_clipboard_egress_permit() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        // Completion requires staging Attached, not its acknowledgement. The
+        // original transport keeps that setup record's bytes and deadline.
+        let before = f.link.h.usage();
+        assert!(before.retained_send_records > before.critical_send_records);
+        assert!(!f.bridge.lane.send_drained(&f.link.h).unwrap());
+        assert_eq!(f.bridge.lane.retained_send_records(&f.link.h), Ok(0));
+        assert_eq!(inflight(&f), 0);
+        assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Active));
+
+        let (_, until) = offer_text(&mut f, 700, "original application payload");
+        assert_eq!(f.pump(), Pump::RecordAccepted);
+        assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Active));
+        assert_eq!(f.bridge.lane.retained_send_records(&f.link.h), Ok(1));
+        assert_eq!(inflight(&f), 1);
+        let admitted = f.link.h.usage();
+        assert_eq!(
+            admitted.retained_send_records,
+            before.retained_send_records + 1
+        );
+        assert!(admitted.retained_send_upper_bound > before.retained_send_upper_bound);
+        retained_until(&f, until);
+
+        // A setup acknowledgement cannot retire this application permit.
+        // Only the actual payload prefix may change the bridge's ledger.
+        let limit = clock(&f.cx) + 1_000_000;
+        while !f.bridge.lane.send_drained(&f.link.h).unwrap() {
+            assert!(clock(&f.cx) < limit);
+            f.link.drive(&f.cx).await;
+            f.peer
+                .dispatch(&mut f.link.c, &f.cx, || true, |_| Ok(Disposition::Consumed))
+                .unwrap();
+            let application = f.bridge.lane.retained_send_records(&f.link.h).unwrap();
+            assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Active));
+            assert_eq!(inflight(&f), application);
+            retained_until(&f, until);
+        }
+        assert_eq!(inflight(&f), 0);
+        assert_eq!(channel(&mut f.seed).outgoing_deadline(), Some(until));
+        assert!(f.bridge.take_received().unwrap().is_none());
+        f.stop();
+    });
+}
+
+#[test]
 fn eight_records_keep_original_permits_until_the_actual_native_lane_drains() {
     runtime().block_on(async {
         let mut f = Fixture::with_bulk_records(true).await;

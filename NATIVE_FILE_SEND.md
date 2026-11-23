@@ -27,14 +27,23 @@ at most one record per turn, and the original one-chunk rate bucket is unchanged
 
 Every admitted offer, data chunk and completion record retains its original
 absolute deadline. Neither a later admission, partial acknowledgement, pause
-toggle nor starting another selected file releases its accounting. The original
-lane's checked retained-record count retires only fully acknowledged prefix
-records, so their slots can be refilled while later records remain in flight.
+toggle nor starting another selected file releases its accounting. The checked
+count of retained application records on the original lane retires only fully
+acknowledged prefix records, so their slots can be refilled while later records
+remain in flight.
 This reconciliation precedes local record-expiry checks: delayed owner service
 cannot expire an already acknowledged record. Every unacknowledged record keeps
 its original deadline and serialized-byte charge. A full flight starts no
 further source read, and transport backpressure retains the same single prepared
 packet. This does not add resume, retry or a new ATP profile.
+
+Completing an attachment requires staging its last setup record, not waiting
+for its acknowledgement. Transport captures that original setup prefix once
+when it promotes the authenticated route. Its full bytes, record count and
+original delivery deadlines remain charged in transport, but it consumes no
+file payload permits. This lets host download senders start with an empty
+application flight even while their original `Attached` record remains in
+native custody. Its acknowledgement never releases a later file permit.
 
 If a retained reliable file record expires between settled native I/O operations,
 the transport resets only its original completed file pair. It releases that

@@ -10,6 +10,8 @@ use fr_wire::{
 mod expiry;
 #[path = "files/peer_retirement.rs"]
 mod peer_retirement;
+#[path = "files/setup_records.rs"]
+mod setup_records;
 
 fn enable(l: &mut Link) {
     l.selection.role = Role::RequestControl;

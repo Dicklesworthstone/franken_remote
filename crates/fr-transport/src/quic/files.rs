@@ -176,17 +176,23 @@ impl FilesChannel {
             .map(|s| s.records == 0 && s.bytes == 0)
             .ok_or(Error::WrongRoute)
     }
-    /// Records still owned by this exact outbound lane, including queued and
-    /// partially staged records. The transport removes only a fully acknowledged
-    /// prefix; an exclusive sender can retire the same prefix of its permits
-    /// without waiting for later records. A reset, expired, closed or foreign
-    /// lane returns an error, never evidence of delivery or file publication.
+    /// Application records still owned by this exact outbound lane, including
+    /// queued and partially staged records. The original attachment prefix
+    /// remains charged to transport but consumes no file payload permit.
+    /// The transport removes only a fully acknowledged prefix; an exclusive
+    /// sender can retire the same prefix of its permits without waiting for
+    /// later records. A reset, expired, closed or foreign lane returns an error,
+    /// never evidence of delivery or file publication.
     pub fn retained_send_records(&self, q: &QuicRecords) -> Result<usize, Error> {
         self.check(q)?;
-        q.senders
+        let sender = q
+            .senders
             .iter()
             .find(|sender| sender.route == self.routes.outbound)
-            .map(|sender| sender.records)
+            .ok_or(Error::WrongRoute)?;
+        sender
+            .records
+            .checked_sub(sender.setup_records)
             .ok_or(Error::WrongRoute)
     }
     /// Queue once under the operation's original deadline, never a refreshed

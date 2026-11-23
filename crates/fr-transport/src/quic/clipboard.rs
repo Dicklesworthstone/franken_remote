@@ -198,17 +198,23 @@ impl ClipboardChannel {
             .map(|s| s.records == 0 && s.bytes == 0)
             .ok_or(Error::WrongRoute)
     }
-    /// Exact record custody on the original outbound lane. Only fully acknowledged
-    /// records leave the ordered prefix, so its exclusive producer can release
-    /// those permits while later records remain queued or unacknowledged.
-    /// Foreign, expired, reset and closed lanes fail the identity/lifetime
-    /// check; a zero count never proves native clipboard publication.
+    /// Exact application-record custody on the original outbound lane. The
+    /// original attachment prefix stays charged to transport, separately from
+    /// clipboard egress permits. Only fully acknowledged records leave the
+    /// ordered prefix, so its exclusive producer can release those permits
+    /// while later records remain queued or unacknowledged. Foreign, expired,
+    /// reset and closed lanes fail the identity/lifetime check; a zero count
+    /// never proves native clipboard publication or a fully drained stream.
     pub fn retained_send_records(&self, q: &QuicRecords) -> Result<usize, Error> {
         self.check(q)?;
-        q.senders
+        let sender = q
+            .senders
             .iter()
             .find(|sender| sender.route == self.routes.outbound)
-            .map(|sender| sender.records)
+            .ok_or(Error::WrongRoute)?;
+        sender
+            .records
+            .checked_sub(sender.setup_records)
             .ok_or(Error::WrongRoute)
     }
     /// Whole-record admission, not a partial socket write or publication receipt.

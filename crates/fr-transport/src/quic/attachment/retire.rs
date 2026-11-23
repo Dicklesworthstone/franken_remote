@@ -355,6 +355,7 @@ impl QuicRecords {
             if sender.route.stream == outbound {
                 sender.bytes = 0;
                 sender.records = 0;
+                sender.setup_records = 0;
                 sender.until = None;
                 sender.staged.clear();
             }
