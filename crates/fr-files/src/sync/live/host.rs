@@ -2,7 +2,7 @@
 use super::{
     ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, HostConfig, JobStatus, LiveError, MAX_SESSION_BYTES,
     MAX_SESSION_TRANSFERS,
-    scan::{PreparedRound, Scan, Version},
+    scan::{PreparedRound, Scan, ScanScope, Version},
     state,
 };
 use crate::{
@@ -224,6 +224,22 @@ impl HostJob {
             self.send_pending(sender, q, authorize, now)?;
             return Ok(());
         }
+        self.advance(sender, q, authorize, now)?;
+        if self.pending.is_some() {
+            self.send_pending(sender, q, authorize, now)?;
+        }
+        Ok(())
+    }
+
+    /// Advance only after the original scope checks and any retained state
+    /// record have completed. Newly queued state is sent by the enclosing turn.
+    fn advance(
+        &mut self,
+        sender: &mut Sender<'_>,
+        q: &mut QuicRecords,
+        authorize: &mut impl FnMut() -> bool,
+        now: u64,
+    ) -> Result<(), LiveError> {
         match self.step {
             Step::Advertise => {
                 self.queue(
@@ -246,54 +262,21 @@ impl HostJob {
                     &self.config,
                     self.status.state.manifest_revision,
                     self.ledger.clone(),
-                    self.cx.clone(),
-                    self.authority.clone(),
-                    self.permission.clone(),
-                    self.stopped.clone(),
-                    self.round_until,
+                    ScanScope {
+                        cx: self.cx.clone(),
+                        authority: self.authority.clone(),
+                        permission: self.permission.clone(),
+                        stopped: self.stopped.clone(),
+                        until: self.round_until,
+                    },
                 )?);
                 self.step = Step::Scanning;
             }
-            Step::Scanning => {
-                let scanned = self.scan.as_mut().ok_or(LiveError::WrongPhase)?.poll();
-                if scanned.is_err() {
-                    self.scan = None;
-                }
-                let Some(prepared) = scanned? else {
-                    return Ok(());
-                };
-                self.scan = None;
-                let count =
-                    u32::try_from(prepared.versions.len()).map_err(|_| LiveError::Resource)?;
-                if self
-                    .attempted_files
-                    .checked_add(count)
-                    .is_none_or(|n| n > MAX_SESSION_TRANSFERS)
-                    || self
-                        .attempted_bytes
-                        .checked_add(prepared.bytes)
-                        .is_none_or(|n| n > MAX_SESSION_BYTES)
-                {
-                    return Err(LiveError::Resource);
-                }
-                let mut announcement = state(
-                    self.config.job_id,
-                    SyncPhase::Transferring,
-                    self.status.state.manifest_revision,
-                );
-                announcement.entries_total = count;
-                announcement.bytes_total = prepared.bytes;
-                let next = if count == 0 {
-                    Step::Settlement
-                } else {
-                    Step::StartTransfer
-                };
-                self.prepared = (count != 0).then_some(prepared);
-                self.queue(announcement, next, now)?;
-            }
+            Step::Scanning => self.poll_scan(now)?,
             Step::StartTransfer => {
                 let prepared = self.prepared.take().ok_or(LiveError::WrongPhase)?;
-                self.attempted_files += prepared.versions.len() as u32;
+                self.attempted_files +=
+                    u32::try_from(prepared.versions.len()).map_err(|_| LiveError::Resource)?;
                 self.attempted_bytes += prepared.bytes;
                 self.versions = prepared.versions;
                 self.reported = 0;
@@ -303,30 +286,7 @@ impl HostJob {
                     .map_err(LiveError::Send)?;
                 self.step = Step::Transfer;
             }
-            Step::Transfer => {
-                let turn = sender.service(q, &mut *authorize).map_err(LiveError::Send);
-                self.observe_report(sender)?;
-                turn?;
-                if let Some(batch::Report {
-                    stop: Some(batch::Stop::Cleanup(error)),
-                    ..
-                }) = sender.batch_report()
-                {
-                    return Err(LiveError::Send(error));
-                }
-                if let Some(report) = sender.batch_report()
-                    && report.complete
-                {
-                    if let Some(stop) = report.stop {
-                        return Err(LiveError::Transfer(stop));
-                    }
-                    if report.receipts().len() != self.versions.len() {
-                        return Err(LiveError::WrongPhase);
-                    }
-                    let _ = sender.take_batch_report();
-                    self.step = Step::EndRound;
-                }
-            }
+            Step::Transfer => self.service_transfer(sender, q, authorize)?,
             Step::EndRound => {
                 if !sender.sync_ready(q).map_err(LiveError::Send)? {
                     return Ok(());
@@ -341,31 +301,7 @@ impl HostJob {
             }
             Step::Settlement => {
                 if let Some(settled) = self.receive_state(sender, q, authorize)? {
-                    self.check_peer(settled)?;
-                    let expected = self.status.state;
-                    if !matches!(
-                        settled.phase,
-                        SyncPhase::Settled | SyncPhase::ConflictRecorded
-                    ) || settled.reason != Reason::None
-                        || settled.manifest_revision != expected.manifest_revision
-                        || settled.entries_total != expected.entries_total
-                        || settled.entries_completed != expected.entries_total
-                        || settled.bytes_total != expected.bytes_total
-                        || settled.bytes_completed != expected.bytes_total
-                    {
-                        return Err(LiveError::WrongPhase);
-                    }
-                    self.status.state = settled;
-                    self.status.rounds_settled = self
-                        .status
-                        .rounds_settled
-                        .checked_add(1)
-                        .ok_or(LiveError::Resource)?;
-                    self.versions.clear();
-                    self.next_scan = now
-                        .checked_add(self.config.interval_us)
-                        .ok_or(LiveError::Clock)?;
-                    self.step = Step::Waiting;
+                    self.settle(settled, now)?;
                 }
             }
             Step::Waiting => {
@@ -380,8 +316,102 @@ impl HostJob {
             }
             Step::Stopped => return Err(self.status.failure.unwrap_or(LiveError::Cancelled)),
         }
-        if self.pending.is_some() {
-            self.send_pending(sender, q, authorize, now)?;
+        Ok(())
+    }
+
+    fn settle(&mut self, settled: SyncJobState, now: u64) -> Result<(), LiveError> {
+        self.check_peer(settled)?;
+        let expected = self.status.state;
+        if !matches!(
+            settled.phase,
+            SyncPhase::Settled | SyncPhase::ConflictRecorded
+        ) || settled.reason != Reason::None
+            || settled.manifest_revision != expected.manifest_revision
+            || settled.entries_total != expected.entries_total
+            || settled.entries_completed != expected.entries_total
+            || settled.bytes_total != expected.bytes_total
+            || settled.bytes_completed != expected.bytes_total
+        {
+            return Err(LiveError::WrongPhase);
+        }
+        self.status.state = settled;
+        self.status.rounds_settled = self
+            .status
+            .rounds_settled
+            .checked_add(1)
+            .ok_or(LiveError::Resource)?;
+        self.versions.clear();
+        self.next_scan = now
+            .checked_add(self.config.interval_us)
+            .ok_or(LiveError::Clock)?;
+        self.step = Step::Waiting;
+        Ok(())
+    }
+
+    fn poll_scan(&mut self, now: u64) -> Result<(), LiveError> {
+        let scanned = self.scan.as_mut().ok_or(LiveError::WrongPhase)?.poll();
+        if scanned.is_err() {
+            self.scan = None;
+        }
+        let Some(prepared) = scanned? else {
+            return Ok(());
+        };
+        self.scan = None;
+        let count = u32::try_from(prepared.versions.len()).map_err(|_| LiveError::Resource)?;
+        if self
+            .attempted_files
+            .checked_add(count)
+            .is_none_or(|n| n > MAX_SESSION_TRANSFERS)
+            || self
+                .attempted_bytes
+                .checked_add(prepared.bytes)
+                .is_none_or(|n| n > MAX_SESSION_BYTES)
+        {
+            return Err(LiveError::Resource);
+        }
+        let mut announcement = state(
+            self.config.job_id,
+            SyncPhase::Transferring,
+            self.status.state.manifest_revision,
+        );
+        announcement.entries_total = count;
+        announcement.bytes_total = prepared.bytes;
+        let next = if count == 0 {
+            Step::Settlement
+        } else {
+            Step::StartTransfer
+        };
+        self.prepared = (count != 0).then_some(prepared);
+        self.queue(announcement, next, now)
+    }
+
+    fn service_transfer(
+        &mut self,
+        sender: &mut Sender<'_>,
+        q: &mut QuicRecords,
+        authorize: &mut impl FnMut() -> bool,
+    ) -> Result<(), LiveError> {
+        let turn = sender.service(q, &mut *authorize).map_err(LiveError::Send);
+        self.observe_report(sender)?;
+        turn?;
+        if let Some(batch::Report {
+            stop: Some(batch::Stop::Cleanup(error)),
+            ..
+        }) = sender.batch_report()
+        {
+            return Err(LiveError::Send(error));
+        }
+        if let Some(report) = sender.batch_report()
+            && report.complete
+        {
+            if let Some(stop) = report.stop {
+                return Err(LiveError::Transfer(stop));
+            }
+            if report.receipts().len() != self.versions.len() {
+                return Err(LiveError::WrongPhase);
+            }
+            let _ = sender.take_batch_report();
+            self.step = Step::EndRound;
         }
         Ok(())
     }

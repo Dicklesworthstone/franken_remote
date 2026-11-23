@@ -378,12 +378,11 @@ impl HostReceiver {
                     if terminal {
                         receiver.stop();
                     }
-                    return match sync(state) {
-                        Ok(disposition) => Ok(disposition),
-                        Err(()) => {
-                            refusal = Some(wire::Error::Wire(fr_wire::WireError::InvalidValue));
-                            Ok(Disposition::Consumed)
-                        }
+                    return if let Ok(disposition) = sync(state) {
+                        Ok(disposition)
+                    } else {
+                        refusal = Some(wire::Error::Wire(fr_wire::WireError::InvalidValue));
+                        Ok(Disposition::Consumed)
                     };
                 }
                 let message = fr_wire::files::decode(bytes, incoming, limits);

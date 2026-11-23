@@ -38,6 +38,13 @@ unselected peers receive no fallback folder transfer. `SyncJobState` records
 share the existing bounded file queue, byte accounting and original deadlines.
 They carry progress and scope, never local paths or file contents.
 
+The fullest combination of folder sync, duplex file transfer, clipboard and
+audio playback uses all 24 negotiated capability slots. For this explicit
+combination, optional decoder-load reporting yields its slot to synchronization;
+source, transport and capture-credit pacing continue. Requested audio,
+clipboard, both file directions and required control/privacy capabilities stay
+selected. A peer that requires decoder-load reporting cannot use this fallback.
+
 ### Bounds and delivery semantics
 
 The live job scans at five-second intervals after the preceding round has

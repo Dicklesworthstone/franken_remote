@@ -44,6 +44,9 @@ const DOWNLOAD_REQUIREMENTS: [(&str, u16); 5] = [
 /// Add only the optional sync boundary to an already configured native download
 /// offer. Call only for explicit local sync configuration, after other offer
 /// extensions. Existing control/privacy gates are never removed to make space.
+/// At capacity, optional quality reporting and bulk/credit optimizations yield
+/// first. If those are already absent, optional decoder metrics yield; the
+/// stream retains its existing source/transport pacing without those samples.
 /// The host offer's role is descriptive; the peer's selected role still must be
 /// controlling. Client entry points separately require a control request.
 pub fn prepare_offer(
@@ -73,6 +76,7 @@ pub fn prepare_offer(
         crate::quality_decision::CAPABILITY,
         attachment::BULK_RECORD_CAPABILITY,
         attachment::credit::CAPABILITY,
+        crate::receiver_metrics::CAPABILITY,
     ] {
         if offer.capabilities.len() < negotiation::MAX_CAPABILITIES {
             break;

@@ -95,7 +95,7 @@ impl ReceiveRequest {
         }
     }
     /// Explicitly accept one host-configured job, independently of ordinary
-    /// file consent. The existing destination must already select KeepBoth.
+    /// file consent. The existing destination must already select `KeepBoth`.
     pub fn with_sync_job(mut self, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
         if job_id == 0 || self.sync_job.is_some() {
             return Err(fr_files::sync::LiveError::InvalidConfig);

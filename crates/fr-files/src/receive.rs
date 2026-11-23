@@ -391,7 +391,7 @@ impl Reservation {
 
     fn published_conflict(&self, renamed: bool) {
         if renamed && let Some(count) = &self.conflicts {
-            let _ = count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            let _ = count.try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
                 Some(old.saturating_add(1))
             });
         }

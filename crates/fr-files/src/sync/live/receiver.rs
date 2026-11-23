@@ -28,7 +28,7 @@ struct Pending {
     admitted: bool,
 }
 
-/// One explicitly accepted local job and pinned KeepBoth destination. Clones of
+/// One explicitly accepted local job and pinned `KeepBoth` destination. Clones of
 /// `directory()` belong only to this receiver lineage; no pathname is reopened.
 /// The ordinary receiver still owns all staging, ATP integrity and permission.
 pub struct ControllerJob {
@@ -173,15 +173,14 @@ impl ControllerJob {
             return Err(LiveError::Clock);
         }
         self.last_now = Some(now);
-        let advertised_until = match self.advertised_until {
-            Some(until) => until,
-            None => {
-                let until = now
-                    .checked_add(ACCEPT_LIFETIME_US)
-                    .ok_or(LiveError::Clock)?;
-                self.advertised_until = Some(until);
-                until
-            }
+        let advertised_until = if let Some(until) = self.advertised_until {
+            until
+        } else {
+            let until = now
+                .checked_add(ACCEPT_LIFETIME_US)
+                .ok_or(LiveError::Clock)?;
+            self.advertised_until = Some(until);
+            until
         };
         if self.phase == Phase::Advertisement && now >= advertised_until {
             return Err(LiveError::Expired);

@@ -64,18 +64,42 @@ consent never migrate to a reconnect. Bidirectional remote reconciliation,
 recursive jobs, Windows host scanning and persistent jobs remain outside this
 slice; see [usage and limits](docs/folder-sync.md).
 
-The final five wire tests and strict all-target `fr-wire` Clippy passed with
-the exact pinned compiler. Six new real independent-root UDP/TLS tests cover
-multiple rounds, the full-snapshot follow-up, conflict preservation, cancellation,
-source mutation and job/connection refusals. Three daemon/viewer tests exercise
-the actual production loops, ordinary-download refusal and preservation of an
-unconsumed host job when the peer has not selected synchronization. Their execution,
-whole-workspace checks and native desktop/live-tailnet qualification remain
-pending at this checkpoint; authored tests are not a pass claim. The separate
+Validation uses the exact pinned nightly and genuine pinned runtime dependencies.
+The final five wire tests and strict all-target `fr-wire` Clippy passed through
+Cargo. The complete six-test `remote_folder_sync` target passes against the
+actual independent-root UDP/TLS, ATP and disk owners: multiple rounds, the
+full-snapshot follow-up, conflict preservation, cancellation, source mutation
+and job/connection refusals. All 24 tests in the complete client `native_profile`
+target pass. Its full clipboard/audio/duplex combination caught a real capability
+capacity failure; sync now yields only optional decoder-load reporting after
+existing optional quality/bulk/credit fallbacks are exhausted. Every requested
+auxiliary capability and required gate remains intact, with explicit required
+metrics refusal and legacy-peer intersection coverage. Source, transport and
+capture-credit pacing remain active without those advisory decoder samples.
+
+Three new transport regressions also pass with the original real UDP/TLS
+fixtures, covering queue accounting, scope/role/deadline checks, input-lane
+independence and refusal on upload or unselected downloads. Complete current
+wire, transport, media, client and files libraries compile. Complete client and
+files production sources and both complete test targets pass strict Clippy. The client/files
+integration executables and these strict checks use full current sources with
+verified pinned build artifacts; they are scoped compiler runs, not a completed
+Cargo workspace gate. Final core validation includes concurrent main `413b5ed`
+and the subsequent profile and lint corrections.
+
+Three authored daemon/viewer regressions exercise the production loops,
+ordinary-download refusal and preservation of an unconsumed host job when the
+peer has not selected synchronization. Their execution, full daemon/workspace
+gates and native desktop/live-tailnet qualification remain unverified. Full
+daemon code generation exceeded available resources; no successful native
+desktop run is inferred from the portable tests. UBS found no actionable new
+production issue in the reviewed changes, but its broad scan remained partial
+on the same higher-order native command analysis as the baseline. The separate
 private-portal test fixture disables unsupported TCP AppArmor label lookup
 without changing production bus checks or weakening name-ownership assertions.
-Transport source: `4da871c`; file-engine source: `4fc8562`; scoped work:
-`fr-p4-folder-sync-p6i.1`. The broader folder-sync parent stays open.
+Transport source: `4da871c`; file-engine source: `4fc8562`; native integration:
+`312100a`; scoped work: `fr-p4-folder-sync-p6i.1`. Both the scoped item and broader
+folder-sync parent stay open for the remaining qualification.
 
 ## Original macOS system-shortcut capture (2026-11-23)
 

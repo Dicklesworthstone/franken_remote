@@ -29,35 +29,40 @@ pub(super) struct PreparedRound {
 pub(super) struct Scan {
     thread: Option<JoinHandle<Result<PreparedRound, LiveError>>>,
 }
+/// The original owner and fixed deadline move together into the disk worker.
+pub(super) struct ScanScope {
+    pub(super) cx: Cx,
+    pub(super) authority: Authority,
+    pub(super) permission: Permission,
+    pub(super) stopped: Arc<AtomicBool>,
+    pub(super) until: u64,
+}
 impl Scan {
     pub(super) fn start(
         config: &HostConfig,
         revision: u64,
         ledger: BTreeMap<String, String>,
-        cx: Cx,
-        authority: Authority,
-        permission: Permission,
-        stopped: Arc<AtomicBool>,
-        until: u64,
+        scope: ScanScope,
     ) -> Result<Self, LiveError> {
         let root = config.root.clone();
         let limits = config.limits;
-        let clock = cx.timer_driver().ok_or(LiveError::Clock)?;
+        let clock = scope.cx.timer_driver().ok_or(LiveError::Clock)?;
         let thread = thread::Builder::new()
             .name("fr-folder-scan".into())
             .spawn(move || {
                 let mut check = || {
-                    if stopped.load(Ordering::Acquire)
-                        || !permission.is_approved()
-                        || cx.checkpoint().is_err()
+                    if scope.stopped.load(Ordering::Acquire)
+                        || !scope.permission.is_approved()
+                        || scope.cx.checkpoint().is_err()
                     {
                         return Err(SyncError::AuthorityRevoked);
                     }
                     let now = clock.now().as_nanos() / 1000;
-                    if now >= until
-                        || authority
+                    if now >= scope.until
+                        || scope
+                            .authority
                             .sample(now)
-                            .and_then(|at| authority.deadline(at))
+                            .and_then(|at| scope.authority.deadline(at))
                             .is_err()
                     {
                         return Err(SyncError::AuthorityRevoked);

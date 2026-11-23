@@ -107,28 +107,39 @@ fn explicit_offer_helper_is_idempotent_and_never_drops_required_capabilities() {
     full.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     full.validate().unwrap();
     assert!(sync_job_state::prepare_offer(full.clone()).is_err());
-    // A diagnostic boundary can yield its optional slot, not a required gate.
-    let cap = full.capabilities.last_mut().unwrap();
-    cap.name = fr_wire::quality_decision::CAPABILITY.into();
-    cap.required = false;
-    full.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    let prepared = sync_job_state::prepare_offer(full.clone()).unwrap();
-    assert_eq!(
-        prepared.capabilities.len(),
-        fr_wire::negotiation::MAX_CAPABILITIES
-    );
-    assert!(
-        !prepared
+    // Each documented fallback may yield an optional slot, never a required one.
+    for fallback in [
+        fr_wire::quality_decision::CAPABILITY,
+        attachment::BULK_RECORD_CAPABILITY,
+        attachment::credit::CAPABILITY,
+        fr_wire::receiver_metrics::CAPABILITY,
+    ] {
+        let mut candidate = full.clone();
+        let cap = candidate.capabilities.last_mut().unwrap();
+        cap.name = fallback.into();
+        cap.required = false;
+        candidate.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+        let prepared = sync_job_state::prepare_offer(candidate.clone()).unwrap();
+        assert_eq!(
+            prepared.capabilities.len(),
+            fr_wire::negotiation::MAX_CAPABILITIES
+        );
+        for preserved in candidate
             .capabilities
             .iter()
-            .any(|cap| cap.name == fr_wire::quality_decision::CAPABILITY)
-    );
-    assert!(
-        full.capabilities
-            .iter()
-            .filter(|cap| cap.required)
-            .all(|cap| prepared.capabilities.contains(cap))
-    );
+            .filter(|cap| cap.name != fallback)
+        {
+            assert!(prepared.capabilities.contains(preserved));
+        }
+        assert!(!prepared.capabilities.iter().any(|cap| cap.name == fallback));
+        candidate
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.name == fallback)
+            .unwrap()
+            .required = true;
+        assert!(sync_job_state::prepare_offer(candidate).is_err());
+    }
 }
 
 fn limits() -> Limits {

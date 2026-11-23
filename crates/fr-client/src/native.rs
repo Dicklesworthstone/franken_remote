@@ -252,7 +252,7 @@ pub fn control_offer_with_download(clipboard: bool, audio: bool) -> Offer {
 }
 
 /// Explicit acceptance of one locally configured host sync job into a pinned
-/// local KeepBoth destination. This only adds protocol understanding; the
+/// local `KeepBoth` destination. This only adds protocol understanding; the
 /// original receive request still supplies its one-use job and directory consent.
 /// Call after other optional extensions to preserve the 24-capability ceiling.
 pub fn with_folder_sync(offer: Offer) -> Result<Offer, fr_wire::negotiation::Error> {

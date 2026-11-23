@@ -19,7 +19,9 @@ mod scan;
 pub use host::HostJob;
 pub use receiver::ControllerJob;
 
-pub const MAX_ENTRIES: u32 = sender::batch::MAX_FILES as u32;
+pub const MAX_ENTRIES: u32 = 32;
+// A complete scan must fit the sender's single bounded batch.
+const _: () = assert!(sender::batch::MAX_FILES == 32);
 /// Standing work retains the native session's cumulative transfer budget.
 /// A full initial scan must leave room for later source versions on this lane.
 pub const MAX_SESSION_TRANSFERS: u32 = 64;
