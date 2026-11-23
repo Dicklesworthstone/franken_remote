@@ -10,6 +10,52 @@ fn waker() -> Waker {
     Waker::noop().clone()
 }
 
+#[test]
+fn serial_provider_never_competes_for_its_original_lookup_credit() {
+    let ready = Rc::new((0..3).map(|_| Cell::new(false)).collect::<Vec<_>>());
+    let dropped = Rc::new(RefCell::new(Vec::new()));
+    let started = RefCell::new(Vec::new());
+    let permitted = Cell::new(true);
+    let future = probe_serial(
+        3,
+        |index| {
+            started.borrow_mut().push(index);
+            Probe {
+                index,
+                ready: ready.clone(),
+                dropped: dropped.clone(),
+            }
+        },
+        || permitted.get(),
+    )
+    .unwrap();
+    let mut future = pin!(future);
+    let wake = waker();
+    let mut task = Context::from_waker(&wake);
+    for _ in 0..8 {
+        assert!(future.as_mut().poll(&mut task).is_pending());
+    }
+    assert_eq!(*started.borrow(), [0]);
+    ready[0].set(true);
+    assert!(future.as_mut().poll(&mut task).is_pending());
+    assert_eq!(*dropped.borrow(), [0]);
+    assert!(future.as_mut().poll(&mut task).is_pending());
+    assert_eq!(*started.borrow(), [0, 1]);
+    permitted.set(false);
+    let Poll::Ready(outcomes) = future.as_mut().poll(&mut task) else {
+        panic!("original sweep must stop")
+    };
+    assert_eq!(
+        outcomes,
+        [
+            ProbeOutcome::Completed(0),
+            ProbeOutcome::Interrupted,
+            ProbeOutcome::NotStarted
+        ]
+    );
+    assert_eq!(*dropped.borrow(), [0, 1]);
+}
+
 struct Probe {
     index: usize,
     ready: Rc<Vec<Cell<bool>>>,

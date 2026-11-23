@@ -47,6 +47,25 @@ fn interrupted<F: Future>(
 /// completes immediately. This leaves the supervisor time to service shutdown.
 pub fn probe_batch<F: Future>(
     targets: usize,
+    start: impl FnMut(usize) -> F,
+    permitted: impl FnMut() -> bool,
+) -> Result<impl Future<Output = Vec<ProbeOutcome<F::Output>>>, TooManyTargets> {
+    batch(targets, MAX_BATCH_CONCURRENCY, start, permitted)
+}
+
+/// The same bounded sweep for a local identity provider whose lookup credit
+/// is process-wide. A second probe cannot compete with the first one's lookup.
+pub fn probe_serial<F: Future>(
+    targets: usize,
+    start: impl FnMut(usize) -> F,
+    permitted: impl FnMut() -> bool,
+) -> Result<impl Future<Output = Vec<ProbeOutcome<F::Output>>>, TooManyTargets> {
+    batch(targets, 1, start, permitted)
+}
+
+fn batch<F: Future>(
+    targets: usize,
+    concurrency: usize,
     mut start: impl FnMut(usize) -> F,
     mut permitted: impl FnMut() -> bool,
 ) -> Result<impl Future<Output = Vec<ProbeOutcome<F::Output>>>, TooManyTargets> {
@@ -57,7 +76,7 @@ pub fn probe_batch<F: Future>(
     let mut active: [Slot<F>; MAX_BATCH_CONCURRENCY] = std::array::from_fn(|_| None);
     let (mut next, mut completed) = (0, 0);
     Ok(poll_fn(move |task| {
-        for slot_index in 0..MAX_BATCH_CONCURRENCY {
+        for slot_index in 0..concurrency {
             // Check before BOTH launching and polling a probe. A preceding
             // completion may have ended the parent or consumed its budget.
             if !permitted() {
@@ -89,7 +108,7 @@ pub fn probe_batch<F: Future>(
         } else {
             // A vacated slot can start the next peer on the next turn. Pending
             // futures keep their own wakers; never busy-poll a full flight.
-            if next < targets && active.iter().any(Option::is_none) {
+            if next < targets && active[..concurrency].iter().any(Option::is_none) {
                 task.waker().wake_by_ref();
             }
             Poll::Pending

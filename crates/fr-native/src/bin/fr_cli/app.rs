@@ -6,7 +6,8 @@
 //!    machine picker with the connection choices (view only or view and
 //!    control, clipboard text, which display, host audio, one-use file sharing)
 //!    and the previous outcome, then
-//!    reports the chosen identity and choices. It opens no connection.
+//!    reports the chosen identity and choices. Explicit `--probe` adds bounded
+//!    capability inspection before the picker; it opens no desktop observation.
 //! 2. `fr connect NODE ... --json` is the plain viewer for that choice.
 //!
 //! The application keeps only local preferences (the same document as the
@@ -40,7 +41,7 @@ mod receive_tests;
 #[path = "app/receiving_tests.rs"]
 mod receiving_tests;
 
-const USAGE: &str = "fr app [--port PORT] [--receive DIR [RECEIVE_OPTIONS]] | --install | --uninstall\n\n\
+const USAGE: &str = "fr app [--probe] [--port PORT] [--receive DIR [RECEIVE_OPTIONS]] | --install | --uninstall\n\n\
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
 View only or View and control, Share clipboard text, Ask which display to\n\
 show and Play host audio, then Connect. Audio starts off; enabling it never\n\
@@ -56,6 +57,10 @@ picker reopens with a fresh machine list every two minutes; after half an\n\
 hour unused, fr app quits.\n\n\
 --port PORT  connect to this service port for this app run (default 8443);\n\
              applies to every choice and is not saved in preferences.\n\
+--probe      check up to 64 discovered hosts before each picker (20 s maximum).\n\
+             Rows show authenticated capability advertisements or probe failures;\n\
+             desktop readiness and permission are checked when connecting.\n\
+             No observation or input is opened by a probe. All rows stay selectable.\n\
 --receive DIR  receive host-selected files in this existing private directory\n\
                on the next selected controlling connection only. Select Receive files; it is not\n\
                remembered, repeated after any choice, or used by view-only.\n\
@@ -85,7 +90,11 @@ pub(super) fn requested(args: &[String]) -> bool {
 
 pub(super) fn run(args: &[String]) -> Result<String, Failure> {
     match app_command(args)? {
-        AppCommand::Open { port, receiving } => application(port, receiving),
+        AppCommand::Open {
+            port,
+            receiving,
+            probe,
+        } => application(port, receiving, probe),
         AppCommand::Help => Ok(USAGE.to_owned()),
         AppCommand::Install => install(),
         AppCommand::Uninstall => uninstall(),
@@ -97,6 +106,7 @@ enum AppCommand {
     Open {
         port: u16,
         receiving: Option<Receiving>,
+        probe: bool,
     },
     Help,
     Install,
@@ -120,10 +130,12 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
     let mut action = None;
     let mut receive_args = Vec::new();
     let mut json = false;
+    let mut probe = false;
     let mut rest = args.iter().skip(1);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--json" if !json => json = true,
+            "--probe" if !probe => probe = true,
             "--port" if port.is_none() => {
                 let raw = rest.next().ok_or_else(invalid)?;
                 if raw.is_empty() || raw.len() > 5 || !raw.bytes().all(|b| b.is_ascii_digit()) {
@@ -149,7 +161,7 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
             _ => return Err(invalid()),
         }
     }
-    if action.is_some() && !receive_args.is_empty() {
+    if action.is_some() && (!receive_args.is_empty() || probe) {
         return Err(invalid());
     }
     let receiving = Receiving::parse(receive_args)?;
@@ -157,6 +169,7 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
         (None, port) => Ok(AppCommand::Open {
             port: port.unwrap_or(DEFAULT_SERVICE_PORT),
             receiving,
+            probe,
         }),
         (Some(action), None) => Ok(action),
         (Some(_), Some(_)) => Err(invalid()),
@@ -563,6 +576,20 @@ fn session_args(node: &str, settings: &Settings, port: u16, send_files: bool) ->
     args
 }
 
+fn probed_pick_args(
+    settings: &Settings,
+    notice: Option<&str>,
+    port: u16,
+    receive_available: bool,
+    probe: bool,
+) -> Vec<String> {
+    let mut arguments = pick_args(settings, notice, port, receive_available);
+    if probe {
+        arguments.push("--app-probe".to_owned());
+    }
+    arguments
+}
+
 fn microphone_controls_available() -> bool {
     cfg!(all(target_os = "macos", feature = "macos-microphone"))
 }
@@ -749,7 +776,11 @@ fn child_failed(error: child::Error) -> Failure {
     Failure::new(code, next, 1).uncertain()
 }
 
-fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Failure> {
+fn application(
+    port: u16,
+    mut receiving: Option<Receiving>,
+    probe: bool,
+) -> Result<String, Failure> {
     let launcher = Launcher::new()?;
     let path = settings_path(&home()?);
     let mut notice: Option<String> = None;
@@ -761,11 +792,12 @@ fn application(port: u16, mut receiving: Option<Receiving>) -> Result<String, Fa
         // A picker reopened only because the last one expired unused stays
         // behind whatever the user is doing.
         let picked = launcher.run(
-            &pick_args(
+            &probed_pick_args(
                 &settings,
                 receiving_notice.as_deref().or(notice.as_deref()),
                 port,
                 receiving::available(receiving.as_ref()),
+                probe,
             ),
             idle_expiries == 0,
         )?;
@@ -1021,6 +1053,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_app_probes_belong_only_to_this_runs_picker_commands() {
+        let parse =
+            |args: &[&str]| app_command(&args.iter().map(ToString::to_string).collect::<Vec<_>>());
+        assert_eq!(
+            parse(&["app", "--probe", "--port", "9443"]).unwrap(),
+            AppCommand::Open {
+                port: 9443,
+                receiving: None,
+                probe: true
+            }
+        );
+        for args in [
+            vec!["app", "--probe", "--probe"],
+            vec!["app", "--probe", "--install"],
+            vec!["app", "--uninstall", "--probe"],
+        ] {
+            assert_eq!(parse(&args).unwrap_err().code, "invalid_arguments");
+        }
+        let settings = Settings::default();
+        for probe in [false, true] {
+            let arguments =
+                probed_pick_args(&settings, Some("Previous outcome"), 9443, false, probe);
+            let crate::options::Command::Connect(connection) =
+                crate::options::parse(&arguments).unwrap().command
+            else {
+                panic!("picker")
+            };
+            assert_eq!(connection.pick.unwrap().probe, probe);
+            assert_eq!(connection.target.port, 9443);
+            assert!(
+                !session_args("n-original", &settings, 9443, false)
+                    .iter()
+                    .any(|arg| arg.contains("probe"))
+            );
+        }
+        assert!(!settings.to_json().contains("probe"));
+    }
+
+    #[test]
     fn settings_round_trip_and_keep_defaults_for_bad_fields() {
         let settings = Settings {
             control: false,
@@ -1074,7 +1145,8 @@ mod tests {
             parse(&["app"]).unwrap(),
             AppCommand::Open {
                 port: DEFAULT_SERVICE_PORT,
-                receiving: None
+                receiving: None,
+                probe: false,
             }
         );
         for port in [1, 9443, u16::MAX] {
@@ -1083,14 +1155,16 @@ mod tests {
                 parse(&["app", "--port", &text, "--json"]).unwrap(),
                 AppCommand::Open {
                     port,
-                    receiving: None
+                    receiving: None,
+                    probe: false,
                 }
             );
             assert_eq!(
                 parse(&["app", "--json", "--port", &text]).unwrap(),
                 AppCommand::Open {
                     port,
-                    receiving: None
+                    receiving: None,
+                    probe: false,
                 }
             );
         }
@@ -1138,7 +1212,8 @@ mod tests {
             parse(&["app"]).unwrap(),
             AppCommand::Open {
                 port: DEFAULT_SERVICE_PORT,
-                receiving: None
+                receiving: None,
+                probe: false,
             }
         );
     }

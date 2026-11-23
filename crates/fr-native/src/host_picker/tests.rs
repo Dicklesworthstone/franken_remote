@@ -119,6 +119,26 @@ fn rows_and_failures_do_not_disclose_identity() {
 }
 
 #[test]
+fn probe_labels_are_bounded_and_do_not_change_original_row_identity() {
+    let row = Row::new("host.fixture.ts.net", "n-original", PathHint::Direct).unwrap();
+    for invalid in ["", "bad\nlabel", "bad\0label", &"x".repeat(65)] {
+        assert_eq!(
+            row.clone().with_probe_hint(Some(invalid)).unwrap_err(),
+            Error::InvalidRow
+        );
+    }
+    let labeled = row
+        .clone()
+        .with_probe_hint(Some("Probe: no answer within deadline"))
+        .unwrap();
+    assert_eq!(labeled.name, row.name);
+    assert_eq!(labeled.stable_id, row.stable_id);
+    assert_eq!(labeled.path, row.path);
+    assert!(!format!("{labeled:?}").contains("no answer"));
+    assert!(row.with_probe_hint(None).unwrap().probe.is_none());
+}
+
+#[test]
 fn invalid_or_ambiguous_snapshots_refuse_before_a_worker_starts() {
     let row = Row::new("host.test", "node", PathHint::Unknown).unwrap();
     assert_eq!(validate(":0", &[]), Err(Error::Empty));

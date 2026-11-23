@@ -7,7 +7,7 @@ use crate::{
     Failure,
     options::{Connection, DisplayChoice, Target},
 };
-use fr_client::discovery::picker::{Candidate, Catalog, PathHint};
+use fr_client::discovery::picker::{Candidate, Catalog, PathHint, ProbeHint};
 
 /// The desktop application's connection choices, shown beside the list for
 /// `--pick-only` and reported with the chosen host. They shape only the next
@@ -67,14 +67,36 @@ pub(super) fn validate(target: &Target) -> Result<(), Failure> {
 }
 
 pub(super) fn catalog(snapshot: &fr_tailnet::Discovery) -> Result<Catalog, Failure> {
+    project_catalog(snapshot, None)
+}
+
+/// Hint ordinal belongs to the exact discovery snapshot, before Catalog sorts
+/// its rows. A failed/omitted probe never removes the original selectable peer.
+pub(super) fn catalog_with_probe_hints(
+    snapshot: &fr_tailnet::Discovery,
+    hints: &[ProbeHint],
+) -> Result<Catalog, Failure> {
+    if hints.len() > snapshot.peers().len()
+        || hints.len() > fr_client::discovery::batch::MAX_BATCH_TARGETS
+    {
+        return Err(invalid_snapshot());
+    }
+    project_catalog(snapshot, Some(hints))
+}
+
+fn project_catalog(
+    snapshot: &fr_tailnet::Discovery,
+    hints: Option<&[ProbeHint]>,
+) -> Result<Catalog, Failure> {
     if snapshot.peers().len() > fr_client::discovery::picker::MAX_CANDIDATES {
         return Err(invalid_snapshot());
     }
     let candidates = snapshot
         .peers()
         .iter()
-        .map(|peer| {
-            Candidate::new(
+        .enumerate()
+        .map(|(index, peer)| {
+            let candidate = Candidate::new(
                 peer.stable_id().to_owned(),
                 peer.certificate_name().to_owned(),
                 match peer.transport_path() {
@@ -82,7 +104,12 @@ pub(super) fn catalog(snapshot: &fr_tailnet::Discovery) -> Result<Catalog, Failu
                     fr_tailnet::PeerTransportPath::DerpRelayed { .. } => PathHint::Relayed,
                     fr_tailnet::PeerTransportPath::Unknown => PathHint::Unknown,
                 },
-            )
+            )?;
+            Ok::<_, fr_client::discovery::picker::Error>(match hints {
+                Some(hints) => candidate
+                    .with_probe_hint(hints.get(index).copied().unwrap_or(ProbeHint::NotProbed)),
+                None => candidate,
+            })
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| invalid_snapshot())?;
@@ -92,7 +119,7 @@ pub(super) fn catalog(snapshot: &fr_tailnet::Discovery) -> Result<Catalog, Failu
 pub(super) fn cancelled() -> Failure {
     Failure::new(
         "host_choice_cancelled",
-        "Host selection was cancelled. No remote connection or input request was opened.",
+        "Host selection was cancelled. No desktop observation or input request was opened.",
         130,
     )
 }
@@ -100,7 +127,7 @@ pub(super) fn cancelled() -> Failure {
 pub(super) fn invalid_snapshot() -> Failure {
     Failure::new(
         "host_choice_invalid_snapshot",
-        "The discovery snapshot contains an invalid, ambiguous or out-of-bounds peer identity. Refresh installed Tailscale metadata before choosing again; no remote connection was opened.",
+        "The discovery snapshot contains an invalid, ambiguous or out-of-bounds peer identity. Refresh installed Tailscale metadata before choosing again; no desktop observation was opened.",
         1,
     )
 }
@@ -185,6 +212,67 @@ pub(super) fn selected_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_results_stay_with_the_original_peer_after_sorting_and_omission() {
+        use fr_tailnet::{DiscoveredPeer, Discovery, DiscoveryExclusions, PeerTransportPath};
+        let snapshot = Discovery::from_parts(
+            [
+                ("n-z", "zulu.fixture.ts.net"),
+                ("n-a", "alpha.fixture.ts.net"),
+                ("n-m", "middle.fixture.ts.net"),
+            ]
+            .into_iter()
+            .map(|(id, name)| {
+                DiscoveredPeer::from_parts(
+                    id.into(),
+                    name.into(),
+                    vec!["100.64.0.2".parse().unwrap()],
+                    PeerTransportPath::Unknown,
+                )
+            })
+            .collect(),
+            DiscoveryExclusions {
+                shared: 0,
+                expired: 0,
+                unusable: 0,
+            },
+            10,
+            20,
+        );
+        let original = catalog_with_probe_hints(
+            &snapshot,
+            &[ProbeHint::ControlAdvertised, ProbeHint::IdentityRefused],
+        )
+        .unwrap();
+        assert_eq!(
+            original.len(),
+            3,
+            "failed and omitted peers remain selectable"
+        );
+        for (index, id, hint) in [
+            (0, "n-a", ProbeHint::IdentityRefused),
+            (1, "n-m", ProbeHint::NotProbed),
+            (2, "n-z", ProbeHint::ControlAdvertised),
+        ] {
+            let row = original.get(index).unwrap();
+            assert_eq!(row.stable_id(), id);
+            assert_eq!(row.probe_hint(), Some(hint));
+            let report: serde_json::Value =
+                serde_json::from_str(&selected_report(row, 9443, true, None)).unwrap();
+            assert_eq!(report["fresh_lookup_required"], true);
+            assert_eq!(report["remote_session_started"], false);
+            assert_eq!(report["input_requested"], false);
+        }
+        assert!(
+            catalog(&snapshot)
+                .unwrap()
+                .candidates()
+                .iter()
+                .all(|row| row.probe_hint().is_none())
+        );
+        assert!(catalog_with_probe_hints(&snapshot, &[ProbeHint::NotProbed; 4]).is_err());
+    }
 
     fn target() -> Target {
         let args = "connect --choose-host --view-only --experimental-native --display choose"

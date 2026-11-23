@@ -197,6 +197,7 @@ fn launch_receive_policy_reuses_direct_connect_validation_without_opening_a_root
     let AppCommand::Open {
         port,
         mut receiving,
+        ..
     } = parse(&[
         "app",
         "--port",

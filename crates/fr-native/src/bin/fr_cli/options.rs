@@ -183,6 +183,8 @@ pub struct Connection {
 /// preferences for the window; the report carries what the user confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickOnly {
+    /// Explicit app-only capability sweep; advertisements never grant a role.
+    pub probe: bool,
     /// The remembered clipboard preference, kept even while view-only.
     pub clipboard: bool,
     /// Initial playback preference only; it never opens an audio device.
@@ -825,6 +827,7 @@ fn parse_command(
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
     let (mut pick_only, mut app_notice) = (false, None);
+    let mut app_probe = false;
     let mut app_receive_available = false;
     let mut diagnostics_out = None;
     while index < args.len() {
@@ -928,6 +931,7 @@ fn parse_command(
                 receive_keep_both = Some(receive::keep_both(next_arg(args, &mut index)?)?);
             }
             "--pick-only" if connect && choose_host => pick_only = true,
+            "--app-probe" if connect && choose_host => app_probe = true,
             "--app-receive-available" if connect && choose_host => app_receive_available = true,
             "--diagnostics-out" if connect => diagnostics_out = Some(next_path(args, &mut index)?),
             "--app-notice" if connect && choose_host => {
@@ -945,7 +949,10 @@ fn parse_command(
             _ => return Err(usage()),
         }
     }
-    if ((app_notice.is_some() || app_receive_available) && !pick_only)
+    if ((app_notice.is_some() || app_receive_available || app_probe) && !pick_only)
+        // `fr app` uses the installed endpoint. Do not accidentally probe a
+        // different daemon from a directly invoked custom-socket picker.
+        || (app_probe && socket.is_some())
         || (pick_only
             && (diagnostics_out.is_some()
                 || microphone
@@ -1149,6 +1156,7 @@ fn parse_command(
                 receive,
                 choose_receive_directory,
                 pick: pick_only.then(|| PickOnly {
+                    probe: app_probe,
                     clipboard: clipboard.unwrap_or(true),
                     playback_audio: audio,
                     receive_available: app_receive_available,
@@ -1185,6 +1193,7 @@ mod tests {
         assert_eq!(
             c.pick,
             Some(PickOnly {
+                probe: false,
                 clipboard: true,
                 playback_audio: false,
                 receive_available: false,

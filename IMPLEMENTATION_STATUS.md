@@ -1,5 +1,72 @@
 # Implementation status
 
+## Original-view robot startup and receipt freshness (2026-11-22)
+
+The production macOS desktop build now includes the authenticated local robot
+owner. Its opening pump waits for the actual first renderer receipt before
+requiring current picture geometry; the same current, nonzero picture and
+foreground checks still gate every input action. After presentation, geometry
+loss remains terminal. Local stop, focus loss and geometry cleanup retire the
+original command owner before native work can delay that fence. Original late
+host receipts and the existing graceful close path remain intact.
+
+Linux controlled screenshots and live read-only observation now retain the
+original initial presentation timestamp through bootstrap acknowledgements and
+native startup. Installing an endpoint cannot reset receipt age. The shared
+snapshot owner refuses future-dated receipts and retaining old pixels creates
+no input authority. This builds on the concurrent macOS robot integration in
+`f1b71d0`; that implementation is preserved.
+
+Two exact-source startup/foreground regressions passed on the pinned nightly.
+The portable baseline passed 1,802 tests across fr-core, fr-media, fr-client and
+fr-windows. The real CLI screenshot test build was killed with SIGKILL while
+compiling the unchanged pinned Asupersync dependency with one compiler job,
+debug information and incremental compilation disabled; its tests did not
+execute. An isolated metadata-only attempt, with one frontend thread and no
+code generation, was also killed before producing runtime metadata. Formatting
+passes. Scoped UBS findings on the changed code were
+reviewed: test assertions and an integer-geometry comparison are expected;
+the existing UID equality warning concerns public kernel credentials. The
+freshness scan also encounters the existing linux.rs detector limitation.
+Full CLI/Session builds, AppKit/Metal execution and live-tailnet input remain
+separate gates. Plan §§7.3, 15.1, 16.1 and 18.1–18.2; tracking `fr-62yx`.
+
+## Explicit capability hints in the native machine picker (2026-11-22)
+
+`fr app --probe` now runs the existing authenticated capability inspection
+before showing the Linux or macOS machine picker. Rows show advertised viewing
+and control support, a typed probe failure, or that a host was not probed. The
+hints follow the original stable identities through sorting. Failed and
+unprobed hosts remain selectable; the actual connection repeats identity,
+capability and consent checks. Advertisements do not imply desktop readiness or
+permission, and probes open no desktop observation or input session.
+
+Probing defaults off, is scoped to this application invocation and is not saved
+as a preference. The sweep retains its 64-host, five-second per-probe and
+twenty-second overall bounds. Linux uses up to four concurrent probes; macOS
+uses one to preserve the installed LocalAPI provider's process-wide lookup
+credit. The private picker flag refuses custom-socket ambiguity. Native labels
+remain bounded, and the overview help fits its existing 16 KiB limit without
+weakening that assertion.
+
+All 21 current discovery tests passed, including the new serial-credit and
+identity/hint sorting regressions. A harness including the complete actual
+host-picker and CLI help modules passed all 15 tests. It compiled the real
+host_picker.c and x11_connection.c with strict C11 warnings and linked the
+installed X11/XCB libraries; no native or runtime stubs were used. These tests
+cover bounded labels, identity, cancellation, worker joins and help routing,
+but do not draw a live picker. A separate CLI component harness passed 67 tests,
+including all four new parsing/identity/probe-hint regressions. It includes the
+complete actual options and host-choice modules, exact source excerpts of app
+parsing and argument generation, and genuine portable protocol dependencies;
+it excludes runtime probe orchestration and receive I/O. Independent source
+review checked opt-in, deadlines, identity retention and native row layout.
+The full CLI/native builds share the runtime blocker above; native picker
+interaction and live-tailnet probes remain open.
+The picker UBS scan reports analyzer limitations in several CLI files; its
+reported changed-line findings were reviewed, not counted as a green scan.
+Plan §§4.1, 6.4 and 16.1; tracking `fr-da7t`.
+
 ## One-shot native macOS observation (2026-11-22)
 
 `fr robot observe NODE --native-once --experimental-native --display HANDLE|only`

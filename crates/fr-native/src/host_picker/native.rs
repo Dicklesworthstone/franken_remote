@@ -11,6 +11,7 @@ pub(super) struct NativeRow {
     name: [u8; 255],
     stable_id: [u8; 129],
     path: u32,
+    probe: [u8; 65],
 }
 
 pub(super) fn rows(rows: &[Row]) -> Vec<NativeRow> {
@@ -24,9 +25,14 @@ pub(super) fn rows(rows: &[Row]) -> Vec<NativeRow> {
                     PathHint::Relayed => 2,
                     PathHint::Unknown => 0,
                 },
+                probe: [0; 65],
             };
             native.name[..row.name.len()].copy_from_slice(row.name.as_bytes());
             native.stable_id[..row.stable_id.len()].copy_from_slice(row.stable_id.as_bytes());
+            if let Some(hint) = &row.probe {
+                let text = hint.as_bytes();
+                native.probe[..text.len()].copy_from_slice(text);
+            }
             native
         })
         .collect()

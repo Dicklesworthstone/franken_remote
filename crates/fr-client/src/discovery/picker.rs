@@ -3,6 +3,7 @@
 //! A row retains only the exact stable node ID and canonical certificate name
 //! to compare against a fresh installed-daemon lookup after selection. It has
 //! no cached address, port, readiness, permission, or remote-session handle.
+//! An optional probe result describes only an acknowledged capability snapshot.
 use super::saved_peers::{valid_id, valid_name};
 use std::fmt;
 
@@ -17,6 +18,37 @@ pub enum PathHint {
     Direct,
     Relayed,
     Unknown,
+}
+
+/// A bounded display hint from an explicit pre-observation capability probe.
+/// Neither an advertisement nor a failed probe decides connection admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeHint {
+    ControlAdvertised,
+    ViewingAdvertised,
+    CapabilitiesObserved,
+    HostBusy,
+    IdentityRefused,
+    NoAnswer,
+    Failed,
+    Interrupted,
+    NotProbed,
+}
+impl ProbeHint {
+    /// Fixed local text, never a host-provided string or a readiness promise.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ControlAdvertised => "Probe: viewing and control advertised",
+            Self::ViewingAdvertised => "Probe: viewing advertised; control unknown",
+            Self::CapabilitiesObserved => "Probe: capabilities observed; desktop unknown",
+            Self::HostBusy => "Probe: host busy",
+            Self::IdentityRefused => "Probe: host identity refused",
+            Self::NoAnswer => "Probe: no answer within deadline",
+            Self::Failed => "Probe: failed; availability unknown",
+            Self::Interrupted => "Probe: budget ended; availability unknown",
+            Self::NotProbed => "Not probed; availability unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +72,7 @@ pub struct Candidate {
     stable_id: Box<str>,
     certificate_name: Box<str>,
     path_hint: PathHint,
+    probe_hint: Option<ProbeHint>,
 }
 impl Candidate {
     pub fn new(
@@ -56,6 +89,7 @@ impl Candidate {
             stable_id: stable_id.into_boxed_str(),
             certificate_name: certificate_name.into_boxed_str(),
             path_hint,
+            probe_hint: None,
         })
     }
     pub fn stable_id(&self) -> &str {
@@ -67,11 +101,20 @@ impl Candidate {
     pub const fn path_hint(&self) -> PathHint {
         self.path_hint
     }
+    pub const fn probe_hint(&self) -> Option<ProbeHint> {
+        self.probe_hint
+    }
+    #[must_use]
+    pub fn with_probe_hint(mut self, hint: ProbeHint) -> Self {
+        self.probe_hint = Some(hint);
+        self
+    }
 }
 impl fmt::Debug for Candidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Candidate")
             .field("path_hint", &self.path_hint)
+            .field("probe_hint", &self.probe_hint)
             .finish_non_exhaustive()
     }
 }
@@ -142,6 +185,49 @@ mod tests {
 
     fn candidate(id: &str, name: &str, path: PathHint) -> Candidate {
         Candidate::new(id.to_owned(), name.to_owned(), path).unwrap()
+    }
+
+    #[test]
+    fn probe_hints_sort_with_identity_and_remain_bounded_metadata() {
+        let catalog = Catalog::new(vec![
+            candidate("n-z", "zulu.tail.ts.net", PathHint::Direct)
+                .with_probe_hint(ProbeHint::ControlAdvertised),
+            candidate("n-a", "alpha.tail.ts.net", PathHint::Unknown)
+                .with_probe_hint(ProbeHint::NoAnswer),
+        ])
+        .unwrap();
+        assert_eq!(catalog.get(0).unwrap().stable_id(), "n-a");
+        assert_eq!(
+            catalog.get(0).unwrap().probe_hint(),
+            Some(ProbeHint::NoAnswer)
+        );
+        assert_eq!(
+            catalog.get(1).unwrap().probe_hint(),
+            Some(ProbeHint::ControlAdvertised)
+        );
+        assert_eq!(
+            candidate("n-plain", "plain.tail.ts.net", PathHint::Unknown).probe_hint(),
+            None
+        );
+        for hint in [
+            ProbeHint::ControlAdvertised,
+            ProbeHint::ViewingAdvertised,
+            ProbeHint::CapabilitiesObserved,
+            ProbeHint::HostBusy,
+            ProbeHint::IdentityRefused,
+            ProbeHint::NoAnswer,
+            ProbeHint::Failed,
+            ProbeHint::Interrupted,
+            ProbeHint::NotProbed,
+        ] {
+            assert!(hint.label().len() <= 64);
+            assert!(
+                hint.label()
+                    .bytes()
+                    .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+            );
+            assert!(!hint.label().contains("ready"));
+        }
     }
 
     #[test]

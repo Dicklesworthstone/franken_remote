@@ -455,13 +455,16 @@ fn host_rows(catalog: &HostCatalog) -> Vec<Row> {
         .map(|candidate| Row {
             title: candidate.certificate_name().to_owned(),
             detail: format!(
-                "{}  |  {}",
+                "{}  |  {}{}",
                 candidate.stable_id(),
                 match candidate.path_hint() {
                     PathHint::Direct => "direct path reported",
                     PathHint::Relayed => "relayed path reported",
                     PathHint::Unknown => "path unknown",
-                }
+                },
+                candidate
+                    .probe_hint()
+                    .map_or_else(String::new, |hint| format!("  |  {}", hint.label()))
             ),
         })
         .collect()
@@ -573,6 +576,28 @@ mod tests {
         let maximum = host_rows(&HostCatalog::new(vec![maximum]).unwrap());
         assert_eq!(maximum[0].title.len(), 253);
         assert!(maximum[0].detail.len() <= MAX_LABEL);
+    }
+
+    #[test]
+    fn host_rows_show_probe_hints_without_replacing_identity_or_path() {
+        use fr_client::discovery::picker::ProbeHint;
+        let catalog = HostCatalog::new(vec![
+            Candidate::new(
+                "n-original".into(),
+                "original.fixture.ts.net".into(),
+                PathHint::Relayed,
+            )
+            .unwrap()
+            .with_probe_hint(ProbeHint::ControlAdvertised),
+        ])
+        .unwrap();
+        let rows = host_rows(&catalog);
+        assert_eq!(rows[0].title, "original.fixture.ts.net");
+        assert_eq!(
+            rows[0].detail,
+            "n-original  |  relayed path reported  |  Probe: viewing and control advertised"
+        );
+        assert!(label_ok(&rows[0].detail));
     }
 
     #[test]

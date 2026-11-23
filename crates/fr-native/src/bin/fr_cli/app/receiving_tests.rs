@@ -40,6 +40,7 @@ fn complete_receive_policy_reaches_only_the_original_selected_viewer() {
     let AppCommand::Open {
         port,
         mut receiving,
+        ..
     } = command
     else {
         panic!("application connection required");

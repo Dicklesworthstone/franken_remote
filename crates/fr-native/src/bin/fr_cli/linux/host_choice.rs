@@ -1,4 +1,4 @@
-//! A local machine choice before any remote connection or source selection.
+//! A local machine choice before desktop observation or source selection.
 //! The immutable displayed identity is re-resolved by the existing connector.
 use super::{Cell, Connection, Cx, Failure, LocalApi, Runtime, Shutdown, failure, tailnet};
 use crate::{
@@ -37,11 +37,17 @@ pub(super) fn select(
     if stopped.get() || cx.is_cancel_requested() {
         return Err(cancelled());
     }
-    let catalog = catalog(&snapshot)?;
+    let original = catalog(&snapshot)?;
+    let catalog = if !original.is_empty() && connection.pick.as_ref().is_some_and(|pick| pick.probe)
+    {
+        super::hosts_probe::picker_catalog(runtime, cx, shutdown, stopped, &snapshot, connection)?
+    } else {
+        original
+    };
     if catalog.is_empty() {
         return Err(failure(
             "host_choice_empty",
-            "The installed Tailscale daemon returned no selectable peers. Check its account, peer visibility and key expiry; no remote connection was opened.",
+            "The installed Tailscale daemon returned no selectable peers. Check its account, peer visibility and key expiry; no desktop observation was opened.",
         ));
     }
     let rows = rows(&catalog)?;
@@ -69,7 +75,7 @@ pub(super) fn select(
     if !finish(&picker) {
         return Err(failure(
             "host_picker_cleanup_incomplete",
-            "The original native host picker has not finished cleanup. No remote connection was opened.",
+            "The original native host picker has not finished cleanup. No desktop observation was opened.",
         ));
     }
     if stopped.get() || cx.is_cancel_requested() {
@@ -112,6 +118,13 @@ fn rows(catalog: &Catalog) -> Result<Vec<host_picker::Row>, Failure> {
                     PathHint::Unknown => host_picker::PathHint::Unknown,
                 },
             )
+            .and_then(|row| {
+                row.with_probe_hint(
+                    candidate
+                        .probe_hint()
+                        .map(fr_client::discovery::picker::ProbeHint::label),
+                )
+            })
             .map_err(|_| invalid_snapshot())
         })
         .collect()
@@ -149,7 +162,7 @@ fn finish(picker: &HostPicker) -> bool {
 fn unavailable() -> Failure {
     failure(
         "host_picker_unavailable",
-        "Check the local X11 display, authorization, window focus and keyboard mapping, then make a new explicit selection. No remote connection was opened.",
+        "Check the local X11 display, authorization, window focus and keyboard mapping, then make a new explicit selection. No desktop observation was opened.",
     )
 }
 #[cfg(test)]

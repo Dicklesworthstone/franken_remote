@@ -92,6 +92,7 @@ pub struct Row {
     name: String,
     stable_id: String,
     path: PathHint,
+    probe: Option<String>,
 }
 
 impl Row {
@@ -109,7 +110,23 @@ impl Row {
             name: name.to_owned(),
             stable_id: stable_id.to_owned(),
             path,
+            probe: None,
         })
+    }
+    /// A bounded informational label. It never changes whether a row can be
+    /// selected or how the original peer identity is checked after selection.
+    pub fn with_probe_hint(mut self, hint: Option<&str>) -> Result<Self, Error> {
+        if hint.is_some_and(|text| {
+            text.is_empty()
+                || text.len() > 64
+                || !text
+                    .bytes()
+                    .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+        }) {
+            return Err(Error::InvalidRow);
+        }
+        self.probe = hint.map(str::to_owned);
+        Ok(self)
     }
 }
 

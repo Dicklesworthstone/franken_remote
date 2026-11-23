@@ -18,6 +18,13 @@ it does not scan the tailnet or open a desktop after a failed probe.
 
 ## Bounded tailnet discovery
 
+`fr app --probe` uses this same bounded authenticated sweep before each native
+machine picker. Its rows show advertised viewing/control capabilities, failures
+and unprobed machines alongside the original identity. Every row remains
+selectable, and the selected desktop connection rechecks identity, approval and
+live capability admission. This opt-in is scoped to the app invocation and is
+never saved in preferences. See [the desktop app](docs/native-client-cli.md#desktop-application-fr-app).
+
 An explicit sweep applies the same acknowledged inspection to a bounded set of
 machines returned by the installed Tailscale daemon:
 
@@ -30,7 +37,8 @@ The default selects at most 64 candidates in stable-node-ID order;
 `--probe-limit 1..64` lowers that count. The original twenty-second deadline
 covers the LocalAPI discovery and all probes. Each probe additionally retains
 its own five-second limit, including its four-second dial allowance. At most
-four probes run concurrently. A peer's failure or close cannot cancel a
+four probes run concurrently on Linux; macOS runs one at a time to preserve
+the installed Tailscale application's process-wide lookup credit. A peer's failure or close cannot cancel a
 sibling, monopolize a lookup slot, or reset the sweep's deadline. Cancellation
 and expiry drop the original pending futures and fence their native owners;
 there are no detached probe tasks or automatic retries.

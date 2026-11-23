@@ -26,11 +26,19 @@ pub(super) fn select(
     if stopped.get() || cx.is_cancel_requested() {
         return Err(host_choice::cancelled());
     }
-    let catalog = host_choice::catalog(&snapshot)?;
+    let original = host_choice::catalog(&snapshot)?;
+    let catalog = if !original.is_empty() && connection.pick.as_ref().is_some_and(|pick| pick.probe)
+    {
+        super::super::hosts_probe::picker_catalog(
+            runtime, cx, shutdown, stopped, &snapshot, connection,
+        )?
+    } else {
+        original
+    };
     if catalog.is_empty() {
         return Err(failure(
             "host_choice_empty",
-            "The installed Tailscale daemon returned no selectable peers. Check its account, peer visibility and key expiry; no remote connection was opened.",
+            "The installed Tailscale daemon returned no selectable peers. Check its account, peer visibility and key expiry; no desktop observation was opened.",
         ));
     }
     let initial = host_choice::Choices::initial(connection);
@@ -55,7 +63,7 @@ pub(super) fn select(
     picker.close().map_err(|_| {
         failure(
             "host_picker_cleanup_incomplete",
-            "The original native host picker has not confirmed cleanup. No remote connection was opened.",
+            "The original native host picker has not confirmed cleanup. No desktop observation was opened.",
         )
     })?;
     if stopped.get() || cx.is_cancel_requested() {
@@ -86,7 +94,7 @@ pub(super) fn select(
     .map_err(|_| {
         Failure::new(
             "output_unavailable",
-            "The selected-host report could not be written. No remote connection was opened.",
+            "The selected-host report could not be written. No desktop observation was opened.",
             74,
         )
     })?;
@@ -113,11 +121,11 @@ fn picker_failure(error: Error) -> Failure {
         Error::Cancelled => host_choice::cancelled(),
         Error::ChoiceTimeout => failure(
             "host_choice_expired",
-            "The original host-choice deadline expired. Start a fresh local choice; no remote connection was opened.",
+            "The original host-choice deadline expired. Start a fresh local choice; no desktop observation was opened.",
         ),
         Error::EventFlood => failure(
             "host_choice_event_overflow",
-            "The local picker could not finish its bounded event batch. No queued choice was accepted and no remote connection was opened.",
+            "The local picker could not finish its bounded event batch. No queued choice was accepted and no desktop observation was opened.",
         ),
         _ => unavailable(),
     }
@@ -126,6 +134,6 @@ fn picker_failure(error: Error) -> Failure {
 fn unavailable() -> Failure {
     failure(
         "host_picker_unavailable",
-        "The local macOS host picker could not complete a valid choice. Run from the logged-in graphical session and make a fresh selection; no remote connection was opened.",
+        "The local macOS host picker could not complete a valid choice. Run from the logged-in graphical session and make a fresh selection; no desktop observation was opened.",
     )
 }

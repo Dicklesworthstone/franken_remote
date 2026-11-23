@@ -1,4 +1,4 @@
-use super::{CapabilityInspectionData, Discovery, Failure, MAX_BATCH_CONCURRENCY, ProbeOutcome};
+use super::{CapabilityInspectionData, Discovery, Failure, PROBE_CONCURRENCY, ProbeOutcome};
 use serde::Serialize;
 use std::fmt::Write as _;
 
@@ -74,7 +74,7 @@ impl Report {
                 expired: excluded.expired,
                 unusable: excluded.unusable,
             },
-            concurrency: MAX_BATCH_CONCURRENCY,
+            concurrency: PROBE_CONCURRENCY,
             per_probe_budget_ms: 5_000,
             sweep_budget_ms: 20_000,
             budget_exhausted: expired,

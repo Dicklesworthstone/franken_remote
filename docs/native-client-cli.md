@@ -43,7 +43,7 @@ known peers, use:
 ./target/debug/fr hosts --probe --experimental-native --probe-limit 16 --json
 ```
 
-At most four probes run at once, with one original twenty-second deadline for
+At most four probes run at once on Linux and one on macOS, with one original twenty-second deadline for
 discovery and probing, and at most five seconds per peer. Results name each
 peer's acknowledged capability intersection or typed failure; unfinished and
 omitted candidates stay explicit. This opens no observation, media or input.
@@ -57,6 +57,23 @@ and follows the selected viewer through its terminal outcome. A picker choice
 is applied only after its original command exits successfully and reports the
 selection-only, fresh-lookup-required result. Each viewer still resolves the
 selected identity again before connecting.
+
+Use `fr app --probe` to inspect up to 64 discovered machines before each
+machine picker. The explicit sweep has a 20-second budget and a five-second
+budget per host, with at most four probes on Linux and one on macOS. The Mac
+limit preserves the installed Tailscale application's shared lookup credit.
+It uses the selected service port and the installed protected Tailscale
+endpoint; no address scan, observation, input request or media worker starts.
+
+The picker displays acknowledged **viewing/control advertised** results,
+identity refusals, busy hosts, unanswered probes and unprobed rows alongside
+the original machine identities. Advertisements do not prove desktop or codec
+readiness or grant permission. Failed and unprobed machines remain selectable,
+and every connection repeats identity and host admission checks. Probe results
+are discarded with that picker; they are never saved as a permission or used
+to change the requested viewing/control role. The flag applies only to this
+app run and cannot accompany `--install` or `--uninstall`. Without `--probe`,
+the app retains local discovery only.
 
 Use `fr app --port 9443` when the host service listens on a nondefault port.
 The selected port applies to every picker and viewer launched during that app

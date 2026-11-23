@@ -13,7 +13,7 @@
 #include <string.h>
 #include <time.h>
 
-struct fr_host_row { char name[255], stable_id[129]; uint32_t path; };
+struct fr_host_row { char name[255], stable_id[129]; uint32_t path; char probe[65]; };
 /* Keys before KEY_REQUIRED must exist in the keymap. F2-F7 toggle the
  * optional connection choices and may be absent (then only clicks do). */
 enum { KEY_ESCAPE, KEY_ENTER, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
@@ -292,7 +292,8 @@ static int draw(struct fr_host_picker *h) {
         y = text(h, value, y);
         const char *path = h->rows[index].path == 1 ? "Path hint: direct" :
             h->rows[index].path == 2 ? "Path hint: relayed" : "Path hint: unknown";
-        text(h, path, y);
+        y = text(h, path, y);
+        if (h->rows[index].probe[0]) text(h, h->rows[index].probe, y);
     }
     colors(h, 0x171717, 0xf5f5f5);
     char page[80];
@@ -337,10 +338,15 @@ struct fr_host_picker *fr_host_picker_open(const char *display,
         }
         if (notice_len > NOTICE_MAX) return NULL;
     }
+    int probed = 0;
     for (uint32_t i = 0; i < count; ++i) {
         if (!rows[i].name[0] || !memchr(rows[i].name, 0, sizeof(rows[i].name)) ||
-            !rows[i].stable_id[0] || !memchr(rows[i].stable_id, 0, sizeof(rows[i].stable_id)) || rows[i].path > 2)
+            !rows[i].stable_id[0] || !memchr(rows[i].stable_id, 0, sizeof(rows[i].stable_id)) || rows[i].path > 2 ||
+            !memchr(rows[i].probe, 0, sizeof(rows[i].probe)))
             return NULL;
+        for (size_t j = 0; rows[i].probe[j]; ++j)
+            if ((unsigned char)rows[i].probe[j] < 32 || (unsigned char)rows[i].probe[j] > 126) return NULL;
+        if (rows[i].probe[0]) probed = 1;
     }
     struct fr_host_picker *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
@@ -381,7 +387,8 @@ struct fr_host_picker *fr_host_picker_open(const char *display,
     free(font); free(error); if (!valid || h->columns < 40) goto fail;
     h->header = (uint16_t)(4 * h->line + 12);
     h->row_height = (uint16_t)((((263u + h->columns - 1) / h->columns) +
-        ((137u + h->columns - 1) / h->columns) + 2) * h->line + 8);
+        ((137u + h->columns - 1) / h->columns) + 2 +
+        (probed ? (64u + h->columns - 1) / h->columns : 0)) * h->line + 8);
     unsigned footer_lines = h->has_choices ? 6 : 4;
     if (h->height < h->header + footer_lines * h->line + 12 + h->row_height) goto fail;
     h->page_rows = (h->height - h->header - footer_lines * h->line - 12) / h->row_height;

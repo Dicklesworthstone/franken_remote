@@ -10,6 +10,27 @@ fn parsed(words: &str) -> Result<Options, Failure> {
 }
 
 #[test]
+fn app_probe_requires_a_selection_only_installed_endpoint_picker() {
+    let base = "connect --choose-host --view-only --experimental-native --display only";
+    let Command::Connect(connection) = parsed(&format!("{base} --pick-only --app-probe"))
+        .unwrap()
+        .command
+    else {
+        panic!("picker")
+    };
+    assert!(connection.pick.unwrap().probe);
+    assert!(!connection.control && connection.audio.is_none() && connection.microphone.is_none());
+    for args in [
+        format!("{base} --app-probe"),
+        format!("{base} --pick-only --app-probe --socket /tmp/other.sock"),
+        format!("{base} --pick-only --app-probe --app-probe"),
+        "connect n-explicit --view-only --experimental-native --display only --app-probe".into(),
+    ] {
+        assert!(parsed(&args).is_err(), "{args}");
+    }
+}
+
+#[test]
 fn host_choice_is_explicit_and_retains_all_connection_permissions_and_limits() {
     let opts = parsed("connect --choose-host --control --experimental-native --display choose --x-display :91 --socket /tmp/ts.sock --port 9443 --fit 960x540 --attempts 2 --no-clipboard --send /source --receive /destination --audio --json").unwrap();
     assert!(opts.json);

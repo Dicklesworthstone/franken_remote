@@ -3,7 +3,8 @@ FrankenRemote development client
 fr help [TOPIC...]
 fr COMMAND --help
 
-fr app [--install | --uninstall]
+fr app [--probe] [--port PORT] [--receive DIR]
+fr app --install | --uninstall
 fr hosts [--json] [--socket /absolute/tailscaled.sock]
 fr peers [--json]
 fr hosts --probe --experimental-native [--probe-limit 1..64]
@@ -73,7 +74,7 @@ Tailnet options cannot be combined.
 Discovery/inspect uses installed Tailscale metadata. --by-name requires an exact
 canonical tailnet FQDN, never arbitrary DNS/a URL. --probe reads authenticated frd
 capabilities, opening no approval, observation or input; it grants no access.
-hosts --probe: up to 64 peers in stable-ID order, four concurrently, one 20-second
+hosts --probe: up to 64 peers in stable-ID order (Linux: four; macOS: one), one 20-second
 discovery/probe budget, five seconds/probe.
 Refusals/unstarted peers/omissions stay visible; timeout cannot prove offline.
 --trust-roots defaults to /etc/ssl/certs/ca-certificates.crt; --worker defaults
@@ -96,6 +97,8 @@ Choice expires after 120 seconds; cleanup precedes connection/file selection.
 --json emits host_selected before connecting; use its ID for disconnect.
 
 Desktop application:
+fr app --probe adds bounded authenticated capability hints to each picker;
+failed/unprobed rows stay selectable. Advertisements grant no desktop access.
 fr app connects using picker choices: View only / View and control, Share
 clipboard text, Ask which display to show (Linux: F2/F3/F4 or bottom-line click).
 Viewer close returns to the picker with the outcome; picker Cancel/Escape quits.
@@ -113,7 +116,7 @@ fr app --install adds ~/Applications/FrankenRemote.app (macOS) or an
 applications-menu entry (Linux) that runs this fr with app; --uninstall
 removes only that launcher. The picker step is fr connect --choose-host
 --pick-only [--app-notice TEXT]: it reports host_selected with the confirmed
-choices and opens no connection.
+choices without opening a desktop.
 
 Control and reconnect:
 Choose one role. --control requests input once after a fresh frame; host:
