@@ -131,6 +131,49 @@ fn installing_the_original_snapshot_preserves_its_renderer_receipt_age() {
         200
     );
 }
+
+#[test]
+fn future_receipt_cannot_be_installed_or_grant_control() {
+    let shared = Shared::new([1; 16], [2; 16]).unwrap();
+    let (_channel, handle) = Channel::new();
+    let now = Instant::now();
+    assert_eq!(
+        shared.bind_snapshot_at(
+            handle.clone(),
+            display(),
+            7,
+            Evidence::SubmittedToCompositor,
+            now + std::time::Duration::from_secs(60),
+        ),
+        Err(())
+    );
+    assert!(shared.locked().snapshots.is_none());
+
+    // The original receipt may already be old when startup/acknowledgement
+    // waits finish. Installation retains that age and creates no input grant.
+    let received_at = now.checked_sub(std::time::Duration::from_secs(5)).unwrap();
+    shared
+        .bind_snapshot_at(
+            handle,
+            display(),
+            7,
+            Evidence::SubmittedToCompositor,
+            received_at,
+        )
+        .unwrap();
+    let state = shared.locked();
+    assert_eq!(
+        state
+            .observation
+            .snapshot(now)
+            .unwrap()
+            .frame
+            .unwrap()
+            .receipt_age_ms,
+        5000
+    );
+    assert!(state.live.is_none(), "a pixel receipt grants no input");
+}
 fn poll<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }

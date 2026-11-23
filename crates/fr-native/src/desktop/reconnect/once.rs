@@ -1,7 +1,7 @@
 //! Finite read-only observation uses the same viewer close and reap path.
 use fr_wire::{closure::Reason, display::Display};
 use frd::{native_connection::reconnect::CallbackError, session_startup::Presentation};
-use std::ops::ControlFlow;
+use std::{ops::ControlFlow, time::Instant};
 
 /// The selected display and actual initial decoder completion of ONE attempt.
 /// No screenshot, host clock mapping, semantic result or reusable grant is implied.
@@ -9,6 +9,9 @@ use std::ops::ControlFlow;
 pub struct Observation {
     pub display: Display,
     pub completion: Presentation,
+    /// Local receipt before bootstrap acknowledgement and native startup waits.
+    /// Keeping the receipt cannot refresh it or establish host capture time.
+    pub received_at: Instant,
 }
 impl Observation {
     /// Read the ORIGINAL initial receipt during a live desktop's ready callback.
@@ -22,6 +25,7 @@ impl Observation {
         Some(Self {
             display: observer.display(),
             completion: observer.initial_presentation(),
+            received_at: observer.initial_presentation_received_at(),
         })
     }
 }

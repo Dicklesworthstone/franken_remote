@@ -1168,11 +1168,12 @@ impl Ui for Interface {
             let observation = fr_native::desktop::reconnect::Observation::initial_from(desktop)
                 .ok_or(CallbackError)?;
             automation
-                .bind_snapshot(
+                .bind_snapshot_at(
                     desktop.snapshot_handle().map_err(|_| CallbackError)?,
                     observation.display,
                     observation.completion.frame.as_raw(),
                     snapshot_evidence(observation.completion.stage),
+                    observation.received_at,
                 )
                 .map_err(|()| CallbackError)?;
         }

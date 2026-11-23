@@ -46,6 +46,7 @@ fn observation(stage: PresentationStage) -> Observation {
             frame: FrameId::FIRST,
             stage,
         },
+        received_at: std::time::Instant::now(),
     }
 }
 

@@ -632,6 +632,7 @@ unknown or absent.
 query round trip. The first receipt retains its timestamp from before the
 remaining bootstrap acknowledgements; registering the opened viewer does not
 make it younger. Repeated callbacks for the same receipt do not refresh it.
+Both Linux and macOS publication retain this original timestamp.
 An idle desktop's receipt age therefore continues to grow. The optional
 `--max-receipt-age-ms` bound, from 1 to 60000 milliseconds, limits that receipt
 age; it does not measure the age of the host's source observation.

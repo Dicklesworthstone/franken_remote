@@ -437,6 +437,7 @@ impl<U: Ui> Application for Session<U> {
                 self.initial = Some(Observation {
                     display: observer.display(),
                     completion: observer.initial_presentation(),
+                    received_at: observer.initial_presentation_received_at(),
                 });
             }
             if display_switching {

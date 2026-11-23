@@ -239,6 +239,7 @@ mod tests {
                 frame: FrameId::FIRST,
                 stage,
             },
+            received_at: std::time::Instant::now(),
         }
     }
 

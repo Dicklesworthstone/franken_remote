@@ -98,6 +98,11 @@ handles. A later status request cannot refresh the pictured frame or replace its
 grant. The screenshot already reports display geometry and image dimensions;
 this addition does not introduce a new image-to-desktop transform.
 
+On Linux and macOS, the first screenshot retains the local receipt time from
+before bootstrap acknowledgement and startup waits. Registering its request
+handle cannot renew the picture's age. A future-dated local receipt is refused;
+retaining a valid old receipt does not create an input grant.
+
 ## Submit one bounded operation
 
 Use the values from the same owner's ready status. The following example is a

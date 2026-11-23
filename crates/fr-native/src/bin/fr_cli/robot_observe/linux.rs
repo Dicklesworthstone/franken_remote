@@ -361,7 +361,7 @@ impl Ui for Interface {
                         original.display,
                         original.completion.frame.as_raw(),
                         evidence(original.completion.stage),
-                        Instant::now(),
+                        original.received_at,
                     )
                 })
                 .map_err(|()| CallbackError)?;
