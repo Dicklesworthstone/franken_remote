@@ -19,6 +19,9 @@ mod displays;
 mod doctor;
 #[path = "linux/doctor_native.rs"]
 mod doctor_native;
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+#[path = "linux/file_choice.rs"]
+mod file_choice;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/files.rs"]
 mod files;
@@ -347,13 +350,16 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
             ),
         ));
     }
-    #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+    #[cfg(not(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    )))]
     if matches!(&options.command, Command::Connect(connection) if connection.upload.choose_files) {
         return Err(receive_before_start(
             options,
             Failure::new(
                 "file_picker_unavailable",
-                "--choose-files requires the native macOS desktop build; use --send PATH or --file-drop on this platform. No connection was opened.",
+                "--choose-files requires a native Linux or macOS desktop build; use --send PATH or --file-drop where available. No connection was opened.",
                 2,
             ),
         ));
@@ -466,7 +472,7 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
     }
 }
 
-#[cfg(feature = "linux-desktop")]
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One original native session owner.
 fn connect(
     runtime: &Runtime,
@@ -497,6 +503,13 @@ fn connect(
     if connection.pick.is_some() {
         return Ok(String::new());
     }
+    if automation && connection.upload.choose_files {
+        return Err(before_start(Failure::new(
+            "interactive_file_choice_required",
+            "Foreground automation requires explicit local paths. Use fr connect for a human file choice; no remote connection was opened.",
+            2,
+        )));
+    }
     let prepared = (|| {
         let roots = read_roots(&connection.target.roots)?;
         let client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
@@ -514,9 +527,16 @@ fn connect(
         } else {
             files::download::select(connection.receive.as_ref())?
         };
-        // Classify every --send path by type before any network I/O.
+        // The original receive destination is already pinned before another
+        // chooser can wait. Both choices retain the existing transfer owners.
+        let chosen = if connection.upload.choose_files {
+            Some(file_choice::select(runtime, cx, shutdown, stopped)?)
+        } else {
+            None
+        };
+        // Classify and pin initial uploads before any network I/O.
         let sends = files::select(
-            &connection.upload.paths,
+            chosen.as_deref().unwrap_or(&connection.upload.paths),
             connection.upload.file_drop,
             connection.upload.file_commands,
         )?;
@@ -1005,7 +1025,7 @@ fn connect(
     )
 }
 #[cfg(not(any(
-    feature = "linux-desktop",
+    all(target_os = "linux", feature = "linux-desktop"),
     all(target_os = "macos", feature = "macos-desktop")
 )))]
 #[allow(clippy::too_many_arguments)]
@@ -1795,7 +1815,7 @@ fn control_history(progress: &Progress, control: &control::Counters) -> crate::C
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(feature = "linux-desktop")))]
     #[test]
     fn unavailable_file_picker_refuses_before_runtime_or_socket_setup() {
         let options = crate::options::parse(

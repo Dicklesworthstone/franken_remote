@@ -3,7 +3,7 @@
 //! The portal service is a test fixture, not a desktop chooser. TCP/ANONYMOUS
 //! applies only to this private broker because some runners prohibit `AF_UNIX`.
 //! The production entry point still accepts only the installed local Unix bus.
-use super::super::{Bus, DirectoryPicker, Error, Message, Phase, bus};
+use super::super::{Bus, DirectoryPicker, Error, FilePicker, Message, Phase, SelectionMode, bus};
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
     fs::File,
@@ -140,7 +140,7 @@ enum Action {
         delay: Duration,
     },
     Response {
-        uris: Vec<&'static str>,
+        uris: Vec<String>,
         code: u32,
         foreign: bool,
         wrong_path: bool,
@@ -204,10 +204,10 @@ impl Portal {
             })
             .unwrap();
     }
-    fn chosen(&self, uris: Vec<&'static str>) {
+    fn chosen(&self, uris: Vec<&str>) {
         self.actions
             .send(Action::Response {
-                uris,
+                uris: uris.into_iter().map(str::to_owned).collect(),
                 code: 0,
                 foreign: false,
                 wrong_path: false,
@@ -283,13 +283,10 @@ fn boolean(message: &Message) -> bool {
 fn read_opening(message: &Message) -> Opening {
     message.signature(c"ssa{sv}").unwrap();
     assert_eq!(message.read_text(b's', 256).unwrap(), "");
-    assert_eq!(
-        message.read_text(b's', 256).unwrap(),
-        "Choose a folder to receive files"
-    );
+    let title = message.read_text(b's', 256).unwrap();
     message.require_container(b'a', c"{sv}").unwrap();
     let (mut token, mut directory, mut multiple) = (None, None, None);
-    let mut labels = 0;
+    let mut label = None;
     while message.enter(b'e', c"sv").unwrap() {
         match message.read_text(b's', 128).unwrap().as_str() {
             "handle_token" => {
@@ -308,9 +305,9 @@ fn read_opening(message: &Message) -> Opening {
                 multiple = Some(boolean(message));
             }
             "accept_label" => {
-                labels += 1;
+                assert!(label.is_none());
                 message.require_container(b'v', c"s").unwrap();
-                assert_eq!(message.read_text(b's', 128).unwrap(), "Receive Here");
+                label = Some(message.read_text(b's', 128).unwrap());
             }
             name => panic!("unexpected option {name}"),
         }
@@ -319,7 +316,15 @@ fn read_opening(message: &Message) -> Opening {
     }
     message.leave().unwrap();
     assert!(message.at_end().unwrap());
-    assert_eq!(labels, 1);
+    let directory = directory.unwrap_or(false);
+    let multiple = multiple.unwrap();
+    let (expected_title, expected_label) = match (directory, multiple) {
+        (true, false) => ("Choose a folder to receive files", "Receive Here"),
+        (false, true) => ("Choose files to send", "Send Files"),
+        _ => panic!("chooser requested an unsupported selection mode"),
+    };
+    assert_eq!(title, expected_title);
+    assert_eq!(label.as_deref(), Some(expected_label));
     let sender = header(message, true);
     let token = token.unwrap();
     assert!(token.starts_with("fr_receive_"));
@@ -342,12 +347,12 @@ fn read_opening(message: &Message) -> Opening {
     Opening {
         sender,
         path,
-        directory: directory.unwrap(),
-        multiple: multiple.unwrap(),
+        directory,
+        multiple,
     }
 }
 
-fn respond(bus: &Bus, opening: &Opening, uris: &[&str], code: u32, wrong_path: bool) {
+fn respond(bus: &Bus, opening: &Opening, uris: &[String], code: u32, wrong_path: bool) {
     let path = if wrong_path {
         c"/org/freedesktop/portal/desktop/request/wrong/owner"
     } else {
@@ -376,7 +381,7 @@ fn respond(bus: &Bus, opening: &Opening, uris: &[&str], code: u32, wrong_path: b
     signal.open(b'v', c"as").unwrap();
     signal.open(b'a', c"s").unwrap();
     for uri in uris {
-        signal.text(&CString::new(*uri).unwrap()).unwrap();
+        signal.text(&CString::new(uri.as_str()).unwrap()).unwrap();
     }
     for _ in 0..4 {
         signal.close().unwrap();
@@ -490,8 +495,6 @@ impl Service<'_> {
         } else if is_method(&message, c"org.freedesktop.portal.FileChooser", c"OpenFile") {
             assert!(self.opening_call.is_none());
             let opening = read_opening(&message);
-            assert!(opening.directory);
-            assert!(!opening.multiple);
             assert!(
                 self.observed
                     .lock()
@@ -625,6 +628,9 @@ fn real_portal_roundtrip_requests_one_directory_and_releases_only_completed_choi
     let mut picker = portal.picker();
     portal.wait_open(&mut picker);
     assert_eq!(portal.state().version_queries, 1);
+    let opening = portal.state().opening.unwrap();
+    assert!(opening.directory);
+    assert!(!opening.multiple);
     portal.reply(false);
     pending_until(&mut picker, |p| p.phase == Phase::Waiting);
     portal.chosen(vec!["file:///tmp/received%20files"]);
@@ -724,7 +730,7 @@ fn unicast_responses_from_another_owner_or_request_cannot_complete_the_choice() 
         portal
             .actions
             .send(Action::Response {
-                uris: vec!["file:///tmp/foreign"],
+                uris: vec!["file:///tmp/foreign".to_owned()],
                 code: 0,
                 foreign,
                 wrong_path,
@@ -866,3 +872,6 @@ fn malformed_terminal_signatures_and_codes_do_not_acknowledge_native_cleanup() {
         );
     }
 }
+
+#[path = "native/files.rs"]
+mod files;

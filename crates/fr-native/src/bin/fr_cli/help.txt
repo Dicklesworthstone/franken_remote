@@ -144,8 +144,8 @@ An incomplete transfer unable to stop independently closes the connection.
 View-only never accesses clipboard.
 
 Files:
-On macOS, --choose-files opens a native picker before connecting: up to 8 local
-files/folders for the original --control upload, instead of --send paths.
+On macOS/Linux, --choose-files opens a native picker before connecting: up to 8
+files (Mac also folders) for the original --control upload, instead of --send.
 Cancel/timeout opens no connection; reconnect never repeats the choice.
 --send PATH needs --control and host frd run --files DIR: up to 8 regular files
 or portable directory roots, in order. Symlinks/special files/existing names
@@ -159,11 +159,11 @@ An open panel accepts X11 file-manager Copy drops. --file-drop works without
 use panel buttons. Hiding stops drops; Cancel before the first ends sharing.
 Reconnect never restores drops/repeats selections. Missing controls:
 file_drop_unavailable.
-On macOS, --choose-receive-directory chooses and pins one existing private folder
-before remote lookup. It requires --control and uses actual receiver defaults
+On macOS/Linux, --choose-receive-directory pins one existing private folder
+before connecting. It requires --control and uses actual receiver defaults
 with reject-conflict policy. It excludes --receive, receive-policy overrides and
 --pick-only. Cancel/timeout starts no connection; each new viewer needs a fresh
-choice. Other platforms refuse this chooser before session startup.
+choice. Linux requires the installed FileChooser portal.
 --receive DIR must be absolute, owned by you, not group/other writable, with no
 symlink components. Host: frd run --once --input-agent PATH --send PATH... .
 Items publish atomically, never open/run. Defaults: 256 MiB/selection, 1 GiB/session.

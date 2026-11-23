@@ -986,8 +986,8 @@ files again. The host still opts in with `--files DIR`.
 `--choose-files` requires `--control` and excludes initial `--send` paths. It may
 accompany `--choose-host`, `--receive`, `--file-drop` and `--file-commands`; each
 keeps its own existing consent and limits. Robot commands refuse interactive
-selection. Linux returns `file_picker_unavailable` before runtime or socket setup;
-use its existing explicit `--send` or `--file-drop` path.
+selection. Linux uses the installed portal route described under
+[Linux file selection](#choose-initial-files-in-the-native-linux-picker).
 
 This chooser runs before the viewer exists. The active Mac viewer's focus-loss
 fence remains terminal, including when switching applications; the picker does
@@ -1000,10 +1000,51 @@ tests, including the new picker grammar and robot refusal. It links the real
 compiled core/wire/media/client crates and uses verbatim production CLI records
 and platform constants. Strict Clippy also passes for the chooser policy and
 Rust FFI boundary. These are component checks; full native CLI compilation and
-the Linux before-runtime refusal test remain blocked by SIGKILL while compiling
+the non-desktop before-runtime refusal test remain blocked by SIGKILL while compiling
 the unchanged pinned Asupersync dependency. Native AppKit compilation and actual
 picker-to-tailnet upload qualification require a macOS SDK and runtime. No native
 support claim follows from these component results.
+
+### Choose initial files in the native Linux picker
+
+With a `linux-desktop` build, `--choose-files` opens the installed desktop's
+FileChooser portal before any remote connection or control request:
+
+```sh
+fr connect NODE_ID --control --choose-files --experimental-native --display only
+```
+
+Choose one to eight local files and confirm **Send Files**. The chooser requires
+the installed XDG FileChooser portal, interface version 1 or newer, in the local
+graphical session. Missing support produces `file_picker_unavailable`;
+`--send PATH` and the explicit file-drop workflow remain available. Directory
+trees can be sent with `--send DIR` or a later file drop.
+
+Sending and receiving use the same original portal request owner. File selection
+retains the five-second setup budget, 120-second original choice budget, exact
+portal/request identity, bounded event processing and acknowledged cleanup.
+Only a completed original request can release a selection, and a successful file
+response must be consumed within two seconds. At most eight distinct local paths
+and 32 KiB of encoded URI data are accepted. Remote URIs, duplicate decoded paths,
+parent traversal, malformed escapes and ambiguous multi-line choices refuse.
+No chosen path or native error text enters reports.
+
+After picker cleanup, the existing upload boundary opens and pins the selected
+sources. When combined with `--choose-receive-directory` or `--receive DIR`, the
+receiving destination is pinned before the upload chooser can wait. Both transfer
+directions retain their original independent consent, budgets and control-lease
+requirements. A local preflight failure preserves receive-not-started evidence.
+Reconnect and display replacement never repeat the chooser or initial upload.
+`--choose-files` requires `--control`, excludes initial `--send` paths, and is
+refused by robot commands. The app's **Send files** option continues to enable
+explicit drops into its viewer.
+
+The pinned-nightly actual-source adapter harness passes **34 tests**, including
+22 cases using real libsystemd framing and a private `dbus-daemon`; nine of those
+cases exercise the upload extension. They cover both selection modes, early
+responses, response identity, cancellation, payload bounds and cleanup failure.
+This is component evidence, separate from an installed graphical portal, full
+native CLI compilation and a live transfer.
 
 ### Native macOS file selections
 

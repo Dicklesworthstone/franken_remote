@@ -1,10 +1,10 @@
-//! One explicit receiving-folder choice through the installed Linux portal.
+//! One explicit local file or receiving-folder choice through the Linux portal.
 //!
 //! This private bus owns exactly one request. Setup and every event turn are
 //! asynchronous and bounded; no runtime, remote session, file or authority is created.
-//! The original `Response` ends the native interaction before its one local URI
+//! The original `Response` ends the native interaction before selected local URIs
 //! can leave this owner. Cancellation instead requires a bounded `Request.Close`
-//! acknowledgement. The caller must still validate and pin the selected folder.
+//! acknowledgement. The caller must still validate and pin the selected paths.
 //!
 //! ABI/API references: systemd sd-bus; XDG Desktop Portal `FileChooser` version 3
 //! (`directory`) and Request (`handle_token`, `Response`, `Close`).
@@ -16,6 +16,7 @@
 #[path = "directory_picker/bus.rs"]
 mod bus;
 
+use crate::file_drop::{MAX_AGE, MAX_BYTES, MAX_PATHS};
 use bus::{Bus, Message};
 use std::{
     ffi::{CStr, CString},
@@ -67,6 +68,16 @@ enum Phase {
     Waiting,
     Closed,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionMode {
+    Directory,
+    Files,
+}
+enum Selection {
+    Directory(PathBuf),
+    Files(Vec<PathBuf>),
+}
 impl Phase {
     fn cookie(self) -> Option<u64> {
         match self {
@@ -96,7 +107,9 @@ pub struct DirectoryPicker {
     activation_attempted: bool,
     request_sent: bool,
     response_received: bool,
-    response: Option<Result<PathBuf, Error>>,
+    mode: SelectionMode,
+    response: Option<Result<Selection, Error>>,
+    response_at: Option<u64>,
     terminal: Option<Error>,
     messages: usize,
 }
@@ -114,6 +127,10 @@ impl DirectoryPicker {
     }
 
     fn open_at(address: &CStr, now: u64) -> Result<Self, Error> {
+        Self::open_mode_at(address, now, SelectionMode::Directory)
+    }
+
+    fn open_mode_at(address: &CStr, now: u64, mode: SelectionMode) -> Result<Self, Error> {
         Ok(Self {
             bus: Some(Bus::open(address)?),
             phase: Phase::Connecting,
@@ -126,7 +143,9 @@ impl DirectoryPicker {
             activation_attempted: false,
             request_sent: false,
             response_received: false,
+            mode,
             response: None,
+            response_at: None,
             terminal: None,
             messages: 0,
         })
@@ -134,6 +153,14 @@ impl DirectoryPicker {
 
     /// One bounded, nonblocking turn. A successful choice consumes this owner.
     pub fn poll(&mut self) -> Result<Option<PathBuf>, Error> {
+        match self.poll_selection()? {
+            None => Ok(None),
+            Some(Selection::Directory(path)) => Ok(Some(path)),
+            Some(Selection::Files(_)) => Err(Error::InvalidSelection),
+        }
+    }
+
+    fn poll_selection(&mut self) -> Result<Option<Selection>, Error> {
         if let Some(error) = self.terminal {
             return Err(error);
         }
@@ -148,7 +175,7 @@ impl DirectoryPicker {
         result
     }
 
-    fn poll_inner(&mut self) -> Result<Option<PathBuf>, Error> {
+    fn poll_inner(&mut self) -> Result<Option<Selection>, Error> {
         self.check_time()?;
         self.turn()?;
         self.check_time()?;
@@ -159,7 +186,14 @@ impl DirectoryPicker {
         // acknowledgement. Opening must ALSO have returned the exact handle.
         let result = self.response.take().ok_or(Error::InvalidSelection)?;
         self.disconnect();
-        self.check_choice_time()?;
+        let now = self.check_choice_time()?;
+        if self.mode == SelectionMode::Files && result.is_ok() {
+            let captured = self.response_at.ok_or(Error::Clock)?;
+            let age = now.checked_sub(captured).ok_or(Error::Clock)?;
+            if Duration::from_micros(age) >= MAX_AGE {
+                return Err(Error::Expired);
+            }
+        }
         result.map(Some)
     }
 
@@ -223,9 +257,15 @@ impl DirectoryPicker {
             }
             // Only a well-formed terminal Response envelope proves the UI
             // ended. Invalid selected content still refuses the choice.
-            let result = response(message)?;
+            let captured = if self.mode == SelectionMode::Files {
+                Some(bus::now()?)
+            } else {
+                None
+            };
+            let result = response(message, self.mode)?;
             self.response_received = true;
             self.response = Some(result);
+            self.response_at = captured;
             return Ok(());
         }
         if self.phase.cookie().is_none() || message.reply_cookie()? != self.phase.cookie() {
@@ -293,7 +333,12 @@ impl DirectoryPicker {
             Phase::Version(_) => {
                 message.signature(c"v")?;
                 message.require_container(b'v', c"u")?;
-                if message.read_number()? < 3 {
+                let minimum = if self.mode == SelectionMode::Directory {
+                    3
+                } else {
+                    1
+                };
+                if message.read_number()? < minimum {
                     return Err(Error::Unavailable);
                 }
                 message.leave()?;
@@ -318,12 +363,25 @@ impl DirectoryPicker {
                     c"OpenFile",
                 )?;
                 query.text(c"")?;
-                query.text(c"Choose a folder to receive files")?;
+                query.text(if self.mode == SelectionMode::Directory {
+                    c"Choose a folder to receive files"
+                } else {
+                    c"Choose files to send"
+                })?;
                 query.open(b'a', c"{sv}")?;
                 query.string_option(c"handle_token", &self.token)?;
-                query.boolean_option(c"directory", true)?;
-                query.boolean_option(c"multiple", false)?;
-                query.string_option(c"accept_label", c"Receive Here")?;
+                if self.mode == SelectionMode::Directory {
+                    query.boolean_option(c"directory", true)?;
+                }
+                query.boolean_option(c"multiple", self.mode == SelectionMode::Files)?;
+                query.string_option(
+                    c"accept_label",
+                    if self.mode == SelectionMode::Directory {
+                        c"Receive Here"
+                    } else {
+                        c"Send Files"
+                    },
+                )?;
                 query.close()?;
                 // Even uncertain queue admission retains original UI cleanup.
                 self.request_sent = true;
@@ -480,6 +538,31 @@ impl Drop for DirectoryPicker {
     }
 }
 
+/// Multiple-file selection using the same original portal owner and cleanup
+/// protocol as receiving-folder selection. No file is opened by this picker.
+#[derive(Debug)]
+pub struct FilePicker(DirectoryPicker);
+impl FilePicker {
+    pub fn open() -> Result<Self, Error> {
+        let now = bus::now()?;
+        let address = session_address()?;
+        DirectoryPicker::open_mode_at(&address, now, SelectionMode::Files).map(Self)
+    }
+
+    /// Return at most eight local paths once, after the native interaction ends.
+    pub fn poll(&mut self) -> Result<Option<Vec<PathBuf>>, Error> {
+        match self.0.poll_selection()? {
+            None => Ok(None),
+            Some(Selection::Files(paths)) => Ok(Some(paths)),
+            Some(Selection::Directory(_)) => Err(Error::InvalidSelection),
+        }
+    }
+
+    pub fn close(&mut self) -> Result<(), Error> {
+        self.0.close()
+    }
+}
+
 fn unique_name(name: &str) -> bool {
     name.starts_with(':')
         && name.len() <= 255
@@ -508,17 +591,17 @@ fn request_path(sender: &str, token: &CStr) -> Result<CString, Error> {
     .map_err(|_| Error::Unavailable)
 }
 
-fn response(message: &Message) -> Result<Result<PathBuf, Error>, Error> {
+fn response(message: &Message, mode: SelectionMode) -> Result<Result<Selection, Error>, Error> {
     message.signature(c"ua{sv}")?;
     match message.read_number()? {
-        0 => Ok(selected_response(message)),
+        0 => Ok(selected_response(message, mode)),
         1 => Ok(Err(Error::Cancelled)),
         2 => Ok(Err(Error::Unavailable)),
         _ => Err(Error::InvalidSelection),
     }
 }
 
-fn selected_response(message: &Message) -> Result<PathBuf, Error> {
+fn selected_response(message: &Message, mode: SelectionMode) -> Result<Selection, Error> {
     message.require_container(b'a', c"{sv}")?;
     let mut selected = None;
     let mut count = 0;
@@ -534,11 +617,16 @@ fn selected_response(message: &Message) -> Result<PathBuf, Error> {
             }
             message.require_container(b'v', c"as")?;
             message.require_container(b'a', c"s")?;
-            let uri = message.read_text(b's', 12_288)?;
-            if !message.at_end()? {
-                return Err(Error::InvalidSelection);
-            }
-            selected = Some(selected_directory(&uri)?);
+            selected = Some(match mode {
+                SelectionMode::Directory => {
+                    let uri = message.read_text(b's', 12_288)?;
+                    if !message.at_end()? {
+                        return Err(Error::InvalidSelection);
+                    }
+                    Selection::Directory(selected_directory(&uri)?)
+                }
+                SelectionMode::Files => Selection::Files(selected_files(message)?),
+            });
             message.leave()?;
             message.leave()?;
         } else {
@@ -548,6 +636,38 @@ fn selected_response(message: &Message) -> Result<PathBuf, Error> {
     }
     message.leave()?;
     selected.ok_or(Error::InvalidSelection)
+}
+
+fn selected_files(message: &Message) -> Result<Vec<PathBuf>, Error> {
+    let mut paths = Vec::new();
+    let mut bytes = 0_usize;
+    while !message.at_end()? {
+        if paths.len() == MAX_PATHS {
+            return Err(Error::InvalidSelection);
+        }
+        let uri = message.read_text(b's', MAX_BYTES.saturating_sub(bytes))?;
+        bytes = bytes
+            .checked_add(uri.len())
+            .and_then(|n| n.checked_add(1))
+            .filter(|n| *n <= MAX_BYTES)
+            .ok_or(Error::InvalidSelection)?;
+        // The existing one-URI parser rejects remote sources, newline injection,
+        // ambiguous escapes and decoded paths longer than 4096 bytes.
+        let path = selected_directory(&uri)?;
+        if paths.contains(&path)
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(Error::InvalidSelection);
+        }
+        paths.push(path);
+    }
+    if paths.is_empty() {
+        Err(Error::InvalidSelection)
+    } else {
+        Ok(paths)
+    }
 }
 
 fn selected_directory(uri: &str) -> Result<PathBuf, Error> {
