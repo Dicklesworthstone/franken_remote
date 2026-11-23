@@ -412,6 +412,12 @@ its original renderer receipt time even when installing the local owner takes
 longer. Later status queries cannot make a retained picture younger or refresh
 an accepted action. A read-only observation publisher remains read-only.
 
+Startup waits for the actual first renderer receipt before requiring current
+picture geometry. That opening wait cannot authorize input: the normal current,
+nonzero picture and foreground checks still apply before any action. Once a
+picture exists, lost geometry is terminal. Local stop and geometry/focus loss
+retire the command owner before native cleanup can delay the session.
+
 Keep the viewer focused while a same-user command process submits actions.
 Any focus-loss event permanently retires this automation owner, including a
 loss and regain in the same native event batch. Hiding, closing, a changed

@@ -179,7 +179,10 @@ impl Owner {
     }
     /// Explicit opt-in only. This opaque LOCAL handle is a comparison fence;
     /// the original controlled viewer retains every host lease and bearer ticket.
-    #[cfg(feature = "linux-desktop")]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     pub fn enable_input(&mut self, cx: &Cx) -> Result<input::Shared, Error> {
         if self.automation.is_some() || self.observations.is_some() {
             return Err(Error::Unavailable);

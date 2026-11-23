@@ -1439,6 +1439,26 @@ fn producer_terminal_event(events: &[WindowEvent], automation: bool) -> Option<L
 /// animation (about 0.5-0.8 s), inside the resize receipt's 2 s bound.
 const FULL_SCREEN_SETTLE: Duration = Duration::from_millis(1500);
 
+fn window_stop(
+    state: Option<super::WindowState>,
+    input_picture: Option<(u32, u32)>,
+    require_picture: bool,
+) -> Option<LocalStop> {
+    match state {
+        None => Some(LocalStop::NativeFailure),
+        Some(state) if !state.visible => Some(LocalStop::WindowHidden),
+        Some(state) if !state.key => Some(LocalStop::FocusLost),
+        Some(state)
+            if (require_picture
+                && (!state.geometry_current || state.picture.0 == 0 || state.picture.1 == 0))
+                || input_picture.is_some_and(|picture| picture != state.picture) =>
+        {
+            Some(LocalStop::PictureChanged)
+        }
+        Some(_) => None,
+    }
+}
+
 /// Drain the window's events, deliver them to a granted session, and stop
 /// control (or the session) on the local conditions frd requires.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1450,7 +1470,7 @@ fn service(
     reopen_intent: &RefCell<ReopenIntent>,
     resize: &Rc<ResizeIntent>,
     can_resize: bool,
-    automation: bool,
+    automation: Option<&dyn Automation>,
     closed: &Cell<bool>,
     stop: &StreamingViewerControl,
     files: &RefCell<files::Files>,
@@ -1460,6 +1480,9 @@ fn service(
 ) {
     events.clear();
     let halt = |reason: LocalStop, input: &mut Option<Input>, report: &mut Report| {
+        if let Some(automation) = automation {
+            automation.retire();
+        }
         report.local_stop.get_or_insert(reason);
         resize.cancel();
         reopen_intent.borrow_mut().cancel();
@@ -1472,6 +1495,9 @@ fn service(
     let geometry_stopped = || {
         // Native already cancelled this exact original viewer before returning
         // from layout. Drop the producer before entering any native cleanup.
+        if let Some(automation) = automation {
+            automation.retire();
+        }
         input.borrow_mut().take();
         stop.stop();
         intent.borrow_mut().retire_initial();
@@ -1487,6 +1513,13 @@ fn service(
         geometry_stopped();
         return;
     }
+    if let Some(automation) = automation
+        && stop.is_stopped()
+    {
+        // The original controller may stop independently of the UI pump. Fence
+        // the local action owner before any native call can delay retirement.
+        automation.retire();
+    }
     let retire_stopped = || -> Result<bool, ()> {
         let retired = {
             let mut slot = input.borrow_mut();
@@ -1499,6 +1532,9 @@ fn service(
         };
         if !retired {
             return Ok(false);
+        }
+        if let Some(automation) = automation {
+            automation.retire();
         }
         files.borrow_mut().cancel();
         intent.borrow_mut().invalidate();
@@ -1565,7 +1601,7 @@ fn service(
             opened.poll(Duration::ZERO, events);
             // Native terminal callbacks defer IME cleanup. Fence owners before
             // state, clipboard or sharing can enter another native call.
-            producer_terminal_event(events, automation)
+            producer_terminal_event(events, automation.is_some())
         }
     };
     if terminal.is_none() && resize.changed() {
@@ -1597,7 +1633,7 @@ fn service(
         } else {
             intent.suspend();
             if reason == LocalStop::NativeFailure
-                || automation
+                || automation.is_some()
                 || input.is_some()
                 || intent.requested()
                 || reopen_intent.borrow().pending()
@@ -1630,20 +1666,14 @@ fn service(
     let reason = if reopen_action.is_err() {
         Some(LocalStop::NativeFailure)
     } else {
-        match state {
-            None => Some(LocalStop::NativeFailure),
-            Some(s) if !s.visible => Some(LocalStop::WindowHidden),
-            Some(s) if !s.key => Some(LocalStop::FocusLost),
-            Some(s) if !s.geometry_current => Some(LocalStop::PictureChanged),
-            Some(s)
-                if input
-                    .as_ref()
-                    .is_some_and(|input| input.picture != s.picture) =>
-            {
-                Some(LocalStop::PictureChanged)
-            }
-            Some(_) => None,
-        }
+        // The opening pump runs before the renderer submits its first picture.
+        // Its empty geometry is expected; it cannot authorize control yet.
+        // After that actual receipt, stale geometry is permanently terminal.
+        window_stop(
+            state,
+            input.as_ref().map(|input| input.picture),
+            automation.is_none() || can_resize,
+        )
     };
     // An app switch or a covered window pauses a grant instead of ending it.
     // Minimizing, hiding, an unavailable session and closing stay terminal
@@ -1687,7 +1717,7 @@ fn service(
     }
     if let Some(reason) = reason {
         intent.suspend();
-        if automation
+        if automation.is_some()
             || input.is_some()
             || intent.requested()
             || (reopen_intent.borrow().pending() && reason != LocalStop::PictureChanged)
@@ -1720,6 +1750,9 @@ fn service(
             // Park this exact producer; dropping Source would cancel the original
             // session before its orderly close callback can fence the actual grant.
             // No new event enters it after this turn, including the click itself.
+            if let Some(automation) = automation {
+                automation.retire();
+            }
             intent.retire_initial();
             if retire_text(window, TextRetireMode::Park).is_err() {
                 halt(LocalStop::NativeFailure, &mut input, &mut report);
@@ -1753,6 +1786,18 @@ fn service(
             return;
         }
     }
+    if let Some(automation) = automation {
+        // Arming the watcher may itself enter AppKit and discover a terminal
+        // geometry change. Fence before any further native work in this turn.
+        if resize.changed() {
+            halt(LocalStop::PictureChanged, &mut input, &mut report);
+        } else if stop.is_stopped() {
+            automation.retire();
+        }
+        // Escape, stop, focus and geometry handling above remain local. No
+        // auxiliary UI or native input producer shares the robot controller.
+        return;
+    }
     clipboard.borrow_mut().turn(window.borrow().as_ref());
     let sharing_ok = window
         .borrow()
@@ -1761,11 +1806,6 @@ fn service(
     if !sharing_ok {
         intent.invalidate();
         halt(LocalStop::NativeFailure, &mut input, &mut report);
-        return;
-    }
-    if automation {
-        // The local window retains escape, stop, focus and geometry handling.
-        // Only the authenticated robot ledger may produce remote actions.
         return;
     }
     // Ordinary input still samples time after native chrome work; the earlier
@@ -2294,7 +2334,7 @@ impl Application for Session {
                 &reopen_intent,
                 &resize,
                 can_resize.get(),
-                automated,
+                automation.as_deref(),
                 &closed,
                 &stop,
                 &files,
@@ -3943,6 +3983,87 @@ mod tests {
             Some(LocalStop::LocalEscape)
         );
         assert_eq!(producer_terminal_event(&[], true), None);
+    }
+
+    #[test]
+    fn automation_waits_for_its_first_picture_before_requiring_current_geometry() {
+        let opening = super::super::WindowState {
+            picture: (0, 0),
+            key: true,
+            visible: true,
+            geometry_current: false,
+        };
+        assert_eq!(window_stop(Some(opening), None, false), None);
+        assert!(!opening.input_ready(), "startup cannot dispatch input");
+        assert_eq!(
+            window_stop(Some(opening), None, true),
+            Some(LocalStop::PictureChanged)
+        );
+
+        let current = super::super::WindowState {
+            picture: (1280, 720),
+            geometry_current: true,
+            ..opening
+        };
+        assert_eq!(window_stop(Some(current), None, true), None);
+        assert!(current.input_ready());
+        let stale = super::super::WindowState {
+            geometry_current: false,
+            ..current
+        };
+        assert_eq!(
+            window_stop(Some(stale), None, true),
+            Some(LocalStop::PictureChanged)
+        );
+        let empty = super::super::WindowState {
+            picture: (1280, 0),
+            ..current
+        };
+        assert_eq!(
+            window_stop(Some(empty), None, true),
+            Some(LocalStop::PictureChanged)
+        );
+        assert_eq!(
+            window_stop(Some(current), Some((1920, 1080)), false),
+            Some(LocalStop::PictureChanged),
+            "an attached producer must always retain its original geometry"
+        );
+    }
+
+    #[test]
+    fn automation_opening_still_requires_a_live_foreground_window() {
+        let opening = super::super::WindowState {
+            picture: (0, 0),
+            key: true,
+            visible: true,
+            geometry_current: false,
+        };
+        assert_eq!(
+            window_stop(None, None, false),
+            Some(LocalStop::NativeFailure)
+        );
+        assert_eq!(
+            window_stop(
+                Some(super::super::WindowState {
+                    key: false,
+                    ..opening
+                }),
+                None,
+                false,
+            ),
+            Some(LocalStop::FocusLost)
+        );
+        assert_eq!(
+            window_stop(
+                Some(super::super::WindowState {
+                    visible: false,
+                    ..opening
+                }),
+                None,
+                false,
+            ),
+            Some(LocalStop::WindowHidden)
+        );
     }
 
     #[test]
