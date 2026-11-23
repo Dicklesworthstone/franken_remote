@@ -117,28 +117,48 @@ impl Shared {
         self.sample_for(true)
     }
     fn sample_for(&self, publication: bool) -> HostInstant {
+        self.sample_with(publication, |local| {
+            if publication {
+                self.authority.try_sample(local)
+            } else {
+                self.authority.sample(local)
+            }
+        })
+    }
+    fn sample_with(
+        &self,
+        publication: bool,
+        mut project: impl FnMut(u64) -> Result<HostInstant, Refusal>,
+    ) -> HostInstant {
         if self.cx.checkpoint().is_err() {
             self.permission.revoke();
         }
-        let mut local = self.clock.now().as_nanos() / 1000;
-        let sample = if publication {
-            // The original owner holding its projection lock at this instant
-            // is ordinary contention, not a lost grant. Back off and take a
-            // FRESH sample; nothing waits after the sample that is used, and
-            // persistent contention still fences below.
-            let mut retries = 0;
-            loop {
-                match self.authority.try_sample(local) {
-                    Err(Refusal::AuthorityUnavailable) if retries < CONTENDED_RETRIES => {
-                        contended_backoff(retries);
-                        retries += 1;
-                        local = self.clock.now().as_nanos() / 1000;
-                    }
-                    result => break result,
-                }
+        let mut retries = 0;
+        let sample = loop {
+            if self.cx.published_cancel_requested() {
+                break Err(Refusal::Revoked);
             }
-        } else {
-            self.authority.sample(local)
+            let local = self.clock.now().as_nanos() / 1000;
+            let sample = project(local);
+            // Projection can wait on its owner or follow a contention backoff.
+            // Fence cancellation that arrived DURING that work before returning
+            // a usable clock. This must be lock-free: a checkpoint here could
+            // spend the final publication sample's lifetime waiting on Cx.
+            if self.cx.published_cancel_requested() {
+                break Err(Refusal::Revoked);
+            }
+            match sample {
+                // The original owner holding its projection lock at this
+                // instant is ordinary contention, not a lost grant. Back off
+                // and take a FRESH sample; persistent contention still fences.
+                Err(Refusal::AuthorityUnavailable)
+                    if publication && retries < CONTENDED_RETRIES =>
+                {
+                    contended_backoff(retries);
+                    retries += 1;
+                }
+                result => break result,
+            }
         };
         if let Ok(now) = sample {
             self.last_sample.store(now.as_micros(), Ordering::Release);
@@ -213,7 +233,7 @@ impl Mailbox {
     }
     /// Cancellation fences admission even before the worker's next timer turn.
     pub fn is_closed(&self) -> bool {
-        if self.shared.cx.is_cancel_requested() {
+        if self.shared.cx.published_cancel_requested() {
             self.shared.stop();
         }
         !self.shared.permission.is_approved()
@@ -566,3 +586,6 @@ fn run(mut receiver: HostReceiver, shared: &Shared) -> Result<(), Error> {
         thread::park_timeout(Duration::from_millis(10));
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests;

@@ -1,5 +1,40 @@
 # Implementation status
 
+## File cancellation at receive publication boundaries (2026-11-23)
+
+The original disk worker now checks the runtime's published cancellation atomic
+before every authority projection attempt and again after that projection. Parent
+cancellation during a policy-lock wait or contention backoff revokes the separate
+file permission before a clock can reach the final rename gate. The final check
+does not acquire a runtime lock after sampling time. Mailbox admission uses the
+same atomic so that its cancellation check respects the nonblocking contract.
+The original authority, clock cursor, bounded retry count and already-published
+receipts are retained; file cancellation does not revoke unrelated input authority.
+
+Four deterministic regressions are authored for ordinary and final projection,
+cancellation during contention, fresh clocks and bounded live retries, and real
+file/nested-directory completion at each of its three clock callbacks. The last
+case targets the final rename boundary and also asserts staging cleanup, returned
+byte/transfer quotas and retained input authority. These regressions have **not
+executed** in this environment.
+
+The exact changed worker and tests pass pinned-nightly rustfmt and whitespace
+checks, with independent source reviews. Whole-workspace formatting passed on
+`2ad2ad7e` before this patch; a later full formatting attempt timed out. All-target
+Cargo and complete dependency-build attempts were interrupted under shared
+resource pressure. A final bounded exact-source clock-component attempt stalled
+before its first compiler-start marker and was also interrupted: it establishes
+no compile, test, mutation or Clippy pass. Complete current `fr-files`, real
+publication and mailbox integration execution, and full final-revision Cargo
+check/test/Clippy remain open. Scoped UBS exited 127 because it is unavailable.
+
+Earlier commit `2ad2ad7e` corrects the four missing `microphone_available` fields
+that broke Linux native picker test compilation, plus the concrete recovery and
+Windows strict-Clippy failures in verification run `45108432935`. Those changes
+retain the original assertions and behavior. Its hosted checks were cancelled by
+later pushes, so no new hosted test pass is claimed. Plan §§7.3 and 15.6; the
+broader `fr-p2-file-transfer-m7o` and `fr-rc-gates-cargo-test-6d8` remain open.
+
 ## Native file outcomes and Linux receiving-folder choice (2026-11-23)
 
 The native app now checks the original upload outcome as well as the receiving
