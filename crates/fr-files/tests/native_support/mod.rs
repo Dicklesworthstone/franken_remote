@@ -323,8 +323,11 @@ impl Running {
         let _input_channel = channel(&mut link, cx, 8, MediaRole::Input).await;
         let (hc, cc) = channel(&mut link, cx, 9, MediaRole::Files).await;
         let input = owner(cx);
+        // This helper is included more than once in the same test binary.
+        // Each inclusion's independent counter needs its own directory prefix.
+        let namespace = module_path!().replace("::", "-");
         let path = std::env::temp_dir().join(format!(
-            "fr-native-files-{}-{}",
+            "fr-native-files-{namespace}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

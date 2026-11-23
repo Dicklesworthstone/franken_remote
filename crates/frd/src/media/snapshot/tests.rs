@@ -81,8 +81,10 @@ fn enlarged_viewport_preserves_the_original_source_and_receiver_evidence() {
         assert!(
             image
                 .pixels()
-                .chunks_exact(4)
-                .all(|p| p == [0x17, 0x2a, 0x3d, 255])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [0x17, 0x2a, 0x3d, 255])
         );
         assert_eq!(presenter.picture(), (320, 240));
         assert_eq!(presenter.worker_id(), worker);

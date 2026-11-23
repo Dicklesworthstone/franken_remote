@@ -35,8 +35,8 @@ pub fn initialize_threads() -> Result<(), InitializationFailed> {
 /// callers must initialize this at process start before their locale-dependent
 /// Xlib calls. All crate-owned composer callers share this initialization.
 pub fn initialize_input_method() -> Result<(), InitializationFailed> {
-    initialize_threads()?;
     static READY: OnceLock<bool> = OnceLock::new();
+    initialize_threads()?;
     // SAFETY: only one mutation of Xlib's locale-modifier storage, before any
     // crate-owned XOpenIM/XCreateFontSet. The returned Xlib pointer is inspected
     // for null only and is never borrowed across another native call.

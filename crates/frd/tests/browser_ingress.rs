@@ -30,6 +30,7 @@ use frd::browser_ingress::{
     websocket::{WsFrame, read_ws_frame, write_ws_frame},
 };
 use std::{
+    fmt::Write as _,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
@@ -97,33 +98,37 @@ async fn send_http_raw(
     client_res
 }
 
-async fn futures_join<A, B>(
+fn futures_join<A, B>(
     fut_a: impl core::future::Future<Output = A>,
     fut_b: impl core::future::Future<Output = B>,
-) -> (A, B) {
-    use core::{pin::pin, task::Poll};
-    let mut a = pin!(fut_a);
-    let mut b = pin!(fut_b);
-    let mut res_a = None;
-    let mut res_b = None;
-    core::future::poll_fn(|cx| {
-        if res_a.is_none()
-            && let Poll::Ready(v) = a.as_mut().poll(cx)
-        {
-            res_a = Some(v);
-        }
-        if res_b.is_none()
-            && let Poll::Ready(v) = b.as_mut().poll(cx)
-        {
-            res_b = Some(v);
-        }
-        if res_a.is_some() && res_b.is_some() {
-            Poll::Ready((res_a.take().unwrap(), res_b.take().unwrap()))
-        } else {
-            Poll::Pending
-        }
+) -> impl core::future::Future<Output = (A, B)> {
+    // Keep the joined socket futures in one owned allocation. Borrowed test
+    // state, polling order and cancellation remain with this exact pair.
+    Box::pin(async move {
+        use core::{pin::pin, task::Poll};
+        let mut a = pin!(fut_a);
+        let mut b = pin!(fut_b);
+        let mut res_a = None;
+        let mut res_b = None;
+        core::future::poll_fn(|cx| {
+            if res_a.is_none()
+                && let Poll::Ready(v) = a.as_mut().poll(cx)
+            {
+                res_a = Some(v);
+            }
+            if res_b.is_none()
+                && let Poll::Ready(v) = b.as_mut().poll(cx)
+            {
+                res_b = Some(v);
+            }
+            if res_a.is_some() && res_b.is_some() {
+                Poll::Ready((res_a.take().unwrap(), res_b.take().unwrap()))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     })
-    .await
 }
 
 async fn read_http_head_from_stream<S: AsyncRead + Unpin>(stream: &mut S) -> String {
@@ -565,171 +570,176 @@ fn adversarial_origin_host_smuggling_and_ticket_attacks_are_refused() {
     runtime.block_on(async {
         let ingress = test_ingress(4096, 4);
 
-        // 1. GET /api/session/bootstrap -> 405 Method Not Allowed (never issues nonce on GET).
-        let r = send_http_raw(
-            &ingress,
-            PEER_IP,
-            Some(EXPECTED_HOST),
-            format!(
-                "GET /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nOrigin: {EXPECTED_ORIGIN}\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await;
-        assert!(r.starts_with("HTTP/1.1 405"), "{r}");
-
-        // 2. Missing Origin, Origin: null, Origin: *, and cross-origin on bootstrap POST -> 403.
-        for bad_origin in [
-            None,
-            Some("null"),
-            Some("*"),
-            Some("https://evil.example:8443"),
-            Some("http://workstation.tailnet.ts.net:8443"),
-        ] {
-            let mut req = format!(
-                "POST /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nContent-Length: 0\r\n"
-            );
-            if let Some(o) = bad_origin {
-                req.push_str(&format!("Origin: {o}\r\n"));
-            }
-            req.push_str("\r\n");
-            let r = send_http_raw(&ingress, PEER_IP, Some(EXPECTED_HOST), req.as_bytes()).await;
-            assert!(
-                r.starts_with("HTTP/1.1 403"),
-                "bad origin {bad_origin:?} was not refused: {r}"
-            );
-        }
-
-        // 3. DNS rebinding Host mismatch and TLS SNI mismatch -> 403 even on GET /.
-        let rebind = send_http_raw(
-            &ingress,
-            PEER_IP,
-            Some(EXPECTED_HOST),
-            b"GET / HTTP/1.1\r\nHost: attacker.evil:8443\r\n\r\n",
-        )
-        .await;
-        assert!(rebind.starts_with("HTTP/1.1 403"), "{rebind}");
-        let bad_sni = send_http_raw(
-            &ingress,
-            PEER_IP,
-            Some("wrong.tailnet.ts.net"),
-            format!("GET / HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\n\r\n").as_bytes(),
-        )
-        .await;
-        assert!(bad_sni.starts_with("HTTP/1.1 403"), "{bad_sni}");
-
-        // 4. Iframe embedding and cross-site Fetch Metadata -> 403.
-        let iframe = send_http_raw(
-            &ingress,
-            PEER_IP,
-            Some(EXPECTED_HOST),
-            format!(
-                "GET / HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nSec-Fetch-Dest: iframe\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await;
-        assert!(iframe.starts_with("HTTP/1.1 403"), "{iframe}");
-
-        let cross_site = send_http_raw(
-            &ingress,
-            PEER_IP,
-            Some(EXPECTED_HOST),
-            format!(
-                "POST /api/session/bootstrap HTTP/1.1\r\n\
-                 Host: {EXPECTED_HOST_HDR}\r\n\
-                 Origin: {EXPECTED_ORIGIN}\r\n\
-                 Sec-Fetch-Site: cross-site\r\n\
-                 Content-Length: 0\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await;
-        assert!(cross_site.starts_with("HTTP/1.1 403"), "{cross_site}");
-
-        // 5. Bearer token/nonce/ticket in query string -> 403.
-        for bad_uri in ["/?nonce=deadbeef", "/ws/control?ticket=1234", "/?token=abc"] {
-            let r = send_http_raw(
-                &ingress,
-                PEER_IP,
-                Some(EXPECTED_HOST),
-                format!("GET {bad_uri} HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\n\r\n").as_bytes(),
-            )
-            .await;
-            assert!(r.starts_with("HTTP/1.1 403"), "{bad_uri}: {r}");
-        }
-
-        // 6. HTTP request smuggling (Transfer-Encoding or duplicate Content-Length) -> 400.
-        let te = send_http_raw(
-            &ingress,
-            PEER_IP,
-            Some(EXPECTED_HOST),
-            format!(
-                "POST /api/session/bootstrap HTTP/1.1\r\n\
-                 Host: {EXPECTED_HOST_HDR}\r\n\
-                 Origin: {EXPECTED_ORIGIN}\r\n\
-                 Transfer-Encoding: chunked\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await;
-        assert!(te.starts_with("HTTP/1.1 400"), "{te}");
-
-        let dup_cl = send_http_raw(
-            &ingress,
-            PEER_IP,
-            Some(EXPECTED_HOST),
-            format!(
-                "POST /api/session/bootstrap HTTP/1.1\r\n\
-                 Host: {EXPECTED_HOST_HDR}\r\n\
-                 Origin: {EXPECTED_ORIGIN}\r\n\
-                 Content-Length: 0\r\n\
-                 Content-Length: 2\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await;
-        assert!(dup_cl.starts_with("HTTP/1.1 400"), "{dup_cl}");
-
-        // 7. Bare session ID (no ticket) on /ws/video and text WebSocket frame on /ws/control -> Close.
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-        let ingress_srv = Arc::clone(&ingress);
-        let (_, _) = futures_join(
-            async move {
-                let (s, _) = listener.accept().await.unwrap();
-                ingress_srv
-                    .serve_stream(s, PEER_IP, Some(EXPECTED_HOST), || {
-                        HostInstant::from_micros(20_000_000)
-                    })
-                    .await
-                    .unwrap();
-            },
-            async move {
-                let mut client = TcpStream::connect(addr).await.unwrap();
-                let up = format!(
-                    "GET /ws/video HTTP/1.1\r\n\
-                     Host: {EXPECTED_HOST_HDR}\r\n\
-                     Origin: {EXPECTED_ORIGIN}\r\n\
-                     Upgrade: websocket\r\n\
-                     Connection: Upgrade\r\n\
-                     Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                     Sec-WebSocket-Version: 13\r\n\r\n"
-                );
-                client.write_all(up.as_bytes()).await.unwrap();
-                client.flush().await.unwrap();
-                let head = read_http_head_from_stream(&mut client).await;
-                assert!(head.starts_with("HTTP/1.1 101"));
-                // An unavailable desktop never accepts any auxiliary attachment,
-                // even before the caller presents a session ID or bearer ticket.
-                let frame = read_ws_frame(&mut client, 64, false).await.unwrap();
-                assert_eq!(frame, WsFrame::Close);
-            },
-        )
-        .await;
+        assert_origin_host_and_fetch_refusals(&ingress).await;
+        assert_query_smuggling_and_ticket_refusals(&ingress).await;
     });
+}
+
+async fn assert_origin_host_and_fetch_refusals(ingress: &Arc<BrowserIngress>) {
+    // 1. GET /api/session/bootstrap -> 405 Method Not Allowed (never issues nonce on GET).
+    let r = send_http_raw(
+        ingress,
+        PEER_IP,
+        Some(EXPECTED_HOST),
+        format!(
+            "GET /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nOrigin: {EXPECTED_ORIGIN}\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 405"), "{r}");
+
+    // 2. Missing Origin, Origin: null, Origin: *, and cross-origin on bootstrap POST -> 403.
+    for bad_origin in [
+        None,
+        Some("null"),
+        Some("*"),
+        Some("https://evil.example:8443"),
+        Some("http://workstation.tailnet.ts.net:8443"),
+    ] {
+        let mut req = format!(
+            "POST /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nContent-Length: 0\r\n"
+        );
+        if let Some(o) = bad_origin {
+            write!(req, "Origin: {o}\r\n").unwrap();
+        }
+        req.push_str("\r\n");
+        let r = send_http_raw(ingress, PEER_IP, Some(EXPECTED_HOST), req.as_bytes()).await;
+        assert!(
+            r.starts_with("HTTP/1.1 403"),
+            "bad origin {bad_origin:?} was not refused: {r}"
+        );
+    }
+
+    // 3. DNS rebinding Host mismatch and TLS SNI mismatch -> 403 even on GET /.
+    let rebind = send_http_raw(
+        ingress,
+        PEER_IP,
+        Some(EXPECTED_HOST),
+        b"GET / HTTP/1.1\r\nHost: attacker.evil:8443\r\n\r\n",
+    )
+    .await;
+    assert!(rebind.starts_with("HTTP/1.1 403"), "{rebind}");
+    let bad_sni = send_http_raw(
+        ingress,
+        PEER_IP,
+        Some("wrong.tailnet.ts.net"),
+        format!("GET / HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\n\r\n").as_bytes(),
+    )
+    .await;
+    assert!(bad_sni.starts_with("HTTP/1.1 403"), "{bad_sni}");
+
+    // 4. Iframe embedding and cross-site Fetch Metadata -> 403.
+    let iframe = send_http_raw(
+        ingress,
+        PEER_IP,
+        Some(EXPECTED_HOST),
+        format!("GET / HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nSec-Fetch-Dest: iframe\r\n\r\n")
+            .as_bytes(),
+    )
+    .await;
+    assert!(iframe.starts_with("HTTP/1.1 403"), "{iframe}");
+
+    let cross_site = send_http_raw(
+        ingress,
+        PEER_IP,
+        Some(EXPECTED_HOST),
+        format!(
+            "POST /api/session/bootstrap HTTP/1.1\r\n\
+             Host: {EXPECTED_HOST_HDR}\r\n\
+             Origin: {EXPECTED_ORIGIN}\r\n\
+             Sec-Fetch-Site: cross-site\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await;
+    assert!(cross_site.starts_with("HTTP/1.1 403"), "{cross_site}");
+}
+
+async fn assert_query_smuggling_and_ticket_refusals(ingress: &Arc<BrowserIngress>) {
+    // 5. Bearer token/nonce/ticket in query string -> 403.
+    for bad_uri in ["/?nonce=deadbeef", "/ws/control?ticket=1234", "/?token=abc"] {
+        let r = send_http_raw(
+            ingress,
+            PEER_IP,
+            Some(EXPECTED_HOST),
+            format!("GET {bad_uri} HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\n\r\n").as_bytes(),
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 403"), "{bad_uri}: {r}");
+    }
+
+    // 6. HTTP request smuggling (Transfer-Encoding or duplicate Content-Length) -> 400.
+    let te = send_http_raw(
+        ingress,
+        PEER_IP,
+        Some(EXPECTED_HOST),
+        format!(
+            "POST /api/session/bootstrap HTTP/1.1\r\n\
+             Host: {EXPECTED_HOST_HDR}\r\n\
+             Origin: {EXPECTED_ORIGIN}\r\n\
+             Transfer-Encoding: chunked\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await;
+    assert!(te.starts_with("HTTP/1.1 400"), "{te}");
+
+    let dup_cl = send_http_raw(
+        ingress,
+        PEER_IP,
+        Some(EXPECTED_HOST),
+        format!(
+            "POST /api/session/bootstrap HTTP/1.1\r\n\
+             Host: {EXPECTED_HOST_HDR}\r\n\
+             Origin: {EXPECTED_ORIGIN}\r\n\
+             Content-Length: 0\r\n\
+             Content-Length: 2\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await;
+    assert!(dup_cl.starts_with("HTTP/1.1 400"), "{dup_cl}");
+
+    // 7. Bare session ID (no ticket) on /ws/video and text WebSocket frame on /ws/control -> Close.
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ingress_srv = Arc::clone(ingress);
+    let ((), ()) = futures_join(
+        async move {
+            let (s, _) = listener.accept().await.unwrap();
+            ingress_srv
+                .serve_stream(s, PEER_IP, Some(EXPECTED_HOST), || {
+                    HostInstant::from_micros(20_000_000)
+                })
+                .await
+                .unwrap();
+        },
+        async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let up = format!(
+                "GET /ws/video HTTP/1.1\r\n\
+                 Host: {EXPECTED_HOST_HDR}\r\n\
+                 Origin: {EXPECTED_ORIGIN}\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            );
+            client.write_all(up.as_bytes()).await.unwrap();
+            client.flush().await.unwrap();
+            let head = read_http_head_from_stream(&mut client).await;
+            assert!(head.starts_with("HTTP/1.1 101"));
+            // An unavailable desktop never accepts any auxiliary attachment,
+            // even before the caller presents a session ID or bearer ticket.
+            let frame = read_ws_frame(&mut client, 64, false).await.unwrap();
+            assert_eq!(frame, WsFrame::Close);
+        },
+    )
+    .await;
 }
 
 #[test]
@@ -740,7 +750,7 @@ fn invalid_bootstrap_roles_and_oversized_bodies_never_issue_credentials() {
         .unwrap();
     runtime.block_on(async {
         let ingress = test_ingress(4096, 4);
-        for body in [r#"{}"#, r#"{"role":null}"#, r#"{"role":"other"}"#, r#"{"role":"observer","role":"controller"}"#, r#"{"role":"observer","session_id_hex":"1"}"#] {
+        for body in ["{}", r#"{"role":null}"#, r#"{"role":"other"}"#, r#"{"role":"observer","role":"controller"}"#, r#"{"role":"observer","session_id_hex":"1"}"#] {
             let request = format!("POST /api/session/bootstrap HTTP/1.1\r\nHost: {EXPECTED_HOST_HDR}\r\nOrigin: {EXPECTED_ORIGIN}\r\nContent-Length: {}\r\n\r\n{body}", body.len());
             let response = send_http_raw(&ingress, PEER_IP, Some(EXPECTED_HOST), request.as_bytes()).await;
             assert!(response.starts_with("HTTP/1.1 400 "));

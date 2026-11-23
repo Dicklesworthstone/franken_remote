@@ -6,8 +6,8 @@ fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|on
     [--port 8443] [--ipv6] [--fit WIDTHxHEIGHT]
     [--evidence-level decoded|submitted_to_compositor] [--screenshot /path/screen.png] [--json]
 The --native-once prefix immediately follows NODE_ID. This explicitly opens ONE
-new observation, subject to normal tailnet/TLS admission and host approval. It
-opens the native viewer, records its first decoder completion even on an idle
+separate read-only connection, subject to normal tailnet/TLS admission and host
+approval. It opens the native viewer, records its first decoder completion even on an idle
 screen, runs InspectionComplete closure, and waits for local native cleanup.
 It never requests input, clipboard, files or audio, and never reconnects.
 Output is historical evidence, never a current input precondition. An explicit
@@ -16,8 +16,9 @@ including fitted letterboxing and any remote cursor overlay, not the native OS
 pointer. The destination must not exist; output is at most 32 MiB of raw pixels
 plus bounded PNG framing. Pixel dimensions describe the viewport separately
 from the selected host display. Capture times and source freshness stay unknown.
-Compositor submission is not physical visibility. This requires a local graphical
-session: X11 and the media worker on Linux, AppKit/Metal on macOS. Linux-only
+Compositor submission is not physical visibility. This is not headless capture:
+it requires a local graphical session, with local X11 and the media worker on
+Linux or AppKit/Metal on macOS. Linux-only
 --worker and --x-display options are refused on macOS. No screenshot is retained
 unless requested. On macOS the receipt's original monotonic time survives
 bootstrap, readback, closing and PNG output; receipt age is not source freshness.

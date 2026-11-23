@@ -48,15 +48,14 @@ fr robot observe NODE_ID [observation options] [--json]
 fr robot input NODE_ID --connection-id ID [input options] [--json]
 fr send NODE_ID --connection-id ID [file command options] [--json]
 
-Detailed help:
-  fr help connect         Connection, discovery, privacy and saved-host options below.
-  fr help robot           Robot command overview and explicit owner modes.
+Detailed help (also COMMAND --help):
+  fr help connect         Discovery, privacy, connection and saved hosts.
+  fr help robot           Commands and explicit owner modes.
   fr help robot session   Foreground lifetime, local identity and conditional close.
-  fr help robot observe   One-shot observations, retained views and screenshots.
-  fr help robot input     Original-observation actions and staged effect receipts.
-  fr help send            Later file selections, status, pause, resume and cancellation.
-Use a command path alone with --help, for example fr robot input --help.
-Help reads no local service or desktop and accepts no target or operational options.
+  fr help robot observe   One-shot/retained observations and screenshots.
+  fr help robot input     Original-observation actions and staged receipts.
+  fr help send            Later selections, status, pause, resume and cancellation.
+Help reads no service/desktop and accepts no target or operational options.
 
 Discovery and connection:
 hosts/peers read one local machine snapshot; peers never probes remote services.
@@ -64,14 +63,13 @@ On macOS these commands read the installed Tailscale app, or without it the
 open-source tailscaled's /var/run/tailscaled.socket; --socket PATH selects one
 root tailscaled socket. Native connection/desktop commands need macos-desktop.
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
-Doctor --probe-native separately captures one local root-display picture and tries
-the explicitly selected HEVC encoder; --input-agent adds capability discovery with
-no injected input. It runs before any runtime/tailnet access, kills and reaps its
-bounded probe children, and reports scoped results plus actionable failures.
-No backend fallback, decoder/presenter proof or sustained-performance claim.
-Use an explicit local X display and installed worker; worker/cookie paths and
-captured content are never printed. Exit 1 means a requested probe failed or was
-blocked; other capabilities stay not_tested. Tailnet options cannot be combined.
+Doctor --probe-native is a bounded local-only probe of one root-display picture
+and the selected HEVC encoder; --input-agent discovers capabilities without
+injection. No fallback or decoder/presenter/sustained-performance proof.
+An explicit X display and installed worker are required; worker/cookie paths and
+captured content are never printed.
+Exit 1: requested probe failed/blocked; others stay not_tested.
+Tailnet options cannot be combined.
 Discovery/inspect uses installed Tailscale metadata. --by-name requires an exact
 canonical tailnet FQDN, never arbitrary DNS/a URL. --probe reads authenticated frd
 capabilities, opening no approval, observation or input; it grants no access.
@@ -98,20 +96,17 @@ Choice expires after 120 seconds; cleanup precedes connection/file selection.
 --json emits host_selected before connecting; use its ID for disconnect.
 
 Desktop application:
-fr app opens the machine picker with View only / View and control, Share
-clipboard text and Ask which display to show (on Linux: F2, F3, F4 or a click
-on the bottom line), then connects with those choices. Closing the viewer
-returns to the picker with the outcome; Cancel/Escape in the picker quits.
-An unused picker reopens with a fresh machine list every two minutes; after
-half an hour unused, fr app quits.
-On macOS, Receive files opens a fresh private-folder chooser before connecting;
-it requires control and starts unchecked for every connection. An explicit
-fr app --receive DIR instead supplies that exact destination once. Linux needs
-that explicit destination. No receive path or consent is remembered.
-On macOS with macos-microphone, Show microphone controls opens the original muted
-panel for this controlling connection only. It pins the current input once before
-connecting. Choose Allow microphone, then a NEW Talk, inside the viewer. This
-checkbox starts off every time; neither microphone consent nor a device is saved.
+fr app connects using picker choices: View only / View and control, Share
+clipboard text, Ask which display to show (Linux: F2/F3/F4 or bottom-line click).
+Viewer close returns to the picker with the outcome; picker Cancel/Escape quits.
+Idle picker: fresh peers every two minutes; app quits after half an hour.
+macOS Receive files requires control and a fresh private-folder choice before
+connecting; unchecked each time. Explicit fr app --receive DIR supplies that
+exact destination once; Linux requires it. No receive path/consent is saved.
+macOS + macos-microphone: Show microphone controls starts unchecked, pins the
+current input once before connecting and opens this control session's muted
+panel. Choose Allow microphone, then a NEW Talk in the viewer; no consent/device
+is saved.
 Choices are remembered in ~/Library/Application Support/FrankenRemote/
 settings.json (macOS) or $XDG_CONFIG_HOME/frankenremote/settings.json.
 fr app --install adds ~/Applications/FrankenRemote.app (macOS) or an
@@ -122,17 +117,16 @@ choices and opens no connection.
 
 Control and reconnect:
 Choose one role. --control requests input once after a fresh frame; host:
-frd run --input-agent. Input: keys, buttons, absolute pointer, line-wheel;
-no text/pixel-scroll. Refusal, revocation, expiry and local release are terminal.
-After transient failure or a checked host geometry change, --attempts may
-reconnect VIEWING ONLY after proven cleanup. Control/clipboard/files never repeat.
-In a --control viewing window, press and release F8 for a new control request.
-Ctrl+Alt+Shift+F7 reopens with the display picker; a window resize reopens viewing
-at the new size. Both end input, clipboard and file choices.
---capture-system-shortcuts (--control, Linux X11) grabs the keyboard after the
-grant for Alt+Tab and similar shortcuts; the title identifies this mode.
-Ctrl+Alt+Shift+Escape releases locally. Focus/input fences release the grab.
-Without it shortcuts stay local; unavailable capture ends control with
+frd run --input-agent. Keys/buttons/absolute pointer/line-wheel; no text/pixel-scroll.
+Refusal/revocation/expiry/local release end control. After transient failure or a
+checked host geometry change, --attempts can reconnect VIEWING ONLY after proven
+cleanup; control/clipboard/files never repeat. In a --control viewing window,
+press and release F8 for new control. Ctrl+Alt+Shift+F7 reopens the display picker;
+resize reopens viewing at its new size. Both end input/clipboard/file choices.
+Linux X11 --capture-system-shortcuts requires --control and grabs the keyboard
+after the grant for Alt+Tab etc.; the title identifies this mode.
+Ctrl+Alt+Shift+Escape releases locally; focus/input fences release the grab.
+Otherwise shortcuts stay local. Unavailable capture ends control with
 system_shortcuts_unavailable. Reserved X-server shortcuts remain limited.
 
 Clipboard:
@@ -189,58 +183,57 @@ Settings survive recovery/reconnect/panel close. Changes affect new submissions;
 queued sound drains briefly. Host, microphone and system volume stay unchanged.
 
 Microphone:
---microphone requires --control and an explicit --microphone-source NAME.
-Linux client build: linux-desktop,linux-microphone with fr-audio-worker beside fr.
-The host must independently enable and approve its native microphone endpoint.
-The local Microphone panel starts muted: click Talk to authorize this selected
-source, then wait for the host configuration and actual PulseAudio RECORD access.
-Mute stops this talk generation. Turn off, hiding or closing the panel ends this
-microphone choice. Both ends require visible controls; no recording starts from
-connecting, receiving playback, restoring permission or viewing reconnects/F8.
-After a mute, wait for the old capture child to exit before another explicit Talk.
-The panel needs visible space outside the viewer; --fit can leave room.
+--microphone requires --control, explicit --microphone-source NAME and the host's
+independently enabled/approved native endpoint. Both ends need visible controls.
+The local panel starts muted; Talk authorizes the selected source. Mute stops
+that talk generation; wait for its capture child to exit before another Talk.
+Turn off/hide/close ends this choice. Connecting, playback, restoring permission
+and viewing reconnects/F8 never start recording.
+Linux build: linux-desktop,linux-microphone; fr-audio-worker beside fr. Talk waits
+for host configuration and actual PulseAudio RECORD access. The panel needs
+visible space outside the viewer; --fit can leave room.
 Server: --microphone-server, else PULSE_SERVER, else XDG_RUNTIME_DIR/pulse/native.
-Only a local Unix socket and named source are accepted, with no default-source
-alias, source creation, implicit device change or downloaded worker.
-macOS client build: macos-desktop,macos-microphone with the matching signed
-fr-audio-worker. --microphone-source default pins the current local input once
-before connecting; an exact CoreAudio device UID selects that device instead.
-It never follows a changed default. --microphone-server is Linux-only.
-The Mac panel starts muted. Choose Allow microphone for the same capture
-helper's macOS permission prompt, then a NEW Talk after access is granted.
-Allow never records. Native capture also requires the host's positive setup
-reply and original control lease. Mute fences speech immediately; wait for the
-old capture child to exit before a new Talk. Hiding, closing, losing visible
-controls, suspend, disconnect or reconnect never resumes recording.
-The installer --audio source-build option includes both Mac audio directions.
-Reports distinguish native capture from host application audibility; physical
-microphone/live-tailnet qualification remains separate. Missing host selection
-is typed absence. Unsafe pending output may end the original connection.
+Only a local Unix socket and named source are accepted: no default-source alias,
+source creation, implicit device change or downloaded worker.
+macOS build: macos-desktop,macos-microphone with matching signed fr-audio-worker.
+--microphone-source default pins the current input once before connecting;
+an exact CoreAudio device UID selects that device. A changed default is never
+followed. --microphone-server is Linux-only.
+On Mac, choose Allow microphone for the same helper's macOS permission prompt,
+then a NEW Talk after access is granted. Allow never records. Capture also needs
+the host's positive setup reply and original control lease. Mute fences speech
+immediately; hiding, closing, lost visible controls, suspend, disconnect or
+reconnect never resumes recording.
+Installer --audio source builds include both Mac audio directions. Reports
+separate native capture from host application audibility; physical microphone/
+live-tailnet qualification remains separate. Missing host selection is typed
+absence. Unsafe pending output may end the original connection.
 
 Local foreground sessions:
-disconnect TARGET / robot session close TARGET stop the kernel-authenticated
-same-user owner for the exact target. Closure proves local cleanup, not remote
-release/rollback; host reports stay in the connect result.
-session status contacts neither Tailscale nor the host; remote state is unknown.
-connection_id is not a remote session or input lease. close --connection-id ID
-refuses a replacement with local_session_changed; it survives viewing reconnects
-but not a new invocation. Omit it to stop the current owner. Lost replies remain
-unknown_external_effect; do not retry another invocation.
-session open TARGET --foreground --role view|control uses the native owner/options,
-TLS, approval and display selection. It requires a local desktop and runs until
-shutdown, reporting completion, never an opened lease. Inspect/close from another
-process; detached opens are unavailable. Robot input requires --accept-input and
-original connection/lease/observation handles.
-Linux desktop and macOS macos-desktop builds can publish live view-only metadata
-with --publish-observations. Use session status to obtain connection_id, then
+disconnect TARGET / robot session close TARGET stop the exact target's
+kernel-authenticated same-user owner. Closure proves local cleanup, not remote
+release/rollback; host reports stay in connect results. session status contacts
+no Tailscale/host; remote state is unknown.
+connection_id is not a remote session or input lease.
+close --connection-id ID refuses replacement with local_session_changed.
+The ID survives viewing reconnects, not new invocations; omit it to stop the
+current owner. Lost replies stay unknown_external_effect; never retry another
+invocation.
+session open TARGET --foreground --role view|control uses native owner/options,
+TLS, approval and display selection. Requires a local desktop, runs until
+shutdown and reports completion, never an opened lease. Inspect/close from
+another process; no detached opens. Input requires --accept-input and original
+connection/lease/observation handles.
+Linux desktop/macOS macos-desktop: --publish-observations publishes live view-only
+metadata. session status gives connection_id; then:
 robot observe TARGET --connection-id ID [--max-receipt-age-ms 1..60000] [--json].
-Reads authenticate the original owner and never open another connection. Receipt
-age is not host source freshness; decoder/compositor evidence is not visibility.
-Publication has one attempt and retires before native cleanup. On macOS,
---native-once, screenshot export and robot input remain unavailable. Linux
-retains those commands; see fr help robot observe and fr help robot input.
-Mac display changes and resizes requiring a new view end the original publisher
-without another dial. --worker and --x-display are Linux-only and refuse on Mac.
+Reads authenticate the original owner, opening no connection. Receipt age is not
+host source freshness; decoder/compositor evidence is not visibility.
+Publication has one attempt and retires before native cleanup. Both platforms
+support --native-once, explicit screenshots and --accept-input; see
+fr help robot observe and fr help robot input for original-owner requirements.
+Mac display changes/resizes needing a new view end the publisher without another
+dial. --worker/--x-display are Linux-only and refuse on Mac.
 
 Saved local hosts:
 fr hosts save ALIAS NODE_ID [--port PORT] [--hosts-file PATH] [--socket PATH] [--json]
