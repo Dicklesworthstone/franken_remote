@@ -286,7 +286,7 @@ fn recovery_keeps_original_file_resume_pause_cancel_and_cleanup_live() {
                 assert_eq!(send.status().report, cancelled_report);
                 assert_eq!(send.snapshot().cleanup, Some(Ok(())));
                 assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 0);
-                assert!(f.effects.lock().unwrap().keys.is_empty());
+                assert_eq!(f.effects.lock().unwrap().keys, [] as [bool; 0]);
                 f.observation.revoke();
             },
             driver,

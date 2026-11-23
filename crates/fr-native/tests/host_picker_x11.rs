@@ -267,6 +267,7 @@ fn actual_choice_keys_change_only_the_confirmed_choices() {
         send_files: false,
         receive_available: false,
         receive_files: false,
+        microphone_available: false,
         microphone_controls: false,
     };
     let mut picker = HostPicker::start_with(
@@ -312,6 +313,7 @@ fn actual_choice_keys_change_only_the_confirmed_choices() {
             send_files: false,
             receive_available: false,
             receive_files: false,
+            microphone_available: false,
             microphone_controls: false,
         })
     );
@@ -332,6 +334,7 @@ fn actual_audio_choice_works_in_view_only_and_respects_build_availability() {
                 send_files: false,
                 receive_available: false,
                 receive_files: false,
+                microphone_available: false,
                 microphone_controls: false,
             }),
             None,
@@ -356,6 +359,7 @@ fn actual_audio_choice_works_in_view_only_and_respects_build_availability() {
                 send_files: false,
                 receive_available: false,
                 receive_files: false,
+                microphone_available: false,
                 microphone_controls: false,
             })
         );

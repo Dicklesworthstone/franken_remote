@@ -105,7 +105,11 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let upload = if !options.send.is_empty() {
+    let upload = if options.send.is_empty() {
+        options
+            .control
+            .then(fr_mobile_ffi::session::Upload::interactive)
+    } else {
         match fr_mobile_ffi::session::Upload::select_many(&options.send) {
             Ok(upload) => Some(upload),
             Err(error) => {
@@ -115,10 +119,6 @@ pub fn run(args: &[String]) -> ExitCode {
                 return ExitCode::from(2);
             }
         }
-    } else {
-        options
-            .control
-            .then(fr_mobile_ffi::session::Upload::interactive)
     };
     let title = format!("FrankenRemote - {}", target.certificate_name());
     let config = Config {

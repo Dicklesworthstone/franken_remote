@@ -1127,18 +1127,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> Completion {
         decoded + stats.earlier_decoded,
         decode_micros + stats.earlier_decode_micros,
     );
-    // Quantiles are conservative upper bounds from 1 ms buckets. Above
-    // 250 ms the overflow bucket reports the actual maximum, never a clipped
-    // stall. Report construction neither clones nor sorts frame history.
-    let interval_ms = serde_json::json!({
-        "p50": stats.intervals.quantile_upper_ms(500),
-        "p95": stats.intervals.quantile_upper_ms(950),
-        "p99": stats.intervals.quantile_upper_ms(990),
-        "max": stats.intervals.max_us().map(micros_to_ms),
-        "percentile_kind": "upper_bound",
-        "bucket_ms": 1,
-        "samples": stats.intervals.gaps(),
-    });
+    let interval_ms = frame_interval_document(stats);
     let mean_decode = decode_micros.checked_div(decoded).map_or(0.0, micros_to_ms);
     let (current_clipboard, collection) = shared.clipboard_completion();
     let mut clipboard = serde_json::json!(stats.clipboard.completion(
@@ -1225,6 +1214,21 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> Completion {
         && upload_ok
         && download_ok;
     Completion { json, success }
+}
+
+fn frame_interval_document(stats: &Stats) -> serde_json::Value {
+    // Quantiles are conservative upper bounds from 1 ms buckets. Above
+    // 250 ms the overflow bucket reports the actual maximum, never a clipped
+    // stall. Report construction neither clones nor sorts frame history.
+    serde_json::json!({
+        "p50": stats.intervals.quantile_upper_ms(500),
+        "p95": stats.intervals.quantile_upper_ms(950),
+        "p99": stats.intervals.quantile_upper_ms(990),
+        "max": stats.intervals.max_us().map(micros_to_ms),
+        "percentile_kind": "upper_bound",
+        "bucket_ms": 1,
+        "samples": stats.intervals.gaps(),
+    })
 }
 
 #[allow(clippy::cast_precision_loss, reason = "timings far below 2^52 µs")]

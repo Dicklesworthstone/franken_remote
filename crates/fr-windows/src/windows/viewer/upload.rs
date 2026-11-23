@@ -345,25 +345,7 @@ impl Menu {
         if self.displayed == Some(report) {
             return;
         }
-        let progress = report.snapshot.and_then(|snapshot| snapshot.current);
-        let bytes = progress.map_or_else(
-            || {
-                format!(
-                    "Selected: {} files, {} bytes; no active source",
-                    report.selected_files, report.selected_bytes
-                )
-            },
-            |progress| match progress.total_bytes {
-                Some(total) => format!(
-                    "Current file: {} / {total} bytes queued (await host receipt)",
-                    progress.queued_bytes,
-                ),
-                None => format!(
-                    "Current file: {} bytes queued; total not yet known",
-                    progress.queued_bytes,
-                ),
-            },
-        );
+        let bytes = progress_text(&report);
         let phase = report.absence.map_or_else(
             || format!("State: {}", report.phase_name().replace('_', " ")),
             |reason| {
@@ -453,6 +435,28 @@ impl Menu {
             self.displayed = Some(report);
         }
     }
+}
+
+fn progress_text(report: &UploadReport) -> String {
+    let progress = report.snapshot.and_then(|snapshot| snapshot.current);
+    progress.map_or_else(
+        || {
+            format!(
+                "Selected: {} files, {} bytes; no active source",
+                report.selected_files, report.selected_bytes
+            )
+        },
+        |progress| match progress.total_bytes {
+            Some(total) => format!(
+                "Current file: {} / {total} bytes queued (await host receipt)",
+                progress.queued_bytes,
+            ),
+            None => format!(
+                "Current file: {} bytes queued; total not yet known",
+                progress.queued_bytes,
+            ),
+        },
+    )
 }
 
 impl Drop for Menu {

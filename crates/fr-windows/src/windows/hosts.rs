@@ -1600,10 +1600,10 @@ unsafe extern "system" fn window_proc(
                             let _ = unsafe { EnableWindow(controls.clipboard, control) };
                             // SAFETY: as above; shortcuts only reach a controlled host.
                             let _ = unsafe { EnableWindow(controls.shortcuts, control) };
-                            if !control {
-                                state.clear_receive();
-                            } else {
+                            if control {
                                 state.show_receive();
+                            } else {
+                                state.clear_receive();
                             }
                         }
                         _ => {}
