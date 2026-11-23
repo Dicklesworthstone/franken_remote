@@ -776,6 +776,51 @@ replacement may start. Live Explorer clipboard, delayed-render and host-receipt
 qualification requires a Windows desktop and is separate from portable parser
 and freshness tests or Windows compilation.
 
+### Drop files from Explorer
+
+While the original viewer is in the foreground and has ready control and file
+transfer, drop up to eight regular files from Explorer onto its client area.
+The whole selection uses the same upload owner, source-handle validation,
+quotas, progress, publication receipts, **Pause**, **Resume** and **Cancel this
+upload** controls. This uploads copies; it never moves or deletes the local
+sources. Directories, virtual Shell items, network paths and unsafe names remain
+refused. The menu's **Selection** row reports acceptance or a content-free
+refusal.
+
+The viewer accepts drops only while its original upload lane is ready. If
+Explorer is still in the foreground, bring the viewer forward during the drag
+and wait for its existing control/view readiness before releasing the files.
+A drop does not enable control, wake a retired file lane or wait for a busy
+upload or picker to finish. Each gesture is consumed once; another attempt
+requires a new explicit drop. Closing, minimizing, resizing, changing displays
+or retiring the original control context disables the old drop target.
+
+The native drop target retains the input/view context, connection attempt and
+window lifetime from when it became available. Its arming timestamp stays fixed
+across ordinary ready polls. A queued drop must be newer than that snapshot,
+including after an internal reconnect that reuses the same window. Native
+message wrap and timestamp rounding use the same conservative checks as menu
+choices. The accepted gesture retains its original two-second budget through
+copying, preparation, collection and final upload admission.
+
+The Shell transfers ownership of a `WM_DROPFILES` allocation to its recipient.
+The receiving callback takes custody before testing viewer availability,
+foreground, event shape or worker capacity. Its bounded byte copy is unlocked
+and the original storage is released exactly once with `DragFinish` before
+the existing preparation worker sees it. Refused and reentrant events release
+the same original storage; no native handle or pointer reaches the worker.
+The existing 128 KiB allocation, eight-file and 32,768-unit path limits apply,
+and this workflow does not read the clipboard. These ownership rules follow
+Microsoft's [WM_DROPFILES](https://learn.microsoft.com/en-us/windows/win32/shell/wm-dropfiles),
+[DragFinish](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-dragfinish)
+and [DragAcceptFiles](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-dragacceptfiles)
+contracts.
+
+Portable tests and Windows binding compilation do not qualify Explorer's
+activation behavior or a real host transfer. Live qualification must cover
+foreground activation during a drag, malformed/over-budget refusal, focus loss
+during preparation, source cleanup and actual host publication receipts.
+
 ### Select the first batch on the command line
 
 ```powershell
@@ -829,8 +874,8 @@ the containing session under its existing rules.
 A command retains at most nine explicit batches of up to eight files, including
 an initial `--send` batch. The host's existing cumulative byte and 64-transfer
 session limits still apply, including failed attempts. After a batch finishes,
-**Pick and send files…** and **Send copied files** become available again only
-if the original lane remains ready. Earlier publication
+**Pick and send files…**, **Send copied files** and file drops become available
+again only if the original lane remains ready. Earlier publication
 receipts and failures remain in bounded history. A cancelled or failed batch
 is never silently repeated.
 

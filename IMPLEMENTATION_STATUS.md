@@ -1,5 +1,42 @@
 # Implementation status
 
+## Windows Explorer file-drop uploads (2026-11-23)
+
+A ready, foreground controlling viewer now accepts up to eight regular files
+dropped from Explorer onto its client area. The selection uses the same single
+preparation worker and original upload owner as picked and copied files,
+including pinned source handles, quotas, progress, host publication receipts,
+pause/resume/cancel and bounded history. A busy worker or unavailable file lane
+refuses the gesture rather than retaining another selection.
+
+Each drop target is armed for one original window, Shared owner, connection
+attempt, native lifetime and input/view context. A queued event must postdate
+that original arming; ordinary ready polls do not move its timestamp. The
+accepted native gesture keeps its original age through copying, preparation
+and final submission. A reconnect on the same HWND cannot adopt an older drop,
+and this workflow receives no dialog focus exemption.
+
+The receiving callback takes drop-owned HDROP custody before any viewer or
+eligibility branch. It bounds native storage to 128 KiB, copies while locked,
+unlocks and invokes DragFinish exactly once before source preparation. Missing
+viewers, malformed events, busy workers and other refusals retire the same
+storage. Clipboard file choices share the bounded copy helper while preserving
+their separate borrowed-handle contract. Existing Unicode, path, file-count
+and aggregate-length checks apply to the complete selection.
+
+The full portable `fr-windows` suite passes 266 tests, including seven new
+custody, arming and native-time regressions; strict all-target Clippy passes.
+The actual drop, clipboard, memory and portable choice modules pass all-target
+check and strict Clippy for `x86_64-pc-windows-gnu`, using the pinned compiler
+and real Windows bindings with dependency versions/checksums matching the
+repository lockfile. Independent source reviews and workspace formatting also
+pass. These component checks do not qualify the complete Windows viewer,
+Explorer activation during a drag, or a live host publication. Those remain
+explicit qualification work. UBS is unavailable in this environment.
+
+Plan §§15.6, 16.1 and 19; tracking `fr-1vkr`;
+[Windows usage](docs/windows-client.md#drop-files-from-explorer).
+
 ## Shared encoder bitrate through reference recovery (2026-11-23)
 
 An established viewer's original connection now remains in the shared encoder's
@@ -25,14 +62,23 @@ five new receiver-reset regressions, and strict all-target Clippy passes.
 On baseline `40788b6` with this change, the wire, transport, tailnet, media,
 client, files and web dependency libraries also compile with the pinned
 compiler and locked third-party inputs.
-Four shared-session regressions cover recovery rate cuts, static deferral,
-healthy-sibling veto and a lagged publisher clock; their execution evidence is
-still being collected. Full daemon code generation and production Clippy were
-killed under shared resource pressure; a focused test build exceeded its
-bounded memory allowance. These are not successful daemon or workspace gates.
-The regressions use real sessions, replacement attachments and worker IPC,
-while acknowledged-path snapshots, encoded bytes and decoder replies are
-explicit fixtures. No new WAN or native encoder qualification is claimed.
+A focused exact-source run on that recorded baseline passes all 32 tests:
+four new shared-session regressions for recovery rate cuts, static deferral,
+healthy-sibling veto and a lagged publisher clock, plus 28 existing path,
+bitrate and receiver cases. The healthy-sibling fixture services real capture
+credit at the admitted cadence and requires a successful source observation;
+its assertions and original freshness deadlines are unchanged. Unrelated test
+modules were excluded while production code and required helpers stayed intact.
+The same finalized production snapshot passes strict daemon Clippy with the
+workspace pedantic rules and warnings denied. Pending-capture sampling uses a
+small helper that preserves the original expiry, lock, sampling and native-poll
+order while keeping the live capture source borrow separate.
+The regressions use real sessions, replacement attachments and worker IPC;
+acknowledged-path snapshots, encoded bytes and decoder replies are explicit
+fixtures. This focused result does not qualify later concurrent folder-job
+changes or the complete current workspace. Earlier full Cargo/production build
+attempts were killed under shared resource pressure. No new WAN or native encoder
+qualification is claimed.
 
 Plan §§12.3 and 13.3; tracking `fr-ktuc`;
 [shared recovery](SHARED_RECOVERY.md#bitrate-during-reference-recovery-fr-ktuc).

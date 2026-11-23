@@ -2,16 +2,13 @@
 //! Copy bounded `CF_HDROP` bytes, unlock and close before opening any source.
 //! The clipboard owns its HGLOBAL throughout; it is never freed here.
 
-use crate::file_choice::{Error, MAX_COPIED_BYTES};
+use crate::{file_choice::Error, windows::viewer::file_memory};
 use std::{thread, time::Duration};
 use windows::Win32::{
-    Foundation::{ERROR_SUCCESS, GetLastError, HGLOBAL, SetLastError},
-    System::{
-        DataExchange::{
-            CloseClipboard, GetClipboardData, GetClipboardSequenceNumber,
-            IsClipboardFormatAvailable, OpenClipboard,
-        },
-        Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+    Foundation::HGLOBAL,
+    System::DataExchange::{
+        CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+        OpenClipboard,
     },
 };
 
@@ -70,26 +67,9 @@ pub(super) fn read(
         // Rendering a delayed format may increment the sequence itself. The
         // exclusive borrow still protects this original selection, so do not
         // mistake its rendering for another copy or retry against a new value.
-        let global = HGLOBAL(handle.0);
-        // SAFETY: CF_HDROP is a global allocation; GlobalSize validates its
-        // handle. Bound the full allocation before any slice or allocation.
-        let bytes = unsafe { GlobalSize(global) };
-        if !(20..=MAX_COPIED_BYTES).contains(&bytes) {
-            return Err(Error::InvalidPath);
-        }
-        // SAFETY: this live clipboard-owned allocation stays valid until the
-        // clipboard closes. The successful lock is released below before that.
-        let pointer = unsafe { GlobalLock(global) };
-        if pointer.is_null() {
-            return Err(Error::Native);
-        }
-        let locked = Locked(Some(global));
-        // SAFETY: GlobalSize established the bounded allocation length and
-        // GlobalLock pins its start. The clipboard remains exclusively open;
-        // only an owned byte copy escapes, never this pointer or its handle.
-        let copied = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), bytes) }.to_vec();
-        locked.release()?;
-        Ok(copied)
+        // SAFETY: the exclusive clipboard borrow keeps this original CF_HDROP
+        // allocation stable and live through the bounded copy and its unlock.
+        unsafe { file_memory::copy(HGLOBAL(handle.0)) }
     })();
     // A cleanup failure overrides any apparent selection success. The caller
     // already treats Error::Cleanup as terminal for the original native owner.
@@ -116,36 +96,5 @@ impl Drop for Open {
             // including a failed explicit close. Failure is never success.
             let _ = unsafe { CloseClipboard() };
         }
-    }
-}
-
-struct Locked(Option<HGLOBAL>);
-impl Locked {
-    fn release(mut self) -> Result<(), Error> {
-        self.unlock()
-    }
-
-    fn unlock(&mut self) -> Result<(), Error> {
-        let Some(global) = self.0 else {
-            return Ok(());
-        };
-        // SAFETY: releases exactly the successful GlobalLock in read, before
-        // CloseClipboard. FALSE with ERROR_SUCCESS means the last lock was
-        // released, so clear the last-error slot before checking both results.
-        let (unlocked, error) = unsafe {
-            SetLastError(ERROR_SUCCESS);
-            let unlocked = GlobalUnlock(global);
-            (unlocked, GetLastError())
-        };
-        if unlocked.is_err() && error != ERROR_SUCCESS {
-            return Err(Error::Cleanup);
-        }
-        self.0 = None;
-        Ok(())
-    }
-}
-impl Drop for Locked {
-    fn drop(&mut self) {
-        let _ = self.unlock();
     }
 }

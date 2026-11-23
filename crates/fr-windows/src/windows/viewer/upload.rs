@@ -2,6 +2,7 @@
 //! Every choice pins up to eight descriptors and retains every original receipt.
 #[path = "file_picker.rs"]
 mod file_picker;
+use super::dropped_files::{self, Dropped};
 use crate::{change_display, control::Choice};
 use fr_mobile_ffi::session::{FileChoiceContext, Shared, Upload, UploadReport};
 use std::{
@@ -38,6 +39,7 @@ type BatchChoice = Choice<(Weak<Upload>, u8)>;
 pub(super) enum Source {
     Dialog,
     Copied(u32),
+    Dropped(Vec<u8>),
 }
 
 /// Sample only for an explicit command, before it can wait for a viewer or
@@ -54,6 +56,60 @@ thread_local! {
     // Keep a completed worker's negative notification until UI synchronization;
     // collecting Choosing must not discard an external foreground-loss signal.
     static PICKER_FOCUS: RefCell<Option<Arc<file_picker::Focus>>> = const { RefCell::new(None) };
+    // A native HWND may outlive a connection or view. Arm one original input
+    // context before enabling Shell drops; never adopt a queued old drop into
+    // a later ready session merely because its event timestamp is still fresh.
+    static DROP_CHOICE: RefCell<Option<ArmedDrop>> = const { RefCell::new(None) };
+}
+
+struct ArmedDrop {
+    window: HWND,
+    original: Arc<Shared>,
+    context: FileChoiceContext,
+    lifetime: u64,
+    attempt: u64,
+    choice: change_display::MenuChoice<Shared>,
+}
+impl ArmedDrop {
+    fn current(&self, window: HWND, shared: &Arc<Shared>, lifetime: u64) -> bool {
+        self.window == window
+            && Arc::ptr_eq(&self.original, shared)
+            && self.lifetime == lifetime
+            && self.attempt == shared.frames.app_id(0)
+            && shared
+                .file_choice_ready(&self.context)
+                .is_ok_and(|ready| ready)
+    }
+}
+
+/// This original native event is consumed or dropped in its receiving turn.
+/// It never enters a queue; its storage guard covers an unavailable Viewer too.
+pub(super) struct DropEvent {
+    window: HWND,
+    message: u32,
+    armed: Option<ArmedDrop>,
+    files: std::result::Result<Dropped, crate::file_choice::Error>,
+}
+
+fn take_drop_choice() -> Option<ArmedDrop> {
+    let armed = DROP_CHOICE.with(|slot| slot.borrow_mut().take());
+    if let Some(armed) = &armed {
+        dropped_files::accept(armed.window, false);
+    }
+    armed
+}
+
+pub(super) fn received_drop(
+    window: HWND,
+    message: u32,
+    files: std::result::Result<Dropped, crate::file_choice::Error>,
+) -> DropEvent {
+    DropEvent {
+        window,
+        message,
+        armed: take_drop_choice(),
+        files,
+    }
 }
 
 fn action(change: impl FnOnce(&Upload, u8)) {
@@ -90,6 +146,7 @@ pub(super) fn resume() {
 /// A lifecycle fence may run reentrantly while Viewer/Menu is borrowed.
 /// It can only stop this original local choice, never submit selected content.
 pub(super) fn retire_choice() {
+    drop(take_drop_choice());
     PICKER_STOP.with(|slot| {
         if let Some(stop) = slot.borrow().as_ref().and_then(Weak::upgrade) {
             stop.store(true, Ordering::SeqCst);
@@ -255,7 +312,86 @@ impl Menu {
         let Ok(context) = shared.begin_file_choice() else {
             return false;
         };
+        self.start_choice(request, context, source)
+    }
+
+    pub(super) fn open_drop(
+        &mut self,
+        shared: &Arc<Shared>,
+        lifetime: u64,
+        event: DropEvent,
+        available: bool,
+    ) {
+        let DropEvent {
+            window,
+            message,
+            armed,
+            files,
+        } = event;
         self.displayed = None;
+        self.last_choice = "drop_expired_or_unavailable";
+        let Some(mut armed) = armed else {
+            return;
+        };
+        let available = available
+            && window == self.hwnd
+            && !self.cleanup_failed
+            && !self.choosing()
+            && self.original.ready()
+            && armed.current(self.hwnd, shared, lifetime)
+            && dropped_files::foreground(self.hwnd);
+        let Some(request) = armed.choice.take(
+            shared,
+            lifetime,
+            shared.frames.app_id(0),
+            available,
+            message,
+            file_picker::ticks(),
+        ) else {
+            return;
+        };
+        // Native copy is bounded; the consumed guard calls DragFinish before
+        // these owned bytes can enter the one source-preparation worker.
+        let bytes = match files.and_then(Dropped::copy) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.cleanup_failed |= error == crate::file_choice::Error::Cleanup;
+                self.last_choice = if self.cleanup_failed {
+                    "cleanup_failed"
+                } else {
+                    "selection_refused"
+                };
+                return;
+            }
+        };
+        self.start_choice(request, armed.context, Source::Dropped(bytes));
+    }
+
+    fn start_choice(
+        &mut self,
+        request: change_display::Request<Shared>,
+        context: FileChoiceContext,
+        source: Source,
+    ) -> bool {
+        drop(take_drop_choice());
+        self.choice = None;
+        self.displayed = None;
+        // A native registration change, copy or source lock wait cannot move
+        // this already accepted gesture onto a replacement context/lifetime.
+        if self.cleanup_failed
+            || self.choosing()
+            || request.lifetime != super::control::lifetime()
+            || request.attempt != request.original.frames.app_id(0)
+            || !request
+                .original
+                .file_choice_ready(&context)
+                .is_ok_and(|ready| ready)
+            || !dropped_files::foreground(self.hwnd)
+            || !self.original.ready()
+        {
+            self.last_choice = "selection_expired_or_unavailable";
+            return false;
+        }
         let Ok(picker) = file_picker::Picker::open(
             request.at,
             Arc::clone(&request.original),
@@ -292,6 +428,7 @@ impl Menu {
     }
 
     pub(super) fn retire_choice(&mut self) {
+        drop(take_drop_choice());
         self.choice = None;
         if let Some(choosing) = &self.choosing {
             choosing.picker.cancel();
@@ -349,6 +486,54 @@ impl Menu {
             self.displayed = None;
         }
         self.available = available;
+        self.arm_drop(current, lifetime);
+    }
+
+    fn arm_drop(&self, current: &Arc<Shared>, lifetime: u64) {
+        if !self.available || !dropped_files::foreground(self.hwnd) {
+            drop(take_drop_choice());
+            return;
+        }
+        let retained = DROP_CHOICE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|armed| armed.current(self.hwnd, current, lifetime))
+        });
+        if retained {
+            // Ordinary ready polls never slide the original arming boundary.
+            return;
+        }
+        drop(take_drop_choice());
+        let attempt = current.frames.app_id(0);
+        let Ok(context) = current.begin_file_choice() else {
+            return;
+        };
+        if current.frames.app_id(0) != attempt
+            || super::control::lifetime() != lifetime
+            || !current.file_choice_ready(&context).is_ok_and(|ready| ready)
+            || !dropped_files::foreground(self.hwnd)
+        {
+            return;
+        }
+        let opened = file_picker::ticks();
+        DROP_CHOICE.with(|slot| {
+            *slot.borrow_mut() = Some(ArmedDrop {
+                window: self.hwnd,
+                original: Arc::clone(current),
+                context,
+                lifetime,
+                attempt,
+                choice: change_display::MenuChoice::new(
+                    Arc::clone(current),
+                    lifetime,
+                    attempt,
+                    opened,
+                ),
+            });
+        });
+        // Publish before the native operation: a reentrant lifecycle fence
+        // must be able to consume this exact original registration.
+        dropped_files::accept(self.hwnd, true);
     }
 
     pub(super) fn cleanup_complete(&self) -> bool {

@@ -528,30 +528,12 @@ impl Publisher {
             if let Err(error) = live {
                 return Poll::Ready(Err(error));
             }
-            if let Some(adaptive) = &mut self.adaptive {
-                let sample = self
-                    .members
-                    .lock()
-                    .map_err(|_| Error::Poisoned)
-                    .and_then(|mut m| {
-                        adaptive.observe_receivers(&m)?;
-                        let peers = m.peer_evidence(m.last, adaptive.interval_us());
-                        let interval = adaptive.sample(m.last, false, peers)?;
-                        m.quality = adaptive.quality_point();
-                        Ok(interval)
-                    });
-                if let Err(error) = sample {
-                    return Poll::Ready(Err(error));
-                }
-            } else if let Some(rate) = &mut self.path_rate {
-                let sample = self
-                    .members
-                    .lock()
-                    .map_err(|_| Error::Poisoned)
-                    .and_then(|members| rate.observe_members(&members));
-                if let Err(error) = sample {
-                    return Poll::Ready(Err(error));
-                }
+            if let Err(error) = Self::sample_pending_capture(
+                &self.members,
+                self.adaptive.as_deref_mut(),
+                self.path_rate.as_deref_mut(),
+            ) {
+                return Poll::Ready(Err(error));
             }
             capture
                 .as_mut()
@@ -582,6 +564,28 @@ impl Publisher {
         fence.complete = true;
         Ok(result)
     }
+
+    /// Sample only the members/controllers while the original capture future
+    /// retains its separate mutable source borrow. The caller ticks expiry
+    /// first, then performs this sampling before polling native work.
+    fn sample_pending_capture(
+        members: &Mutex<Members>,
+        adaptive: Option<&mut adaptive::CapturePacing>,
+        path_rate: Option<&mut path_rate::PathRate>,
+    ) -> Result<(), Error> {
+        if let Some(adaptive) = adaptive {
+            let mut members = members.lock().map_err(|_| Error::Poisoned)?;
+            adaptive.observe_receivers(&members)?;
+            let peers = members.peer_evidence(members.last, adaptive.interval_us());
+            adaptive.sample(members.last, false, peers)?;
+            members.quality = adaptive.quality_point();
+        } else if let Some(rate) = path_rate {
+            let members = members.lock().map_err(|_| Error::Poisoned)?;
+            rate.observe_members(&members)?;
+        }
+        Ok(())
+    }
+
     pub fn close(&mut self) {
         self.members
             .lock()

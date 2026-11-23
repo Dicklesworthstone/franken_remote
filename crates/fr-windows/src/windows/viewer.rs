@@ -36,6 +36,8 @@ mod control;
 mod cursor;
 mod display;
 mod download;
+mod dropped_files;
+mod file_memory;
 mod screen;
 mod text;
 mod upload;
@@ -87,16 +89,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, GetMessageTime, HTCLIENT, IDC_ARROW, IsDialogMessageW, IsIconic,
-    LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_NOREMOVE, PM_REMOVE, PeekMessageW,
-    PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED,
-    SPI_GETWORKAREA, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE, WM_COMMAND,
-    WM_DESTROY, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_INITMENUPOPUP, WM_KEYDOWN,
-    WM_KEYFIRST, WM_KEYLAST, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    GetForegroundWindow, GetMessageTime, HTCLIENT, IDC_ARROW, ISMEX_NOSEND, InSendMessageEx,
+    IsDialogMessageW, IsIconic, LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_NOREMOVE,
+    PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED,
+    SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    ShowWindow, SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE,
+    WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_MOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, Interface, w};
 
@@ -1484,6 +1486,25 @@ impl Viewer {
         }
     }
 
+    fn drop_files(&mut self, event: upload::DropEvent) {
+        if self.choosing_file() {
+            return;
+        }
+        let available = self.can_choose_file();
+        if available {
+            self.release_everything();
+        }
+        let available = available && self.can_choose_file();
+        if let Some(menu) = &mut self.upload_menu {
+            menu.open_drop(
+                &self.session.shared_handle(),
+                control::lifetime(),
+                event,
+                available,
+            );
+        }
+    }
+
     fn can_change_display(&self) -> bool {
         use fr_mobile_ffi::session::ControlState;
         !self.closing
@@ -2004,6 +2025,24 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_DROPFILES {
+        // Preserve the queued event time and acquire its transfer-owned HDROP
+        // before any native callback, state borrow or eligibility branch. Even
+        // an absent/busy viewer or malformed event must finish this allocation.
+        let time = current_message_time();
+        // SAFETY: adopt this delivered WM_DROPFILES wParam exactly once. The
+        // resulting guard stays on this thread; workers receive owned bytes.
+        let files = unsafe { dropped_files::Dropped::from_message(wparam) };
+        // SAFETY: no argument; sent callbacks cannot borrow a previous queued
+        // event's GetMessageTime as an invented file-drop gesture.
+        let posted = unsafe { InSendMessageEx(None) } == ISMEX_NOSEND;
+        let event = upload::received_drop(hwnd, time, files);
+        drain_hook_failure();
+        if lparam.0 == 0 && posted {
+            with_viewer(|viewer| viewer.drop_files(event));
+        }
+        return LRESULT(0);
+    }
     drain_hook_failure();
     let handled = match message {
         WM_SETCURSOR

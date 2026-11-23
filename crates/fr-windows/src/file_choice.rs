@@ -4,10 +4,14 @@
 
 #[path = "file_choice/copied.rs"]
 mod copied;
+#[path = "file_choice/dropped.rs"]
+mod dropped;
 #[path = "file_choice/selection.rs"]
 mod selection;
 #[cfg(any(windows, test))]
 pub use copied::{MAX_COPIED_BYTES, copied_paths};
+#[cfg(any(windows, test))]
+pub use dropped::DropMemory;
 pub use selection::MAX_SELECTED_FILES;
 #[cfg(any(windows, test))]
 pub use selection::selected_paths;

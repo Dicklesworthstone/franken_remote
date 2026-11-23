@@ -2,6 +2,7 @@
 //! acknowledged path snapshots, encoded bytes and decoder replies are fixtures;
 //! these tests do not measure a WAN or qualify a native encoder.
 use super::*;
+use crate::media::shared_publisher::Error as PublisherError;
 use fr_media::bitrate::Reason;
 use fr_transport::quic::PathLoad;
 
@@ -49,6 +50,9 @@ fn sample(g: &mut Group, queued: &[bool]) {
 
 async fn hold(g: &mut Group, queued: &[bool]) {
     let started = now(&g.peers[0].h).unwrap();
+    let healthy = queued.iter().any(|queued| !queued);
+    let mut next_capture = started;
+    let mut observations = 0;
     loop {
         for p in &mut g.peers {
             if p.shared.as_ref().unwrap().statistics().recovery_requests == 0 {
@@ -58,16 +62,36 @@ async fn hold(g: &mut Group, queued: &[bool]) {
             }
         }
         sample(g, queued);
-        if queued.iter().any(|queued| !queued) {
-            // The healthy sibling continues receiving real static-source
-            // observations while the failed viewer waits for replacement.
-            assert!(g.publisher.capture_next().await.unwrap().unchanged);
+        let at = now(&g.peers[0].h).unwrap();
+        let mut observed = false;
+        if healthy && at >= next_capture {
+            // Keep the admitted capture cadence and actual sender credit.
+            // Backpressure retains this pending turn while peer service runs;
+            // it is not permission to replace an unsent reference.
+            match g.publisher.capture_next().await {
+                Ok(report) => {
+                    assert!(report.unchanged);
+                    observations += 1;
+                    observed = true;
+                    let interval = g.publisher.pacing().map_or(50_000, |p| p.interval_us());
+                    next_capture = (at + interval).max(now(&g.peers[0].h).unwrap());
+                }
+                Err(PublisherError::Media(crate::media::Error::Backpressure)) => {}
+                Err(error) => panic!("healthy source observation: {error:?}"),
+            }
         }
-        if now(&g.peers[0].h).unwrap() - started >= 220_000 {
+        // End the split-path interval on a real source observation, so the
+        // following 220 ms queued interval inherits fresh source evidence
+        // within the original 250 ms reference horizon. No deadline is reset.
+        if now(&g.peers[0].h).unwrap() - started >= 220_000 && (!healthy || observed) {
             break;
         }
         asupersync::time::sleep(g.peers[0].h.now(), Duration::from_millis(10)).await;
     }
+    assert!(
+        !healthy || observations > 0,
+        "healthy source never observed"
+    );
 }
 
 #[test]

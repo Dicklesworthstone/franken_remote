@@ -112,7 +112,7 @@ impl Picker {
         }
         let choice = match match &source {
             Source::Dialog => Choice::new(opened),
-            Source::Copied(_) => Choice::from_gesture(opened, ticks()),
+            Source::Copied(_) | Source::Dropped(_) => Choice::from_gesture(opened, ticks()),
         } {
             Ok(choice) => choice,
             Err(error) => {
@@ -143,10 +143,22 @@ impl Picker {
                 // No native window can activate before the UI publishes this
                 // exact Picker/Focus into its original choice registration.
                 started.recv().map_err(|_| Error::Cancelled)?;
-                if let Source::Copied(sequence) = source {
-                    // No dialog owns local input. In particular, never give
-                    // this worker thread the dialog's activation exemption.
-                    return choose_copied(choice, worker_focus, sequence);
+                match source {
+                    // No dialog owns local input. Neither explicit clipboard
+                    // reads nor file drops get a dialog activation exemption.
+                    Source::Copied(sequence) => {
+                        return choose_copied(choice, worker_focus, sequence);
+                    }
+                    Source::Dropped(bytes) => {
+                        return prepare_list(choice, worker_focus, &bytes).map_err(|error| {
+                            if error == Error::NoCopiedFiles {
+                                Error::InvalidPath
+                            } else {
+                                error
+                            }
+                        });
+                    }
+                    Source::Dialog => {}
                 }
                 // SAFETY: identify this worker before creating any native UI.
                 let worker = unsafe { GetCurrentThreadId() };
@@ -325,7 +337,7 @@ fn collect_retiring() {
     }
 }
 
-fn check_copied(choice: &mut Choice, focus: &Focus) -> Result<(), Error> {
+fn check_local_choice(choice: &mut Choice, focus: &Focus) -> Result<(), Error> {
     if focus.stop.load(Ordering::SeqCst)
         || focus.original.frames.app_id(0) != focus.attempt
         || !focus
@@ -341,7 +353,7 @@ fn check_copied(choice: &mut Choice, focus: &Focus) -> Result<(), Error> {
 }
 
 fn choose_copied(mut choice: Choice, focus: Arc<Focus>, sequence: u32) -> Result<Selected, Error> {
-    check_copied(&mut choice, &focus)?;
+    check_local_choice(&mut choice, &focus)?;
     let bytes = copied_files::read(sequence, || {
         // No authority/source lock spans a clipboard borrow or delayed render.
         if focus.stop.load(Ordering::SeqCst) {
@@ -349,17 +361,22 @@ fn choose_copied(mut choice: Choice, focus: Arc<Focus>, sequence: u32) -> Result
         }
         choice.check(ticks())
     })?;
-    check_copied(&mut choice, &focus)?;
-    let paths: Vec<PathBuf> = copied_paths(&bytes)?
+    prepare_list(choice, focus, &bytes)
+}
+
+fn prepare_list(mut choice: Choice, focus: Arc<Focus>, bytes: &[u8]) -> Result<Selected, Error> {
+    check_local_choice(&mut choice, &focus)?;
+    let paths: Vec<PathBuf> = copied_paths(bytes)?
         .iter()
         .map(|path| PathBuf::from(OsString::from_wide(path)))
         .collect();
-    check_copied(&mut choice, &focus)?;
-    // The borrowed clipboard handle and pointer are already unlocked/closed.
+    check_local_choice(&mut choice, &focus)?;
+    // Clipboard borrowing or drop-owned storage has already ended. No native
+    // handle or pointer survives into this common preparation/transfer owner.
     // Reuse the exact regular-file custody and batch validation owner; never
     // send a partial selection or reopen names after their handles are pinned.
     let prepared = Upload::prepare_many(&paths).map_err(|_| Error::Selection)?;
-    check_copied(&mut choice, &focus)?;
+    check_local_choice(&mut choice, &focus)?;
     Ok(Selected {
         choice,
         prepared,
