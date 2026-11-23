@@ -223,3 +223,66 @@ fn programmatic_live_send_options_cannot_bypass_original_scope() {
     options.input_agent = None;
     assert!(options.validate_file_send().is_err());
 }
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn standing_folder_source_requires_an_explicit_original_controlled_share() {
+    let options = parse(&[
+        "--once",
+        "--input-agent",
+        "/local/agent",
+        "--sync-source",
+        "/local/source",
+        "--sync-job",
+        "41",
+    ])
+    .unwrap();
+    assert_eq!(options.sync_source, Some(PathBuf::from("/local/source")));
+    assert_eq!(options.sync_job, Some(41));
+    assert!(options.send.is_empty() && options.send_control.is_none());
+    assert!(parse(&[]).unwrap().sync_source.is_none());
+    for extra in [
+        vec!["--sync-source", "/local/source"],
+        vec!["--sync-job", "41"],
+        vec!["--sync-source", "/local/source", "--sync-job", "0"],
+        vec!["--sync-source", "relative", "--sync-job", "41"],
+        vec!["--sync-source", "/local/../source", "--sync-job", "41"],
+        vec![
+            "--sync-source",
+            "/local/source",
+            "--sync-job",
+            "41",
+            "--sync-job",
+            "42",
+        ],
+        vec![
+            "--sync-source",
+            "/local/source",
+            "--sync-job",
+            "41",
+            "--send",
+            "/local/file",
+        ],
+        vec![
+            "--sync-source",
+            "/local/source",
+            "--sync-job",
+            "41",
+            "--send-control",
+            "desk",
+        ],
+    ] {
+        let mut args = vec!["--once", "--input-agent", "/local/agent"];
+        args.extend(extra);
+        assert!(
+            matches!(parse(&args), Err(Error::InvalidArgument)),
+            "{args:?}"
+        );
+    }
+    let mut missing_scope = options;
+    missing_scope.once = false;
+    assert!(missing_scope.validate_file_send().is_err());
+    missing_scope.once = true;
+    missing_scope.input_agent = None;
+    assert!(missing_scope.validate_file_send().is_err());
+}

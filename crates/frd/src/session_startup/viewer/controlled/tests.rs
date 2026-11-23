@@ -191,6 +191,7 @@ enum ClipboardMode {
     FilesNegotiate,
     FileDrop,
     FileDownload,
+    FolderSync,
     FileDuplex,
     Combined,
     Microphone,
@@ -285,6 +286,7 @@ async fn fixture_with_recovery(
             | ClipboardMode::FilesNegotiate
             | ClipboardMode::FileDrop
             | ClipboardMode::FileDownload
+            | ClipboardMode::FolderSync
             | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
             | ClipboardMode::MicrophoneCombined
@@ -312,7 +314,7 @@ async fn fixture_with_recovery(
     }
     if matches!(
         clipboard,
-        ClipboardMode::FileDownload | ClipboardMode::FileDuplex
+        ClipboardMode::FileDownload | ClipboardMode::FileDuplex | ClipboardMode::FolderSync
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::DOWNLOAD_CAPABILITY.into(),
@@ -324,6 +326,13 @@ async fn fixture_with_recovery(
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::DUPLEX_CAPABILITY.into(),
             version: fr_wire::files::DUPLEX_VERSION,
+            required: false,
+        });
+    }
+    if clipboard == ClipboardMode::FolderSync {
+        wire_capabilities.push(WireCapability {
+            name: fr_wire::sync_job_state::CAPABILITY.into(),
+            version: fr_wire::sync_job_state::VERSION,
             required: false,
         });
     }

@@ -1,4 +1,40 @@
 //! Actual shipped host/client profiles and negotiation bytes, without native I/O.
+
+#[test]
+fn folder_sync_requires_both_explicit_download_owners_and_preserves_control() {
+    for clipboard in [false, true] {
+        for audio in [false, true] {
+            for duplex in [false, true] {
+                let host = if duplex {
+                    host_offer_with_duplex(true, clipboard, audio)
+                } else {
+                    host_offer_with_download(true, clipboard, audio, true)
+                };
+                let client = if duplex {
+                    fr_client::native::control_offer_with_duplex(clipboard, audio)
+                } else {
+                    fr_client::native::control_offer_with_download(clipboard, audio)
+                };
+                let syncing_host = with_folder_sync(host.clone()).unwrap();
+                let syncing_client = fr_client::native::with_folder_sync(client.clone()).unwrap();
+                for (h, c, expected) in [
+                    (&host, &client, false),
+                    (&syncing_host, &client, false),
+                    (&host, &syncing_client, false),
+                    (&syncing_host, &syncing_client, true),
+                ] {
+                    let selection = select(h, c);
+                    assert_eq!(fr_wire::sync_job_state::selected(&selection), expected);
+                    assert!(super::super::file_download_lane(&selection).is_ok());
+                    assert_eq!(selection.role, Role::RequestControl);
+                }
+            }
+        }
+    }
+    assert!(with_folder_sync(host_offer(false)).is_err());
+    assert!(with_folder_sync(host_offer_with_files(true, false, false, true)).is_err());
+}
+
 use super::*;
 use fr_client::native::{control_offer_with_auxiliary, observation_offer_with_audio};
 use fr_wire::negotiation::{self, Message, Selection};

@@ -20,7 +20,11 @@ use std::time::Duration;
 
 pub(super) enum Destination {
     Send(Policy),
-    Receive(Configuration, ReceiveControl),
+    Receive(
+        Configuration,
+        ReceiveControl,
+        Option<Box<fr_files::sync::ControllerJob>>,
+    ),
 }
 pub(super) enum Advance {
     Waiting,
@@ -56,10 +60,10 @@ fn attachment_kind(bytes: &[u8]) -> bool {
 }
 impl Pending {
     pub(super) fn is_download(&self) -> bool {
-        matches!(self.destination, Destination::Receive(_, _))
+        matches!(self.destination, Destination::Receive(_, _, _))
     }
     pub(super) fn stopped(&self) {
-        if let Destination::Receive(_, control) = &self.destination {
+        if let Destination::Receive(_, control, _) = &self.destination {
             control.end(crate::native_files::Absence::Refused(Error::Cancelled));
             control.cleaned(Ok(()));
         }
@@ -238,7 +242,7 @@ impl Pending {
         input: &mut PresentedInput,
     ) -> Result<Attached, Error> {
         let control = match &self.destination {
-            Destination::Receive(_, control) => Some(control.clone()),
+            Destination::Receive(_, control, _) => Some(control.clone()),
             Destination::Send(_) => None,
         };
         let result = self.start_inner(q, input);
@@ -275,7 +279,7 @@ impl Pending {
                 let sender = Sender::owning(self.cx, q, lane, policy)?;
                 Ok(Attached::Sender(Box::new(sender), self.permission))
             }
-            Destination::Receive(configuration, control) => {
+            Destination::Receive(configuration, control, sync) => {
                 if control.cancel_requested() {
                     lane.retire(q, &self.cx).map_err(Error::Transport)?;
                     control.end(crate::native_files::Absence::Refused(Error::Cancelled));
@@ -298,7 +302,7 @@ impl Pending {
                 })?;
                 control.set_phase(ReceivePhase::Receiving);
                 Ok(Attached::Receiver(
-                    Box::new(super::download::Receiving::new(receiver, control)),
+                    Box::new(super::download::Receiving::new(receiver, control, sync)),
                     self.permission,
                 ))
             }
@@ -377,7 +381,7 @@ impl ControlledViewer {
         destination: Destination,
         timeout: Duration,
     ) -> Result<(), Error> {
-        let download = matches!(destination, Destination::Receive(_, _));
+        let download = matches!(destination, Destination::Receive(_, _, _));
         let duplex = fr_wire::files::duplex_selected(&self.session.opened.selection);
         let slot = self.files.slot(download);
         let other = self.files.slot(!download);

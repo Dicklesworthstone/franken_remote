@@ -953,6 +953,16 @@ chooses the local destination. `--receive-max-file-bytes`,
 same native receive policy as Linux. The default conflict policy is reject;
 nothing here enables overwrite, automatic resume or general filesystem access.
 
+Linux and macOS controllers can also explicitly accept one host-configured
+standing folder job by adding `--sync-job ID` to an explicit `--receive DIR
+--receive-conflict keep-both` connection. The host selects the matching positive
+ID with `frd run --once --input-agent PATH --sync-source DIR --sync-job ID`.
+The job delivers later source versions over the original download attachment;
+it preserves occupied names and does not recreate consent after a reconnect.
+This is bounded one-way delivery of flat regular files. See
+[folder synchronization](folder-sync.md) for complete commands, limits,
+cancellation semantics and the remaining native qualification scope.
+
 The original observer registers those selections once. Contents still need
 the actual host control grant and the matching negotiated file attachment.
 Unsupported optional directions produce typed absence results while ordinary

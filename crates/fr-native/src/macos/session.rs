@@ -2285,6 +2285,9 @@ impl Application for Session {
             if name == fr_wire::audio_up::CAPABILITY {
                 return microphone;
             }
+            if name == fr_wire::sync_job_state::CAPABILITY {
+                return self.files.borrow().folder_sync_available();
+            }
             !matches!(
                 name,
                 fr_wire::attachment::FILES_CAPABILITY

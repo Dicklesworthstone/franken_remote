@@ -65,7 +65,13 @@ pub(super) fn select(
         ));
     }
     let upload = upload::select(chosen.unwrap_or(&connection.upload.paths))?;
-    let files = Files::new(upload, download).map_err(upload::selection_failure)?;
+    let download = download
+        .map(|directory| match &connection.receive {
+            Some(options) => options.request(&directory),
+            None => Ok(frd::native_files::ReceiveRequest::new(&directory)),
+        })
+        .transpose()?;
+    let files = Files::from_requests(upload, download).map_err(upload::selection_failure)?;
     let files = if connection.upload.file_commands {
         files.with_commands()
     } else {

@@ -41,13 +41,14 @@ pub(in crate::session_startup) struct Lane {
     configuration: Option<Configuration>,
     selection: Option<SendRequest>,
     interactive: Option<Box<Sending>>,
+    sync: Option<fr_files::sync::HostConfig>,
 }
 impl Lane {
     pub(in crate::session_startup) fn has_upload(&self) -> bool {
         self.configuration.is_some()
     }
     pub(in crate::session_startup) fn has_download(&self) -> bool {
-        self.selection.is_some() || self.interactive.is_some()
+        self.selection.is_some() || self.interactive.is_some() || self.sync.is_some()
     }
     pub(in crate::session_startup) fn add_upload(&mut self, directory: &Directory) {
         self.configuration = Some(directory.configuration());
@@ -63,10 +64,12 @@ impl Lane {
                 sending.set_intake(intake);
                 self.interactive = Some(Box::new(sending));
             }
+            HostDownload::Sync(config) => self.sync = Some(config),
         }
     }
     pub(in crate::session_startup) fn close(&mut self) {
         self.selection = None;
+        self.sync = None;
         if let Some(sending) = &mut self.interactive {
             sending.stop();
         }
@@ -105,6 +108,11 @@ impl Lane {
                 selection.policy,
                 selection.lifetime,
             );
+        }
+        if let Some(source) = self.sync.take()
+            && let Some(request) = request(host, view, nonce)
+        {
+            let _ = host.offer_folder_sync(request, source);
         }
         if let Some(sending) = &mut self.interactive {
             let request = sending

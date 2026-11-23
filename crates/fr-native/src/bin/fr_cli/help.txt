@@ -30,7 +30,7 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--file-drop] [--file-commands]
     [--receive /absolute/private-directory | --choose-receive-directory]
     [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
-    [--receive-max-session-bytes N]
+    [--receive-max-session-bytes N] [--sync-job POSITIVE_ID]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
      [--audio-volume 0..100] [--audio-muted]]
     [--microphone --microphone-source NAME
@@ -170,6 +170,14 @@ Both --receive-max-* limits must be positive; session >= file. Directories count
 spend budget. --receive-conflict reject is default; keep-both uses a bounded
 .fr-conflict- name. Neither overwrites, merges, retries or resumes.
 Download Cancel affects only downloads.
+--sync-job ID accepts one explicitly configured host folder job on Linux/macOS.
+It requires --control, --receive DIR and --receive-conflict keep-both; the same
+positive ID must be configured by the host with --sync-source DIR --sync-job ID.
+The original connection scans up to 32 flat regular files and delivers new source
+versions within the existing cumulative byte/transfer/time limits. No deletion,
+overwrite, recursive tree, bidirectional job or reconnect replay is performed.
+Editing/deleting a received copy does not resend an already acknowledged source
+version. Closing or cancelling downloads ends that original job.
 Upload/download may coexist with clipboard/audio; legacy peers may admit one
 direction. Permissions/limits/cancellation remain separate under the original
 control lease. Receipts report index/size/durability/cleanup, never paths;

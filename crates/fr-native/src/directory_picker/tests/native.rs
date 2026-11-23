@@ -54,6 +54,9 @@ const BROKER: &[u8] = br#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus 
  <type>session</type>
  <listen>tcp:host=127.0.0.1,port=0</listen>
  <auth>ANONYMOUS</auth><allow_anonymous/>
+ <!-- Only this private TCP fixture has no AppArmor peer labels. Production
+      uses the installed Unix session bus and its unchanged security policy. -->
+ <apparmor mode="disabled"/>
  <policy context="default">
   <allow user="*"/><allow own="*"/>
   <allow send_destination="*"/><allow receive_sender="*"/>
@@ -555,7 +558,10 @@ fn serve(
     // SAFETY: live thread-owned bus and static name; no Rust callback retained.
     let claimed =
         unsafe { sd_bus_request_name(bus.raw(), c"org.freedesktop.portal.Desktop".as_ptr(), 0) };
-    assert!(claimed > 0);
+    assert!(
+        claimed > 0,
+        "private portal name ownership failed: {claimed}"
+    );
     ready.send(()).unwrap();
     let mut service = Service {
         bus,

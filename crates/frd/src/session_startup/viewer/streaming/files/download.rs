@@ -32,9 +32,10 @@ impl Lane {
                 policy: request.configuration.policy,
                 reply_lifetime: request.configuration.reply_lifetime,
             };
-            match viewer.expect_file_download_with_control(
+            match viewer.expect_file_download_with_sync(
                 configuration,
                 self.control.clone(),
+                request.sync_job,
                 SETUP_TIMEOUT,
             ) {
                 Ok(()) => {

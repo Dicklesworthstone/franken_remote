@@ -8,6 +8,8 @@ pub struct ReceiveOptions {
     pub max_file_bytes: Option<u64>,
     pub max_session_bytes: Option<u64>,
     pub keep_both: bool,
+    /// One explicitly accepted host-configured folder job on this connection.
+    pub sync_job: Option<u64>,
 }
 
 impl std::fmt::Debug for ReceiveOptions {
@@ -16,6 +18,7 @@ impl std::fmt::Debug for ReceiveOptions {
             .field("max_file_bytes", &self.max_file_bytes)
             .field("max_session_bytes", &self.max_session_bytes)
             .field("keep_both", &self.keep_both)
+            .field("sync_job", &self.sync_job)
             .finish_non_exhaustive()
     }
 }
@@ -47,6 +50,53 @@ pub(super) fn keep_both(value: &str) -> Result<bool, Failure> {
     }
 }
 
+pub(super) fn job_id(value: &str) -> Result<u64, Failure> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid_job());
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value != 0)
+        .ok_or_else(invalid_job)
+}
+
+fn invalid_job() -> Failure {
+    Failure::new(
+        "files_sync_job_invalid",
+        "--sync-job requires a positive host-configured job ID. No connection was made.",
+        2,
+    )
+}
+
+pub(super) fn accept_job(
+    receive: Option<ReceiveOptions>,
+    job: Option<u64>,
+) -> Result<Option<ReceiveOptions>, Failure> {
+    let Some(job) = job else {
+        return Ok(receive);
+    };
+    let Some(mut receive) = receive else {
+        return Err(Failure::new(
+            "files_sync_directory_required",
+            "--sync-job requires an explicit --receive directory and --receive-conflict keep-both.",
+            2,
+        ));
+    };
+    if job == 0 {
+        return Err(invalid_job());
+    }
+    if !receive.keep_both {
+        return Err(Failure::new(
+            "files_sync_keep_both_required",
+            "Folder synchronization requires --receive-conflict keep-both to preserve occupied destinations.",
+            2,
+        ));
+    }
+    receive.sync_job = Some(job);
+    Ok(Some(receive))
+}
+
 impl ReceiveOptions {
     /// A native chooser supplies only a path, never policy. Keep the actual
     /// receiver's default budgets and reject existing destinations.
@@ -76,6 +126,7 @@ impl ReceiveOptions {
             max_file_bytes: None,
             max_session_bytes: None,
             keep_both: false,
+            sync_job: None,
         })
     }
 
@@ -106,6 +157,7 @@ impl ReceiveOptions {
             max_file_bytes,
             max_session_bytes,
             keep_both: keep_both.unwrap_or(false),
+            sync_job: None,
         }))
     }
 
@@ -133,6 +185,28 @@ impl ReceiveOptions {
                     2,
                 )
             })
+    }
+
+    /// The selected job and destination are consumed by one original receiver.
+    #[cfg(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
+    pub(crate) fn request(
+        &self,
+        directory: &frd::native_files::Directory,
+    ) -> Result<frd::native_files::ReceiveRequest, Failure> {
+        let request = frd::native_files::ReceiveRequest::new(directory);
+        match self.sync_job {
+            Some(job) => request.with_sync_job(job).map_err(|_| {
+                Failure::new(
+                    "files_sync_selection_invalid",
+                    "The selected folder job requires an explicit keep-both destination on this original connection. No receiver started.",
+                    2,
+                )
+            }),
+            None => Ok(request),
+        }
     }
 
     /// Pure preflight shared by the direct connector and app launcher. The
@@ -328,6 +402,66 @@ mod tests {
     }
 
     #[test]
+    fn folder_job_needs_explicit_id_destination_and_keep_both_consent() {
+        let configured = connection(
+            "--sync-job 41 --receive /private/destination --receive-conflict keep-both --no-clipboard",
+        )
+        .unwrap();
+        assert!(!configured.clipboard);
+        let receive = configured.receive.unwrap();
+        assert_eq!(receive.sync_job, Some(41));
+        assert!(receive.keep_both);
+        assert!(
+            connection("--receive /private/destination --receive-conflict keep-both")
+                .unwrap()
+                .receive
+                .unwrap()
+                .sync_job
+                .is_none()
+        );
+        for (args, code) in [
+            ("--sync-job 41", "files_sync_directory_required"),
+            (
+                "--receive /private/destination --sync-job 41",
+                "files_sync_keep_both_required",
+            ),
+            (
+                "--receive /private/destination --receive-conflict reject --sync-job 41",
+                "files_sync_keep_both_required",
+            ),
+        ] {
+            let failure = connection(args).err().unwrap();
+            assert_eq!(failure.code, code);
+            assert!(!format!("{failure:?}").contains("/private/destination"));
+        }
+        for value in ["0", "-1", "+1", "1.5", "18446744073709551616"] {
+            assert_eq!(
+                connection(&format!(
+                    "--receive /private/destination --receive-conflict keep-both --sync-job {value}"
+                ))
+                .err()
+                .unwrap()
+                .code,
+                "files_sync_job_invalid"
+            );
+        }
+        for args in [
+            "--receive /private/destination --receive-conflict keep-both --sync-job 41 --sync-job 42",
+            "--choose-receive-directory --sync-job 41",
+            "--sync-job",
+        ] {
+            assert!(connection(args).is_err());
+        }
+        for command in [
+            "hosts --sync-job 41",
+            "connect n-host --view-only --experimental-native --display only --receive /private/destination --receive-conflict keep-both --sync-job 41",
+            "connect --choose-host --control --experimental-native --display only --pick-only --sync-job 41",
+        ] {
+            assert!(options(command).is_err());
+        }
+    }
+
+    #[test]
     #[cfg(any(
         all(target_os = "linux", feature = "linux-desktop"),
         all(target_os = "macos", feature = "macos-desktop")
@@ -346,6 +480,7 @@ mod tests {
                 max_file_bytes: file,
                 max_session_bytes: session,
                 keep_both: true,
+                sync_job: None,
             };
             assert_eq!(request.open().err().unwrap().code, "files_limits_invalid");
         }

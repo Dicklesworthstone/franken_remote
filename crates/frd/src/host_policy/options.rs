@@ -90,6 +90,10 @@ pub struct RunOptions {
     /// Opt-in same-user command endpoint for later selections on one original
     /// controlled session. Requires `once` and an input agent.
     pub send_control: Option<String>,
+    /// Explicit one-way folder source for one original controlled connection.
+    pub sync_source: Option<PathBuf>,
+    /// Nonzero job identifier that the receiving controller must accept.
+    pub sync_job: Option<u64>,
     /// Local collision handling for both files and whole trees. Absent: reject.
     pub files_conflict: Option<ConflictPolicy>,
     /// Per-file byte limit for `--files` (default in `native_files`).
@@ -228,6 +232,8 @@ impl RunOptions {
                 "--files" => set(&mut options.files, PathBuf::from(value))?,
                 "--send" => options.send.push(PathBuf::from(value)),
                 "--send-control" => set(&mut options.send_control, value.to_owned())?,
+                "--sync-source" => set(&mut options.sync_source, PathBuf::from(value))?,
+                "--sync-job" => set(&mut options.sync_job, bytes(value)?)?,
                 "--files-conflict" => {
                     set(&mut options.files_conflict, files::parse_conflict(value)?)?;
                 }

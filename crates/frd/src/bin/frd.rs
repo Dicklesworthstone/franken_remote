@@ -123,6 +123,15 @@ OPTIONS:
                     privately and published atomically. Windows publication
                     retains an unknown durability result unless metadata flush
                     is proven. Off by default
+    --sync-source DIR  Linux/macOS, with --once and --input-agent: forward new
+                    and changed regular files from this private flat directory
+                    under one explicitly accepted folder job. Requires --sync-job
+                    and cannot combine with --send or --send-control. The client
+                    selects --receive DIR --receive-conflict keep-both --sync-job ID.
+                    Occupied names become conflict copies; no deletes or replay
+                    after this original connection ends.
+    --sync-job ID   Nonzero local job identifier paired with --sync-source.
+                    The controller must explicitly accept this same ID.
     --files-conflict reject|keep-both  Taken destination names are refused by
                     default. keep-both publishes the complete verified file/tree
                     under a conflict-marked name; never merges or overwrites.
@@ -1042,6 +1051,24 @@ fn send(
     options: &frd::host_policy::options::RunOptions,
     json: bool,
 ) -> Result<Option<frd::native_files::HostSelection>, ExitCode> {
+    if let Some(source) = &options.sync_source {
+        let job = options.sync_job.ok_or_else(|| {
+            run_refusal(
+                json,
+                "files_sync_config_invalid",
+                "A folder source requires its explicit nonzero --sync-job ID.",
+                2,
+            )
+        })?;
+        return frd::native_files::HostSelection::sync(source, job)
+            .map(Some)
+            .map_err(|_| run_refusal(
+                json,
+                "files_sync_source_invalid",
+                "Choose an existing private local directory and a nonzero folder job ID. No sync source or connection was started.",
+                2,
+            ));
+    }
     if options.send.is_empty() {
         return Ok(None);
     }

@@ -682,6 +682,23 @@ fn connect(
                 2,
             )
         }).map_err(before_start)?;
+        let offer = if connection
+            .receive
+            .as_ref()
+            .is_some_and(|receive| receive.sync_job.is_some())
+        {
+            fr_client::native::with_folder_sync(offer)
+                .map_err(|_| {
+                    Failure::new(
+                        "files_sync_capability_limit",
+                        "The selected folder job cannot fit the native capability offer. Reduce the optional file or audio features before connecting.",
+                        2,
+                    )
+                })
+                .map_err(before_start)?
+        } else {
+            offer
+        };
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
@@ -1199,6 +1216,16 @@ impl Ui for Interface {
                     .is_some_and(files::Local::can_configure_upload),
             initial && progress.downloads.is_some(),
         );
+        if !initial
+            || !progress
+                .downloads
+                .as_ref()
+                .is_some_and(files::download::Local::folder_sync_available)
+        {
+            offer
+                .capabilities
+                .retain(|cap| cap.name != fr_wire::sync_job_state::CAPABILITY);
+        }
         if !initial
             || !progress
                 .microphone

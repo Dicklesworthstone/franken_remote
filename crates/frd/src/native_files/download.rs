@@ -7,7 +7,7 @@ use asupersync::cx::Cx;
 use fr_files::{session::Progress, wire::ResultReceipt, worker};
 use std::{
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -19,12 +19,27 @@ pub struct HostSelection(Arc<Mutex<Option<SelectionKind>>>);
 enum SelectionKind {
     Initial(SendRequest),
     Interactive(HostSendIntake),
+    Sync(fr_files::sync::HostConfig),
 }
 pub(crate) enum HostDownload {
     Initial(SendRequest),
     Interactive(SendIntake),
+    Sync(fr_files::sync::HostConfig),
 }
 impl HostSelection {
+    /// One explicit host-side folder job. Merely opening this source neither
+    /// scans it nor authorizes a receiver; the original client must separately
+    /// accept this exact job ID and the negotiated one-way sync capability.
+    pub fn sync(source: &Path, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
+        let selected = SelectionKind::Sync(fr_files::sync::HostConfig::open(source, job_id)?);
+        Ok(Self(Arc::new(Mutex::new(Some(selected)))))
+    }
+    pub fn sync_job_id(&self) -> Option<u64> {
+        match self.lock().as_ref() {
+            Some(SelectionKind::Sync(config)) => Some(config.job_id()),
+            _ => None,
+        }
+    }
     pub fn select(paths: &[PathBuf]) -> Result<Self, SelectRefusal> {
         let request = Selection::select(paths)?.request()?;
         let selected = SelectionKind::Initial(request);
@@ -49,6 +64,7 @@ impl HostSelection {
         match self.lock().take().ok_or(Absence::Unavailable)? {
             SelectionKind::Initial(request) => Ok(HostDownload::Initial(request)),
             SelectionKind::Interactive(intake) => intake.bind(cx).map(HostDownload::Interactive),
+            SelectionKind::Sync(config) => Ok(HostDownload::Sync(config)),
         }
     }
     fn lock(&self) -> MutexGuard<'_, Option<SelectionKind>> {
@@ -69,12 +85,29 @@ impl fmt::Debug for HostSelection {
 /// control authority; the original live controller supplies that at attachment.
 pub struct ReceiveRequest {
     pub(crate) configuration: fr_files::quic::Configuration,
+    pub(crate) sync_job: Option<u64>,
 }
 impl ReceiveRequest {
     pub fn new(directory: &Directory) -> Self {
         Self {
             configuration: directory.configuration(),
+            sync_job: None,
         }
+    }
+    /// Explicitly accept one host-configured job, independently of ordinary
+    /// file consent. The existing destination must already select KeepBoth.
+    pub fn with_sync_job(mut self, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
+        if job_id == 0 || self.sync_job.is_some() {
+            return Err(fr_files::sync::LiveError::InvalidConfig);
+        }
+        if self.configuration.directory.conflict_policy() != super::ConflictPolicy::KeepBoth {
+            return Err(fr_files::sync::LiveError::KeepBothRequired);
+        }
+        self.sync_job = Some(job_id);
+        Ok(self)
+    }
+    pub const fn sync_job_id(&self) -> Option<u64> {
+        self.sync_job
     }
 }
 impl fmt::Debug for ReceiveRequest {

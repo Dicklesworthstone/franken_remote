@@ -549,3 +549,6 @@ mod credit;
 
 #[path = "native_profile/quality.rs"]
 mod quality;
+
+#[path = "native_profile/sync.rs"]
+mod sync;

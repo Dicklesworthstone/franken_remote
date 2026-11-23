@@ -1,11 +1,82 @@
-# Folder synchronization transaction engine
+# Folder synchronization
 
-`fr_files::sync` implements bounded local reconciliation and ATP-verified,
-no-overwrite publication of regular files. It emits validated `SyncJobState`
-records. It is not yet connected to the shipping host/client file channel:
-this API and its local filesystem tests do not establish remote folder sync,
-reconnect resumption, or live tailnet qualification. Plan §15.6 and bead
-`fr-p4-folder-sync-p6i` continue to own that integration.
+`fr_files::sync::live` connects an explicitly configured host folder to one
+explicitly accepted native controller download. It repeatedly delivers new
+source versions through the existing ATP sender, receiver and disk worker.
+`fr_files::sync` also retains the local reconciliation API described below.
+Plan §15.6 and bead `fr-p4-folder-sync-p6i` own the complete feature; the native
+one-way integration is tracked separately by `fr-p4-folder-sync-p6i.1`.
+
+## Run one explicit native job
+
+On a Linux or macOS host, add these options to the existing configured host
+command (retain its normal capture, policy, worker and tailnet options):
+
+```sh
+frd run --once --input-agent /absolute/fr-input-agent \
+  --sync-source /private/source --sync-job 41
+```
+
+On the controlling native client, explicitly choose the matching job and a
+private local destination:
+
+```sh
+fr connect NODE_ID --control --experimental-native --display only \
+  --receive /private/destination --receive-conflict keep-both --sync-job 41
+```
+
+Both roots must pass the existing descriptor-pinned directory checks. The
+positive job ID is configured locally at each endpoint; a peer cannot create a
+host job or supply a host path. Ordinary file-receive consent never accepts a
+folder job. The host source excludes `--send` and `--send-control`; independent
+controller uploads can still coexist on a positively negotiated duplex lane.
+
+The host advertises only its configured ID. Scanning starts after matching
+controller acceptance on the original granted download. The optional
+`file-folder-sync` capability is selected by both endpoints; older or
+unselected peers receive no fallback folder transfer. `SyncJobState` records
+share the existing bounded file queue, byte accounting and original deadlines.
+They carry progress and scope, never local paths or file contents.
+
+### Bounds and delivery semantics
+
+The live job scans at five-second intervals after the preceding round has
+settled. Each scan allows at most 32 flat regular files, 64 MiB per file and
+256 MiB of source content. Subdirectories, symlinks and special files refuse the
+job. Across all rounds, the live job allows 64 attempted file versions and
+1 GiB of attempted content; the receiver's independently selected lower limits
+still apply. Scanning uses one supervised worker and one bounded result. Each
+round has a five-minute deadline, and each retained state record keeps its
+original one-second delivery deadline. A round does not start while prior ATP,
+publication proof, source cleanup or job-state custody remains outstanding.
+
+Only actual verified publication receipts advance the source-version ledger.
+A file changed between scanning and source preparation is refused before its
+offer, so a different version cannot be credited to the scanned manifest.
+Occupied destination names always preserve both versions. Editing or removing
+a received copy does not replay a previously acknowledged source version; a
+later host change remains eligible for a new delivery. `Settled` confirms the
+round's deliveries, rather than asserting equality of the two directories.
+
+Cancellation, lost authority, expiry or disconnect ends the original job.
+Already published files remain published, with their durability and cleanup
+results retained separately; unfinished staging is cancelled under the existing
+worker owner. State acknowledgements wait for disk/proof/network drain and
+never turn a failed cleanup or uncertain durability result into success.
+Neither the job, its accepted destination nor its ledger is replayed by a
+reconnecting viewer. Start a new explicit job to authorize another session.
+
+This path is one-way host-to-controller delivery of flat regular files.
+Bidirectional remote reconciliation, recursive jobs, persistent jobs across
+reconnects and native desktop/live-tailnet qualification remain separate work
+under the parent bead. The existing local two-way engine is not evidence that
+those remote features are complete.
+
+## Local reconciliation engine
+
+The local API performs bounded reconciliation and ATP-verified, no-overwrite
+publication with both directory owners in one process. Its local filesystem
+tests establish that scope independently of the native transport tests.
 
 ## Source and destination custody
 
@@ -64,6 +135,17 @@ names disappear from both snapshots; kept-version history is bounded by the
 current source names. Callers retain a baseline per configured job.
 
 ## Regression coverage
+
+`cargo test -p fr-files --test remote_folder_sync --locked` drives the real
+native UDP/TLS file attachment and independent source/destination disk owners.
+The target includes repeated changes, a full 32-file first round followed by
+another version, keep-both preservation, local edit/delete without replay,
+wrong job IDs, replacement connections, cancellation cleanup and source mutation
+between scan and preparation. Production daemon/viewer regressions additionally
+exercise repeated jobs while input continues and refuse ordinary download
+consent before consuming a host's shared job selection. Current execution and
+platform qualification results are recorded in
+[implementation status](../IMPLEMENTATION_STATUS.md#explicit-native-one-way-folder-jobs-2026-11-23).
 
 `cargo test -p fr-files --test folder_sync --locked` exercises real local
 filesystems: two-way transfer, repeated concurrent edits, local deletion,

@@ -412,6 +412,14 @@ fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() 
                 fr_client::native::control_offer_with_auxiliary(clipboard, true, audio),
                 fr_client::native::control_offer_with_download(clipboard, audio),
                 fr_client::native::control_offer_with_duplex(clipboard, audio),
+                fr_client::native::with_folder_sync(
+                    fr_client::native::control_offer_with_download(clipboard, audio),
+                )
+                .unwrap(),
+                fr_client::native::with_folder_sync(fr_client::native::control_offer_with_duplex(
+                    clipboard, audio,
+                ))
+                .unwrap(),
             ] {
                 let mut ui = interface();
                 {
@@ -434,7 +442,15 @@ fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() 
                                 directory: private_receive_directory(),
                                 max_file_bytes: Some(1),
                                 max_session_bytes: Some(1),
-                                keep_both: false,
+                                keep_both: original
+                                    .capabilities
+                                    .iter()
+                                    .any(|cap| cap.name == fr_wire::sync_job_state::CAPABILITY),
+                                sync_job: original
+                                    .capabilities
+                                    .iter()
+                                    .any(|cap| cap.name == fr_wire::sync_job_state::CAPABILITY)
+                                    .then_some(41),
                             }))
                             .unwrap();
                     }
@@ -478,6 +494,7 @@ fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() 
                         fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
                         fr_wire::files::DOWNLOAD_CAPABILITY,
                         fr_wire::files::DUPLEX_CAPABILITY,
+                        fr_wire::sync_job_state::CAPABILITY,
                     ]
                     .contains(&capability.name.as_str());
                     assert_eq!(narrowed.capabilities.contains(capability), !file);

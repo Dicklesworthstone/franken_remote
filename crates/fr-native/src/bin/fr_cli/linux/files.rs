@@ -53,7 +53,7 @@ pub(super) fn retain_offer(offer: &mut fr_wire::negotiation::Offer, upload: bool
                 upload || download
             }
             fr_wire::files::CHANNEL_SCOPE_CAPABILITY => upload,
-            fr_wire::files::DOWNLOAD_CAPABILITY => download,
+            fr_wire::files::DOWNLOAD_CAPABILITY | fr_wire::sync_job_state::CAPABILITY => download,
             fr_wire::files::DUPLEX_CAPABILITY => upload && download,
             _ => true,
         });

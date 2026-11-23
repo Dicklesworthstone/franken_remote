@@ -244,6 +244,13 @@ impl StreamingHost {
         let session = self.host.session().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::file_download_lane(&session.opened.selected)?;
+        // Keep the original source available when an ordinary download client
+        // did not separately negotiate the standing job boundary.
+        if selection.sync_job_id().is_some()
+            && !fr_wire::sync_job_state::selected(&session.opened.selected)
+        {
+            return Err(Absence::NotNegotiated);
+        }
         if self.files.as_ref().is_some_and(files::Lane::has_upload)
             && !fr_wire::files::duplex_selected(&session.opened.selected)
         {

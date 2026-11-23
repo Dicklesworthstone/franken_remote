@@ -540,6 +540,21 @@ fn connect_selected(
             )
         })?;
         let offer = microphone::offer(offer, connection.microphone.is_some())?;
+        let offer = if connection
+            .receive
+            .as_ref()
+            .is_some_and(|receive| receive.sync_job.is_some())
+        {
+            fr_client::native::with_folder_sync(offer).map_err(|_| {
+                Failure::new(
+                    "files_sync_capability_limit",
+                    "The selected folder job cannot fit the native capability offer. Reduce the optional file or audio features before connecting.",
+                    2,
+                )
+            })?
+        } else {
+            offer
+        };
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),

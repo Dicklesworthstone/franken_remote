@@ -587,6 +587,24 @@ local choices and authority; no transfer is silently resumed. See
 [PROTOCOL_FILES.md](PROTOCOL_FILES.md) and
 [PROTOCOL_ATTACHMENT.md](PROTOCOL_ATTACHMENT.md).
 
+The optional `file-folder-sync` v1 capability permits `SyncJobState` on the
+original host-to-controller file pair, including the distinct duplex download
+role. Both endpoints must also select `native-media-attachment`,
+`native-input-attachment`, `native-file-receive`, `file-atp-full` and
+`file-download`, all version 1, under a controlling role. An upload pair or an
+unselected peer cannot carry job state. The existing 121-byte record and ATP
+file records retain the same connection, session, lease, handle and channel
+binding; job records consume ordinary file queue counts and bytes.
+
+Native one-way jobs require an explicit host-configured source/ID and explicit
+client acceptance of that ID into its own keep-both destination. Scanning waits
+for acceptance. A bounded scan/transfer/settlement sequence separates job-state
+exchange from outstanding ATP/source/proof custody; settled counters represent
+confirmed deliveries, not directory equality. Local destination edits and
+deletions do not replay acknowledged source versions. Job state contains no
+local paths, and reconnecting does not restore the original job or consent.
+The implemented scope and limits are in [folder synchronization](docs/folder-sync.md).
+
 File messages are an authorization/stream envelope for **existing ATP**;
 they do not define a competing chunk-repair, hashing, resumption, or sync
 algorithm. The exact upstream ATP revision/profile and codecs must be selected

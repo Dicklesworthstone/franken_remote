@@ -13,6 +13,7 @@ impl RunOptions {
     /// A host selection is consumed once. Never persist it in a restartable
     /// daemon or infer control consent from a source path.
     pub fn validate_file_send(&self) -> Result<(), Error> {
+        self.validate_folder_sync()?;
         if let Some(target) = &self.send_control {
             // Both native Unix hosts use the same bounded command protocol.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -44,6 +45,30 @@ impl RunOptions {
                         .components()
                         .any(|part| part == std::path::Component::ParentDir)
             })
+        {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(())
+    }
+
+    fn validate_folder_sync(&self) -> Result<(), Error> {
+        if self.sync_source.is_some() != self.sync_job.is_some() {
+            return Err(Error::InvalidArgument);
+        }
+        let Some(source) = &self.sync_source else {
+            return Ok(());
+        };
+        if !cfg!(any(target_os = "linux", target_os = "macos"))
+            || self.sync_job == Some(0)
+            || !self.once
+            || self.input_agent.is_none()
+            || !self.send.is_empty()
+            || self.send_control.is_some()
+            || !source.is_absolute()
+            || source.as_os_str().len() > 4096
+            || source
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
         {
             return Err(Error::InvalidArgument);
         }

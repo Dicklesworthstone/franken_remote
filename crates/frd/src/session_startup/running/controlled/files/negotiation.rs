@@ -28,6 +28,7 @@ pub(super) enum Target {
         batch: Option<(batch::Selection, Duration)>,
         permission: Permission,
         policy: sender::Policy,
+        sync: Option<fr_files::sync::HostConfig>,
     },
 }
 impl Target {
@@ -151,6 +152,7 @@ impl Pending {
                 batch,
                 permission,
                 policy,
+                sync,
             } => {
                 let mut sender =
                     Sender::owning(self.cx.clone(), q, lane, policy).map_err(Error::Sender)?;
@@ -160,11 +162,24 @@ impl Pending {
                     let _ = sender.cancel(q);
                     return Err(Error::Sender(error));
                 }
+                let sync = sync
+                    .map(|config| {
+                        fr_files::sync::HostJob::new(
+                            config,
+                            self.cx.clone(),
+                            self.authority.clone(),
+                            permission.clone(),
+                            q,
+                        )
+                    })
+                    .transpose()
+                    .map_err(|error| Error::Sender(super::download::sync_error(error)))?;
                 Ok(Attached::Sender(Box::new(super::download::Outgoing {
                     sender,
                     authority: self.authority,
                     permission,
                     cx: self.cx,
+                    sync,
                 })))
             }
         }

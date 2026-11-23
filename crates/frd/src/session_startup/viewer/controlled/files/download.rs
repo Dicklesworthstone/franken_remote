@@ -6,6 +6,7 @@ use crate::native_files::{Absence, ReceiveControl, ReceivePhase, ReceiveStatus};
 use asupersync::cx::Cx;
 use fr_files::{
     quic::{self, Configuration, Receiver, State},
+    sync::{ControllerJob, JobStatus, LiveError},
     wire::ResultReceipt,
     worker,
 };
@@ -24,19 +25,38 @@ pub(super) fn send_error(error: quic::Error) -> Error {
     }
 }
 
+fn receive_sync_error(error: LiveError) -> quic::Error {
+    match error {
+        LiveError::Receive(error) => error,
+        LiveError::Transport(error) => quic::Error::Transport(error),
+        LiveError::WrongConnection => quic::Error::WrongConnection,
+        LiveError::Clock => quic::Error::Clock,
+        LiveError::Cancelled => quic::Error::Cancelled,
+        _ => quic::Error::File(fr_files::wire::Error::Wire(
+            fr_wire::WireError::InvalidValue,
+        )),
+    }
+}
+
 pub(super) struct Receiving {
     pub(super) receiver: Receiver,
     control: ReceiveControl,
     failure: Option<quic::Error>,
     cleanup: Option<Result<(), worker::Error>>,
+    sync: Option<Box<ControllerJob>>,
 }
 impl Receiving {
-    pub(super) fn new(receiver: Receiver, control: ReceiveControl) -> Self {
+    pub(super) fn new(
+        receiver: Receiver,
+        control: ReceiveControl,
+        sync: Option<Box<ControllerJob>>,
+    ) -> Self {
         Self {
             receiver,
             control,
             failure: None,
             cleanup: None,
+            sync,
         }
     }
     pub(super) fn observe(&self) {
@@ -52,13 +72,22 @@ impl Receiving {
     ) -> Result<(), Error> {
         self.observe();
         if self.control.cancel_requested() {
+            if let Some(sync) = &mut self.sync {
+                sync.stop();
+            }
             // As in `stop`: a cancelled receive has ended even if its reset fails.
             let retired = self.receiver.retire(q).map_err(send_error);
             self.control.set_phase(ReceivePhase::Ended);
             let _ = self.collect();
             return retired;
         }
-        if let Err(error) = self.receiver.service(q, authorize) {
+        let result = if let Some(sync) = &mut self.sync {
+            sync.service(&mut self.receiver, q, authorize)
+                .map_err(receive_sync_error)
+        } else {
+            self.receiver.service(q, authorize).map(|_| ())
+        };
+        if let Err(error) = result {
             self.failure.get_or_insert(error);
             self.control.end(Absence::ReceiveFailed(error));
             self.observe();
@@ -74,6 +103,9 @@ impl Receiving {
     }
     pub(super) fn stop(&mut self, q: &mut QuicRecords, cleanup: Option<&Cx>) -> Result<(), Error> {
         self.observe();
+        if let Some(sync) = &mut self.sync {
+            sync.stop();
+        }
         self.receiver.stop();
         // An orderly close must not add a reset to an idle pair: its terminal
         // exchange requires an empty sender. In-flight publication is fenced
@@ -106,7 +138,15 @@ impl Receiving {
                 self.observe();
             }
         }
+        if let Some(sync) = &mut self.sync {
+            // A final publication may race the local stop. Preserve the exact
+            // original receipt without sending a late round acknowledgement.
+            let _ = sync.collect_after_close(&self.receiver);
+        }
         if let Some(result) = self.cleanup {
+            if let Some(sync) = &mut self.sync {
+                sync.cleaned(result);
+            }
             self.control.cleaned(result);
         }
         self.cleanup
@@ -130,13 +170,33 @@ impl ControlledViewer {
         control: ReceiveControl,
         timeout: Duration,
     ) -> Result<(), Error> {
+        self.expect_file_download_with_sync(configuration, control, None, timeout)
+    }
+    pub(in crate::session_startup) fn expect_file_download_with_sync(
+        &mut self,
+        mut configuration: Configuration,
+        control: ReceiveControl,
+        sync_job: Option<u64>,
+        timeout: Duration,
+    ) -> Result<(), Error> {
         crate::session_startup::native_control::file_download_lane(&self.session.opened.selection)
             .map_err(|_| Error::WrongRole)?;
+        let sync = if let Some(job_id) = sync_job {
+            if !fr_wire::sync_job_state::selected(&self.session.opened.selection) {
+                return Err(Error::WrongRole);
+            }
+            let job = ControllerJob::new(job_id, configuration.directory.clone())
+                .map_err(|error| send_error(receive_sync_error(error)))?;
+            configuration.directory = job.directory();
+            Some(Box::new(job))
+        } else {
+            None
+        };
         let permission = configuration.permission.clone();
         self.expect_file_target(
             None,
             permission,
-            super::negotiation::Destination::Receive(configuration, control),
+            super::negotiation::Destination::Receive(configuration, control, sync),
             timeout,
         )
     }
@@ -167,6 +227,17 @@ impl ControlledViewer {
             .receiver
             .as_ref()
             .map(|r| r.control.status())
+    }
+    /// Content-free progress of the explicitly accepted original job, distinct
+    /// from individual file receipts and joined disk-cleanup evidence.
+    pub fn file_sync_status(&self) -> Option<JobStatus> {
+        self.files
+            .download
+            .receiver
+            .as_ref()?
+            .sync
+            .as_ref()
+            .map(|job| job.status())
     }
     pub fn file_receive_failure(&self) -> Option<quic::Error> {
         self.files

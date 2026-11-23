@@ -36,6 +36,7 @@ fn receive() -> ReceiveOptions {
         max_file_bytes: Some(4 * 1024 * 1024),
         max_session_bytes: Some(8 * 1024 * 1024),
         keep_both: true,
+        sync_job: None,
     }
 }
 

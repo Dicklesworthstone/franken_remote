@@ -15,6 +15,7 @@ pub(super) struct Outgoing {
     pub(super) authority: Authority,
     pub(super) permission: Permission,
     pub(super) cx: Cx,
+    pub(super) sync: Option<fr_files::sync::HostJob>,
 }
 impl Outgoing {
     pub(super) fn service(
@@ -25,14 +26,32 @@ impl Outgoing {
         let authority = &self.authority;
         let permission = &self.permission;
         let cx = &self.cx;
-        self.sender
-            .service(q, || {
-                permission.is_approved()
-                    && authorize()
-                    && crate::session_startup::now(cx)
-                        .is_ok_and(|at| authority.deadline(HostInstant::from_micros(at)).is_ok())
-            })
-            .map(|_| ())
+        let mut permitted = || {
+            permission.is_approved()
+                && authorize()
+                && crate::session_startup::now(cx)
+                    .is_ok_and(|at| authority.deadline(HostInstant::from_micros(at)).is_ok())
+        };
+        if let Some(sync) = &mut self.sync {
+            sync.service(&mut self.sender, q, &mut permitted)
+                .map_err(sync_error)
+        } else {
+            self.sender.service(q, permitted).map(|_| ())
+        }
+    }
+    pub(super) fn stop(&mut self) {
+        if let Some(sync) = &mut self.sync {
+            sync.stop();
+        }
+        self.sender.stop();
+    }
+    pub(super) fn cleanup(&mut self) -> Option<Result<(), sender::Error>> {
+        match &mut self.sync {
+            Some(sync) => sync
+                .try_finish_cleanup(&mut self.sender)
+                .map(|result| result.map_err(sync_error)),
+            None => self.sender.try_finish_cleanup(),
+        }
     }
 }
 
@@ -59,6 +78,7 @@ impl ControlledHost {
                 batch: Some((selection, lifetime)),
                 permission,
                 policy,
+                sync: None,
             },
         )
     }
@@ -81,6 +101,31 @@ impl ControlledHost {
                 batch: None,
                 permission,
                 policy,
+                sync: None,
+            },
+        )
+    }
+    /// A standing source is separately selected and must be explicitly
+    /// accepted by job ID after positive sync negotiation on this attachment.
+    pub fn offer_folder_sync(
+        &mut self,
+        request: ChannelRequest,
+        source: fr_files::sync::HostConfig,
+    ) -> Result<(), Error> {
+        if !fr_wire::sync_job_state::selected(&self.session.opened.selected) {
+            return Err(Error::NotNegotiated);
+        }
+        crate::session_startup::native_control::file_download_lane(&self.session.opened.selected)
+            .map_err(|_| Error::NotNegotiated)?;
+        let handle = u128::from(request.binding.parent.id);
+        self.offer_file_target(
+            request,
+            handle,
+            super::negotiation::Target::Send {
+                batch: None,
+                permission: Permission::new(true),
+                policy: Policy::default(),
+                sync: Some(source),
             },
         )
     }
@@ -133,6 +178,9 @@ impl ControlledHost {
             .sender
             .as_ref()
             .ok_or(sender::Error::Closed)?;
+        if outgoing.sync.is_some() {
+            return Err(sender::Error::Busy);
+        }
         let now = crate::session_startup::now(&outgoing.cx).map_err(|_| sender::Error::Clock)?;
         if !outgoing.permission.is_approved()
             || self.session.opened.control.check().is_err()
@@ -173,25 +221,38 @@ impl ControlledHost {
             return None;
         }
         match self.files.download.sender.as_mut() {
-            Some(outgoing) => outgoing.sender.try_finish_cleanup(),
+            Some(outgoing) => outgoing.cleanup(),
             None => Some(Ok(())),
         }
     }
     /// Original, ordered receipts. `ControllerPublished` means the receiver
     /// verified ATP and reported publication; transport acknowledgements do not.
     pub fn file_batch_report(&self) -> Option<batch::Report> {
-        self.files
-            .download
-            .sender
-            .as_ref()
-            .and_then(|outgoing| outgoing.sender.batch_report())
+        self.files.download.sender.as_ref().and_then(|outgoing| {
+            outgoing
+                .sync
+                .is_none()
+                .then(|| outgoing.sender.batch_report())
+                .flatten()
+        })
     }
     pub fn take_file_batch_report(&mut self) -> Option<batch::Report> {
+        self.files.download.sender.as_mut().and_then(|outgoing| {
+            outgoing
+                .sync
+                .is_none()
+                .then(|| outgoing.sender.take_batch_report())
+                .flatten()
+        })
+    }
+    pub fn file_sync_status(&self) -> Option<fr_files::sync::JobStatus> {
         self.files
             .download
             .sender
-            .as_mut()
-            .and_then(|outgoing| outgoing.sender.take_batch_report())
+            .as_ref()?
+            .sync
+            .as_ref()
+            .map(fr_files::sync::HostJob::status)
     }
     pub fn file_send_result(&self) -> Option<sender::Receipt> {
         self.files
@@ -220,6 +281,24 @@ impl ControlledHost {
             .pending
             .as_ref()
             .is_some_and(super::negotiation::Pending::is_download)
+    }
+}
+
+pub(super) fn sync_error(error: fr_files::sync::LiveError) -> sender::Error {
+    use fr_files::sync::LiveError;
+    match error {
+        LiveError::Send(error) => error,
+        LiveError::Transport(error) => sender::Error::Transport(error),
+        LiveError::Wire(error) => sender::Error::Wire(error),
+        LiveError::Clock => sender::Error::Clock,
+        LiveError::Expired => sender::Error::Expired,
+        LiveError::Cancelled => sender::Error::Cancelled,
+        LiveError::WrongConnection => sender::Error::WrongConnection,
+        LiveError::NotNegotiated | LiveError::WrongDirection => sender::Error::WrongRole,
+        LiveError::InvalidConfig | LiveError::Resource => sender::Error::Limits,
+        LiveError::Source(_) => sender::Error::SourceChanged,
+        LiveError::Worker | LiveError::Panicked | LiveError::Cleanup => sender::Error::Worker,
+        _ => sender::Error::Protocol,
     }
 }
 

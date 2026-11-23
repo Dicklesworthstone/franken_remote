@@ -319,6 +319,84 @@ async fn receive(
     count
 }
 #[test]
+#[cfg(unix)]
+fn ordinary_download_does_not_consume_a_shared_folder_job_selection() {
+    use crate::native_files::{Absence, HostSelection};
+    use std::os::unix::fs::DirBuilderExt;
+
+    run(|c, h| async move {
+        let source = std::env::temp_dir().join(format!(
+            "fr-stream-folder-source-{}-{}",
+            std::process::id(),
+            crate::session_startup::tests::unique_nonce()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&source)
+            .unwrap();
+        let selected = HostSelection::sync(&source, 41).unwrap();
+        let shared = selected.clone();
+        for sync in [false, true] {
+            let mut caps = capabilities();
+            for name in [
+                attachment::INPUT_CAPABILITY,
+                attachment::FILES_CAPABILITY,
+                fr_wire::files::CAPABILITY,
+                fr_wire::files::DOWNLOAD_CAPABILITY,
+            ] {
+                caps.push(Capability {
+                    name: name.into(),
+                    version: 1,
+                    required: false,
+                });
+            }
+            if sync {
+                caps.push(Capability {
+                    name: fr_wire::sync_job_state::CAPABILITY.into(),
+                    version: fr_wire::sync_job_state::VERSION,
+                    required: false,
+                });
+            }
+            caps.sort_by(|a, b| a.name.cmp(&b.name));
+            let (mut host, mut viewer) = pair_initialized(&c, &h, caps, |_| {}).await;
+            assert_eq!(
+                super::super::super::native_control::file_download_lane(host.selection()),
+                Ok(())
+            );
+            let stream = Box::pin(media(
+                &mut host,
+                &mut viewer,
+                &c,
+                &h,
+                "stall",
+                SendPolicy::default(),
+            ))
+            .await
+            .stream;
+            let mut host = host.into_streaming(stream).unwrap();
+            let result = host.configure_file_download(&shared);
+            if sync {
+                assert_eq!(result, Ok(()));
+                assert!(!selected.is_available() && !shared.is_available());
+                assert_eq!(
+                    host.configure_file_download(&selected),
+                    Err(Absence::Unavailable)
+                );
+            } else {
+                assert_eq!(result, Err(Absence::NotNegotiated));
+                assert!(selected.is_available() && shared.is_available());
+                assert_eq!(selected.sync_job_id(), Some(41));
+                assert!(host.files.is_none());
+            }
+            viewer.close();
+            host.reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
+                .await
+                .unwrap();
+        }
+    });
+}
+
+#[test]
 fn continuous_frames_keep_the_original_session_alive_past_initial_authority() {
     run(|c, h| async move {
         let (mut host, mut viewer, channels, mut receiver) =

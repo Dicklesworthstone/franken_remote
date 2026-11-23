@@ -69,7 +69,7 @@ impl Slot {
             receiver.stop();
         }
         if let Some(outgoing) = &mut self.sender {
-            outgoing.sender.stop();
+            outgoing.stop();
         }
     }
     pub(super) fn owns(&self, route: Route, bytes: &[u8]) -> bool {
@@ -341,6 +341,7 @@ impl ControlledHost {
         }
         self.files.download.stopped = true;
         if let Some(outgoing) = &mut self.files.download.sender {
+            outgoing.stop();
             outgoing
                 .sender
                 .cancel(&mut self.session.opened.transport)
@@ -379,7 +380,7 @@ impl ControlledHost {
             }
             let upload = self.file_receive_cleanup();
             let download = match self.files.download.sender.as_mut() {
-                Some(outgoing) => outgoing.sender.try_finish_cleanup(),
+                Some(outgoing) => outgoing.cleanup(),
                 None => Some(Ok(())),
             };
             if upload != Cleanup::Pending

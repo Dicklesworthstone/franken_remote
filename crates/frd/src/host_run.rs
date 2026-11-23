@@ -1052,8 +1052,12 @@ fn run_inner(
         report(Event::Stopped);
         return Ok(());
     };
-    if options.microphone.is_some() {
-        selected_offer(
+    let folder_sync = options
+        .file_send
+        .as_ref()
+        .is_some_and(|selection| selection.is_available() && selection.sync_job_id().is_some());
+    if options.microphone.is_some() || folder_sync {
+        let offer = selected_offer(
             (
                 control,
                 options.clipboard,
@@ -1062,12 +1066,21 @@ fn run_inner(
                     .file_send
                     .as_ref()
                     .is_some_and(crate::native_files::HostSelection::is_available),
-                true,
+                options.microphone.is_some(),
             ),
             options.audio.is_some(),
             options.adaptive_capture,
         )
-        .map_err(|_| Error::MicrophoneCapabilities)?;
+        .map_err(|_| {
+            if options.microphone.is_some() {
+                Error::MicrophoneCapabilities
+            } else {
+                Error::Configuration
+            }
+        })?;
+        if folder_sync {
+            crate::session_startup::with_folder_sync(offer).map_err(|_| Error::Configuration)?;
+        }
     }
     let Some(encoder) =
         awaiting_permission(stop, report, awaited_permission, permission_recheck, || {
@@ -1837,6 +1850,10 @@ impl Share<'_> {
         );
         let audio = self.options.audio.is_some();
         let adaptive_capture = self.options.adaptive_capture;
+        let folder_sync =
+            self.options.file_send.as_ref().is_some_and(|selection| {
+                selection.is_available() && selection.sync_job_id().is_some()
+            });
         // ScreenCaptureKit scales in hardware, so a VideoToolbox host can send
         // a viewer pictures sized for its screen. Other captures stay native.
         let scales = scales_pictures(encoder);
@@ -1869,6 +1886,11 @@ impl Share<'_> {
                         if scales {
                             request.session.offer =
                                 fr_wire::display::picture::with_capability(request.session.offer)
+                                    .map_err(|_| serial::Error::Configuration)?;
+                        }
+                        if folder_sync {
+                            request.session.offer =
+                                crate::session_startup::with_folder_sync(request.session.offer)
                                     .map_err(|_| serial::Error::Configuration)?;
                         }
                         Ok(request)

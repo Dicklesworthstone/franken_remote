@@ -183,6 +183,18 @@ impl Files {
         upload: Option<Selection>,
         download: Option<Directory>,
     ) -> Result<Self, SelectRefusal> {
+        Self::from_requests(
+            upload,
+            download.map(|directory| ReceiveRequest::new(&directory)),
+        )
+    }
+
+    /// Retain an explicit receive request, including any separately accepted
+    /// folder job, before the original connection starts. It is handed off once.
+    pub fn from_requests(
+        upload: Option<Selection>,
+        download: Option<ReceiveRequest>,
+    ) -> Result<Self, SelectRefusal> {
         let (upload, sizes) = if let Some(selection) = upload {
             let sizes = selection.sizes().collect();
             (
@@ -195,7 +207,7 @@ impl Files {
         Ok(Self {
             upload,
             sizes,
-            download: download.map(|directory| Direction::new(ReceiveRequest::new(&directory))),
+            download: download.map(Direction::new),
             commands: None,
             selections: None,
         })
@@ -257,6 +269,17 @@ impl Files {
         self.commands
             .as_mut()
             .map_or(Ok(()), |commands| commands.set_connection(connection))
+    }
+
+    /// Keep the optional job capability only while its original request is unspent.
+    pub(crate) fn folder_sync_available(&self) -> bool {
+        self.download.as_ref().is_some_and(|download| {
+            download.will_offer()
+                && download
+                    .pending
+                    .as_ref()
+                    .is_some_and(|request| request.sync_job_id().is_some())
+        })
     }
 
     /// Offer only directions whose explicit local request is still unspent.

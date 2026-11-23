@@ -1,5 +1,45 @@
 # Implementation status
 
+## Explicit native one-way folder jobs (2026-11-23)
+
+The previously local-only folder engine now has original-connection host and
+controller owners, negotiated job-state routing and native daemon/client entry
+points. A Linux or macOS host explicitly selects `--sync-source DIR --sync-job
+ID` on an original controlled `--once` share. The controller explicitly accepts
+the same ID using `--receive DIR --receive-conflict keep-both --sync-job ID`.
+Ordinary receive consent cannot enable a standing job. Both roots are pinned
+locally; no peer can supply a host path or create a job.
+
+After acceptance, one supervised scanner delivers changed source versions
+through the actual ATP sender, receiver and disk worker. Job states share the
+ordinary bounded file queue and wait for ATP/proof/cleanup drain. Only confirmed
+publication advances the bounded version ledger. A source changed between scan
+and preparation refuses before its file offer. Local destination edits and
+deletions do not replay acknowledged source versions; occupied names preserve
+both versions. Known publication, uncertain durability and cleanup remain
+separate results when cancellation races completion.
+
+Each source snapshot permits 32 flat regular files, 64 MiB per file and 256 MiB
+total. A distinct cumulative budget allows 64 attempted versions and 1 GiB, so
+a full first snapshot can still deliver later changes. The original receiver's
+lower limits and control authority remain binding. The job and its destination
+consent never migrate to a reconnect. Bidirectional remote reconciliation,
+recursive jobs, Windows host scanning and persistent jobs remain outside this
+slice; see [usage and limits](docs/folder-sync.md).
+
+The final five wire tests and strict all-target `fr-wire` Clippy passed with
+the exact pinned compiler. Six new real independent-root UDP/TLS tests cover
+multiple rounds, the full-snapshot follow-up, conflict preservation, cancellation,
+source mutation and job/connection refusals. Three daemon/viewer tests exercise
+the actual production loops, ordinary-download refusal and preservation of an
+unconsumed host job when the peer has not selected synchronization. Their execution,
+whole-workspace checks and native desktop/live-tailnet qualification remain
+pending at this checkpoint; authored tests are not a pass claim. The separate
+private-portal test fixture disables unsupported TCP AppArmor label lookup
+without changing production bus checks or weakening name-ownership assertions.
+Transport source: `4da871c`; file-engine source: `4fc8562`; scoped work:
+`fr-p4-folder-sync-p6i.1`. The broader folder-sync parent stays open.
+
 ## Original macOS system-shortcut capture (2026-11-23)
 
 The Mac native client now implements the previously refused

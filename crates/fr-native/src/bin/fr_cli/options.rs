@@ -830,6 +830,7 @@ fn parse_command(
     let mut file_drop = false;
     let mut file_commands = false;
     let mut receive = None;
+    let mut sync_job = None;
     let mut choose_receive_directory = false;
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
@@ -928,6 +929,9 @@ fn parse_command(
             "--file-drop" if connect => file_drop = true,
             "--file-commands" if connect => file_commands = true,
             "--receive" if connect => receive = Some(next_path(args, &mut index)?),
+            "--sync-job" if connect => {
+                sync_job = Some(receive::job_id(next_arg(args, &mut index)?)?);
+            }
             "--choose-receive-directory" if connect => choose_receive_directory = true,
             "--receive-max-file-bytes" if connect => {
                 receive_max_file_bytes = Some(receive::bytes(next_arg(args, &mut index)?)?);
@@ -974,6 +978,7 @@ fn parse_command(
                 || file_drop
                 || file_commands
                 || choose_receive_directory
+                || sync_job.is_some()
                 || receive.is_some()))
     {
         return Err(usage());
@@ -982,6 +987,7 @@ fn parse_command(
         && (receive.is_some()
             || receive_max_file_bytes.is_some()
             || receive_max_session_bytes.is_some()
+            || sync_job.is_some()
             || receive_keep_both.is_some())
     {
         return Err(usage());
@@ -992,6 +998,7 @@ fn parse_command(
         receive_max_session_bytes,
         receive_keep_both,
     )?;
+    let receive = receive::accept_job(receive, sync_job)?;
     if (hosts_file.is_some() && !saved) || (choose_host && (saved || by_name)) {
         return Err(usage());
     }

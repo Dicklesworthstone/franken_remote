@@ -4,10 +4,10 @@ pub(in crate::linux) use crate::file_reports::download::Summary;
 use crate::file_reports::download::absence_code;
 use crate::{Failure, options::ReceiveOptions};
 use fr_native::desktop::{Desktop, Error as DesktopError};
-use frd::native_files::{Directory, ReceiveControl, ReceiveRequest};
+use frd::native_files::{ReceiveControl, ReceiveRequest};
 
 pub(in crate::linux) struct Local {
-    directory: Directory,
+    request: Option<ReceiveRequest>,
     attempt: Option<Attempt>,
 }
 enum Attempt {
@@ -20,26 +20,35 @@ pub(in crate::linux) fn select(options: Option<&ReceiveOptions>) -> Result<Optio
         return Ok(None);
     };
     let directory = options.open()?;
+    let request = options.request(&directory)?;
     Ok(Some(Local {
-        directory,
+        request: Some(request),
         attempt: None,
     }))
 }
 
 impl Local {
+    pub(in crate::linux) fn folder_sync_available(&self) -> bool {
+        self.request
+            .as_ref()
+            .is_some_and(|request| request.sync_job_id().is_some())
+    }
+
     pub(in crate::linux) fn configure(&mut self, desktop: &mut Desktop) {
         // Explicit consent and any outcome belong to the first opened attempt.
         // A later callback must not replace its evidence or reapprove receipt.
         if self.attempt.is_some() {
             return;
         }
-        self.attempt = Some(
-            match desktop.request_receive_files(ReceiveRequest::new(&self.directory)) {
-                Ok(control) => Attempt::Configured(control),
-                Err(DesktopError::Files(absence)) => Attempt::Absent(absence_code(absence)),
-                Err(_) => Attempt::Absent("files_receive_unavailable"),
-            },
-        );
+        let Some(request) = self.request.take() else {
+            self.attempt = Some(Attempt::Absent("files_receive_not_started"));
+            return;
+        };
+        self.attempt = Some(match desktop.request_receive_files(request) {
+            Ok(control) => Attempt::Configured(control),
+            Err(DesktopError::Files(absence)) => Attempt::Absent(absence_code(absence)),
+            Err(_) => Attempt::Absent("files_receive_unavailable"),
+        });
     }
 
     pub(in crate::linux) fn summary(&self) -> Summary {

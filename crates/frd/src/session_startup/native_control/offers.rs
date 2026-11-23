@@ -199,6 +199,13 @@ pub fn host_offer_with_download(
     offer
 }
 
+/// Offer sync only for an explicitly configured local host job, after the
+/// ordinary download/control profile and other optional extensions. No upload
+/// directory, peer-controlled path or authority is implied by this marker.
+pub fn with_folder_sync(offer: Offer) -> Result<Offer, negotiation::Error> {
+    fr_wire::sync_job_state::prepare_offer(offer)
+}
+
 /// Both an explicitly configured host drop directory and a finite host source
 /// selection. Each direction retains an independent one-use file attachment;
 /// optional negotiation permits a legacy peer's original single direction.

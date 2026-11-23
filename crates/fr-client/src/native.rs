@@ -251,6 +251,17 @@ pub fn control_offer_with_download(clipboard: bool, audio: bool) -> Offer {
     offer
 }
 
+/// Explicit acceptance of one locally configured host sync job into a pinned
+/// local KeepBoth destination. This only adds protocol understanding; the
+/// original receive request still supplies its one-use job and directory consent.
+/// Call after other optional extensions to preserve the 24-capability ceiling.
+pub fn with_folder_sync(offer: Offer) -> Result<Offer, fr_wire::negotiation::Error> {
+    if offer.role != Role::RequestControl {
+        return Err(fr_wire::negotiation::Error::RequiredCapability);
+    }
+    fr_wire::sync_job_state::prepare_offer(offer)
+}
+
 /// Explicit independent upload and download selections. The two directions
 /// require positive `file-duplex` negotiation; either legacy single-direction
 /// host can still select its original optional file workflow.
