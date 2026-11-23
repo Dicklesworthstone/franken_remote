@@ -4,6 +4,9 @@
 //! `fr_core::input::windows_scan`, shared with frd's Windows host, which maps
 //! the usages back. Platform-neutral so every CI host tests it.
 
+#[path = "keys/hook.rs"]
+pub mod hook;
+
 /// One keyboard message as the window procedure sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyMessage {
@@ -85,6 +88,18 @@ pub fn message_time(message: u32, now: u64) -> Result<u64, QueueError> {
         return Err(QueueError::Expired);
     }
     now.checked_sub(age).ok_or(QueueError::Clock)
+}
+
+/// Charge the original expanded native timestamp, including time spent in the
+/// hook and UI queues. Keeping 64 bits prevents a long suspension from making
+/// an old wrapping Win32 timestamp appear recent again.
+pub fn captured_age(at: u64, now: u64) -> Result<std::time::Duration, QueueError> {
+    let age = now.checked_sub(at).ok_or(QueueError::Clock)?;
+    let age = age.checked_add(TICK_MARGIN_MS).ok_or(QueueError::Clock)?;
+    if age >= MAX_AGE_MS {
+        return Err(QueueError::Expired);
+    }
+    Ok(std::time::Duration::from_millis(age))
 }
 
 impl<T> Deferred<T> {

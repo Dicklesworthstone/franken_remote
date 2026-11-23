@@ -1,5 +1,29 @@
 # Implementation status
 
+## Original Windows keyboard-hook delivery (2026-11-22)
+
+The native shortcut hook now retains the physical event timestamp in a fixed
+mailbox instead of replacing it with a window-posting timestamp. The mailbox
+bounds both retained transitions and outstanding native notifications at 64.
+Notifications carry only never-reused ordinals; input stays bound to the
+original connection attempt. Focus and close retire pending keys, repeated
+presses consume no new credit, and stale deliveries cannot reach a successor.
+
+Queue overflow, posting loss, missing predecessors, invalid native timestamps
+and expired delivery fence the original input owner. An invalid timestamp can
+no longer silently lose a release. Full native age still passes through the
+current grant's capture gate, and AltGr pairing uses original event times.
+The shared close helper claims that exact attempt under its existing owner
+lock; input failure never fabricates successful focus cleanup.
+
+The complete production key policy and mailbox pass 20 pinned-nightly tests
+(including 12 new hook cases), compilation with warnings denied, and strict
+pedantic component Clippy with the repository's existing allowances. These
+checks execute the actual portable sources, not Win32 or the full Shared
+runtime. Native Windows compilation/execution and the added Shared-owner
+regressions remain separate, unrun gates. Formatting and scoped whitespace
+checks pass. Plan §§7.2–7.3 and 15.1; tracking `fr-j2dc`.
+
 ## Original-view robot startup and receipt freshness (2026-11-22)
 
 The production macOS desktop build now includes the authenticated local robot

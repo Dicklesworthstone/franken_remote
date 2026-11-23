@@ -192,6 +192,7 @@ fn with_viewer<R>(f: impl FnOnce(&mut Viewer) -> R) -> Option<R> {
 }
 
 fn drain_close() {
+    drain_hook_failure();
     if CLOSE_PENDING.with(Cell::get) {
         CHANGE_PENDING.with(|pending| *pending.borrow_mut() = None);
         with_viewer(|viewer| {
@@ -214,6 +215,23 @@ fn drain_close() {
             CHANGE_PENDING.with(|pending| *pending.borrow_mut() = requested);
         }
     }
+}
+
+/// Posting loss and hook-queue expiry do not depend on another key arriving.
+/// Fence the exact original attempt before any native cleanup or Viewer borrow.
+fn drain_hook_failure() {
+    let Some(failed) = screen::take_failure() else {
+        return;
+    };
+    let Some(original) = failed.fence() else {
+        return;
+    };
+    eprintln!("fr-windows: shortcut_input_lost (original input fenced)");
+    with_viewer(|viewer| {
+        if Arc::ptr_eq(&original, &viewer.session.shared_handle()) {
+            viewer.reconnect("shortcut input lost");
+        }
+    });
 }
 
 #[derive(Default)]
@@ -816,6 +834,7 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
                 && v.display_picker.is_none()
                 && !v.choosing_file()
                 && v.session.shared().controlled(),
+            &v.session.shared_handle(),
         );
     }
     if !v.keys.is_empty() {
@@ -1754,7 +1773,7 @@ impl Viewer {
     /// A key stamped once, in order behind any the session deferred. The
     /// source clock is sampled before the native age, conservatively charging
     /// an interrupted sample or a wait for the grant lock to the old event.
-    fn key(&mut self, usage: u16, pressed: bool, message_time: u32) {
+    fn key(&mut self, usage: u16, pressed: bool, native_at: u64) {
         if self.closing || self.reopen.pending() || self.choosing_file() {
             return;
         }
@@ -1771,9 +1790,9 @@ impl Viewer {
         };
         // Older than the freshness budget (the UI thread was busy): dropped,
         // never sent late. A dropped release releases every held key instead.
-        let Some((at, captured)) = message_age(message_time)
+        let Some(captured) = keys::captured_age(native_at, input_ticks())
             .ok()
-            .and_then(|(at, age)| captured.with_queue_age(age).map(|captured| (at, captured)))
+            .and_then(|age| captured.with_queue_age(age))
         else {
             if !pressed {
                 let _ = shared.release_all();
@@ -1782,7 +1801,7 @@ impl Viewer {
         };
         if self
             .keys
-            .push(captured, at, input_ticks, |captured| {
+            .push(captured, native_at, input_ticks, |captured| {
                 key_result(shared.captured_key(captured))
             })
             .is_err()
@@ -1980,6 +1999,7 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    drain_hook_failure();
     let handled = match message {
         WM_SETCURSOR
             if u32::try_from(lparam.0 & 0xffff) == Ok(HTCLIENT) && wparam.0 == hwnd.0 as usize =>
@@ -2275,6 +2295,45 @@ extern "system" fn window_proc(
             with_viewer(|v| v.scroll(hwnd, (dx, dy), (sx, sy), time));
             true
         }
+        screen::SHORTCUT_KEY => {
+            if with_viewer(|viewer| {
+                let Some(delivery) = screen::take_key(wparam.0) else {
+                    return;
+                };
+                if !delivery.original.current(&viewer.session.shared_handle())
+                    || delivery.synthetic_control
+                    || viewer.text.is_some()
+                    || viewer.display_picker.is_some()
+                    || !viewer.session.shared().controlled()
+                {
+                    return;
+                }
+                // The hook's capture-time focus cannot authorize dispatch
+                // after a foreground change whose notification is still queued.
+                // SAFETY: scalar queries of the current native foreground and
+                // this UI thread's live viewer window.
+                let foreground =
+                    unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
+                if !foreground {
+                    screen::deactivate();
+                    viewer.release_everything();
+                    return;
+                }
+                if let Some(usage) =
+                    fr_core::input::windows_scan::usage(delivery.key.scan, delivery.key.extended)
+                {
+                    viewer.key(usage, delivery.key.pressed, delivery.at);
+                }
+            })
+            .is_none()
+            {
+                // A nested native message pump consumed the notification while
+                // Viewer was borrowed. Do not lose an ordered release silently.
+                screen::post_failed(wparam.0);
+            }
+            drain_hook_failure();
+            true
+        }
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
             let (scan, extended) = key_bits(lparam);
             let pressed = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
@@ -2319,13 +2378,18 @@ extern "system" fn window_proc(
                     && !repeat
                     && !synthetic
                 {
-                    v.key(usage, pressed, time);
+                    if let Ok(at) = keys::message_time(time, input_ticks()) {
+                        v.key(usage, pressed, at);
+                    } else {
+                        v.drop_input(!pressed);
+                    }
                 }
                 true
             })
             .unwrap_or(false)
         }
         WM_KILLFOCUS => {
+            screen::deactivate();
             with_viewer(Viewer::release_everything);
             false
         }

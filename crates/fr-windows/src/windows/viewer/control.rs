@@ -51,6 +51,7 @@ thread_local! {
 }
 
 pub(super) fn bind(original: &Arc<Shared>) {
+    super::screen::deactivate();
     invalidate_display();
     ORIGINAL.with(|slot| *slot.borrow_mut() = Some(Arc::downgrade(original)));
 }
@@ -82,6 +83,9 @@ pub(super) fn invalidate_display() {
 
 /// Window lifecycle checks need no mutable access to Viewer or any codec.
 pub(super) fn visible(visible: bool) {
+    if !visible {
+        super::screen::deactivate();
+    }
     let was = VISIBLE.with(|current| current.replace(visible));
     if !visible && was {
         invalidate_display();
@@ -100,6 +104,7 @@ pub(super) fn visible(visible: bool) {
 #[must_use]
 pub(super) fn active(active: bool) -> bool {
     if !active {
+        super::screen::deactivate();
         invalidate_display();
     }
     ORIGINAL.with(|slot| {
@@ -179,6 +184,7 @@ pub(super) fn stop(message: u32) -> Option<change_display::Request<Shared>> {
 }
 
 pub(super) fn close() {
+    super::screen::deactivate();
     invalidate_display();
     ORIGINAL.with(|slot| {
         if let Some(original) = slot.borrow().as_ref().and_then(Weak::upgrade) {

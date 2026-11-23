@@ -578,6 +578,8 @@ fn focus_continuity_requires_an_actual_published_grant_not_a_view_or_request() {
     let request = shared.control_request().unwrap();
     let clipboard = shared.clipboard_report();
     assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(!shared.input_failed_for_attempt(shared.frames.app_id(0)));
+    assert!(!shared.input_failed_for_attempt(shared.frames.app_id(0).saturating_add(1)));
     assert!(!shared.close.load(Ordering::SeqCst));
     assert!(!shared.focus_close_requested.load(Ordering::SeqCst));
     assert!(!shared.focus_closed());
@@ -587,9 +589,11 @@ fn focus_continuity_requires_an_actual_published_grant_not_a_view_or_request() {
     assert!(shared.request_control_for(&request, Duration::ZERO));
     // A queued control gesture remains a request, never an attached grant.
     assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(!shared.input_failed_for_attempt(shared.frames.app_id(0)));
     assert!(shared.take_control_request().unwrap());
     shared.close();
     assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(!shared.input_failed_for_attempt(shared.frames.app_id(0)));
     assert!(!shared.focus_close_requested.load(Ordering::SeqCst));
 }
 

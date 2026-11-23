@@ -579,6 +579,18 @@ impl Shared {
     /// A stale callback, a failed input source or an earlier close cannot create
     /// that proof. `attempt` is the drawn frame's original `app_id(0)` scope.
     pub fn close_for_focus_loss(&self, attempt: u64) -> bool {
+        self.close_original_input(attempt, LocalStop::Hidden)
+    }
+
+    /// A native producer lost an ordered event on this exact connection
+    /// attempt. Claim its irreversible close under the original grant witness
+    /// before cleanup, rather than checking an attempt then stopping whichever
+    /// grant happens to exist later. No focus-cleanup success is implied.
+    pub fn input_failed_for_attempt(&self, attempt: u64) -> bool {
+        self.close_original_input(attempt, LocalStop::InputRefused)
+    }
+
+    fn close_original_input(&self, attempt: u64, reason: LocalStop) -> bool {
         {
             let Ok(owner) = self.focus_owner.lock() else {
                 return false;
@@ -601,12 +613,7 @@ impl Shared {
             owner.control.fence_for_close();
             if self
                 .local_stop
-                .compare_exchange(
-                    0,
-                    LocalStop::Hidden as u32,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
+                .compare_exchange(0, reason as u32, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
             {
                 return false;
@@ -614,7 +621,8 @@ impl Shared {
             // Cleanup retires this witness under the same short lock before
             // any later attempt may begin. Publish the request here, so fast
             // original cleanup cannot race the callback out of its real proof.
-            self.focus_close_requested.store(true, Ordering::SeqCst);
+            self.focus_close_requested
+                .store(reason == LocalStop::Hidden, Ordering::SeqCst);
             self.events.state(state::CONTROL_ENDED, 0);
         }
         // The close fence precedes every auxiliary/native cleanup. Hiding a

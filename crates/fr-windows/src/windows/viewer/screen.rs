@@ -9,8 +9,9 @@
 //! Windows acts on some keys before any window sees them: the Windows key,
 //! Alt+Tab, Alt+Esc, Ctrl+Esc, Alt+Space and so on. While this window is in
 //! front and its session controls the host, a low-level keyboard hook takes
-//! every physical key away from Windows and posts it to this window as an
-//! ordinary key message, which the existing key path sends to the host (the
+//! every physical key away from Windows and retains its original timestamp in
+//! a bounded mailbox. A content-free notification wakes this window, whose
+//! existing key path sends it to the host (the
 //! Windows key arrives on a Mac as Command). Ctrl+Alt+Del and Win+L stay
 //! with Windows: no hook can take them. Ctrl+Alt+Enter is never sent.
 //!
@@ -19,10 +20,15 @@
 //! Windows 7 silently removes it for good, so a busy UI thread (drawing a
 //! large picture) would make shortcuts stop working. That thread also
 //! registers the hook afresh every two seconds, so even a removal cannot last.
+use crate::keys::{
+    self,
+    hook::{Delivery, Mailbox},
+};
+use fr_mobile_ffi::session::Shared;
 use std::{
     cell::{Cell, RefCell},
     sync::{
-        Mutex, PoisonError,
+        Arc, Mutex, PoisonError, Weak,
         atomic::{AtomicBool, AtomicIsize, Ordering},
         mpsc,
     },
@@ -47,8 +53,8 @@ use windows::Win32::{
             KillTimer, LLKHF_EXTENDED, LLKHF_UP, MSG, PM_NOREMOVE, PeekMessageW, PostMessageW,
             PostThreadMessageW, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SetMenu,
             SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, TranslateMessage,
-            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_TIMER,
-            WM_USER, WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_POPUP,
+            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER, WM_USER, WS_MAXIMIZE,
+            WS_OVERLAPPEDWINDOW, WS_POPUP,
         },
     },
 };
@@ -58,6 +64,41 @@ const REHOOK_MS: u32 = 2_000;
 
 /// Posted by the hook (or the key path) to toggle full screen outside it.
 pub(super) const TOGGLE_FULLSCREEN: u32 = WM_APP + 0x46;
+/// Scalar notification only; key contents and original time stay in MAILBOX.
+pub(super) const SHORTCUT_KEY: u32 = WM_APP + 0x47;
+
+/// A weak identity cannot keep a retired connection alive or match a reused
+/// allocation. Internal reconnects on the same Shared have different attempts.
+#[derive(Clone)]
+pub(super) struct Scope {
+    original: Weak<Shared>,
+    attempt: u64,
+}
+
+impl PartialEq for Scope {
+    fn eq(&self, other: &Self) -> bool {
+        self.original.ptr_eq(&other.original) && self.attempt == other.attempt
+    }
+}
+
+impl Scope {
+    pub(super) fn current(&self, original: &Arc<Shared>) -> bool {
+        self.original.ptr_eq(&Arc::downgrade(original)) && self.attempt == original.frames.app_id(0)
+    }
+
+    /// Only the original attempt can receive this failure. Never end a newer
+    /// connection on the same Shared merely because an old post failed late.
+    pub(super) fn fence(&self) -> Option<Arc<Shared>> {
+        let original = self.original.upgrade()?;
+        original
+            .input_failed_for_attempt(self.attempt)
+            .then_some(original)
+    }
+}
+
+// The mutex protects a fixed array and scalar bookkeeping only. No native,
+// session, authority or rendering operation runs while it is held.
+static MAILBOX: Mutex<Mailbox<Scope>> = Mutex::new(Mailbox::new());
 
 struct Saved {
     /// Only the frame bits full screen removed. Restoring the whole earlier
@@ -217,7 +258,7 @@ pub(super) fn install(hwnd: HWND) -> bool {
 }
 
 pub(super) fn uninstall() {
-    ACTIVE.store(false, Ordering::SeqCst);
+    deactivate();
     TARGET.store(0, Ordering::SeqCst);
     let running = HOOK_THREAD
         .lock()
@@ -229,10 +270,60 @@ pub(super) fn uninstall() {
         let _ = unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
         let _ = handle.join();
     }
+    MAILBOX
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retired();
 }
 
-pub(super) fn set_active(active: bool) {
+pub(super) fn set_active(active: bool, original: &Arc<Shared>) {
+    if !active {
+        deactivate();
+        return;
+    }
+    let scope = Scope {
+        original: Arc::downgrade(original),
+        attempt: original.frames.app_id(0),
+    };
+    let now = super::input_ticks();
+    let active = {
+        let mut mailbox = MAILBOX.lock().unwrap_or_else(PoisonError::into_inner);
+        mailbox.activate(Some(scope), now);
+        mailbox.active()
+    };
     ACTIVE.store(active, Ordering::SeqCst);
+}
+
+/// Native focus and close fences retire queued hook work before cleanup, even
+/// when a nested native callback cannot borrow the Viewer.
+pub(super) fn deactivate() {
+    ACTIVE.store(false, Ordering::SeqCst);
+    MAILBOX
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .deactivate();
+}
+
+pub(super) fn take_key(ordinal: usize) -> Option<Delivery<Scope>> {
+    let now = super::input_ticks();
+    MAILBOX
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take(ordinal, now)
+}
+
+pub(super) fn post_failed(ordinal: usize) {
+    MAILBOX
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .post_failed(ordinal);
+}
+
+pub(super) fn take_failure() -> Option<Scope> {
+    MAILBOX
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take_failure()
 }
 
 fn set_hook() -> Option<HHOOK> {
@@ -340,9 +431,11 @@ extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if info.vkCode == u32::from(VK_RETURN.0) {
         let chord = MODIFIERS.with(Cell::get) & 3 == 3;
         if !up && chord {
-            TOGGLE_HELD.with(|held| held.set(true));
-            // SAFETY: posting to this thread's own live window.
-            let _ = unsafe { PostMessageW(Some(target), TOGGLE_FULLSCREEN, WPARAM(0), LPARAM(0)) };
+            if !TOGGLE_HELD.with(|held| held.replace(true)) {
+                // SAFETY: a scalar local shortcut for our live viewer window.
+                let _ =
+                    unsafe { PostMessageW(Some(target), TOGGLE_FULLSCREEN, WPARAM(0), LPARAM(0)) };
+            }
             return LRESULT(1);
         }
         if up && TOGGLE_HELD.with(|held| held.replace(false)) {
@@ -359,25 +452,30 @@ extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         return pass();
     }
     DOWN.with(|down| down.borrow_mut()[slot] = !up);
-    let mut bits: isize = 1 | (isize::from(scan) << 16);
-    if extended {
-        bits |= 1 << 24;
+    // The host repeats held keys; native auto-repeat creates no new ordered
+    // transition and consumes neither mailbox nor Win32 notification credit.
+    if !up && was_down {
+        return LRESULT(1);
     }
-    if up {
-        bits |= (1 << 30) | (1 << 31);
-    } else if was_down {
-        bits |= 1 << 30; // an auto-repeat; the host repeats held keys itself
-    }
-    let message = if up { WM_KEYUP } else { WM_KEYDOWN };
-    // SAFETY: posting to this thread's own live window; the window procedure
-    // reads only the scan code, extended flag and repeat bit from lParam.
-    let _ = unsafe {
-        PostMessageW(
-            Some(target),
-            message,
-            WPARAM(info.vkCode as usize),
-            LPARAM(bits),
-        )
+    let key = keys::KeyMessage {
+        scan,
+        extended,
+        pressed: !up,
+        time: info.time,
     };
+    let now = super::input_ticks();
+    let ordinal = MAILBOX
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(key, now);
+    if let Some(ordinal) = ordinal {
+        // SAFETY: our live viewer receives only a scalar mailbox ordinal. No
+        // borrowed pointer or key bytes cross the native queue. The original
+        // hardware timestamp is retained independently of PostMessage's time.
+        if unsafe { PostMessageW(Some(target), SHORTCUT_KEY, WPARAM(ordinal), LPARAM(0)) }.is_err()
+        {
+            post_failed(ordinal);
+        }
+    }
     LRESULT(1)
 }
