@@ -112,7 +112,7 @@ pub enum State {
 // Eight permits let full 16-KiB chunks use the existing 128-KiB bulk byte
 // allowance; transport byte admission still takes precedence over this count.
 // Every retained native record keeps its OWN immutable permit/deadline until
-// the whole native lane drains. The worker still has only one handoff slot.
+// that whole record is acknowledged. The worker still has one handoff slot.
 const MAX_INFLIGHT_RECORDS: usize = 8;
 
 enum OutboundRefusal {
@@ -300,6 +300,9 @@ impl Bridge {
         clock: Clock,
         worker_clock: Clock,
     ) -> Result<(Self, WorkerSeed), Error> {
+        if lane.retained_send_records(q).map_err(Error::Transport)? != 0 {
+            return Err(Error::AlreadyAttached);
+        }
         clock.sample_maintenance(&cx)?;
         if let Err(reason) = clock.sample(&cx)
             && !reason.is_suspended()
@@ -398,15 +401,21 @@ impl Bridge {
             let reason = self.retirement_reason(q);
             return self.on_refusal(q, reason);
         }
-        if self.inflight.iter().any(Option::is_some) {
-            match self.lane.send_drained(q) {
-                // Consume the exact native empty-send witness BEFORE checking
-                // old permits. Completed transport work retains no payload.
-                Ok(true) => self.inflight.fill(None),
-                Ok(false) => {}
-                Err(_) => return self.on_refusal(q, Error::Closed),
-            }
-        }
+        let retained = match self.lane.retained_send_records(q) {
+            Ok(records) => records,
+            Err(_) => return self.on_refusal(q, Error::Closed),
+        };
+        let charged = self.inflight.iter().flatten().count();
+        let Some(completed) = charged.checked_sub(retained) else {
+            // This owner began with an empty lane and is its sole producer.
+            // Never treat missing permit custody as acknowledgement evidence.
+            return self.on_refusal(q, Error::Limit);
+        };
+        // Consume only the exact ACKed prefix BEFORE checking old permits.
+        // Later queued/unacknowledged records keep their original deadlines;
+        // neither the worker handoff nor native publication is completed here.
+        self.inflight.rotate_left(completed);
+        self.inflight[retained..].fill(None);
         let (local, host) = match self.clock.sample_maintenance(&self.cx) {
             Ok(sample) => sample,
             Err(reason) => return self.on_refusal(q, reason),

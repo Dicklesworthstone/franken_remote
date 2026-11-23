@@ -47,6 +47,105 @@ async fn accepted_without_payload(
     sender.set_paused(&link.c, false).unwrap();
 }
 
+#[test]
+fn acknowledged_prefix_refills_the_bounded_flight_before_the_lane_drains() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut f = Running::new(&cx).await;
+        let path = f.path.join("source");
+        let data = vec![0x6b; 120_007];
+        fs::write(&path, &data).unwrap();
+        let mut sender =
+            Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
+        sender
+            .begin(&f.link.c, File::open(&path).unwrap(), "received")
+            .unwrap();
+        accepted_without_payload(&mut sender, &mut f.host, &mut f.link, &cx).await;
+        fill_without_network(&mut sender, &mut f.link, &cx);
+        let first_flight = sender.progress().unwrap().queued_bytes;
+
+        // Each transport turn stages one bounded bulk prefix. Stop as soon as
+        // a real ACK retires the first whole record, leaving later records in
+        // the same lane. No sender turn can have renewed any permit meanwhile.
+        let until = clock(&cx) + 500_000;
+        while bulk_flight(&f.link).1 == 8 {
+            assert!(clock(&cx) < until, "first record was never acknowledged");
+            f.host.service(&mut f.link.h, || true).unwrap();
+            f.link.drive(&cx).await;
+            f.host.service(&mut f.link.h, || true).unwrap();
+        }
+        assert!((1..8).contains(&bulk_flight(&f.link).1));
+        assert_eq!(sender.progress().unwrap().queued_bytes, first_flight);
+        assert!(sender.result().is_none());
+        assert!(!f.path.join("received").exists());
+
+        // Producer turns alone can refill the released prefix. Waiting for the
+        // remaining flight to drain would stall here with no network drives.
+        fill_without_network(&mut sender, &mut f.link, &cx);
+        assert!(sender.progress().unwrap().queued_bytes > first_flight);
+        assert_eq!(bulk_flight(&f.link).1, 8);
+        assert!(bulk_flight(&f.link).0 <= 128 * 1024);
+        assert_eq!(
+            result(&mut sender, &mut f.host, &mut f.link, &cx)
+                .await
+                .outcome,
+            Outcome::HostPublished {
+                bytes: data.len() as u64,
+                publication: Publication::Durable,
+            }
+        );
+        assert_eq!(fs::read(f.path.join("received")).unwrap(), data);
+        drop(sender);
+        f.input_live(&cx);
+    });
+}
+
+#[test]
+fn delayed_sender_maintenance_does_not_expire_already_acknowledged_records() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut f = Running::new(&cx).await;
+        let path = f.path.join("source");
+        fs::write(&path, vec![0x63; 120_007]).unwrap();
+        let mut sender = Sender::new(
+            cx.clone(),
+            &f.link.c,
+            &mut f.client,
+            Policy {
+                record_lifetime: Duration::from_millis(300),
+                ..Policy::default()
+            },
+        )
+        .unwrap();
+        sender
+            .begin(&f.link.c, File::open(&path).unwrap(), "received")
+            .unwrap();
+        accepted_without_payload(&mut sender, &mut f.host, &mut f.link, &cx).await;
+        fill_without_network(&mut sender, &mut f.link, &cx);
+        sender.set_paused(&f.link.c, true).unwrap();
+        let queued = sender.progress().unwrap().queued_bytes;
+        let until = clock(&cx) + 500_000;
+        while bulk_flight(&f.link).1 != 0 {
+            assert!(clock(&cx) < until, "original record ACKs did not arrive");
+            f.host.service(&mut f.link.h, || true).unwrap();
+            f.link.drive(&cx).await;
+            f.host.service(&mut f.link.h, || true).unwrap();
+        }
+        // Only local sender maintenance is delayed; all original queued bytes
+        // have already been acknowledged. Pausing keeps new work out of play.
+        asupersync::time::sleep(cx.now(), Duration::from_millis(310)).await;
+        assert_eq!(sender.service(&mut f.link.c, || true), Ok(Stage::Streaming));
+        assert_eq!(sender.progress().unwrap().queued_bytes, queued);
+        assert!(sender.result().is_none());
+        assert!(!f.path.join("received").exists());
+        sender.cancel(&mut f.link.c).unwrap();
+        assert_eq!(
+            cleanup(&mut sender).outcome,
+            Outcome::InterruptedBeforePublication(Error::Cancelled)
+        );
+    });
+}
+
 fn fill_without_network(sender: &mut Sender<'_>, link: &mut native_support::Link, cx: &Cx) {
     let until = clock(cx) + 300_000;
     while bulk_flight(link).1 < 8 {

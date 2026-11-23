@@ -1,7 +1,7 @@
 //! Fixed accounting for admitted records on the original file channel.
-//! Only the caller's exact native send-drained witness clears this ledger.
-//! Payload remains in transport; elapsed time, partial ACKs and a new transfer
-//! never reclaim a slot or replace an earlier record's absolute deadline.
+//! Only the original channel's retained-record count retires its acknowledged prefix.
+//! Payload remains in transport; elapsed time, an incomplete record's ACKs and
+//! a new transfer never reclaim a slot or replace an original deadline.
 
 const MAX_RECORDS: usize = 8;
 const MAX_BYTES: usize = 128 * 1024;
@@ -39,8 +39,18 @@ impl Flight {
     pub(super) fn expired(&self, now: u64) -> bool {
         self.records.iter().flatten().any(|r| now >= r.deadline)
     }
-    pub(super) fn drained(&mut self) {
-        self.records.fill(None);
+    /// The exclusive channel owner supplies the current retained count AFTER
+    /// checking the original connection and lane. Transport retires whole
+    /// records in order, so only this ledger's oldest prefix can be released.
+    /// A larger count is an ownership mismatch; leave every charge intact.
+    pub(super) fn reconcile(&mut self, retained: usize) -> bool {
+        let charged = self.records.iter().flatten().count();
+        let Some(completed) = charged.checked_sub(retained) else {
+            return false;
+        };
+        self.records.rotate_left(completed);
+        self.records[retained..].fill(None);
+        true
     }
 }
 
@@ -106,18 +116,57 @@ mod tests {
     }
 
     #[test]
-    fn only_an_explicit_native_drain_reclaims_the_original_flight() {
+    fn only_an_exact_native_retained_count_reclaims_the_original_flight() {
         let mut f = Flight::default();
         for _ in 0..MAX_RECORDS {
             assert!(f.record(128, 100));
         }
         assert!(f.expired(100));
         assert!(!f.permits(1));
-        f.drained();
+        assert!(f.reconcile(0));
         assert!(f.is_empty());
         assert!(!f.expired(u64::MAX));
         assert!(f.record(16_384, 1_000));
         assert!(!f.expired(999));
         assert!(f.expired(1_000));
+    }
+
+    #[test]
+    fn acknowledged_prefix_releases_capacity_and_only_its_original_deadline() {
+        let mut f = Flight::default();
+        assert!(f.record(40_000, 10));
+        assert!(f.record(40_000, 50));
+        assert!(f.record(40_000, 30));
+        assert!(!f.permits(20_000));
+        assert!(f.expired(10));
+        assert!(f.reconcile(2));
+        assert!(f.permits(20_000));
+        assert!(!f.expired(10));
+        assert!(!f.expired(29));
+        assert!(f.expired(30));
+        assert!(f.record(20_000, 100));
+        assert!(f.reconcile(2));
+        assert!(f.expired(30));
+        assert!(f.reconcile(1));
+        assert!(!f.expired(99));
+        assert!(f.expired(100));
+    }
+
+    #[test]
+    fn unchanged_and_impossible_counts_preserve_all_charges() {
+        let mut f = Flight::default();
+        for index in 0..MAX_RECORDS {
+            assert!(f.record(100, 10 + index as u64));
+        }
+        assert!(f.reconcile(MAX_RECORDS));
+        assert!(!f.reconcile(MAX_RECORDS + 1));
+        assert!(!f.reconcile(usize::MAX));
+        assert!(!f.permits(1));
+        assert!(f.expired(10));
+        assert!(f.reconcile(7));
+        assert!(!f.expired(10));
+        assert!(f.expired(11));
+        assert!(f.record(100, 100));
+        assert!(!f.permits(1));
     }
 }

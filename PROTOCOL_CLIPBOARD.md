@@ -310,12 +310,17 @@ controller's authorization while accepted bytes remain retained.
 The application bridge retains at most eight original record permits and one
 bounded worker handoff. This count does not enlarge the native 128-KiB clipboard
 byte allowance: at most seven full 16-KiB chunks, including their headers, fit
-at once. A permit remains held until the actual native whole-lane drain witness,
-not merely until enqueue or a partial transmission. Every retry retains the
+at once. The original lane's checked retained-record count releases only the
+fully acknowledged prefix of permits. Later records can remain in flight while
+the producer refills freed slots. Enqueue and partial transmission release
+nothing, and an expired, foreign or closed lane cannot supply acknowledgement
+credit. The bridge begins with an empty lane and refuses impossible increases
+in retained-record accounting. Every retry retains the
 original operation deadline; expiry retires this optional lane while control
 keeps its independent lifecycle. A newer local copy can discard an exclusively
 local unsent record, but records already accepted by transport keep their
-original custody until drain or retirement.
+original custody until their whole record is acknowledged or the lane retires.
+Transport acknowledgement remains distinct from native clipboard publication.
 
 When the original transport delivery deadline expires between settled native
 I/O operations, the completed Clipboard pair resets independently with

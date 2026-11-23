@@ -186,15 +186,29 @@ impl ClipboardChannel {
     pub fn request_retirement(&self) {
         self.attachment.request_retirement();
     }
-    /// True only after the existing native empty-send witness has retired all
-    /// queued, unsent and retransmittable bytes on this original route. This is
-    /// not an application receipt. Keep the Egress permit until this is true.
+    /// True only after the transport has retired all queued, unsent and
+    /// retransmittable records on this original route. This is not an
+    /// application receipt. Individual permits may retire with their acknowledged
+    /// prefix through `retained_send_records`.
     pub fn send_drained(&self, q: &QuicRecords) -> Result<bool, Error> {
         self.check(q)?;
         q.senders
             .iter()
             .find(|s| s.route == self.routes.outbound)
             .map(|s| s.records == 0 && s.bytes == 0)
+            .ok_or(Error::WrongRoute)
+    }
+    /// Exact record custody on the original outbound lane. Only fully acknowledged
+    /// records leave the ordered prefix, so its exclusive producer can release
+    /// those permits while later records remain queued or unacknowledged.
+    /// Foreign, expired, reset and closed lanes fail the identity/lifetime
+    /// check; a zero count never proves native clipboard publication.
+    pub fn retained_send_records(&self, q: &QuicRecords) -> Result<usize, Error> {
+        self.check(q)?;
+        q.senders
+            .iter()
+            .find(|sender| sender.route == self.routes.outbound)
+            .map(|sender| sender.records)
             .ok_or(Error::WrongRoute)
     }
     /// Whole-record admission, not a partial socket write or publication receipt.

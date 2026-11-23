@@ -251,6 +251,9 @@ impl<'a> Sender<'a> {
         policy: Policy,
     ) -> Result<Self, Error> {
         lane.check(q).map_err(Error::Transport)?;
+        if lane.retained_send_records(q).map_err(Error::Transport)? != 0 {
+            return Err(Error::Busy);
+        }
         if lane.outgoing().sender != lane.outgoing().direction.source() {
             return Err(Error::WrongRole);
         }
@@ -565,13 +568,21 @@ impl<'a> Sender<'a> {
         if expired {
             return Err(Error::Expired);
         }
+        // Reconcile the original lane's fully ACKed prefix before inspecting
+        // old permits. The rest retains its exact byte charge and deadline;
+        // later unacknowledged records cannot keep an already delivered record
+        // alive until its former deadline spuriously cancels the transfer.
+        let retained = self
+            .lane
+            .retained_send_records(q)
+            .map_err(Error::Transport)?;
+        if !self.flight.reconcile(retained) {
+            return Err(Error::Protocol);
+        }
         // A real terminal receipt remains evidence even if a final ACK is late.
-        // All other work keeps EVERY earlier admitted record's original expiry.
+        // All retained work keeps EVERY admitted record's original expiry.
         if self.flight.expired(now) && self.transfer.as_ref().is_none_or(|t| t.result.is_none()) {
             return Err(Error::Expired);
-        }
-        if !self.flight.is_empty() && self.lane.send_drained(q).map_err(Error::Transport)? {
-            self.flight.drained();
         }
         let Some(t) = self.transfer.as_mut() else {
             return Ok(());

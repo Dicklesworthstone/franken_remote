@@ -101,13 +101,98 @@ fn eight_records_keep_original_permits_until_the_actual_native_lane_drains() {
             assert_chunk(&f, record, u32::try_from(index).unwrap());
         }
         // An application receipt or successful flush did not release these.
-        // Maintenance now consumes the actual native empty-send witness.
+        // Maintenance now consumes the original lane's zero retained count.
         assert_eq!(inflight(&f), 8);
         retained_until(&f, until);
         assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Active));
         assert_eq!(inflight(&f), 0);
         assert_eq!(channel(&mut f.seed).outgoing_deadline(), Some(until));
         f.stop();
+    });
+}
+
+#[test]
+fn acknowledged_prefix_reopens_a_permit_without_draining_later_records() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        drain(&mut f, 0).await;
+        let (_, until) = offer_text(&mut f, 711, &"p".repeat(9 * MAX_CHUNK_BYTES));
+        for _ in 0..8 {
+            assert_eq!(f.pump(), Pump::RecordAccepted);
+            assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Active));
+        }
+        assert_eq!(inflight(&f), 8);
+        assert_eq!(f.pump(), Pump::RecordAccepted);
+        f.bridge.service(&mut f.link.h, || true).unwrap();
+        assert!(f.bridge.pending.is_none());
+        assert!(f.bridge.shared.outbox.lock().unwrap().busy);
+
+        let limit = clock(&f.cx) + 500_000;
+        while f.bridge.lane.retained_send_records(&f.link.h).unwrap() == 8 {
+            assert!(
+                clock(&f.cx) < limit,
+                "first whole record ACK did not arrive"
+            );
+            f.link.drive(&f.cx).await;
+            f.peer
+                .dispatch(&mut f.link.c, &f.cx, || true, |_| Ok(Disposition::Consumed))
+                .unwrap();
+        }
+        let retained = f.bridge.lane.retained_send_records(&f.link.h).unwrap();
+        assert!((1..8).contains(&retained));
+        assert_eq!(inflight(&f), 8);
+        retained_until(&f, until);
+
+        // Only actual transport acknowledgement releases this prefix. The
+        // remaining permits and item keep their unchanged original lifetime.
+        assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Active));
+        assert_eq!(inflight(&f), retained);
+        retained_until(&f, until);
+        assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Active));
+        assert_eq!(inflight(&f), retained + 1);
+        assert_eq!(
+            f.bridge.lane.retained_send_records(&f.link.h).unwrap(),
+            retained + 1
+        );
+        assert!(!f.bridge.shared.outbox.lock().unwrap().busy);
+        assert_eq!(channel(&mut f.seed).outgoing_deadline(), Some(until));
+        retained_until(&f, until);
+        assert!(f.bridge.take_received().unwrap().is_none());
+        f.stop();
+        assert!(f.bridge.lane.retained_send_records(&f.link.h).is_err());
+    });
+}
+
+#[test]
+fn another_connection_or_closed_lane_cannot_supply_acknowledgement_credit() {
+    runtime().block_on(async {
+        let mut original = Fixture::new().await;
+        let mut other = Fixture::new().await;
+        original.offer(712);
+        assert_eq!(original.pump(), Pump::RecordAccepted);
+        original
+            .bridge
+            .service(&mut original.link.h, || true)
+            .unwrap();
+        assert_eq!(inflight(&original), 1);
+        assert!(
+            original
+                .bridge
+                .lane
+                .retained_send_records(&other.link.h)
+                .is_err()
+        );
+        assert_eq!(inflight(&original), 1);
+        original.link.h.close();
+        assert!(
+            original
+                .bridge
+                .lane
+                .retained_send_records(&original.link.h)
+                .is_err()
+        );
+        assert_eq!(inflight(&original), 1);
+        other.stop();
     });
 }
 

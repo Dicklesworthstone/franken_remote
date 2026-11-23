@@ -27,10 +27,14 @@ at most one record per turn, and the original one-chunk rate bucket is unchanged
 
 Every admitted offer, data chunk and completion record retains its original
 absolute deadline. Neither a later admission, partial acknowledgement, pause
-toggle nor starting another selected file releases its accounting. Only the
-original lane's exact native send-drained proof empties the flight. A full flight
-starts no further source read, and transport backpressure retains the same
-single prepared packet. This does not add resume, retry or a new ATP profile.
+toggle nor starting another selected file releases its accounting. The original
+lane's checked retained-record count retires only fully acknowledged prefix
+records, so their slots can be refilled while later records remain in flight.
+This reconciliation precedes local record-expiry checks: delayed owner service
+cannot expire an already acknowledged record. Every unacknowledged record keeps
+its original deadline and serialized-byte charge. A full flight starts no
+further source read, and transport backpressure retains the same single prepared
+packet. This does not add resume, retry or a new ATP profile.
 
 If a retained reliable file record expires between settled native I/O operations,
 the transport resets only its original completed file pair. It releases that
@@ -78,8 +82,11 @@ The flight regressions withhold both native drives while eight real source
 chunks queue, verify that further producer turns and pause toggles cannot grow
 the flight, then resume real UDP/TLS/ATP receipt and check durable exact bytes.
 They also hold a verified source EOF behind undrained content and cancel a full
-flight before completion. Pure ledger tests cover independent byte/count bounds,
-integer overflow and immutable deadlines, including out-of-order deadlines.
+flight before completion. Prefix regressions acknowledge only part of a real
+flight, refill it without another native drive, and service an already drained
+flight after its former local record deadline. Pure ledger tests cover
+independent byte/count bounds, impossible accounting increases, integer overflow
+and immutable deadlines, including out-of-order deadlines.
 These are correctness checks, not a measured WAN throughput claim.
 These use explicit admission/controller fixtures, not live Tailscale or native
 file-picker authority. Running host/viewer optional-channel setup is described below; user-facing
