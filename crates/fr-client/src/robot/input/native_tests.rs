@@ -46,6 +46,112 @@ fn report(ledger: &Ledger, id: u64) -> Report {
     report
 }
 
+fn locally_applied(sequence: u64) -> InputResult {
+    InputResult {
+        outcome: InputOutcome::AppliedLocally,
+        stage: Stage::Admitted,
+        submitted_operations: 0,
+        ..submitted(sequence)
+    }
+}
+
+#[test]
+fn relative_gesture_separates_local_mode_receipts_from_native_submission() {
+    let mut ledger = Ledger::new(scope()).unwrap();
+    start(&mut ledger, 1, 10, 3);
+    ledger.encoded_local(1, binding(), 0).unwrap();
+    assert!(!ledger.ready(1, 11).unwrap());
+    assert_eq!(
+        ledger.result(ResultEvent::Completed(locally_applied(0))),
+        Ok(None)
+    );
+    assert!(ledger.ready(1, 12).unwrap());
+    ledger.encoded(1, binding(), 1).unwrap();
+    let movement = InputResult {
+        submitted_operations: 1,
+        ..submitted(1)
+    };
+    assert_eq!(ledger.result(ResultEvent::Completed(movement)), Ok(None));
+    assert!(ledger.ready(1, 13).unwrap());
+    ledger.encoded_local(1, binding(), 2).unwrap();
+    let result = ledger
+        .result(ResultEvent::Completed(locally_applied(2)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.actions_submitted, 1);
+    assert_eq!(result.actions_applied_locally, 2);
+    assert_eq!(result.submitted_operations, 1);
+    assert_eq!(result.acknowledged_actions, 3);
+    assert_eq!(result.disposition, InputDisposition::Committed);
+    assert_eq!(result.stage, Some(AcknowledgementStage::SubmittedToOs));
+    assert_eq!(result.host_outcome, Some(Outcome::AppliedLocally));
+    assert!(!ledger.is_closed());
+    assert_eq!(
+        ledger.result(ResultEvent::Duplicate(locally_applied(2))),
+        Ok(None)
+    );
+    assert_eq!(report(&ledger, 1), result);
+}
+
+#[test]
+fn a_local_mode_prefix_without_restoration_closes_the_original_owner() {
+    for native in [false, true] {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, 3);
+        ledger.encoded_local(1, binding(), 0).unwrap();
+        ledger
+            .result(ResultEvent::Completed(locally_applied(0)))
+            .unwrap();
+        if native {
+            ledger.encoded(1, binding(), 1).unwrap();
+            ledger
+                .result(ResultEvent::Completed(InputResult {
+                    submitted_operations: 1,
+                    ..submitted(1)
+                }))
+                .unwrap();
+        }
+        let result = ledger.expire(100).unwrap().unwrap();
+        assert_eq!(result.actions_applied_locally, 1);
+        assert_eq!(result.actions_submitted, u8::from(native));
+        assert_eq!(result.submitted_operations, u32::from(native));
+        assert_eq!(result.disposition, InputDisposition::Partial);
+        assert_eq!(result.end, End::Expired);
+        assert!(
+            ledger.is_closed(),
+            "an unfinished mode gesture cannot survive into the next request"
+        );
+        assert_eq!(result.validate(), Ok(()));
+    }
+}
+
+#[test]
+fn mode_and_native_success_receipts_are_not_interchangeable() {
+    for local in [false, true] {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, 1);
+        if local {
+            ledger.encoded_local(1, binding(), 0).unwrap();
+        } else {
+            ledger.encoded(1, binding(), 0).unwrap();
+        }
+        let forged = if local {
+            submitted(0)
+        } else {
+            locally_applied(0)
+        };
+        assert_eq!(
+            ledger.result(ResultEvent::Completed(forged)),
+            Err(Error::InvalidReceipt)
+        );
+        assert!(ledger.is_closed());
+        let actual = report(&ledger, 1);
+        assert_eq!(actual.disposition, InputDisposition::UnknownEffect);
+        assert_eq!(actual.actions_applied_locally, 0);
+        assert_eq!(actual.actions_submitted, 0);
+    }
+}
+
 #[test]
 fn original_reliable_receipt_is_required_and_duplicate_never_adds_effects() {
     let mut ledger = Ledger::new(scope()).unwrap();
@@ -651,7 +757,11 @@ fn report_validation_preserves_partial_prefixes_and_wholly_missing_receipts() {
     ] {
         let mut ledger = Ledger::new(scope()).unwrap();
         start(&mut ledger, 1, 0, 1);
-        ledger.encoded(1, binding(), 1).unwrap();
+        if outcome == InputOutcome::AppliedLocally {
+            ledger.encoded_local(1, binding(), 1).unwrap();
+        } else {
+            ledger.encoded(1, binding(), 1).unwrap();
+        }
         let receipt = InputResult {
             outcome,
             stage: if outcome == InputOutcome::PartiallySubmittedToOs {

@@ -34,6 +34,11 @@ pub(crate) enum Operation {
         x: i32,
         y: i32,
     },
+    /// Enter relative mode, submit one native displacement, restore absolute.
+    MoveRelative {
+        dx: i32,
+        dy: i32,
+    },
     Scroll {
         x: i32,
         y: i32,
@@ -90,6 +95,7 @@ impl Operation {
     pub fn count(&self) -> u8 {
         match *self {
             Self::Text { .. } | Self::Move { .. } => 1,
+            Self::MoveRelative { .. } => 3,
             Self::Scroll { dx, dy, .. } => {
                 // The public request spans up to 120 lines per axis, but one
                 // native wheel action admits at most 32 total steps. A request
@@ -126,6 +132,9 @@ impl Operation {
                     && text.as_str().len() <= fr_core::input::MAX_COMMITTED_TEXT_BYTES
             }
             Self::Move { .. } => true,
+            Self::MoveRelative { dx, dy } => {
+                i16::try_from(dx).is_ok() && i16::try_from(dy).is_ok() && (dx != 0 || dy != 0)
+            }
             Self::Scroll { dx, dy, .. } => {
                 (-120..=120).contains(&dx) && (-120..=120).contains(&dy) && (dx != 0 || dy != 0)
             }
@@ -279,6 +288,9 @@ impl Operation {
         let required = match self {
             Self::Text { .. } => Capabilities::default().with(Capability::Text),
             Self::Move { .. } => Capabilities::default().with(Capability::Absolute),
+            Self::MoveRelative { .. } => Capabilities::default()
+                .with(Capability::Absolute)
+                .with(Capability::Relative),
             Self::Scroll { .. } => Capabilities::default()
                 .with(Capability::Absolute)
                 .with(Capability::LineScroll),
@@ -307,6 +319,7 @@ impl Operation {
             .map_err(|_| usage())?;
         Ok(match (flag, values.as_slice()) {
             ("--move", &[x, y]) => Self::Move { x, y },
+            ("--move-relative", &[dx, dy]) => Self::MoveRelative { dx, dy },
             ("--scroll", &[x, y, dx, dy]) => Self::Scroll { x, y, dx, dy },
             ("--modified-scroll", [modifiers @ .., x, y, dx, dy]) => Self::ModifiedScroll {
                 modifiers: Self::modifier_mask(modifiers)?,
@@ -464,6 +477,7 @@ pub(crate) enum InputCapability {
     Buttons,
     LineScroll,
     CommittedText,
+    RelativePointer,
 }
 /// Signed host desktop pixels, with exclusive right and bottom edges.
 #[cfg(any(
@@ -521,6 +535,7 @@ impl InputSupport {
                 (InputCapability::Buttons, Capability::Buttons),
                 (InputCapability::LineScroll, Capability::LineScroll),
                 (InputCapability::CommittedText, Capability::Text),
+                (InputCapability::RelativePointer, Capability::Relative),
             ]
             .into_iter()
             .filter_map(|(name, capability)| capabilities.contains(capability).then_some(name))
@@ -537,7 +552,7 @@ impl InputSupport {
             self.bounds.height,
         )
         .is_some()
-            && self.capabilities.len() <= 5
+            && self.capabilities.len() <= 6
             && self.capabilities.windows(2).all(|pair| pair[0] < pair[1])
     }
 }
@@ -809,8 +824,8 @@ fn command(args: &[String]) -> Result<Command, Failure> {
             "--request-id" => request_id = Some(value.parse().map_err(|_| usage())?),
             "--observation-id" => observation_id = Some(value.parse().map_err(|_| usage())?),
             "--max-observation-age-ms" => max_age = Some(value.parse().map_err(|_| usage())?),
-            "--move" | "--scroll" | "--click" | "--key" | "--chord" | "--drag"
-            | "--modified-click" | "--modified-drag" | "--modified-scroll" => {
+            "--move" | "--move-relative" | "--scroll" | "--click" | "--key" | "--chord"
+            | "--drag" | "--modified-click" | "--modified-drag" | "--modified-scroll" => {
                 if operation.is_some() || text_file.is_some() {
                     return Err(usage());
                 }

@@ -37,6 +37,7 @@ fn complete_report() -> Report {
         actions_total: 2,
         actions_encoded: 2,
         actions_submitted: 2,
+        actions_applied_locally: 0,
         acknowledged_actions: 2,
         unacknowledged_actions: 0,
         submitted_operations: 4,
@@ -47,6 +48,43 @@ fn complete_report() -> Report {
         unknown_next_operation: false,
         end: End::HostResult,
     }
+}
+
+#[test]
+fn relative_move_cli_is_bounded_and_requires_both_granted_pointer_modes() {
+    use fr_core::input_submission::{Capabilities, Capability};
+    for (value, dx, dy) in [("-12,7", -12, 7), ("32767,-32768", 32767, -32768)] {
+        let parsed = command(&action("--move-relative", value)).unwrap();
+        let request = parsed.request.unwrap();
+        assert!(
+            matches!(request.operation, Operation::MoveRelative { dx: x, dy: y } if x == dx && y == dy)
+        );
+        assert_eq!(request.operation.count(), 3);
+        assert!(request.operation.valid());
+        assert!(
+            !request
+                .operation
+                .supported(Capabilities::default().with(Capability::Absolute))
+        );
+        assert!(
+            !request
+                .operation
+                .supported(Capabilities::default().with(Capability::Relative))
+        );
+        assert!(
+            request.operation.supported(
+                Capabilities::default()
+                    .with(Capability::Absolute)
+                    .with(Capability::Relative)
+            )
+        );
+    }
+    for value in ["0,0", "32768,1", "1,-32769", "1", "1,2,3", "bad,2"] {
+        refused(&action("--move-relative", value));
+    }
+    let mut duplicate = action("--move-relative", "1,2");
+    duplicate.extend(words("--move 3,4"));
+    refused(&duplicate);
 }
 
 #[test]

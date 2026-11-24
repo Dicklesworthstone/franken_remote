@@ -624,6 +624,7 @@ fn control_capabilities() -> Capabilities {
         .with(Capability::LineScroll)
         .with(Capability::PixelScroll)
         .with(Capability::Text)
+        .with(Capability::Relative)
 }
 
 fn selected_offer(
@@ -2282,10 +2283,10 @@ mod tests {
             Capability::LineScroll,
             Capability::PixelScroll,
             Capability::Text,
+            Capability::Relative,
         ] {
             assert!(control_capabilities().contains(allowed));
         }
-        assert!(!control_capabilities().contains(Capability::Relative));
     }
 
     #[test]

@@ -192,7 +192,22 @@ fn validate_report(
     {
         return Err(Error::Protocol);
     }
-    report.validate().map_err(|_| Error::Protocol)
+    report.validate().map_err(|_| Error::Protocol)?;
+    // A local mode acknowledgement cannot masquerade as a key, text, click or
+    // movement submission. Relative movement has local steps only at 0 and 2.
+    let succeeded = report.actions_submitted + report.actions_applied_locally;
+    let expected_local = if matches!(
+        request.operation,
+        crate::robot_input::Operation::MoveRelative { .. }
+    ) {
+        u8::from(succeeded >= 1) + u8::from(succeeded >= 3)
+    } else {
+        0
+    };
+    if report.actions_applied_locally != expected_local {
+        return Err(Error::Protocol);
+    }
+    Ok(())
 }
 pub(super) fn clear_snapshot(snapshot: &mut crate::robot_input::Snapshot) {
     snapshot.ready = false;

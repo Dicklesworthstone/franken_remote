@@ -2,7 +2,9 @@
 use super::{Candidate, Shared};
 use crate::robot_input::Operation;
 use fr_client::input::Action;
-use fr_core::input::{DesktopPoint, KeyTransition, PhysicalKey, PointerButton, ScrollUnit};
+use fr_core::input::{
+    DesktopPoint, KeyTransition, PhysicalKey, PointerButton, PointerMode, ScrollUnit,
+};
 use frd::session_startup::{ControlledViewer, ControlledViewerError};
 use std::time::Instant;
 
@@ -15,6 +17,12 @@ impl Operation {
     }
     fn action(&self, index: u8) -> Option<Action<'static>> {
         match *self {
+            Self::MoveRelative { dx, dy } if self.valid() => match index {
+                0 => Some(Action::Mode(PointerMode::Relative)),
+                1 => Some(Action::Relative { x: dx, y: dy }),
+                2 => Some(Action::Mode(PointerMode::Absolute)),
+                _ => None,
+            },
             Self::Scroll { x, y, .. } => {
                 let (dx, dy) = self.scroll_lines(index)?;
                 Some(Action::Scroll {
@@ -225,6 +233,10 @@ impl Shared {
             return;
         }
         let binding = viewer.input_result_binding();
+        let local = matches!(
+            pending.request.operation.action(pending.encoded),
+            Some(Action::Mode(_))
+        );
         let encoded = if let Some(text) = pending.request.operation.committed_text(pending.encoded)
         {
             viewer.action(Action::Text(text))
@@ -239,11 +251,14 @@ impl Shared {
         };
         match encoded {
             Ok(encoded) => {
-                if state
-                    .ledger
-                    .encoded_in(id, binding, encoded.space, encoded.sequence)
-                    .is_err()
-                {
+                let recorded = if local {
+                    state.ledger.encoded_local(id, binding, encoded.sequence)
+                } else {
+                    state
+                        .ledger
+                        .encoded_in(id, binding, encoded.space, encoded.sequence)
+                };
+                if recorded.is_err() {
                     // Sending became possible before ledger recording. Fence
                     // immediately; the ledger preserves that uncertainty.
                     viewer.close();
@@ -268,6 +283,41 @@ impl Shared {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn relative_move_changes_mode_submits_one_delta_and_restores_absolute() {
+        let operation = Operation::MoveRelative { dx: -15, dy: 20 };
+        assert!(operation.valid());
+        assert_eq!(operation.count(), 3);
+        assert!(matches!(
+            operation.action(0),
+            Some(Action::Mode(PointerMode::Relative))
+        ));
+        assert!(matches!(
+            operation.action(1),
+            Some(Action::Relative { x: -15, y: 20 })
+        ));
+        assert!(matches!(
+            operation.action(2),
+            Some(Action::Mode(PointerMode::Absolute))
+        ));
+        for index in 0..=u8::MAX {
+            assert!(
+                operation.pointer(index).is_none(),
+                "never emulate relative input with a warp"
+            );
+            if index >= 3 {
+                assert!(operation.action(index).is_none());
+            }
+        }
+        for (dx, dy) in [(0, 0), (32_768, 0), (0, -32_769), (i32::MIN, i32::MAX)] {
+            let invalid = Operation::MoveRelative { dx, dy };
+            assert!(!invalid.valid());
+            for index in 0..=u8::MAX {
+                assert!(invalid.action(index).is_none());
+            }
+        }
+    }
 
     #[test]
     fn move_encodes_one_pointer_without_synthesizing_a_reliable_action() {

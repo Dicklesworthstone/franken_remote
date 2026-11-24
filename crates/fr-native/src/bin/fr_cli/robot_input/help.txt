@@ -5,7 +5,7 @@ fr robot session open NODE_ID --foreground --role control --accept-input
 fr robot input NODE_ID --connection-id ID --status [--json]
 fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
     --observation-id INTEGER --max-observation-age-ms 1..1000
-    (--move X,Y | --click BUTTON,X,Y | --modified-click MODIFIER,...,BUTTON,X,Y
+    (--move X,Y | --move-relative DX,DY | --click BUTTON,X,Y | --modified-click MODIFIER,...,BUTTON,X,Y
      | --drag BUTTON,X1,Y1,X2,Y2 | --modified-drag MODIFIER,...,BUTTON,X1,Y1,X2,Y2
      | --key USB_USAGE | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY
      | --modified-scroll MODIFIER,...,X,Y,DX,DY | --text-file PATH) [--json]
@@ -16,7 +16,8 @@ control lease and has no reconnect, clipboard, files or native input forwarding.
 --status returns a bounded input observation with all view generations and a
 local comparison lease handle. Ready observations also include input_support:
 signed host-desktop bounds (x,y,width,height) and the original grant's supported
-physical_keys, absolute_pointer, buttons, line_scroll and committed_text capabilities.
+physical_keys, absolute_pointer, buttons, line_scroll, committed_text and
+relative_pointer capabilities.
 A missing/null input_support from an older owner means unknown support. Expiry
 clears this metadata with the observation's authority handles; it grants nothing
 on its own. Screenshot control_authority carries the same original support.
@@ -33,6 +34,18 @@ host desktop pixels. --move sends one absolute pointer state without a click,
 key or wheel event. Its point must be inside the original granted display. It
 waits for the original host's pointer receipt; a lost datagram or missing receipt
 is an unknown effect, never an automatic retry or a refreshed observation.
+--move-relative submits one native relative displacement on a Linux X11 host
+whose original grant includes relative_pointer and absolute_pointer. Each delta
+must fit -32768..32767 and at least one must be nonzero. The host checks the
+actual pointer and intended destination against the granted display immediately
+before native submission; it never emulates this operation with an absolute warp.
+The request enters relative mode, waits for its local receipt and a fresh ticket,
+submits the displacement, then restores absolute mode after the movement receipt.
+All three reliable actions keep the original observation and request deadline.
+Results count two actions_applied_locally and one actions_submitted on complete
+success; only the movement counts as an OS operation. An interrupted transition
+ends the original control owner, including when no native movement was submitted.
+Hosts without the probed native capability refuse before changing pointer mode.
 Buttons are 1 primary, 2 secondary, 3 middle, 4 back, 5 forward.
 --drag presses at X1,Y1, moves once with the button held, then releases at X2,Y2.
 Both distinct endpoints must be inside the original granted display before any
@@ -82,7 +95,7 @@ ignore Unicode event strings. No native IME composition is added by this command
 Pointer replay, arbitrary batches and persistent held keys are unavailable.
 Human keyboard/mouse events are not forwarded in this mode.
 
-Results distinguish confirmed OS submission, partial effects, refusal, and an
+Results distinguish confirmed OS submission, host-local transitions, partial effects, refusal, and an
 unknown external effect. Partial/uncertain requests fence the original control
 owner and trigger its existing held-state cleanup. Nothing is rolled back or
 automatically retried. At most eight results are retained; older request IDs stay

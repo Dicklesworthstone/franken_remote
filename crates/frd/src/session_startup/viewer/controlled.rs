@@ -581,6 +581,9 @@ impl ControlledViewer {
     /// the same action by generating fresh credentials or sequence positions.
     pub fn action(&mut self, action: Action<'_>) -> Result<Encoded, Error> {
         let t = self.slot()?;
+        if self.input.pointer_mode_pending() {
+            return Err(Error::Backpressure);
+        }
         let (until, limit) = self.input.send_limit(t)?;
         let mut p = Pending {
             bytes: [0; MAX_INPUT_RECORD_BYTES],
@@ -598,6 +601,9 @@ impl ControlledViewer {
     }
     pub fn pointer(&mut self, position: DesktopPoint) -> Result<Encoded, Error> {
         let t = self.slot()?;
+        if self.input.pointer_mode_pending() {
+            return Err(Error::Backpressure);
+        }
         let (until, limit) = self.input.send_limit(t)?;
         let mut p = Pending {
             bytes: [0; MAX_INPUT_RECORD_BYTES],

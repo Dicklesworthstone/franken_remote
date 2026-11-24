@@ -99,6 +99,10 @@ pub struct Report {
     pub actions_total: u8,
     pub actions_encoded: u8,
     pub actions_submitted: u8,
+    /// Successful host-local transitions, such as changing pointer mode. They
+    /// acknowledge no native operation and are never counted as OS submission.
+    #[serde(default)]
+    pub actions_applied_locally: u8,
     pub acknowledged_actions: u8,
     /// Encoded actions whose ENTIRE external outcome remains unreported.
     pub unacknowledged_actions: u8,
@@ -121,18 +125,23 @@ impl Report {
         if self.request_id == 0
             || !(1..=MAX_ACTIONS).contains(&self.actions_total)
             || self.actions_encoded > self.actions_total
-            || self.actions_submitted > self.acknowledged_actions
+            || u16::from(self.actions_submitted) + u16::from(self.actions_applied_locally)
+                > u16::from(self.acknowledged_actions)
             || u16::from(self.acknowledged_actions) + u16::from(self.unacknowledged_actions)
                 != u16::from(self.actions_encoded)
             || (self.host_outcome.is_some() != (self.acknowledged_actions != 0))
+            || (self.host_outcome == Some(Outcome::AppliedLocally)
+                && self.actions_applied_locally == 0)
+            || (self.host_outcome == Some(Outcome::SubmittedToOs) && self.actions_submitted == 0)
             || self.unknown_next_operation != (self.host_outcome == Some(Outcome::EffectUnknown))
         {
             return Err(Error::InvalidReport);
         }
         let failed = self
             .host_outcome
-            .is_some_and(|o| o != Outcome::SubmittedToOs);
-        if self.actions_submitted != self.acknowledged_actions - u8::from(failed)
+            .is_some_and(|o| !matches!(o, Outcome::SubmittedToOs | Outcome::AppliedLocally));
+        let succeeded = self.actions_submitted + self.actions_applied_locally;
+        if succeeded != self.acknowledged_actions - u8::from(failed)
             || (failed && self.unacknowledged_actions != 0 && self.end != End::Stopped)
         {
             return Err(Error::InvalidReport);
@@ -163,9 +172,9 @@ impl Report {
         };
         let disposition = if self.unknown_next_operation || self.unacknowledged_actions != 0 {
             InputDisposition::UnknownEffect
-        } else if self.actions_submitted == self.actions_total {
+        } else if succeeded == self.actions_total {
             InputDisposition::Committed
-        } else if self.submitted_operations != 0 {
+        } else if self.submitted_operations != 0 || self.actions_applied_locally != 0 {
             InputDisposition::Partial
         } else {
             InputDisposition::Refused
@@ -176,7 +185,7 @@ impl Report {
             || (self.end == End::HostResult
                 && (self.acknowledged_actions == 0
                     || self.unacknowledged_actions != 0
-                    || (!failed && self.actions_submitted != self.actions_total)))
+                    || (!failed && succeeded != self.actions_total)))
         {
             return Err(Error::InvalidReport);
         }
@@ -244,6 +253,7 @@ struct Action {
     binding: ResultBinding,
     space: SequenceSpace,
     sequence: u64,
+    local: bool,
     receipt: Option<InputResult>,
 }
 #[derive(Clone, Copy)]
@@ -262,6 +272,7 @@ impl Request {
             actions_total: self.total,
             actions_encoded: self.encoded,
             actions_submitted: 0,
+            actions_applied_locally: 0,
             acknowledged_actions: 0,
             unacknowledged_actions: 0,
             submitted_operations: 0,
@@ -278,6 +289,8 @@ impl Request {
                 report.acknowledged_actions += 1;
                 report.actions_submitted +=
                     u8::from(receipt.outcome == InputOutcome::SubmittedToOs);
+                report.actions_applied_locally +=
+                    u8::from(receipt.outcome == InputOutcome::AppliedLocally);
                 // Each action is validated against the wire's 4096-operation
                 // bound; ten bounded receipts cannot overflow this sum.
                 report.submitted_operations += receipt.submitted_operations;
@@ -302,9 +315,9 @@ impl Request {
         report.disposition = if report.unknown_next_operation || report.unacknowledged_actions != 0
         {
             InputDisposition::UnknownEffect
-        } else if report.actions_submitted == self.total {
+        } else if report.actions_submitted + report.actions_applied_locally == self.total {
             InputDisposition::Committed
-        } else if report.submitted_operations != 0 {
+        } else if report.submitted_operations != 0 || report.actions_applied_locally != 0 {
             InputDisposition::Partial
         } else {
             InputDisposition::Refused
@@ -334,6 +347,13 @@ impl Request {
             };
         }
         valid_receipt(receipt)?;
+        if matches!(
+            receipt.outcome,
+            InputOutcome::SubmittedToOs | InputOutcome::AppliedLocally
+        ) && action.local != (receipt.outcome == InputOutcome::AppliedLocally)
+        {
+            return Err(Error::InvalidReceipt);
+        }
         action.receipt = Some(receipt);
         Ok(true)
     }
@@ -454,7 +474,9 @@ impl Ledger {
         Ok(Admission::Started)
     }
     /// Recheck immediately BEFORE the owner calls its original action encoder.
-    /// No waiting for readiness, newer observations, new tickets or a new lease.
+    /// Never replace the original observation or lease. A compound pointer-mode
+    /// request may wait for its required post-mode ticket within these SAME
+    /// original bounds; this method never issues or renews authority itself.
     pub fn ready(&mut self, id: u64, now_us: u64) -> Result<bool, Error> {
         self.pending_id(id)?;
         if self.expire(now_us)?.is_some() {
@@ -484,6 +506,27 @@ impl Ledger {
         space: SequenceSpace,
         sequence: u64,
     ) -> Result<(), Error> {
+        self.encoded_with_effect(id, binding, space, sequence, false)
+    }
+    /// Record an explicitly encoded host-local mode transition. Its successful
+    /// receipt must be AppliedLocally, never an OS-submission claim. Ordinary
+    /// encoded actions continue to require a genuine native-submission result.
+    pub fn encoded_local(
+        &mut self,
+        id: u64,
+        binding: ResultBinding,
+        sequence: u64,
+    ) -> Result<(), Error> {
+        self.encoded_with_effect(id, binding, SequenceSpace::Action, sequence, true)
+    }
+    fn encoded_with_effect(
+        &mut self,
+        id: u64,
+        binding: ResultBinding,
+        space: SequenceSpace,
+        sequence: u64,
+        local: bool,
+    ) -> Result<(), Error> {
         if self.closed {
             return Err(Error::Closed);
         }
@@ -511,6 +554,7 @@ impl Ledger {
                     binding,
                     space,
                     sequence,
+                    local,
                     receipt: None,
                 });
             }
@@ -547,7 +591,10 @@ impl Ledger {
         if let Some(request) = self.pending.as_mut()
             && request.accepts(receipt)?
         {
-            let failed = receipt.outcome != InputOutcome::SubmittedToOs;
+            let failed = !matches!(
+                receipt.outcome,
+                InputOutcome::SubmittedToOs | InputOutcome::AppliedLocally
+            );
             if failed || request.encoded == request.total {
                 self.closed |= failed;
                 return self.finish(End::HostResult).map(Some);

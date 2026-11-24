@@ -183,6 +183,10 @@ impl InputClient {
             false
         };
         self.credentials.ticket = c.ticket;
+        // Results and tickets share one ordered feedback stream. A ticket
+        // accepted before the mode result cannot release this barrier; the
+        // first timely ticket after it was issued after host invalidation.
+        self.pointer_state.ticket();
         if self.awaiting_recovery_ticket {
             // Unlike a same-generation freshness lapse, this exact new view
             // could not have had a ticket before the host installed recovery.

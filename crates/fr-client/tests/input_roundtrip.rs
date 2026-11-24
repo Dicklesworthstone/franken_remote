@@ -9,6 +9,8 @@ use fr_core::{
     time::HostInstant,
 };
 use fr_wire::{input::*, input_result::*};
+#[path = "input_roundtrip/relative.rs"]
+mod relative;
 const ORIGIN: u64 = 1_000_000_000;
 fn local(n: u64) -> ClientInstant {
     ClientInstant(ORIGIN + n)
@@ -34,6 +36,7 @@ fn caps() -> Capabilities {
         .with(Capability::Repeat)
         .with(Capability::Text)
         .with(Capability::LineScroll)
+        .with(Capability::Relative)
 }
 fn bounds() -> InputBounds {
     InputBounds::new(DesktopPoint { x: -20, y: -30 }, 340, 270).unwrap()

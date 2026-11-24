@@ -14,7 +14,7 @@ env:
   RUST_TEST_THREADS: '4'
 jobs:
   relative:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
@@ -30,11 +30,16 @@ jobs:
       - name: Verify docs
         run: |
           ./scripts/verify.sh docs
-      # fr-client has no relative-mode tests: its relative_input target was
-      # staged in September and never landed (the client profile is absolute
-      # pointer only). This lane checks the wire and native halves.
+      - name: Check client mode barriers and robot receipt accounting
+        run: |
+          cargo test -p fr-client --test input_roundtrip --test input_ticket --test input_readiness --locked
+          cargo test -p fr-client --lib robot::input::native --locked
       - name: Repeat wire and native relative-mode regressions
         run: |
           cargo test -p fr-wire --test input_submission --locked
           cargo test -p fr-native --features linux-input --lib --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- --test-threads=1
           cargo test -p fr-native --features linux-input --lib --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- --test-threads=8
+      - name: Exercise native relative movement over QUIC and the robot command
+        run: |
+          cargo test -p fr-native --features linux-input-agent --test input_quic native_relative_gesture --locked -- --test-threads=1
+          cargo test -p fr-native --features linux-desktop --bin fr robot_input --locked

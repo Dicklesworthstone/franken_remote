@@ -19,6 +19,79 @@ async fn until_tickets(f: &mut Fixture, n: usize) {
         f.turn().await;
     }
 }
+
+#[test]
+fn native_relative_gesture_waits_for_mode_tickets_and_restores_absolute_input() {
+    let rt = network::runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let mut f = Fixture::new_options(cx, true).await;
+        assert!(
+            f.observer
+                .capabilities()
+                .contains(fr_core::input_submission::Capability::Relative)
+        );
+        let driver = f.driver.take().unwrap();
+        let (shutdown, ()) = Box::pin(network::both(driver, async {
+            assert_eq!(renew(&mut f, 10), Progress::NativePending);
+            until_tickets(&mut f, 1).await;
+            let before = f.observer.query_pointer().unwrap().0;
+            let (x, y) = (
+                if before.x < 160 { 7 } else { -7 },
+                if before.y < 120 { 3 } else { -3 },
+            );
+            let expected = DesktopPoint {
+                x: before.x + x,
+                y: before.y + y,
+            };
+            let bytes = f.action(Action::Mode(PointerMode::Relative));
+            f.send(&bytes, Route::Stream(f.pair.actions));
+            f.until_receipts(1).await;
+            assert_eq!(f.receipts[0].outcome, InputOutcome::AppliedLocally);
+            assert_eq!(f.receipts[0].submitted_operations, 0);
+            assert!(f.client.pointer_mode_pending());
+            assert_eq!(f.observer.query_pointer().unwrap().0, before);
+            // No cadence wait: the mode's invalidation requests the next
+            // ticket immediately, ordered strictly after its local receipt.
+            assert_eq!(renew(&mut f, 11), Progress::NativePending);
+            until_tickets(&mut f, 2).await;
+            assert!(!f.client.pointer_mode_pending());
+            let bytes = f.action(Action::Relative { x, y });
+            f.send(&bytes, Route::Stream(f.pair.actions));
+            f.until_receipts(2).await;
+            assert_eq!(f.receipts[1].outcome, InputOutcome::SubmittedToOs);
+            assert_eq!(f.receipts[1].submitted_operations, 1);
+            let end = Instant::now() + Duration::from_millis(100);
+            while f.observer.query_pointer().unwrap().0 != expected {
+                assert!(
+                    Instant::now() < end,
+                    "native relative displacement was not observed"
+                );
+                asupersync::time::sleep(f.cx.now(), Duration::from_millis(1)).await;
+            }
+            let bytes = f.action(Action::Mode(PointerMode::Absolute));
+            f.send(&bytes, Route::Stream(f.pair.actions));
+            f.until_receipts(3).await;
+            assert_eq!(f.receipts[2].outcome, InputOutcome::AppliedLocally);
+            assert_eq!(f.receipts[2].submitted_operations, 0);
+            assert_eq!(renew(&mut f, 12), Progress::NativePending);
+            until_tickets(&mut f, 3).await;
+            let mut bytes = [0; MAX_INPUT_RECORD_BYTES];
+            let encoded = f
+                .client
+                .pointer(before, &mut bytes, ClientInstant(network::clock(&f.cx)))
+                .unwrap();
+            f.send(&bytes[..encoded.bytes], Route::Datagram(f.pair.pointer));
+            f.until_receipts(4).await;
+            assert_eq!(f.receipts[3].outcome, InputOutcome::SubmittedToOs);
+            assert_eq!(f.client.pending_actions(), 0);
+            f.input.control().stop(StopReason::LocalRevoke);
+            f.cleared().await;
+        }))
+        .await;
+        assert!(shutdown.handoff_safe());
+    });
+}
 async fn observe_shift(f: &mut Fixture, pressed: bool) {
     // SubmittedToOs means XFlush, not that this separate observer connection
     // has seen XTest processing. As in presentation_input::observe_pressed,

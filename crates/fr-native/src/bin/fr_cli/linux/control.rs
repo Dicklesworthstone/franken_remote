@@ -74,9 +74,11 @@ pub(super) fn policy() -> ControlPolicy {
 }
 /// The foreground robot uses the same positive text negotiation as the local
 /// editor. Its distinct opt-in endpoint and source remain owned by automation.
+/// Relative movement is requested only here; the host's actual native probe
+/// still decides whether its executor can grant it.
 pub(super) fn automation_policy() -> ControlPolicy {
     ControlPolicy {
-        capabilities: capabilities().with(Capability::Text),
+        capabilities: capabilities().with(Capability::Relative),
         ..policy()
     }
 }
@@ -724,6 +726,8 @@ mod tests {
         use fr_wire::control::{requestable, with_committed_text};
         let requested = automation_policy().capabilities;
         assert!(requested.contains(Capability::Text));
+        assert!(requested.contains(Capability::Relative));
+        assert!(!policy().capabilities.contains(Capability::Relative));
         assert!(policy().capabilities.contains(Capability::Text));
         let client = with_committed_text(offer(false)).unwrap();
         let legacy = offer(false);

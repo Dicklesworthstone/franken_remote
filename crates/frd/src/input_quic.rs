@@ -137,7 +137,7 @@ pub enum Progress {
 }
 #[derive(Clone, Copy)]
 enum Command {
-    Input,
+    Input { mode_change: bool },
     Reconcile,
     Authority,
     Ticket,
@@ -366,7 +366,7 @@ impl QuicInput {
                 Ok(Progress::Authority(result))
             }
             Some(Command::Ticket) => self.collect_ticket(),
-            Some(Command::Input) => {
+            Some(Command::Input { mode_change }) => {
                 let Some(reply) = self.agent.try_input_result().map_err(Error::Agent)? else {
                     return Ok(Progress::NativePending);
                 };
@@ -374,6 +374,15 @@ impl QuicInput {
                 self.last_reply = Some(reply);
                 match reply {
                     InputReply::Record(result) => {
+                        if mode_change
+                            && result.outcome
+                                == fr_core::input_sequence::InputOutcome::AppliedLocally
+                        {
+                            // A successful mode change invalidated all old
+                            // tickets. Renew promptly, after this receipt is
+                            // admitted to their shared ordered feedback stream.
+                            self.ticket_after_us = 0;
+                        }
                         let mut bytes = [0; READINESS_TICKET_BYTES];
                         let length = encode_input_result(
                             result,
@@ -503,7 +512,12 @@ impl QuicInput {
                 self.command = Some(if reconciliation {
                     Command::Reconcile
                 } else {
-                    Command::Input
+                    Command::Input {
+                        mode_change: delivery == InputDelivery::Reliable
+                            && bytes
+                                .get(6..8)
+                                .is_some_and(|kind| kind == (Kind::InputMode as u16).to_be_bytes()),
+                    }
                 });
                 Ok(Disposition::Consumed)
             }

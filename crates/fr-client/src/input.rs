@@ -5,13 +5,15 @@
 mod control;
 pub mod held;
 mod readiness;
+mod relative;
 pub mod ticket;
 pub mod viewport;
 use fr_core::{
     ids::{InputTicketId, RecoveryGeneration, RemoteSessionId},
     input::{
         DesktopPoint, InputBounds, InputCredentials, InputEvent, InputRequest, InputView,
-        KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey, PointerButton, ScrollUnit,
+        KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey, PointerButton, PointerMode,
+        ScrollUnit,
     },
     input_sequence::InputOutcome,
     input_submission::{Capabilities, Capability},
@@ -54,10 +56,18 @@ pub struct PresentedObservation {
     pub received_at: ClientInstant,
     pub source_age_upper_us: u64,
 }
-/// Absolute-pointer profile; relative-mode negotiation remains a separate slice.
+/// Granted input actions. Pointer-mode changes are reliable local operations;
+/// relative checkpoints wait for their receipt and a new ordered host ticket.
 /// This deliberately separates committed text from physical keyboard events.
 #[derive(Clone, Copy)]
 pub enum Action<'a> {
+    /// Change pointer interpretation while no keys, buttons or actions are held.
+    Mode(PointerMode),
+    /// A relative displacement, encoded as a cumulative reliable checkpoint.
+    Relative {
+        x: i32,
+        y: i32,
+    },
     Key {
         key: PhysicalKey,
         transition: KeyTransition,
@@ -144,6 +154,7 @@ pub(crate) struct Pending {
     pub(crate) deadline: ClientInstant,
     minimum: u32,
     maximum: u32,
+    pointer: relative::Pending,
 }
 /// Non-cloneable owner for ONE explicit input grant. No method resumes a stopped
 /// owner or rebinds its session/lease. The session coordinator must require a new
@@ -172,6 +183,7 @@ pub struct InputClient {
     next_action: Option<u64>,
     next_pointer: Option<u64>,
     next_held: Option<u64>,
+    pointer_state: relative::State,
     held_after: Option<ClientInstant>,
     pub(crate) pending: [Option<Pending>; MAX_PENDING_ACTIONS],
     receipts: [Option<InputResult>; MAX_PENDING_ACTIONS],
@@ -242,6 +254,7 @@ impl InputClient {
             next_action: Some(0),
             next_pointer: Some(0),
             next_held: Some(0),
+            pointer_state: relative::State::new(),
             held_after: None,
             pending: [None; MAX_PENDING_ACTIONS],
             receipts: [None; MAX_PENDING_ACTIONS],
@@ -278,6 +291,11 @@ impl InputClient {
     }
     pub const fn stopped(&self) -> Option<StopReason> {
         self.stopped
+    }
+    /// A mode transition waits for its receipt and a subsequent ticket on the
+    /// same ordered feedback stream. This never grants input on its own.
+    pub const fn pointer_mode_pending(&self) -> bool {
+        self.pointer_state.pending()
     }
     pub fn pending_actions(&self) -> usize {
         self.pending.iter().flatten().count()
@@ -508,7 +526,8 @@ impl InputClient {
                     .iter()
                     .position(|p| p.is_some_and(|p| p.sequence == sequence))
                     .ok_or(Error::InvalidTransition)?;
-                self.pending[slot] = None;
+                let pending = self.pending[slot].take().expect("matched pending");
+                self.pointer_state.abandon(pending.pointer);
                 self.next_action = Some(sequence);
             }
             Unsent::Held(sequence) => {
@@ -609,6 +628,7 @@ impl InputClient {
         }
     }
     fn position(&self, p: DesktopPoint) -> Result<(), Error> {
+        self.pointer_state.absolute()?;
         self.require(Capability::Absolute)?;
         if self.bounds.contains(p) {
             Ok(())
@@ -659,6 +679,7 @@ impl InputClient {
         now: ClientInstant,
     ) -> Result<Encoded, Error> {
         self.ready(now)?;
+        self.pointer_state.ready()?;
         let Some(slot) = self.pending.iter().position(Option::is_none) else {
             return Err(Error::Backpressure);
         };
@@ -713,6 +734,7 @@ impl InputClient {
             deadline,
             minimum,
             maximum,
+            pointer: self.pointer_state.encoded(event),
         });
         self.clipboard_readiness();
         self.next_action = sequence.checked_add(1);
@@ -731,6 +753,27 @@ impl InputClient {
         barrier: u64,
     ) -> Result<(InputEvent<'a>, u32, u32), Error> {
         Ok(match action {
+            Action::Mode(mode) => {
+                self.require(match mode {
+                    PointerMode::Absolute => Capability::Absolute,
+                    PointerMode::Relative => Capability::Relative,
+                })?;
+                // The old opaque-ticket API cannot prove a post-mode ticket.
+                if self.ticket_state.is_none() {
+                    return Err(Error::Unsupported);
+                }
+                if self.pending_actions() != 0
+                    || self.keys.iter().any(|held| *held)
+                    || self.buttons.iter().any(|held| *held)
+                {
+                    return Err(Error::InvalidTransition);
+                }
+                (self.pointer_state.mode(mode)?, 0, 0)
+            }
+            Action::Relative { x, y } => {
+                self.require(Capability::Relative)?;
+                (self.pointer_state.relative(x, y)?, 1, 1)
+            }
             Action::Key { key, transition } => {
                 self.require(Capability::Keys)?;
                 let held = self.keys[usize::from(key.usage())];
@@ -871,19 +914,25 @@ impl InputClient {
         let p = self.pending[slot].expect("matched pending");
         let count = result.submitted_operations;
         let valid = match result.outcome {
-            InputOutcome::SubmittedToOs => count == p.minimum || count == p.maximum,
+            InputOutcome::SubmittedToOs => {
+                p.minimum != 0 && (count == p.minimum || count == p.maximum)
+            }
             InputOutcome::PartiallySubmittedToOs | InputOutcome::EffectUnknown => count < p.maximum,
-            InputOutcome::AppliedLocally => false,
+            InputOutcome::AppliedLocally => p.maximum == 0 && count == 0,
             _ => count == 0,
         };
         if !valid {
             return self.fail(StopReason::InvalidReceipt);
         }
         self.pending[slot] = None;
+        self.pointer_state.result(p.pointer, result.outcome);
         self.clipboard_readiness();
         self.receipts[self.receipt_cursor] = Some(result);
         self.receipt_cursor = (self.receipt_cursor + 1) % MAX_PENDING_ACTIONS;
-        if result.outcome != InputOutcome::SubmittedToOs {
+        if !matches!(
+            result.outcome,
+            InputOutcome::SubmittedToOs | InputOutcome::AppliedLocally
+        ) {
             self.stop(StopReason::ActionFailed);
         }
         Ok(ResultEvent::Completed(result))

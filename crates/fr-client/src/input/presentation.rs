@@ -16,7 +16,6 @@ use fr_media::{
     presented::{AdmittedCursor, QueuedReport},
 };
 use fr_wire::MediaLimits;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Clipboard(crate::clipboard::Error),
@@ -315,6 +314,10 @@ impl PresentedInput {
     /// It grants neither visibility nor permission to send input.
     pub fn viewport(&self) -> super::viewport::Viewport {
         self.input.viewport()
+    }
+    /// The pointer-mode barrier awaits its local result or subsequent ticket.
+    pub const fn pointer_mode_pending(&self) -> bool {
+        self.input.pointer_mode_pending()
     }
     /// Immutable host-granted operation capabilities. This does not grant
     /// authority or replace the submission-time checks in the input owner.
