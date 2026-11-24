@@ -36,6 +36,19 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var cursorTexture: MTLTexture?
     private var cursor: FrCursor?
     private var dirty = true
+    /// A retained CAMetalLayer drawable survives dropping its source texture.
+    /// Clear it once after retirement, retrying when a drawable is unavailable.
+    private var needsBlankDrawable = false
+    private var surfaceVisible = false
+    /// Old presentation callbacks may arrive after a hide and show of the
+    /// identical session and frame. Only the current visible interval counts.
+    private var presentationOwner: UUID?
+
+    func setVisible(_ visible: Bool) {
+        guard surfaceVisible != visible else { return }
+        surfaceVisible = visible
+        if !visible { reset() }
+    }
 
     /// The host's original-display hotspot mapped into the encoded-size
     /// input area. A retired frame or unavailable scoped cursor never seeds
@@ -98,12 +111,14 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     /// Drop the shown picture (a new session or a new size).
     func reset() {
+        let hadPicture = current != nil
         current = nil
+        presentationOwner = nil
         lastSequence = 0
         cursor = nil
         cursorTexture = nil
         dirty = true
-        if let cache { CVMetalTextureCacheFlush(cache, 0) }
+        if hadPicture, let cache { CVMetalTextureCacheFlush(cache, 0) }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -113,11 +128,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     /// Acquire the newest actual frame before the surface maps any input.
     /// The metadata queue does not own this geometry: the retained frame does.
     func prepareFrame() -> (frame: UInt64, picture: CGSize, display: CGSize)? {
-        guard let session else { reset(); return nil }
+        guard surfaceVisible, let session else { reset(); return nil }
         if let frame = session.frame(after: lastSequence) {
             guard session.display(forFrame: frame.info.frame) != nil,
                   let picture = makePicture(frame) else { reset(); return nil }
             current = picture
+            if presentationOwner == nil { presentationOwner = UUID() }
             lastSequence = frame.info.sequence
             dirty = true
         }
@@ -153,13 +169,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         let now = CACurrentMediaTime()
         onRefresh?(now)
-        guard let session, let current else { return }
+        guard surfaceVisible, let owner = presentationOwner, let session, let current else {
+            blankIfNeeded(in: view)
+            return
+        }
         refreshCursor(for: current.info)
         let geometry = mapper()
         guard geometry.frame == current.info.frame,
               geometry.picture == CGSize(width: current.luma.width, height: current.luma.height),
               session.display(forFrame: current.info.frame) == geometry.display else {
             reset()
+            blankIfNeeded(in: view)
             return
         }
         if geometry != lastMapper || view.drawableSize != lastDrawableSize {
@@ -167,23 +187,22 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             lastDrawableSize = view.drawableSize
             dirty = true
         }
-        guard dirty, geometry.isReady,
-              let pass = view.currentRenderPassDescriptor,
-              let drawable = view.currentDrawable,
-              let commands = queue.makeCommandBuffer(),
-              let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
-        dirty = false
+        guard dirty else { return }
         let bounds = view.bounds.size
         let drawableSize = view.drawableSize
         let sx = drawableSize.width / max(1, bounds.width)
         let sy = drawableSize.height / max(1, bounds.height)
         let rect = geometry.imageRect
         let visible = rect.intersection(geometry.content)
-        guard !visible.isNull,
+        guard geometry.isReady, !visible.isNull,
               let scissor = scissorRect(visible, sx: sx, sy: sy, drawable: drawableSize) else {
-            encoder.endEncoding()
+            blankIfNeeded(in: view)
             return
         }
+        guard let pass = view.currentRenderPassDescriptor,
+              let drawable = view.currentDrawable,
+              let commands = queue.makeCommandBuffer(),
+              let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
         encoder.setScissorRect(scissor)
         let dx = rect.width * sx / CGFloat(current.luma.width)
         let dy = rect.height * sy / CGFloat(current.luma.height)
@@ -221,27 +240,53 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             return
         }
         let frame = current.info.frame
-        let handle = session.handle
+        dirty = false
+        needsBlankDrawable = true
         drawnPictures += 1
         #if targetEnvironment(simulator)
         // The simulator's Metal has no presentation feedback: the nearest
         // evidence is the GPU finishing a drawable already queued to present.
         commands.addCompletedHandler { [weak self] buffer in
             guard buffer.status == .completed else { return }
-            fr_session_frame_drawn(handle, frame)
-            DispatchQueue.main.async { self?.presentedPictures += 1 }
+            DispatchQueue.main.async { self?.presented(frame, owner: owner) }
         }
         #else
         drawable.addPresentedHandler { [weak self] presented in
             // Only a drawable that actually reached the display counts.
             guard presented.presentedTime > 0 else { return }
-            fr_session_frame_drawn(handle, frame)
-            DispatchQueue.main.async { self?.presentedPictures += 1 }
+            DispatchQueue.main.async { self?.presented(frame, owner: owner) }
         }
         #endif
         commands.present(drawable)
         // Keep this picture's planes alive until the GPU is done with them.
         commands.addCompletedHandler { _ in _ = current }
+        commands.commit()
+    }
+
+    private func presented(_ frame: UInt64, owner: UUID) {
+        guard surfaceVisible, presentationOwner == owner, let session,
+              session.display(forFrame: frame) != nil else { return }
+        session.drawn(frame)
+        presentedPictures += 1
+    }
+
+    /// Submit the view's opaque black clear on the same ordered Metal queue
+    /// as the old picture. A blank never reports a frame to the host.
+    private func blankIfNeeded(in view: MTKView) {
+        guard needsBlankDrawable, let pass = view.currentRenderPassDescriptor,
+              let drawable = view.currentDrawable, let commands = queue.makeCommandBuffer()
+        else { return }
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = view.clearColor
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
+        encoder.endEncoding()
+        needsBlankDrawable = false
+        commands.present(drawable)
+        commands.addCompletedHandler { [weak self] buffer in
+            if buffer.status != .completed {
+                DispatchQueue.main.async { self?.needsBlankDrawable = true }
+            }
+        }
         commands.commit()
     }
 

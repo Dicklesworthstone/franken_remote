@@ -10,7 +10,7 @@ import UIKit
 /// become US-layout key presses. Unicode and negotiated multi-character paste
 /// go to the host's text input once, without queueing, splitting or retry.
 final class RemoteSurfaceView: UIView, UIKeyInput {
-    let metalView = MTKView()
+    private var metalView = MTKView()
     let interpreter = TouchInterpreter()
     private var renderer: MetalRenderer?
     private var feedback = UIImpactFeedbackGenerator(style: .light)
@@ -52,15 +52,8 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
         backgroundColor = .black
-        metalView.isUserInteractionEnabled = false
-        metalView.colorPixelFormat = .bgra8Unorm
-        metalView.framebufferOnly = true
-        metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        metalView.enableSetNeedsDisplay = false
-        metalView.isPaused = false
-        metalView.autoResizeDrawable = true
         metalView.device = MTLCreateSystemDefaultDevice()
-        addSubview(metalView)
+        installMetalView()
         if let renderer = MetalRenderer(view: metalView) {
             self.renderer = renderer
             metalView.delegate = renderer
@@ -80,6 +73,19 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
                            name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         center.addObserver(self, selector: #selector(keyboardWillHide(_:)),
                            name: UIResponder.keyboardWillHideNotification, object: nil)
+    }
+
+    private func installMetalView() {
+        metalView.isUserInteractionEnabled = false
+        metalView.colorPixelFormat = .bgra8Unorm
+        metalView.framebufferOnly = true
+        metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        metalView.enableSetNeedsDisplay = false
+        metalView.isPaused = false
+        metalView.autoResizeDrawable = true
+        addSubview(metalView)
+        metalView.delegate = renderer
+        setNeedsLayout()
     }
 
     @objc private func keyboardFrameChanged(_ note: Notification) {
@@ -452,9 +458,31 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
         session?.releaseAllKeys()
     }
 
+    /// Metal's retained drawable and the session's visibility have the same
+    /// lifetime. Cover the remote pixels even if iOS stops display callbacks
+    /// before the renderer can submit its black drawable.
+    func setSurfaceVisible(_ visible: Bool) {
+        session?.setVisible(visible)
+        renderer?.setVisible(visible)
+        if visible, metalView.isHidden {
+            // iOS can stop servicing drawables while hidden. A fresh layer
+            // cannot flash the previous desktop before its first draw.
+            let previous = metalView
+            previous.delegate = nil
+            previous.removeFromSuperview()
+            metalView = MTKView(frame: bounds, device: previous.device)
+            installMetalView()
+        } else if !visible {
+            metalView.isHidden = true
+            suspend()
+        }
+    }
+
     /// The app left the foreground or the view went away.
-    func suspend() {
-        interpreter.reset()
+    private func suspend() {
+        // The next visibility interval must establish its own touch-time
+        // floor, even when the first drawable has the same size and frame.
+        retirePresentation(at: CACurrentMediaTime())
         releaseKeys()
         setSoftwareKeyboard(false)
     }

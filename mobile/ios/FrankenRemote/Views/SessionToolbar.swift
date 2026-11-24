@@ -152,8 +152,7 @@ struct SessionSurface: UIViewRepresentable {
         view.interpreter.scroller.pointsPerLine = 18 / CGFloat(max(0.25, settings.scrollSpeed))
         view.interpreter.scroller.preciseScale = CGFloat(max(0.25, settings.scrollSpeed))
         view.hapticsEnabled = settings.haptics
-        session.setVisible(visible)
-        if !visible { view.suspend() }
+        view.setSurfaceVisible(visible)
         view.setSoftwareKeyboard(keyboard && visible && session.phase == .controlled)
         if let command = zoom {
             switch command {
@@ -165,7 +164,6 @@ struct SessionSurface: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ view: RemoteSurfaceView, coordinator: ()) {
-        view.suspend()
-        view.session?.setVisible(false)
+        view.setSurfaceVisible(false)
     }
 }
