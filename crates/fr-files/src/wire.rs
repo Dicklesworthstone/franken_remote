@@ -147,8 +147,8 @@ impl HostReceiver {
     pub fn is_busy(&self) -> bool {
         self.reply.is_some() || self.offer_refusal.is_some() || self.atp.has_pending()
     }
-    pub(crate) fn has_pending_offer_refusal(&self) -> bool {
-        self.offer_refusal.is_some()
+    pub(crate) fn pending_offer_refusal(&self) -> Option<Reason> {
+        self.offer_refusal.map(|(_, reason)| reason)
     }
     pub fn progress(&self) -> Option<Progress> {
         if self.is_closed() {
@@ -166,9 +166,19 @@ impl HostReceiver {
     /// actual receipt has been polled and its bounded reply encoded. A terminal
     /// pre-admission refusal is retained even if a later cancellation arrives.
     pub fn receive(&mut self, bytes: &[u8]) -> Result<Admission, Error> {
+        self.receive_bounded(bytes, u64::MAX)
+    }
+
+    /// A standing job supplies its remaining manifest allowance. The ATP owner
+    /// checks the decoded size before handing the offer to its disk worker.
+    pub(crate) fn receive_bounded(
+        &mut self,
+        bytes: &[u8],
+        max_offer_bytes: u64,
+    ) -> Result<Admission, Error> {
         let message = files::decode(bytes, self.settings.incoming, self.settings.limits)
             .map_err(Error::Wire)?;
-        if self.has_pending_offer_refusal() {
+        if self.pending_offer_refusal().is_some() {
             return Err(Error::Busy);
         }
         if let Body::Cancel(_) = message.body {
@@ -192,9 +202,14 @@ impl HostReceiver {
             && !self.atp.is_closed()
             && self.progress.is_none()
             && self.last.is_none_or(|last| message.id > last.id);
-        let result =
-            self.atp
-                .push_enveloped(self.atp.binding(), message.id, atp, Some(offer), profile);
+        let result = self.atp.push_enveloped(
+            self.atp.binding(),
+            message.id,
+            atp,
+            Some(offer),
+            profile,
+            max_offer_bytes,
+        );
         if let Err(error) = result
             && fresh_offer
             && let Some(reason) = offer_refusal(error)

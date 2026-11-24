@@ -1,7 +1,9 @@
 //! Explicit acceptance and real publication accounting on one original receiver.
-use super::{ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, JobStatus, LiveError, MAX_ENTRIES, state};
+use super::{
+    ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, JobBudget, JobStatus, LiveError, SyncLimits, state,
+};
 use crate::{
-    quic::{Receiver, State},
+    quic::{FileAdmission, Receiver, State},
     receive::{ConflictPolicy, DropDirectory, Publication},
     wire::ResultReceipt,
     worker::{self, Completion},
@@ -20,6 +22,7 @@ enum Phase {
     Manifest,
     Files,
     Acknowledging,
+    Refusing(LiveError),
     Stopped,
 }
 struct Pending {
@@ -35,6 +38,7 @@ pub struct ControllerJob {
     directory: DropDirectory,
     status: JobStatus,
     phase: Phase,
+    budget: JobBudget,
     pending: Option<Pending>,
     connection: Option<ConnectionBinding>,
     last_now: Option<u64>,
@@ -60,6 +64,7 @@ impl ControllerJob {
             directory: directory.with_conflict_tracking(),
             status: JobStatus::new(job_id),
             phase: Phase::Advertisement,
+            budget: JobBudget::default(),
             pending: None,
             connection: None,
             last_now: None,
@@ -188,10 +193,20 @@ impl ControllerJob {
         self.observe(receiver.last_result())?;
         self.finish_pending(receiver, q, now)?;
         let idle = receiver.sync_idle(q).map_err(LiveError::Receive)?;
-        let allow_files = self.phase == Phase::Files && self.completed < self.entries;
+        let admission = if self.phase == Phase::Files && self.completed < self.entries {
+            let remaining = self
+                .bytes
+                .checked_sub(self.published_bytes)
+                .ok_or(LiveError::Resource)?;
+            FileAdmission::JobFiles {
+                max_offer_bytes: remaining.min(SyncLimits::default().max_file_bytes),
+            }
+        } else {
+            FileAdmission::WaitingForJob
+        };
         let mut incoming = None;
         let receiver_state = receiver
-            .service_sync(q, &mut *authorize, allow_files, |record| {
+            .service_sync(q, &mut *authorize, admission, |record| {
                 if !idle && !matches!(record.phase, SyncPhase::Cancelled | SyncPhase::Failed) {
                     return Ok(Disposition::Blocked);
                 }
@@ -199,6 +214,21 @@ impl ControllerJob {
                 Ok(Disposition::Consumed)
             })
             .map_err(LiveError::Receive)?;
+        // A rejected new offer owns the lane's sole reply slot. Let the
+        // receiver deliver its bounded no-effect proof before retiring.
+        if let Some(reason) = receiver.pending_offer_refusal() {
+            self.phase = Phase::Refusing(match reason {
+                Reason::Resource => LiveError::Resource,
+                _ => LiveError::WrongPhase,
+            });
+        }
+        if let Phase::Refusing(error) = self.phase {
+            return if receiver_state == State::Retired {
+                Err(error)
+            } else {
+                Ok(())
+            };
+        }
         self.observe(receiver.last_result())?;
         if let Some(record) = incoming {
             self.received(record, now)?;
@@ -291,13 +321,14 @@ impl ControllerJob {
             Phase::Manifest => {
                 if record.phase != SyncPhase::Transferring
                     || record.manifest_revision != self.revision
-                    || record.entries_total > MAX_ENTRIES
                     || record.entries_completed != 0
                     || record.bytes_completed != 0
                     || (record.entries_total == 0 && record.bytes_total != 0)
                 {
                     return Err(LiveError::WrongPhase);
                 }
+                self.budget
+                    .admit(record.entries_total, record.bytes_total)?;
                 self.entries = record.entries_total;
                 self.bytes = record.bytes_total;
                 self.status.state = record;

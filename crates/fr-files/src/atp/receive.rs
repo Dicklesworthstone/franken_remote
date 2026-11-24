@@ -249,7 +249,7 @@ impl Receiver {
         bytes: &[u8],
         profile: u16,
     ) -> Result<u64, Error> {
-        self.push_enveloped(binding, id, bytes, None, profile)
+        self.push_enveloped(binding, id, bytes, None, profile, u64::MAX)
     }
     pub fn profile(&self) -> u16 {
         self.profile
@@ -261,6 +261,7 @@ impl Receiver {
         bytes: &[u8],
         offer: Option<bool>,
         profile: u16,
+        max_offer_bytes: u64,
     ) -> Result<u64, Error> {
         self.check_binding(binding)?;
         if id == 0 {
@@ -272,7 +273,7 @@ impl Receiver {
         if self.is_closed() {
             return Err(Error::Closed);
         }
-        let result = self.push_inner(id, bytes, offer, profile);
+        let result = self.push_inner(id, bytes, offer, profile, max_offer_bytes);
         if let Err(error) = &result
             && !matches!(
                 error,
@@ -289,6 +290,7 @@ impl Receiver {
         bytes: &[u8],
         offer: Option<bool>,
         profile: u16,
+        max_offer_bytes: u64,
     ) -> Result<u64, Error> {
         let frame = decode_frame(bytes, self.frame_bytes)?;
         if frame.frame_type() != FrameType::ObjectManifest && profile != self.profile {
@@ -301,6 +303,9 @@ impl Receiver {
                     return Err(Error::Order);
                 }
                 let manifest = portable_manifest(&frame, profile)?;
+                if manifest.total_bytes > max_offer_bytes {
+                    return Err(Error::ResourceLimit);
+                }
                 let expected = if manifest.is_directory {
                     Expected::Directory(directory_manifest(&manifest, profile)?)
                 } else {

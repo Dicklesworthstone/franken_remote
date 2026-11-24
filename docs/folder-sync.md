@@ -52,7 +52,10 @@ settled. Each scan allows at most 32 flat regular files, 64 MiB per file and
 256 MiB of source content. Subdirectories, symlinks and special files refuse the
 job. Across all rounds, the live job allows 64 attempted file versions and
 1 GiB of attempted content; the receiver's independently selected lower limits
-still apply. Scanning uses one supervised worker and one bounded result. Each
+still apply. The controller charges each announced round against those job
+limits before accepting its file offers. Each decoded ATP offer must also fit
+the remaining bytes of the round and the per-file ceiling before the receiver
+can queue a staging operation. Scanning uses one supervised worker and one bounded result. Each
 round has a five-minute deadline, and each retained state record keeps its
 original one-second delivery deadline. A round does not start while prior ATP,
 publication proof, source cleanup or job-state custody remains outstanding.

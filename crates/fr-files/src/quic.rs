@@ -44,6 +44,13 @@ pub enum State {
     Retired,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum FileAdmission {
+    Ordinary,
+    WaitingForJob,
+    JobFiles { max_offer_bytes: u64 },
+}
+
 /// One receive operation in the original disk slot, one retained reply buffer,
 /// and one bounded native send reservation. Never blocks for a syscall or thread
 /// join. File retirement clears only the file pair; actual results stay readable.
@@ -235,7 +242,7 @@ impl HostReceiver {
         q: &mut QuicRecords,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<State, Error> {
-        self.service_inner(q, &mut authorize, None, &mut |_| Err(()))
+        self.service_inner(q, &mut authorize, FileAdmission::Ordinary, &mut |_| Err(()))
     }
 
     /// The original sync owner supplies both the ATP admission gate and the
@@ -245,21 +252,21 @@ impl HostReceiver {
         &mut self,
         q: &mut QuicRecords,
         mut authorize: impl FnMut() -> bool,
-        allow_files: bool,
+        admission: FileAdmission,
         mut sync: impl FnMut(SyncJobState) -> Result<Disposition, ()>,
     ) -> Result<State, Error> {
         self.check_identity(q)?;
         if !self.lane.sync_selected() {
             return Err(Error::WrongRole);
         }
-        self.service_inner(q, &mut authorize, Some(allow_files), &mut sync)
+        self.service_inner(q, &mut authorize, admission, &mut sync)
     }
 
     fn service_inner(
         &mut self,
         q: &mut QuicRecords,
         authorize: &mut impl FnMut() -> bool,
-        allow_files: Option<bool>,
+        admission: FileAdmission,
         sync: &mut impl FnMut(SyncJobState) -> Result<Disposition, ()>,
     ) -> Result<State, Error> {
         self.check_identity(q)?;
@@ -279,7 +286,7 @@ impl HostReceiver {
             self.retire(q)?;
             return Err(Error::Transport(error));
         }
-        let result = self.turn(q, authorize, allow_files, sync);
+        let result = self.turn(q, authorize, admission, sync);
         if result.is_err() {
             self.receiver.stop();
             self.retire(q)?;
@@ -290,7 +297,7 @@ impl HostReceiver {
         &mut self,
         q: &mut QuicRecords,
         authorize: &mut impl FnMut() -> bool,
-        allow_files: Option<bool>,
+        admission: FileAdmission,
         sync: &mut impl FnMut(SyncJobState) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
         let now = self.clock.now().as_nanos() / 1000;
@@ -335,7 +342,7 @@ impl HostReceiver {
             // A next-record FileCancel can still fence the disk owner; ordinary
             // data remains transport-owned until the reply slot is free.
             return if self.state == State::Active {
-                self.receive_one(q, authorize, true, allow_files, sync)
+                self.receive_one(q, authorize, true, admission, sync)
             } else {
                 Ok(())
             };
@@ -346,14 +353,14 @@ impl HostReceiver {
         if self.state == State::Draining {
             return Ok(());
         }
-        self.receive_one(q, authorize, false, allow_files, sync)
+        self.receive_one(q, authorize, false, admission, sync)
     }
     fn receive_one(
         &mut self,
         q: &mut QuicRecords,
         authorize: &mut impl FnMut() -> bool,
         cancel_only: bool,
-        allow_files: Option<bool>,
+        admission: FileAdmission,
         sync: &mut impl FnMut(SyncJobState) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
         let incoming = self.lane.incoming();
@@ -366,7 +373,7 @@ impl HostReceiver {
                 // One terminal refusal already owns the reply slot. Do not
                 // consume a following cancel/data record or reset the lane
                 // before its bounded reply has entered transport ownership.
-                if receiver.has_pending_offer_refusal() {
+                if receiver.pending_offer_refusal().is_some() {
                     return Ok(Disposition::Blocked);
                 }
                 if sync_selected && let Ok(state) = sync_job_state::decode(bytes, incoming, limits)
@@ -393,11 +400,11 @@ impl HostReceiver {
                         ..
                     })
                 );
-                if allow_files == Some(false) && !cancellation {
+                if matches!(admission, FileAdmission::WaitingForJob) && !cancellation {
                     refusal = Some(wire::Error::Wire(fr_wire::WireError::InvalidValue));
                     return Ok(Disposition::Consumed);
                 }
-                if allow_files.is_some()
+                if !matches!(admission, FileAdmission::Ordinary)
                     && matches!(message, Ok(fr_wire::files::Message {
                         body: fr_wire::files::Body::Offer { profile, .. }, ..
                     }) if profile != fr_wire::files::ATP_PORTABLE_FULL)
@@ -410,12 +417,16 @@ impl HostReceiver {
                 if cancel_only && !cancellation {
                     return Ok(Disposition::Blocked);
                 }
-                match receiver.receive(bytes) {
+                let limit = match admission {
+                    FileAdmission::JobFiles { max_offer_bytes } => max_offer_bytes,
+                    FileAdmission::Ordinary | FileAdmission::WaitingForJob => u64::MAX,
+                };
+                match receiver.receive_bounded(bytes, limit) {
                     Ok(Admission::Queued(_) | Admission::CancellationRequested) => {
                         Ok(Disposition::Consumed)
                     }
                     Err(error) if busy(error) => Ok(Disposition::Blocked),
-                    Err(_) if receiver.has_pending_offer_refusal() => {
+                    Err(_) if receiver.pending_offer_refusal().is_some() => {
                         // The original worker is fenced. The next service turn
                         // drains FileComplete under the unchanged reply budget,
                         // then retires files without cancelling desktop input.
@@ -449,6 +460,10 @@ impl HostReceiver {
             return Err(Error::WrongRole);
         }
         Ok(self.clock.now().as_nanos() / 1000)
+    }
+
+    pub(crate) fn pending_offer_refusal(&self) -> Option<fr_wire::files::Reason> {
+        self.receiver.pending_offer_refusal()
     }
 
     pub(crate) fn sync_tracks(&self, directory: &DropDirectory) -> bool {

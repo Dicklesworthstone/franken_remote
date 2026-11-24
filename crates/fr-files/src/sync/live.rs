@@ -29,6 +29,31 @@ pub const MAX_SESSION_BYTES: u64 = 1024 * 1024 * 1024;
 pub(super) const CONTROL_LIFETIME_US: u64 = 1_000_000;
 pub(super) const ACCEPT_LIFETIME_US: u64 = 5_000_000;
 
+/// Each endpoint charges the declared round once, before admitting any of its
+/// files. Empty, settled rounds can continue after a budget is exhausted.
+#[derive(Default)]
+struct JobBudget {
+    files: u32,
+    bytes: u64,
+}
+
+impl JobBudget {
+    fn admit(&mut self, files: u32, bytes: u64) -> Result<(), LiveError> {
+        let limits = SyncLimits::default();
+        if files > MAX_ENTRIES
+            || bytes > limits.max_total_bytes
+            || bytes > u64::from(files) * limits.max_file_bytes
+            || files > MAX_SESSION_TRANSFERS - self.files
+            || bytes > MAX_SESSION_BYTES - self.bytes
+        {
+            return Err(LiveError::Resource);
+        }
+        self.files += files;
+        self.bytes += bytes;
+        Ok(())
+    }
+}
+
 /// Sanitized terminal job failures. None contains a local path or source hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveError {
@@ -213,5 +238,33 @@ impl HostConfig {
         }
         self.interval_us = micros;
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_reservations_are_bounded_and_rejections_spend_nothing() {
+        let limits = SyncLimits::default();
+        let mut budget = JobBudget::default();
+        for (entries, bytes) in [
+            (0, 1),
+            (1, limits.max_file_bytes + 1),
+            (MAX_ENTRIES, limits.max_total_bytes + 1),
+            (MAX_ENTRIES + 1, 0),
+            (1, u64::MAX),
+        ] {
+            assert_eq!(budget.admit(entries, bytes), Err(LiveError::Resource));
+        }
+        for _ in 0..4 {
+            budget.admit(4, limits.max_total_bytes).unwrap();
+        }
+        assert_eq!(budget.admit(1, 1), Err(LiveError::Resource));
+        budget.admit(32, 0).unwrap();
+        budget.admit(16, 0).unwrap();
+        assert_eq!(budget.admit(1, 0), Err(LiveError::Resource));
+        budget.admit(0, 0).unwrap();
     }
 }

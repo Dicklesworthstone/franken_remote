@@ -1,7 +1,6 @@
 //! Source-version delivery on one original, explicitly accepted download lane.
 use super::{
-    ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, HostConfig, JobStatus, LiveError, MAX_SESSION_BYTES,
-    MAX_SESSION_TRANSFERS,
+    ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, HostConfig, JobBudget, JobStatus, LiveError,
     scan::{PreparedRound, Scan, ScanScope, Version},
     state,
 };
@@ -64,8 +63,7 @@ pub struct HostJob {
     acceptance_until: u64,
     round_until: u64,
     next_scan: u64,
-    attempted_files: u32,
-    attempted_bytes: u64,
+    budget: JobBudget,
     reported: usize,
     recorded_ledger: bool,
     cleanup: Option<Result<(), LiveError>>,
@@ -111,8 +109,7 @@ impl HostJob {
             acceptance_until,
             round_until: 0,
             next_scan: now,
-            attempted_files: 0,
-            attempted_bytes: 0,
+            budget: JobBudget::default(),
             reported: 0,
             recorded_ledger: false,
             cleanup: None,
@@ -275,9 +272,6 @@ impl HostJob {
             Step::Scanning => self.poll_scan(now)?,
             Step::StartTransfer => {
                 let prepared = self.prepared.take().ok_or(LiveError::WrongPhase)?;
-                self.attempted_files +=
-                    u32::try_from(prepared.versions.len()).map_err(|_| LiveError::Resource)?;
-                self.attempted_bytes += prepared.bytes;
                 self.versions = prepared.versions;
                 self.reported = 0;
                 self.recorded_ledger = false;
@@ -358,17 +352,7 @@ impl HostJob {
         };
         self.scan = None;
         let count = u32::try_from(prepared.versions.len()).map_err(|_| LiveError::Resource)?;
-        if self
-            .attempted_files
-            .checked_add(count)
-            .is_none_or(|n| n > MAX_SESSION_TRANSFERS)
-            || self
-                .attempted_bytes
-                .checked_add(prepared.bytes)
-                .is_none_or(|n| n > MAX_SESSION_BYTES)
-        {
-            return Err(LiveError::Resource);
-        }
+        self.budget.admit(count, prepared.bytes)?;
         let mut announcement = state(
             self.config.job_id,
             SyncPhase::Transferring,
