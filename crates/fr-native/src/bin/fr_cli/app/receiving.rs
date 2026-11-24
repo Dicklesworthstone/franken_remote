@@ -13,6 +13,7 @@ use std::fmt;
 #[derive(PartialEq, Eq)]
 pub(super) struct Receiving {
     arguments: Vec<String>,
+    sync_job: Option<u64>,
 }
 
 impl fmt::Debug for Receiving {
@@ -43,6 +44,7 @@ impl Receiving {
             return Err(invalid());
         };
         let receive = connection.receive.ok_or_else(invalid)?;
+        let sync_job = receive.sync_job;
         #[cfg(any(
             all(target_os = "linux", feature = "linux-desktop"),
             all(target_os = "macos", feature = "macos-desktop")
@@ -53,7 +55,14 @@ impl Receiving {
             all(target_os = "macos", feature = "macos-desktop")
         )))]
         let _ = receive;
-        Ok(Some(Self { arguments }))
+        Ok(Some(Self {
+            arguments,
+            sync_job,
+        }))
+    }
+
+    pub(super) const fn sync_job(&self) -> Option<u64> {
+        self.sync_job
     }
 
     fn into_session_args(self, mut arguments: Vec<String>) -> Result<Vec<String>, Failure> {
@@ -110,11 +119,14 @@ pub(super) fn take_for_app_choice(
 /// The pending choice remains visible even after an unused picker refresh.
 /// Neither the destination nor any transfer contents enter this UI notice.
 pub(super) fn notice(pending: Option<&Receiving>, previous: Option<&str>) -> Option<String> {
-    pending.map(|_| {
-        notice_text(&format!(
-            "Receive host files once: choose View and control, then Receive files. The destination applies only to the next connection. {}",
-            previous.unwrap_or_default()
-        ))
+    pending.map(|receiving| {
+        let scope = receiving.sync_job.map_or_else(
+            || "Receive host files once: choose View and control, then Receive files. The destination applies only to the next connection.".to_owned(),
+            |job| format!(
+                "Accept host folder job {job}: choose View and control, then Receive files. New source versions are received throughout this connection, keeping both on conflicts. This job and destination apply only to the next connection."
+            ),
+        );
+        notice_text(&format!("{scope} {}", previous.unwrap_or_default()))
     })
 }
 

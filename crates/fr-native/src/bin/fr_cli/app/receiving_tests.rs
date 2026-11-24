@@ -267,3 +267,133 @@ fn receive_consent_cannot_be_installed_or_combined_with_other_app_actions() {
     assert!(USAGE.contains("next selected controlling connection only"));
     assert!(USAGE.contains("--receive-conflict POLICY"));
 }
+
+#[test]
+fn explicit_folder_job_reaches_only_the_accepted_original_app_connection() {
+    for consent in [false, true] {
+        let mut receiving = pending(&[
+            "app",
+            "--receive",
+            "/private/folder destination",
+            "--receive-conflict",
+            "keep-both",
+            "--sync-job",
+            "41",
+        ]);
+        let notice =
+            receiving::notice(receiving.as_ref(), Some("Previous viewer closed.")).unwrap();
+        assert!(notice.starts_with("Accept host folder job 41:"));
+        assert!(notice.contains("throughout this connection"));
+        assert!(notice.contains("keeping both on conflicts"));
+        assert!(notice.contains("Previous viewer closed."));
+        assert!(!notice.contains("/private/folder destination"));
+        assert!(!format!("{receiving:?}").contains("/private/folder destination"));
+
+        let picker = pick_args(&Settings::default(), Some(&notice), 9443, true);
+        assert!(connection(&picker).receive.is_none());
+        assert!(!picker.iter().any(|arg| arg == "--sync-job"));
+        let args = receiving::take_for_app_choice(
+            &mut receiving,
+            session_args("nORIGINAL", &Settings::default(), 9443, false),
+            consent,
+        )
+        .unwrap();
+        assert!(receiving.is_none());
+        let viewer = connection(&args);
+        assert_eq!(viewer.target.node, "nORIGINAL");
+        assert!(!viewer.choose_receive_directory);
+        if consent {
+            let selected = viewer.receive.unwrap();
+            assert_eq!(selected.sync_job, Some(41));
+            assert!(selected.keep_both);
+            assert_eq!(
+                selected.directory,
+                PathBuf::from("/private/folder destination")
+            );
+        } else {
+            assert!(viewer.receive.is_none());
+        }
+        assert_eq!(
+            args.iter().filter(|arg| *arg == "--sync-job").count(),
+            usize::from(consent)
+        );
+
+        // A failed first launch or a later host choice cannot recover either
+        // the job acceptance or its private destination from the app owner.
+        let next = receiving::take_for_session(
+            &mut receiving,
+            session_args("nNEXT", &Settings::default(), 9443, false),
+        )
+        .unwrap();
+        assert!(connection(&next).receive.is_none());
+        assert!(!next.iter().any(|arg| arg == "--sync-job"));
+        assert!(receiving::notice(receiving.as_ref(), None).is_none());
+    }
+}
+
+#[test]
+fn folder_job_refuses_view_only_and_cannot_be_restored_from_preferences() {
+    let mut receiving = pending(&[
+        "app",
+        "--receive",
+        "/private/folder destination",
+        "--receive-conflict",
+        "keep-both",
+        "--sync-job",
+        "41",
+    ]);
+    let settings = Settings {
+        control: false,
+        ..Settings::default()
+    };
+    assert!(
+        receiving::take_for_app_choice(
+            &mut receiving,
+            session_args("nVIEW", &settings, 9443, false),
+            true,
+        )
+        .is_err()
+    );
+    assert!(receiving.is_none());
+    let settings = Settings::from_json(
+        br#"{"version":1,"sync_job":41,"receive":"/private/old","receive_conflict":"keep-both"}"#,
+    );
+    let saved = settings.to_json();
+    assert!(!saved.contains("sync") && !saved.contains("receive"));
+    assert!(
+        connection(&session_args("nNEXT", &settings, 9443, false))
+            .receive
+            .is_none()
+    );
+}
+
+#[test]
+fn app_folder_acceptance_reuses_the_original_job_and_destination_validation() {
+    for (options, code) in [
+        (vec!["--sync-job", "41"], "files_sync_directory_required"),
+        (
+            vec!["--receive", "/private/destination", "--sync-job", "41"],
+            "files_sync_keep_both_required",
+        ),
+        (vec!["--sync-job", "0"], "files_sync_job_invalid"),
+        (vec!["--sync-job", "-1"], "files_sync_job_invalid"),
+        (
+            vec!["--sync-job", "41", "--sync-job", "42"],
+            "invalid_arguments",
+        ),
+    ] {
+        let mut args = vec!["app"];
+        args.extend(options);
+        assert_eq!(parse(&args).unwrap_err().code, code);
+    }
+    for action in ["--help", "--install", "--uninstall"] {
+        assert_eq!(
+            parse(&["app", "--sync-job", "41", action])
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+    }
+    assert!(USAGE.contains("--sync-job ID"));
+    assert!(!desktop_entry("/home/me/.local/bin/fr").contains("--sync-job"));
+}

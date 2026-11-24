@@ -82,6 +82,10 @@ hour unused, fr app quits.\n\n\
 --receive-max-file-bytes N     optional positive per-file receive limit.\n\
 --receive-max-session-bytes N  optional positive total receive limit.\n\
 --receive-conflict POLICY      reject (default) or keep-both; never overwrite.\n\
+--sync-job ID  accept this host-configured folder job on the next controlling\n\
+               connection only. Requires --receive DIR and --receive-conflict\n\
+               keep-both. Choose Receive files to accept new source versions\n\
+               for this connection; a later connection needs a new choice.\n\
 --microphone-source NAME  use this explicit local source on the next selected\n\
                connection only; choose Show microphone controls, then Allow and Talk.\n\
                Linux requires a named PulseAudio source. macOS can pin default.\n\
@@ -185,7 +189,8 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
             "--receive"
             | "--receive-max-file-bytes"
             | "--receive-max-session-bytes"
-            | "--receive-conflict" => {
+            | "--receive-conflict"
+            | "--sync-job" => {
                 receive_args.push(arg.clone());
                 receive_args.push(rest.next().ok_or_else(invalid)?.clone());
             }
@@ -719,6 +724,7 @@ fn session_notice_checked(
 
 /// The viewer, upload sources and receive disk owner each owe terminal evidence.
 /// Validate every owner before another picker or viewer can start.
+#[cfg(test)]
 fn session_notice_with_transfers(
     stdout: &CompletionCapture,
     name: &str,
@@ -726,12 +732,31 @@ fn session_notice_with_transfers(
     upload_expected: bool,
     receive_expected: bool,
 ) -> Result<String, Failure> {
+    session_notice_with_job(
+        stdout,
+        name,
+        success,
+        upload_expected,
+        receive_expected,
+        None,
+    )
+}
+
+fn session_notice_with_job(
+    stdout: &CompletionCapture,
+    name: &str,
+    success: bool,
+    upload_expected: bool,
+    receive_expected: bool,
+    expected_job: Option<u64>,
+) -> Result<String, Failure> {
     let report = last_report(stdout);
     // Inspect both directions even if either fails. Their original committed
     // effects survive independently; an upload failure must not erase a known
     // download, and a receiver failure must not erase host publication proof.
     let upload = upload_completion::inspect(stdout, upload_expected, report.as_ref());
-    let receive = receive_completion::inspect(stdout, receive_expected, report.as_ref());
+    let receive =
+        receive_completion::inspect_job(stdout, receive_expected, expected_job, report.as_ref());
     let upload = upload.map_err(|mut failure| {
         match &receive {
             Ok(receive) => receive.preserve(&mut failure),
@@ -981,6 +1006,10 @@ fn application(
         // selected viewer, including an explicit decline. No next picker or
         // failed launch can recover this one-use destination.
         let receive_expected = receive_files;
+        let expected_job = receiving
+            .as_ref()
+            .filter(|_| receive_files)
+            .and_then(Receiving::sync_job);
         let arguments = receiving::take_for_app_choice(
             &mut receiving,
             microphone::take_for_choice(
@@ -997,12 +1026,13 @@ fn application(
             receive_files,
         )?;
         let session = launcher.run(&arguments, true)?;
-        notice = Some(session_notice_with_transfers(
+        notice = Some(session_notice_with_job(
             &session.stdout,
             short_name(&name),
             session.status.success(),
             send_files,
             receive_expected,
+            expected_job,
         )?);
     }
 }

@@ -31,6 +31,23 @@ host job or supply a host path. Ordinary file-receive consent never accepts a
 folder job. The host source excludes `--send` and `--send-control`; independent
 controller uploads can still coexist on a positively negotiated duplex lane.
 
+The Linux and macOS native app can accept the same job through its normal
+machine picker:
+
+```sh
+fr app --receive /private/destination --receive-conflict keep-both --sync-job 41
+```
+
+The picker notice names the job and explains that new source versions will be
+received throughout this connection. Choose **View and control**, then
+**Receive files**. The app consumes this explicit job and destination before
+launching the selected viewer, including a declined choice or failed launch;
+neither is saved or reused by another connection. Without `--sync-job`, ordinary
+receiving consent does not accept a folder job.
+When the viewer closes, the app reports the original job's settled rounds,
+publications and stop reason alongside the file receipts. A mismatched job or
+unconfirmed receiver cleanup stops the app instead of opening another picker.
+
 The host advertises only its configured ID. Scanning starts after matching
 controller acceptance on the original granted download. The optional
 `file-folder-sync` capability is selected by both endpoints; older or

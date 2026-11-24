@@ -43,9 +43,10 @@ impl Inspection {
     }
 }
 
-pub(super) fn inspect(
+pub(super) fn inspect_job(
     stdout: &CompletionCapture,
     expected: bool,
+    expected_job: Option<u64>,
     report: Option<&Report>,
 ) -> Result<Inspection, Failure> {
     let Ok(line) = stdout.completion() else {
@@ -86,7 +87,7 @@ pub(super) fn inspect(
     }
     let record = Record::parse(&value).map_err(|()| unknown(Some(incomplete(&value))))?;
     let evidence = record.evidence();
-    if record.requested != expected || !record.consistent() {
+    if record.requested != expected || !record.consistent(expected_job) {
         return Err(unknown(Some(evidence)));
     }
     if matches!(record.cleanup, Cleanup::Pending | Cleanup::Failed) {
@@ -100,6 +101,12 @@ pub(super) fn inspect(
         return Err(failure);
     }
     if record.truncated
+        || record.folder_job.as_ref().is_some_and(|job| {
+            matches!(
+                job.failure,
+                Some("sync_publication_unknown" | "sync_cleanup_unconfirmed")
+            )
+        })
         || record.ended == Some("receive_invalid_result")
         || [record.absence, record.ended].contains(&Some("publication_unknown"))
         || record
@@ -121,9 +128,9 @@ pub(super) fn inspect(
 
 fn has_metadata(value: &Value) -> bool {
     value.as_object().is_some_and(|object| {
-        object
-            .keys()
-            .any(|key| key == "files_received" || key.starts_with("files_receive_"))
+        object.keys().any(|key| {
+            key == "files_received" || key == "folder_job" || key.starts_with("files_receive_")
+        })
     })
 }
 
@@ -154,6 +161,8 @@ fn pre_start_refusal(value: &Value, report: Option<&Report>) -> bool {
     matches!(report, Some(Report::Failed { code, unknown_effect: false, .. })
         if matches!(code.as_str(),
             "invalid_arguments" | "receive_requires_control" | "receive_directory_required"
+            | "files_sync_job_invalid" | "files_sync_directory_required"
+            | "files_sync_keep_both_required"
             | "files_limits_invalid" | "files_directory_relative" | "files_directory_missing"
             | "files_directory_not_directory" | "files_directory_symlink"
             | "files_directory_not_owned" | "files_directory_writable_by_others"
@@ -173,7 +182,7 @@ fn unknown(evidence: Option<FileReceiveReport>) -> Failure {
     failure
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Cleanup {
     NotStarted,
     Finished,
@@ -235,8 +244,114 @@ impl Refused {
     }
 }
 
+/// Job observations supplement the publication receipts; they never replace
+/// proof of publication or the original disk worker's cleanup result.
+struct FolderJob {
+    id: u64,
+    phase: &'static str,
+    revision: u64,
+    rounds_settled: u64,
+    confirmed_publications: u64,
+    failure: Option<&'static str>,
+    cleanup: Cleanup,
+}
+
+impl FolderJob {
+    fn parse(value: Option<&Value>) -> Result<Option<Self>, ()> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let phase = value.get("phase").and_then(Value::as_str).ok_or(())?;
+        let phase = [
+            "advertised",
+            "accepted",
+            "scanning",
+            "transferring",
+            "settled",
+            "conflict_recorded",
+            "cancelled",
+            "failed",
+        ]
+        .into_iter()
+        .find(|known| *known == phase)
+        .ok_or(())?;
+        let failure = match value.get("failure") {
+            Some(Value::Null) => None,
+            Some(Value::String(code)) => Some(sync_failure(code).ok_or(())?),
+            _ => return Err(()),
+        };
+        let job = Self {
+            id: value.get("id").and_then(Value::as_u64).ok_or(())?,
+            phase,
+            revision: value.get("revision").and_then(Value::as_u64).ok_or(())?,
+            rounds_settled: value
+                .get("rounds_settled")
+                .and_then(Value::as_u64)
+                .ok_or(())?,
+            confirmed_publications: value
+                .get("confirmed_publications")
+                .and_then(Value::as_u64)
+                .ok_or(())?,
+            failure,
+            cleanup: Cleanup::parse(value.get("cleanup"))?,
+        };
+        if job.id == 0
+            || job.rounds_settled > job.revision
+            || job.confirmed_publications > 64
+            || matches!(job.cleanup, Cleanup::NotStarted)
+            || match job.phase {
+                "cancelled" => job.failure != Some("sync_cancelled"),
+                "failed" => job.failure.is_none() || job.failure == Some("sync_cancelled"),
+                _ => job.failure.is_some(),
+            }
+        {
+            return Err(());
+        }
+        Ok(Some(job))
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "phase": self.phase,
+            "revision": self.revision,
+            "rounds_settled": self.rounds_settled,
+            "confirmed_publications": self.confirmed_publications,
+            "failure": self.failure,
+            "cleanup": self.cleanup.code(),
+        })
+    }
+}
+
+fn sync_failure(value: &str) -> Option<&'static str> {
+    [
+        "sync_invalid_config",
+        "sync_keep_both_required",
+        "sync_not_negotiated",
+        "sync_reconnect_refused",
+        "sync_job_mismatch",
+        "sync_direction_unsupported",
+        "sync_state_refused",
+        "sync_clock",
+        "sync_expired",
+        "sync_cancelled",
+        "sync_resource_limit",
+        "sync_source_refused",
+        "sync_transfer_failed",
+        "sync_worker_failed",
+        "sync_cleanup_unconfirmed",
+        "sync_publication_unknown",
+        "sync_durability_unconfirmed",
+        "sync_transfer_stopped",
+        "sync_peer_failed",
+    ]
+    .into_iter()
+    .find(|known| *known == value)
+}
+
 struct Record {
     requested: bool,
+    folder_job: Option<FolderJob>,
     received: Vec<Published>,
     refused: Vec<Refused>,
     bytes: u64,
@@ -288,6 +403,7 @@ impl Record {
                 .get("files_receive_requested")
                 .and_then(Value::as_bool)
                 .ok_or(())?,
+            folder_job: FolderJob::parse(value.get("folder_job"))?,
             received,
             refused,
             bytes,
@@ -306,9 +422,36 @@ impl Record {
         })
     }
 
-    fn consistent(&self) -> bool {
-        let no_work =
-            self.received.is_empty() && self.refused.is_empty() && self.progress.is_null();
+    fn consistent(&self, expected_job: Option<u64>) -> bool {
+        let no_work = self.received.is_empty()
+            && self.refused.is_empty()
+            && self.progress.is_null()
+            && self.folder_job.is_none();
+        match (&self.folder_job, expected_job) {
+            (Some(job), Some(expected)) => {
+                if job.id != expected || job.cleanup != self.cleanup || !self.requested {
+                    return false;
+                }
+                if matches!(self.cleanup, Cleanup::Finished)
+                    && !matches!(job.phase, "cancelled" | "failed")
+                {
+                    return false;
+                }
+            }
+            (None, Some(_)) => {
+                // Attachment can fail before the accepted job owner exists.
+                // Only this empty, typed setup result proves that exception.
+                let setup_refused = matches!(self.cleanup, Cleanup::Finished)
+                    && self.ended == Some("files_receive_setup_failed")
+                    && no_work
+                    && !self.truncated;
+                if !matches!(self.cleanup, Cleanup::NotStarted) && !setup_refused {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+            _ => {}
+        }
         if !self.requested {
             return matches!(self.cleanup, Cleanup::NotStarted)
                 && no_work
@@ -350,6 +493,16 @@ impl Record {
             durability_unknown,
             self.cleanup.code(),
         );
+        if let Some(job) = &self.folder_job {
+            let _ = write!(
+                notice,
+                " Folder job {}: {}, {} rounds settled, {} confirmed publications.",
+                job.id, job.phase, job.rounds_settled, job.confirmed_publications,
+            );
+            if let Some(failure) = job.failure {
+                let _ = write!(notice, " Job ended: {failure}.");
+            }
+        }
         if publication_unknown != 0 {
             let _ = write!(
                 notice,
@@ -369,20 +522,21 @@ impl Record {
     }
 
     fn evidence(&self) -> FileReceiveReport {
-        evidence(
-            &json!({
-                "files_receive_requested": self.requested,
-                "files_received": self.received.iter().map(Published::json).collect::<Vec<_>>(),
-                "files_receive_refused": self.refused.iter().map(Refused::json).collect::<Vec<_>>(),
-                "files_receive_absence": self.absence,
-                "files_receive_ended": self.ended,
-                "files_receive_cleanup": self.cleanup.code(),
-                "files_receive_progress": self.progress,
-                "files_receive_results_truncated": self.truncated,
-                "files_receive_cancel_requested": self.cancelled,
-            }),
-            &self.notice(),
-        )
+        let mut value = json!({
+            "files_receive_requested": self.requested,
+            "files_received": self.received.iter().map(Published::json).collect::<Vec<_>>(),
+            "files_receive_refused": self.refused.iter().map(Refused::json).collect::<Vec<_>>(),
+            "files_receive_absence": self.absence,
+            "files_receive_ended": self.ended,
+            "files_receive_cleanup": self.cleanup.code(),
+            "files_receive_progress": self.progress,
+            "files_receive_results_truncated": self.truncated,
+            "files_receive_cancel_requested": self.cancelled,
+        });
+        if let Some(job) = &self.folder_job {
+            value["folder_job"] = job.json();
+        }
+        evidence(&value, &self.notice())
     }
 }
 
@@ -415,12 +569,16 @@ fn incomplete(value: &Value) -> FileReceiveReport {
         .filter_map(Refused::parse)
         .map(|receipt| receipt.json())
         .collect();
+    let mut retained = json!({
+        "app_receive_evidence_incomplete": true,
+        "files_received": received,
+        "files_receive_refused": refused,
+    });
+    if let Ok(Some(job)) = FolderJob::parse(value.get("folder_job")) {
+        retained["folder_job"] = job.json();
+    }
     evidence(
-        &json!({
-            "app_receive_evidence_incomplete": true,
-            "files_received": received,
-            "files_receive_refused": refused,
-        }),
+        &retained,
         "Original receive evidence is incomplete; well-typed receipt fragments are retained. Do not infer no publication.",
     )
 }

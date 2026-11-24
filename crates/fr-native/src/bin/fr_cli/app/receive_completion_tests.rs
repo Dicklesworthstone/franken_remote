@@ -33,6 +33,157 @@ fn capture(value: &Value) -> CompletionCapture {
     capture_completion_with_limit(value.to_string().as_bytes(), CompletionLimit::NativeCommand)
 }
 
+fn folder_completion(macos: bool) -> Value {
+    let mut value = completion(macos);
+    value["files_received"] = json!([{"index":0,"bytes":19,"durable":true}]);
+    value["folder_job"] = json!({
+        "id":41,"phase":"cancelled","revision":3,"rounds_settled":2,
+        "confirmed_publications":1,"failure":"sync_cancelled","cleanup":"finished"
+    });
+    value
+}
+
+fn check_job(value: &Value, job: Option<u64>) -> Result<String, Failure> {
+    super::super::session_notice_with_job(&capture(value), "workstation", true, false, true, job)
+}
+
+#[test]
+fn folder_completion_keeps_original_job_and_publications_after_cancellation() {
+    for macos in [false, true] {
+        let value = folder_completion(macos);
+        let notice = check_job(&value, Some(41)).unwrap();
+        assert!(notice.contains("1 published (19 bytes)"));
+        assert!(
+            notice
+                .contains("Folder job 41: cancelled, 2 rounds settled, 1 confirmed publications.")
+        );
+        assert!(notice.contains("sync_cancelled"));
+        let inspection = inspect_job(&capture(&value), true, Some(41), None).unwrap();
+        let mut failure = Failure::new("session_failed", "The original viewer stopped.", 1);
+        inspection.preserve(&mut failure);
+        let report = retained(failure);
+        assert_eq!(report["folder_job"], value["folder_job"]);
+        assert_eq!(report["files_received"], value["files_received"]);
+
+        // A job observation is not another publication receipt. A final disk
+        // receipt can strengthen evidence after the job's last counter sample.
+        let mut later_receipt = value;
+        later_receipt["files_received"] = json!([
+            {"index":0,"bytes":19,"durable":true},
+            {"index":1,"bytes":7,"durable":false},
+        ]);
+        let notice = check_job(&later_receipt, Some(41)).unwrap();
+        assert!(notice.contains("2 published (26 bytes)"));
+        assert!(notice.contains("1 durability unconfirmed"));
+        assert!(notice.contains("1 confirmed publications"));
+    }
+}
+
+#[test]
+fn wrong_missing_or_unrequested_folder_job_never_authorizes_another_picker() {
+    let value = folder_completion(false);
+    for job in [None, Some(42)] {
+        let failure = check_job(&value, job).unwrap_err();
+        assert_eq!(failure.code, "app_receive_outcome_unknown");
+        let report = retained(failure);
+        assert_eq!(report["folder_job"], value["folder_job"]);
+        assert_eq!(report["files_received"], value["files_received"]);
+    }
+    let mut missing = value;
+    missing.as_object_mut().unwrap().remove("folder_job");
+    assert_eq!(
+        check_job(&missing, Some(41)).unwrap_err().code,
+        "app_receive_outcome_unknown"
+    );
+    let mut not_started = completion(false);
+    not_started["files_receive_cleanup"] = json!("not_started");
+    not_started["files_receive_absence"] = json!("host_download_unavailable");
+    assert!(
+        check_job(&not_started, Some(41))
+            .unwrap()
+            .starts_with("Receiving did not start")
+    );
+    let standalone = json!({"folder_job":folder_completion(false)["folder_job"]});
+    assert!(inspect_job(&capture(&standalone), false, None, None).is_err());
+
+    let mut setup_refused = completion(false);
+    setup_refused["files_receive_ended"] = json!("files_receive_setup_failed");
+    assert!(check_job(&setup_refused, Some(41)).is_ok());
+    for (field, invalid) in [
+        ("files_receive_ended", json!("receive_cancelled")),
+        ("files_receive_ended", json!("files_receive_failed")),
+        ("files_receive_ended", Value::Null),
+        ("files_receive_cleanup", json!("pending")),
+        ("files_receive_cleanup", json!("failed")),
+        ("files_receive_results_truncated", json!(true)),
+        ("files_receive_requested", json!(false)),
+        (
+            "files_receive_progress",
+            json!({"index":0,"staged_bytes":0,"total_bytes":19}),
+        ),
+        (
+            "files_receive_refused",
+            json!([{"index":0,"reason":"receive_cancelled"}]),
+        ),
+    ] {
+        let mut contradictory = setup_refused.clone();
+        contradictory[field] = invalid;
+        assert_eq!(
+            check_job(&contradictory, Some(41)).unwrap_err().code,
+            "app_receive_outcome_unknown"
+        );
+    }
+    setup_refused["files_received"] = json!([{"index":0,"bytes":19,"durable":true}]);
+    let failure = check_job(&setup_refused, Some(41)).unwrap_err();
+    assert_eq!(failure.code, "app_receive_outcome_unknown");
+    assert_eq!(
+        retained(failure)["files_received"],
+        setup_refused["files_received"]
+    );
+}
+
+#[test]
+fn folder_job_metadata_is_bounded_sanitized_and_consistent_with_owner_cleanup() {
+    for (field, invalid) in [
+        ("id", json!(0)),
+        ("rounds_settled", json!(4)),
+        ("confirmed_publications", json!(65)),
+        ("phase", json!("/private/untrusted")),
+        ("failure", json!("/private/untrusted")),
+        ("failure", Value::Null),
+        ("cleanup", json!("pending")),
+        ("cleanup", json!("not_started")),
+    ] {
+        let mut value = folder_completion(false);
+        value["folder_job"][field] = invalid;
+        let failure = check_job(&value, Some(41)).unwrap_err();
+        assert_eq!(failure.code, "app_receive_outcome_unknown");
+        let report = retained(failure);
+        assert_eq!(report["files_received"], value["files_received"]);
+        assert!(!report.to_string().contains("/private/untrusted"));
+    }
+    for failure in ["sync_publication_unknown", "sync_cleanup_unconfirmed"] {
+        let mut value = folder_completion(false);
+        value["folder_job"]["phase"] = json!("failed");
+        value["folder_job"]["failure"] = json!(failure);
+        let report = retained(check_job(&value, Some(41)).unwrap_err());
+        assert_eq!(report["folder_job"]["failure"], failure);
+        assert_eq!(report["files_received"], value["files_received"]);
+    }
+    let mut active = folder_completion(false);
+    active["folder_job"]["phase"] = json!("settled");
+    active["folder_job"]["failure"] = Value::Null;
+    assert_eq!(
+        check_job(&active, Some(41)).unwrap_err().code,
+        "app_receive_outcome_unknown"
+    );
+    active["folder_job"]["cleanup"] = json!("pending");
+    active["files_receive_cleanup"] = json!("pending");
+    let failure = check_job(&active, Some(41)).unwrap_err();
+    assert_eq!(failure.code, "app_receive_cleanup_unconfirmed");
+    assert_eq!(retained(failure)["folder_job"], active["folder_job"]);
+}
+
 fn check(value: &Value, expected: bool, success: bool) -> Result<String, Failure> {
     session_notice_checked(&capture(value), "workstation", success, expected)
 }
