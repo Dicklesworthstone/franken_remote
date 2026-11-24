@@ -894,3 +894,71 @@ fn deferred_restoration_can_qualify_the_prior_installed_rate_before_restoring_ou
     assert_eq!(c.applied_bitrate(), 8_000_000);
     assert_eq!(c.pending(), None);
 }
+
+#[test]
+fn clear_transport_cannot_probe_through_current_encoder_or_decoder_pressure() {
+    use fr_media::bitrate::PathEvidence;
+    for path_first in [false, true] {
+        for slow_decoder in [false, true] {
+            let (mut c, mut p) = reduced();
+            for now in (150_000..=6_150_000).step_by(50_000) {
+                let mut local = sample(now, A::Ready);
+                let receiver = if slow_decoder {
+                    ReceiverEvidence::Measured(Load {
+                        retained_bytes: 1024,
+                        retained_pictures: 2,
+                        decoding: true,
+                        work_us: None,
+                    })
+                } else {
+                    local.source_work_us = Some(50_000);
+                    ReceiverEvidence::Unobserved
+                };
+                if path_first {
+                    c.observe_path_evidence(now, PathEvidence::Clear).unwrap();
+                    assert_eq!(c.pending(), None);
+                }
+                c.observe(&p.update_with_receiver(local, receiver).unwrap())
+                    .unwrap();
+                if !path_first {
+                    c.observe_path_evidence(now, PathEvidence::Clear).unwrap();
+                }
+                assert_eq!(c.pending(), None);
+            }
+            // Normal service can probe only after a new interval without
+            // pressure. Both paths still use the same original capture token.
+            for now in (6_200_000..10_200_000).step_by(50_000) {
+                observe(&mut c, &mut p, now, A::Ready);
+                c.observe_path_evidence(now, PathEvidence::Clear).unwrap();
+                assert_eq!(c.pending(), None);
+            }
+            observe(&mut c, &mut p, 10_200_000, A::Ready);
+            c.observe_path_evidence(10_200_000, PathEvidence::Clear)
+                .unwrap();
+            assert_eq!(c.pending().unwrap().reason(), Reason::Headroom);
+        }
+    }
+}
+
+#[test]
+fn clear_path_cannot_probe_on_a_stale_pacing_report_but_a_queue_still_cuts() {
+    use fr_media::bitrate::PathEvidence;
+    let (mut c, mut p) = reduced();
+    observe(&mut c, &mut p, 150_000, A::Ready);
+    for now in (150_000..=6_150_000).step_by(50_000) {
+        c.observe_path_evidence(now, PathEvidence::Clear).unwrap();
+        assert_eq!(c.pending(), None);
+    }
+    for now in (6_200_000..=6_400_000).step_by(50_000) {
+        c.observe_path_evidence(
+            now,
+            PathEvidence::Queued {
+                delivered_bits_per_second: 1_000_000,
+            },
+        )
+        .unwrap();
+    }
+    let cut = c.pending().unwrap();
+    assert_eq!(cut.reason(), Reason::PathQueue);
+    assert!(cut.bitrate() < c.applied_bitrate());
+}

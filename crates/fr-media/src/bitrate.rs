@@ -146,6 +146,8 @@ pub struct Controller {
     next_capture: u64,
     last_now: Option<u64>,
     last_sample: Option<u64>,
+    /// Latest original capture-pacing report vetoes optimistic transport probes.
+    local_probe_blocked: bool,
     changed_at: Option<u64>,
     pressure_since: Option<u64>,
     headroom: Headroom,
@@ -175,6 +177,7 @@ impl Controller {
             next_capture: 1,
             last_now: None,
             last_sample: None,
+            local_probe_blocked: false,
             changed_at: None,
             pressure_since: None,
             headroom: Headroom::default(),
@@ -205,11 +208,10 @@ impl Controller {
     pub fn observe(&mut self, report: &Report) -> Result<(), Error> {
         let now = report.sample.now_us;
         self.clock(now)?;
-        let gap = self
-            .last_sample
-            .is_some_and(|last| now - last > EVIDENCE_GAP_US);
+        let local_gap = self.last_sample.map_or(0, |last| now - last);
         self.last_sample = Some(now);
-        let evidence_gap = gap || report.reason == crate::pacing::Reason::EvidenceGap;
+        let evidence_gap =
+            local_gap > EVIDENCE_GAP_US || report.reason == crate::pacing::Reason::EvidenceGap;
         // Once a path observer is installed, local enqueue/decoder headroom
         // cannot override its absent or congested capacity evidence. This also
         // holds when a native service polls local pacing after the path sample.
@@ -219,7 +221,11 @@ impl Controller {
                     .last_path_sample
                     .zip(self.path_sample_lifetime_us)
                     .is_none_or(|(last, lifetime)| now - last > lifetime));
-        let negative = headroom_negative(report) || path_negative;
+        self.local_probe_blocked = headroom_negative(report);
+        if self.local_probe_blocked || local_gap > PATH_EVIDENCE_GAP_US {
+            self.path_clear_since = None;
+        }
+        let negative = self.local_probe_blocked || path_negative;
         if self
             .pending
             .is_some_and(|change| change.reason == Reason::Headroom)
@@ -322,6 +328,18 @@ impl Controller {
             .is_some_and(|(last, previous_lifetime)| {
                 now_us - last > lifetime_us.min(previous_lifetime)
             });
+        // ACKs can prove transport headroom while the encoder or decoder is
+        // overloaded or capture has gone idle. Only veto optimistic samples:
+        // a measured queue still reduces the rate. Path-only controllers have
+        // no pacing owner and continue to follow their own qualified samples.
+        let local_veto = self
+            .last_sample
+            .is_some_and(|at| self.local_probe_blocked || now_us - at > PATH_EVIDENCE_GAP_US);
+        let evidence = if local_veto && evidence == PathEvidence::Clear {
+            PathEvidence::Unknown
+        } else {
+            evidence
+        };
         let queued = matches!(evidence, PathEvidence::Queued { .. });
         let measured = matches!(evidence, PathEvidence::Clear | PathEvidence::Queued { .. });
         if (gap || !measured || queued)
