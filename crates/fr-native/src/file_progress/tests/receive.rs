@@ -15,6 +15,7 @@ impl DownloadProbe {
     pub(super) fn new() -> Self {
         Self {
             sample: Mutex::new(ReceiveStatus {
+                folder_job: None,
                 phase: ReceivePhase::Receiving,
                 absence: None,
                 progress: None,

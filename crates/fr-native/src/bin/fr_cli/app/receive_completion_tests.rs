@@ -348,6 +348,7 @@ fn actual_native_formatter_and_terminal_preservation_match_the_application_contr
     };
     use frd::native_files::{ReceivePhase, ReceiveStatus};
     let mut status = ReceiveStatus {
+        folder_job: None,
         phase: ReceivePhase::Ended,
         absence: None,
         progress: None,

@@ -3,6 +3,7 @@ use crate::file_progress::{Snapshot, model::COLUMNS};
 
 fn status() -> ReceiveStatus {
     ReceiveStatus {
+        folder_job: None,
         phase: ReceivePhase::Receiving,
         absence: None,
         progress: None,

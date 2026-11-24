@@ -16,6 +16,7 @@ const MAX_RESULTS: usize = 65;
 #[derive(Debug)]
 pub(crate) struct Summary {
     requested: bool,
+    folder_job: Option<fr_files::sync::JobStatus>,
     received: Vec<(u64, u64, bool)>,
     refused: Vec<(u64, &'static str)>,
     absence: Option<&'static str>,
@@ -30,6 +31,7 @@ impl Summary {
     pub(crate) fn not_requested() -> Self {
         Self {
             requested: false,
+            folder_job: None,
             received: Vec::new(),
             refused: Vec::new(),
             absence: None,
@@ -58,6 +60,7 @@ impl Summary {
         let started = status.may_have_started();
         let mut summary = Self {
             requested: true,
+            folder_job: status.folder_job,
             absence: if started {
                 None
             } else {
@@ -167,6 +170,23 @@ impl Summary {
             "],\"files_receive_absence\":{absence},\"files_receive_ended\":{ended},\"files_receive_cleanup\":\"{}\",\"files_receive_progress\":{progress},\"files_receive_results_truncated\":{},\"files_receive_cancel_requested\":{}",
             self.cleanup, self.truncated, self.cancelled,
         );
+        if let Some(job) = self.folder_job {
+            let state = job.state;
+            let failure = job.failure.map_or_else(
+                || "null".to_owned(),
+                |error| crate::output::quoted(error.code()),
+            );
+            let _ = write!(
+                out,
+                ",\"folder_job\":{{\"id\":{},\"phase\":\"{}\",\"revision\":{},\"rounds_settled\":{},\"confirmed_publications\":{},\"failure\":{failure},\"cleanup\":\"{}\"}}",
+                state.job_id,
+                phase_name(state.phase),
+                state.manifest_revision,
+                job.rounds_settled,
+                job.confirmed_publications,
+                self.cleanup,
+            );
+        }
         out
     }
 
@@ -202,6 +222,21 @@ impl Summary {
                 " Selection #{index} progress: {staged}/{total} bytes staged (not publication)."
             );
         }
+        if let Some(job) = self.folder_job {
+            let _ = write!(
+                out,
+                " Folder job {} is {} at revision {} with {} settled rounds and {} confirmed publications. Folder job cleanup is {}.",
+                job.state.job_id,
+                phase_name(job.state.phase),
+                job.state.manifest_revision,
+                job.rounds_settled,
+                job.confirmed_publications,
+                self.cleanup,
+            );
+            if let Some(failure) = job.failure {
+                let _ = write!(out, " Folder job ended with {}.", failure.code());
+            }
+        }
         if self.truncated {
             out.push_str(" Additional result evidence was truncated; do not infer no effect.");
         }
@@ -218,6 +253,20 @@ impl Summary {
                 text: self.text(),
             })));
         }
+    }
+}
+
+const fn phase_name(phase: fr_wire::sync_job_state::SyncPhase) -> &'static str {
+    use fr_wire::sync_job_state::SyncPhase;
+    match phase {
+        SyncPhase::Advertised => "advertised",
+        SyncPhase::Accepted => "accepted",
+        SyncPhase::Scanning => "scanning",
+        SyncPhase::Transferring => "transferring",
+        SyncPhase::Settled => "settled",
+        SyncPhase::ConflictRecorded => "conflict_recorded",
+        SyncPhase::Cancelled => "cancelled",
+        SyncPhase::Failed => "failed",
     }
 }
 
@@ -285,6 +334,7 @@ mod tests {
 
     fn status(results: Vec<ResultReceipt>) -> ReceiveStatus {
         ReceiveStatus {
+            folder_job: None,
             phase: ReceivePhase::Ended,
             absence: None,
             progress: None,
@@ -293,6 +343,65 @@ mod tests {
             cancel_requested: false,
             cleanup: Some(Ok(())),
         }
+    }
+
+    #[test]
+    fn folder_job_reports_the_original_rounds_failure_and_worker_cleanup() {
+        use fr_files::sync::{JobStatus, LiveError};
+        use fr_wire::sync_job_state::{ConflictPolicy, SyncDirection, SyncJobState, SyncPhase};
+
+        let mut status = status(Vec::new());
+        assert!(
+            json(&Summary::from_status(&status))
+                .get("folder_job")
+                .is_none()
+        );
+        let mut job = JobStatus {
+            state: SyncJobState {
+                job_id: 41,
+                sync_direction: SyncDirection::HostToController,
+                conflict_policy: ConflictPolicy::KeepBoth,
+                phase: SyncPhase::Settled,
+                reason: fr_wire::files::Reason::None,
+                entries_total: 0,
+                entries_completed: 0,
+                conflicts_kept: 0,
+                bytes_total: 0,
+                bytes_completed: 0,
+                manifest_revision: 3,
+            },
+            failure: None,
+            confirmed_publications: 2,
+            rounds_settled: 3,
+            cleanup_complete: false,
+        };
+        status.phase = ReceivePhase::Receiving;
+        status.cleanup = None;
+        status.folder_job = Some(job);
+        let report = json(&Summary::from_status(&status));
+        assert_eq!(
+            report["folder_job"],
+            serde_json::json!({
+                "id":41,"phase":"settled","revision":3,"rounds_settled":3,
+                "confirmed_publications":2,"failure":null,"cleanup":"pending"
+            })
+        );
+        job.state.phase = SyncPhase::Failed;
+        job.failure = Some(LiveError::DurabilityUnknown);
+        job.cleanup_complete = true;
+        status.folder_job = Some(job);
+        status.cleanup = Some(Ok(()));
+        status.phase = ReceivePhase::Ended;
+        let summary = Summary::from_status(&status);
+        let report = json(&summary);
+        assert_eq!(report["folder_job"]["phase"], "failed");
+        assert_eq!(
+            report["folder_job"]["failure"],
+            "sync_durability_unconfirmed"
+        );
+        assert_eq!(report["folder_job"]["confirmed_publications"], 2);
+        assert_eq!(report["folder_job"]["cleanup"], "finished");
+        assert!(summary.text().contains("sync_durability_unconfirmed"));
     }
 
     fn published(id: u64, bytes: u64, publication: Publication) -> ResultReceipt {

@@ -51,6 +51,9 @@ impl Receiving {
         control: ReceiveControl,
         sync: Option<Box<ControllerJob>>,
     ) -> Self {
+        if let Some(job) = &sync {
+            control.record_folder_job(job.status());
+        }
         Self {
             receiver,
             control,
@@ -60,6 +63,9 @@ impl Receiving {
         }
     }
     pub(super) fn observe(&self) {
+        if let Some(job) = &self.sync {
+            self.control.record_folder_job(job.status());
+        }
         self.control.progress(self.receiver.progress());
         if let Some(receipt) = self.receiver.last_result() {
             self.control.observe(receipt);
@@ -148,6 +154,9 @@ impl Receiving {
                 sync.cleaned(result);
             }
             self.control.cleaned(result);
+        }
+        if let Some(job) = &self.sync {
+            self.control.record_folder_job(job.status());
         }
         self.cleanup
     }

@@ -2197,6 +2197,7 @@ mod tests {
             )
             .preserve(&mut original);
             files::download::Summary::from_status(&ReceiveStatus {
+                folder_job: None,
                 phase: ReceivePhase::Ended,
                 absence: None,
                 progress: None,

@@ -73,6 +73,7 @@ fn finish_releases_unstarted_consent_and_cannot_restart_it() {
 
 fn status() -> ReceiveStatus {
     ReceiveStatus {
+        folder_job: None,
         phase: ReceivePhase::Receiving,
         absence: None,
         progress: None,
@@ -233,6 +234,7 @@ fn report(results: Vec<ResultReceipt>) -> Report {
         cancel_requested: false,
         absence: None,
         status: Some(ReceiveStatus {
+            folder_job: None,
             phase: ReceivePhase::Ended,
             absence: None,
             progress: None,

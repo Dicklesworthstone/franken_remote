@@ -123,6 +123,7 @@ fn production_control_loops_deliver_two_folder_rounds_while_original_input_conti
                 assert_eq!(viewer.confirmed_publications, 3);
                 assert!(state.host.file_batch_report().is_none());
                 let received = state.viewer.file_receive_status().unwrap();
+                assert_eq!(received.folder_job, Some(viewer));
                 assert_eq!(
                     received
                         .results
@@ -162,10 +163,10 @@ fn production_control_loops_deliver_two_folder_rounds_while_original_input_conti
                     assert_eq!(status.rounds_settled, 2);
                     assert!(status.cleanup_complete);
                 }
-                assert_eq!(
-                    state.viewer.file_receive_status().unwrap().results,
-                    received.results
-                );
+                let final_receive = state.viewer.file_receive_status().unwrap();
+                assert_eq!(final_receive.folder_job, state.viewer.file_sync_status());
+                assert_eq!(final_receive.cleanup, Some(Ok(())));
+                assert_eq!(final_receive.results, received.results);
             },
             driver,
         ))

@@ -650,6 +650,11 @@ impl StreamingViewer {
         let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::file_download_lane(&session.opened.selection)?;
+        if request.sync_job_id().is_some()
+            && !fr_wire::sync_job_state::selected(&session.opened.selection)
+        {
+            return Err(Absence::NotNegotiated);
+        }
         if self.files.as_ref().is_some_and(files::Lane::has_send)
             && !fr_wire::files::duplex_selected(&session.opened.selection)
         {

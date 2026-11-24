@@ -132,6 +132,8 @@ pub const MAX_RECEIVE_RESULTS: usize = MAX_SESSION_FILES as usize + 1;
 /// never establish publication; only a retained Published result does that.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiveStatus {
+    /// Latest bounded evidence from this receiver's original standing job.
+    pub folder_job: Option<fr_files::sync::JobStatus>,
     pub phase: ReceivePhase,
     pub absence: Option<Absence>,
     pub progress: Option<Progress>,
@@ -147,6 +149,7 @@ impl ReceiveStatus {
     /// remains distinct unless later progress, results or a join prove otherwise.
     pub fn may_have_started(&self) -> bool {
         self.cleanup.is_some()
+            || self.folder_job.is_some()
             || self.progress.is_some()
             || !self.results.is_empty()
             || self.phase == ReceivePhase::Receiving
@@ -169,6 +172,7 @@ impl fmt::Debug for ReceiveControl {
 impl ReceiveControl {
     pub(crate) fn new() -> Self {
         Self(Arc::new(Mutex::new(ReceiveStatus {
+            folder_job: None,
             phase: ReceivePhase::WaitingForControl,
             absence: None,
             progress: None,
@@ -250,6 +254,9 @@ impl ReceiveControl {
         state.phase = ReceivePhase::Ended;
         state.absence.get_or_insert(absence);
         state.progress = None;
+    }
+    pub(crate) fn record_folder_job(&self, job: fr_files::sync::JobStatus) {
+        self.lock().folder_job = Some(job);
     }
     pub(crate) fn cleaned(&self, cleanup: Result<(), worker::Error>) {
         let mut state = self.lock();

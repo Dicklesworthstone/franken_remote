@@ -171,3 +171,18 @@ remaining remote runtime and platform acceptance gates.
 boundary convergence. The receive library test also plants an actual poisoned
 reservation during cancellation, checks retained publication receipts and
 cleanup evidence, and refuses a new round under that failed original owner.
+
+### Reading the native CLI receive report
+
+On Linux and macOS, the receive report for an attached folder job includes a
+`folder_job` object. Its `id`, `phase` and `revision` identify the job and
+its latest recorded manifest state. `rounds_settled` counts rounds whose
+acknowledgement drained. A settled round can contain zero changed files.
+`confirmed_publications` counts files actually published across all rounds,
+including a file whose durability could not subsequently be confirmed.
+
+A stopped job retains those counts. Read `failure` for the original reason
+(for example, `sync_cancelled` or `sync_durability_unconfirmed`) and
+`cleanup` for the receiver worker's join outcome. A cancelled job can report
+`cleanup: "finished"` after the worker exits with its earlier publications
+intact. Ordinary file downloads omit the `folder_job` member.
