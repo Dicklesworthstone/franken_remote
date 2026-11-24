@@ -127,7 +127,7 @@ test("the public sample's exact hvcC and six complete access units retain their 
     const sample = f.window.FrankenHevcProbeSample;
     const digest = createHash("sha256").update(sample.parameters("1").hvcc);
     for (let index = 0; index < 6; index++) digest.update(sample.picture(index));
-    assert.equal(digest.digest("hex"), "2ea5344208a06d5c37e9dfef94372d7fd29dcbf21244e8c644d92dd190a63959");
+    assert.equal(digest.digest("hex"), "241e3b10a079ab3f8d946fd731fc424c25bb2b2dd104a33f41c150bf7fe16519");
 });
 
 test("the fixed sample passes real Rust admission through idle, burst, reset and positive cleanup", async () => {
@@ -144,6 +144,12 @@ test("the fixed sample passes real Rust admission through idle, burst, reset and
     assert.ok(f.media[0].freed());
     assert.equal(f.decoders.length, 2);
     assert.ok(f.decoders.every((decoder) => decoder.state === "closed"));
+    for (const decoder of f.decoders) {
+        // The actual Rust guard consumes the complete wire IDR and removes its
+        // repeated parameter sets before native hvc1 decoding.
+        assert.deepEqual(Buffer.from(decoder.chunks[0].data),
+            Buffer.from(f.window.FrankenHevcProbeSample.picture(0).subarray(85)));
+    }
     assert.equal(f.timers.size, 0);
 });
 

@@ -59,7 +59,9 @@ allocations inside a defective browser implementation.
 ## Public fixture provenance
 
 `web/hevc_probe_sample.js` embeds an `hvcC` record and the first six complete
-length-prefixed access units of an eight-frame FFmpeg `testsrc2` sequence. The
+length-prefixed access units of an eight-frame FFmpeg `testsrc2` sequence. Its
+wire IDR includes the exact VPS/SPS/PPS from that record. Rust validates and
+removes those repeated parameter sets before native `hvc1` submission. The
 source was generated with FFmpeg 7.1.5 and libx265 using:
 
 ```sh
@@ -78,20 +80,23 @@ hex records and derive the codec string. On the tested libx265 build, the
 FFmpeg color options above left SPS VUI primaries and transfer unspecified
 (value 2). The fixture explicitly describes both fields as BT.709 (value 1):
 within this exact 111-byte `hvcC`, bytes 87 and 88 each change from `0x40` to
-`0x20`. Every other configuration byte and all six compressed pictures stay
-bit-exact. These offsets describe this fixed sample, not a general SPS parser.
+`0x20`. Every other configuration byte and all six compressed picture NALs stay
+bit-exact. The three corrected parameter NALs are prepended to the wire IDR,
+each with a four-byte length, as required by the production admission boundary.
+These offsets describe this fixed sample, not a general SPS parser.
 The original unspecified VUI is rejected by the production Rust owner; its
 color checks remain unchanged. No remux or regeneration is claimed for this
 metadata correction.
 
 The sample contains one IDR followed
-by five P pictures, with no B frames, reordering or in-band parameter sets.
-Its `hvcC` is 111 bytes; the access units are 7,773, 1,707, 2,343, 2,288, 2,411
+by five P pictures, with no B frames or reordering. The emitted native `hvc1`
+chunks contain no in-band parameter sets. Its `hvcC` is 111 bytes; the wire
+access units are 7,858, 1,707, 2,343, 2,288, 2,411
 and 2,369 bytes. The SHA-256 of the exact `hvcC` followed by these six access
 units is:
 
 ```text
-2ea5344208a06d5c37e9dfef94372d7fd29dcbf21244e8c644d92dd190a63959
+241e3b10a079ab3f8d946fd731fc424c25bb2b2dd104a33f41c150bf7fe16519
 ```
 
 ## Automated execution
