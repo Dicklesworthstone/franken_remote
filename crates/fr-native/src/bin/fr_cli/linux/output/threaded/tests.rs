@@ -3,6 +3,46 @@
 use super::*;
 use fr_core::audio::{AudioChannels, AudioStopReason};
 
+// Existing bridge tests do not open a native device. They still run the exact
+// production ACK wait; dedicated progress tests supply an observable callback.
+fn forward_ack(
+    shared: &Shared,
+    origin: Instant,
+    until: Instant,
+    replies: &SyncSender<Ack>,
+    bytes: &[u8],
+) -> Result<(), ViewerAudioRefused> {
+    super::forward_ack(shared, origin, until, replies, bytes, &mut || Ok(()))
+}
+
+#[test]
+fn outer_attempt_stop_fences_native_permission_without_another_service_turn() {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let original = Shared::with_stop(0, stopped.clone());
+    original.authorize_at(10).unwrap();
+    assert!(original.live_at(11));
+    stopped.store(true, Ordering::Release);
+    assert!(!original.live_at(12));
+    assert!(original.authorize_at(13).is_err());
+    // Once observed, even a caller mistake cannot revive this worker's grant.
+    stopped.store(false, Ordering::Release);
+    assert!(!original.live_at(14));
+    assert!(original.authorize_at(15).is_err());
+    let successor = Shared::with_stop(15, Arc::new(AtomicBool::new(false)));
+    successor.authorize_at(16).unwrap();
+    assert!(successor.live_at(17));
+    assert!(!original.live_at(17));
+}
+
+#[test]
+fn stopping_outer_attempt_before_first_grant_never_authorizes_native_setup() {
+    let stopped = Arc::new(AtomicBool::new(true));
+    let original = Shared::with_stop(0, stopped);
+    assert!(original.authorize_at(1).is_err());
+    assert_eq!(original.until.load(Ordering::Acquire), 0);
+    assert!(original.is_stopped());
+}
+
 fn offer() -> AudioConfiguration {
     AudioConfiguration {
         direction: AudioDirection::Downlink,
@@ -25,6 +65,7 @@ fn fixture(
     let job = Job::spawn(&slot, shared.clone(), work).unwrap();
     let report = Rc::new(RefCell::new(Report::default()));
     let output = Output {
+        external_stop: Arc::new(AtomicBool::new(false)),
         selected: Selected {
             #[cfg(target_os = "linux")]
             server: PathBuf::from("/unused-fixture"),
@@ -518,3 +559,6 @@ mod overflow;
 
 #[path = "tests/replacement.rs"]
 mod replacement;
+
+#[path = "tests/ack_progress.rs"]
+mod ack_progress;

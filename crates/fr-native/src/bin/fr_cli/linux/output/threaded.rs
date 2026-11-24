@@ -73,6 +73,9 @@ impl From<super::Failure> for Fault {
 }
 
 struct Shared {
+    /// Exact outer session attempt. UI close/hide can fence native work even
+    /// while the session executor or a previous worker callback is stalled.
+    external_stop: Arc<AtomicBool>,
     stopped: AtomicBool,
     until: AtomicU64,
     progress: AtomicU64,
@@ -82,8 +85,13 @@ struct Shared {
     retired: AtomicBool,
 }
 impl Shared {
+    #[cfg(test)]
     fn new(now: u64) -> Self {
+        Self::with_stop(now, Arc::new(AtomicBool::new(false)))
+    }
+    fn with_stop(now: u64, external_stop: Arc<AtomicBool>) -> Self {
         Self {
+            external_stop,
             stopped: AtomicBool::new(false),
             until: AtomicU64::new(0),
             progress: AtomicU64::new(now),
@@ -96,6 +104,12 @@ impl Shared {
     fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
     }
+    fn is_stopped(&self) -> bool {
+        if self.external_stop.load(Ordering::Acquire) {
+            self.stop();
+        }
+        self.stopped.load(Ordering::Acquire)
+    }
     fn fail(&self, fault: Fault) {
         let _ = self
             .fault
@@ -103,10 +117,10 @@ impl Shared {
         self.stop();
     }
     fn live_at(&self, now: u64) -> bool {
-        !self.stopped.load(Ordering::Acquire) && now < self.until.load(Ordering::Acquire)
+        !self.is_stopped() && now < self.until.load(Ordering::Acquire)
     }
     fn authorize_at(&self, now: u64) -> Result<(), ViewerAudioRefused> {
-        if self.stopped.load(Ordering::Acquire) {
+        if self.is_stopped() {
             return Err(ViewerAudioRefused);
         }
         let old = self.until.load(Ordering::Acquire);
@@ -123,7 +137,7 @@ impl Shared {
             return Err(ViewerAudioRefused);
         }
         self.until.store(until, Ordering::Release);
-        if self.stopped.load(Ordering::Acquire) {
+        if self.is_stopped() {
             return Err(ViewerAudioRefused);
         }
         Ok(())
@@ -292,6 +306,7 @@ impl Drop for Exit {
 }
 
 pub struct Output {
+    external_stop: Arc<AtomicBool>,
     selected: Selected,
     image: Option<PathBuf>,
     origin: Instant,
@@ -306,11 +321,6 @@ pub struct Output {
     cleanup: Retirement,
 }
 impl Output {
-    /// Select the current Windows render endpoint on the native worker only.
-    #[cfg(windows)]
-    pub fn windows(report: Rc<RefCell<Report>>, volume: AudioVolumeControl) -> Self {
-        Self::selected(Selected {}, report, volume)
-    }
     #[cfg(target_os = "macos")]
     pub fn macos(report: Rc<RefCell<Report>>, volume: AudioVolumeControl) -> Self {
         Self::selected(Selected {}, report, volume)
@@ -324,13 +334,41 @@ impl Output {
     ) -> Self {
         Self::selected(Selected { server, sink }, report, volume)
     }
+    /// Select the installed Windows decoder without opening a device or codec.
+    /// Shells with an independent session stop gate use `windows_with_stop`.
+    #[cfg(windows)]
+    pub fn windows(report: Rc<RefCell<Report>>, volume: AudioVolumeControl) -> Self {
+        let mut output = Self::selected(Selected {}, report, volume);
+        output.image = super::super::decoder_image();
+        output
+    }
+    /// Prepare one Windows attempt without opening a device or codec. The
+    /// caller owns this immutable stop gate and the original cleanup witness.
+    #[cfg(windows)]
+    pub fn windows_with_stop(
+        image: PathBuf,
+        report: Rc<RefCell<Report>>,
+        volume: AudioVolumeControl,
+        external_stop: Arc<AtomicBool>,
+    ) -> Self {
+        let mut output = Self::selected(Selected {}, report, volume);
+        output.image = image.is_absolute().then_some(image);
+        output.external_stop = external_stop;
+        output
+    }
     fn selected(
         selected: Selected,
         report: Rc<RefCell<Report>>,
         volume: AudioVolumeControl,
     ) -> Self {
         Self {
+            external_stop: Arc::new(AtomicBool::new(false)),
             selected,
+            // The Windows shell supplies its exact preflighted sibling path.
+            // Do not inspect the filesystem on the session authority thread.
+            #[cfg(windows)]
+            image: None,
+            #[cfg(not(windows))]
             image: super::super::decoder_image(),
             origin: Instant::now(),
             job: None,
@@ -344,12 +382,18 @@ impl Output {
             volume,
         }
     }
+    fn is_stopped(&self) -> bool {
+        if self.external_stop.load(Ordering::Acquire) {
+            self.cleanup.stop();
+        }
+        self.cleanup.stopped.get()
+    }
     fn account(&mut self) {
         if let Some(job) = &self.job {
             self.cleanup.track(job);
             self.cleanup.collect();
             let fault = job.shared.fault.load(Ordering::Acquire);
-            if fault == 0 && self.current.is_some() && !job.shared.stopped.load(Ordering::Acquire) {
+            if fault == 0 && self.current.is_some() && !job.shared.is_stopped() {
                 self.report.borrow_mut().recovered();
             }
         }
@@ -373,7 +417,7 @@ impl Output {
     }
     fn authorize(&self, live: &mut dyn FnMut() -> bool) -> Result<(), ViewerAudioRefused> {
         let job = self.job.as_ref().ok_or(ViewerAudioRefused)?;
-        if self.cleanup.stopped.get() || !live() || self.cleanup.stopped.get() {
+        if self.is_stopped() || !live() || self.is_stopped() {
             job.stop();
             return Err(ViewerAudioRefused);
         }
@@ -398,7 +442,10 @@ impl Output {
         }
         self.check_setup()?;
         let config = self.pending.take().ok_or(ViewerAudioRefused)?;
-        let shared = Arc::new(Shared::new(now(self.origin).0));
+        let shared = Arc::new(Shared::with_stop(
+            now(self.origin).0,
+            self.external_stop.clone(),
+        ));
         let job = spawn(shared, config).inspect_err(|_| {
             self.report
                 .borrow_mut()
@@ -407,7 +454,7 @@ impl Output {
         self.job = Some(job);
         self.cleanup
             .track(self.job.as_ref().ok_or(ViewerAudioRefused)?);
-        if self.cleanup.stopped.get() {
+        if self.is_stopped() {
             return Err(ViewerAudioRefused);
         }
         // Cleanup can publish the old worker's final committed-PCM count.
@@ -416,7 +463,7 @@ impl Output {
         Ok(true)
     }
     fn check_setup(&mut self) -> Result<(), ViewerAudioRefused> {
-        if self.cleanup.stopped.get() {
+        if self.is_stopped() {
             self.pending = None;
             self.setup_until = None;
             return Err(ViewerAudioRefused);
@@ -445,7 +492,7 @@ impl ViewerAudioOutput for Output {
         offer: AudioConfiguration,
     ) -> Result<(), ViewerAudioRefused> {
         self.account();
-        if self.cleanup.stopped.get()
+        if self.is_stopped()
             || self.ended
             || self.current.is_some()
             || binding == 0
@@ -481,7 +528,7 @@ impl ViewerAudioOutput for Output {
         acknowledge: &mut dyn FnMut(&[u8]) -> Result<(), ViewerAudioRefused>,
     ) -> Result<(), ViewerAudioRefused> {
         self.account();
-        if self.cleanup.stopped.get() {
+        if self.is_stopped() {
             self.pending = None;
             self.setup_until = None;
             return Err(ViewerAudioRefused);
@@ -664,6 +711,7 @@ fn forward_ack(
     setup_until: Instant,
     replies: &SyncSender<Ack>,
     bytes: &[u8],
+    progress: &mut super::AckProgress<'_>,
 ) -> Result<(), ViewerAudioRefused> {
     let record: Ack = bytes.try_into().map_err(|_| ViewerAudioRefused)?;
     if Instant::now() >= setup_until {
@@ -677,6 +725,16 @@ fn forward_ack(
     while shared.live_at(now(origin).0) && Instant::now() < until {
         if shared.ack.load(Ordering::Acquire) == ACK_ACCEPTED {
             return Ok(());
+        }
+        // Keep the same native speaker clock and bounded startup silence alive
+        // while the session handles the reply. This never admits media or
+        // refreshes either the permission window or the original setup bound.
+        progress().map_err(|error| {
+            shared.fail(super::Failure::from(error).into());
+            ViewerAudioRefused
+        })?;
+        if !shared.live_at(now(origin).0) || Instant::now() >= until {
+            break;
         }
         thread::park_timeout(TICK);
     }
@@ -701,7 +759,7 @@ fn native(
         // configure() cannot receive the observation callback. Wait for the first
         // session service turn instead of assuming creation grants permission.
         while shared.until.load(Ordering::Acquire) == 0 {
-            if shared.stopped.load(Ordering::Acquire) {
+            if shared.is_stopped() {
                 return Err(ViewerAudioRefused);
             }
             if Instant::now() >= config.setup_until {
@@ -719,7 +777,7 @@ fn native(
         }
         output.configure(config.binding, config.offer)?;
         loop {
-            if shared.stopped.load(Ordering::Acquire) {
+            if shared.is_stopped() {
                 return Ok(());
             }
             if !shared.live_at(now(config.origin).0) {
@@ -730,9 +788,19 @@ fn native(
                 shared.fail(Fault::Setup);
                 return Err(ViewerAudioRefused);
             }
-            output.service(&mut || shared.live_at(now(config.origin).0), &mut |bytes| {
-                forward_ack(shared, config.origin, config.setup_until, replies, bytes)
-            })?;
+            output.service_with_ack(
+                &mut || shared.live_at(now(config.origin).0),
+                &mut |bytes, progress| {
+                    forward_ack(
+                        shared,
+                        config.origin,
+                        config.setup_until,
+                        replies,
+                        bytes,
+                        progress,
+                    )
+                },
+            )?;
             shared
                 .progress
                 .store(now(config.origin).0, Ordering::Release);
@@ -758,7 +826,7 @@ fn native(
     shared
         .submitted
         .store(report.borrow().submitted, Ordering::Release);
-    if result.is_err() && !shared.stopped.load(Ordering::Acquire) {
+    if result.is_err() && !shared.is_stopped() {
         shared.fail(output.failure.unwrap_or(super::Failure::Native).into());
     }
     shared.stop();

@@ -78,10 +78,14 @@ fn server(request: &AudioRequest) -> Result<PathBuf, Failure> {
         })
 }
 
-#[cfg(any(feature = "linux-audio", feature = "macos-audio"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-audio"),
+    all(target_os = "macos", feature = "macos-audio")
+))]
 pub(super) use fr_native::audio_output::Output;
 #[cfg(all(target_os = "macos", feature = "macos-audio"))]
 pub(super) use fr_native::audio_output::Retirement;
+
 /// Build the output for one attempt; `None` when this build has no audio.
 #[cfg(all(target_os = "linux", feature = "linux-audio"))]
 pub(super) fn output(

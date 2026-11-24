@@ -66,7 +66,7 @@ impl Report {
         feature = "windows-audio",
         test
     ))]
-    fn begin_generation(&mut self) {
+    pub fn begin_generation(&mut self) {
         self.acknowledged = false;
         self.generation_start = self.submitted;
     }
@@ -76,7 +76,7 @@ impl Report {
         feature = "windows-audio",
         test
     ))]
-    fn failed_generation(&mut self, reason: &'static str, expired: bool) {
+    pub fn failed_generation(&mut self, reason: &'static str, expired: bool) {
         if expired {
             self.expired_generations = self.expired_generations.saturating_add(1);
         } else {
@@ -94,7 +94,7 @@ impl Report {
         feature = "windows-audio",
         test
     ))]
-    fn recovered(&mut self) {
+    pub fn recovered(&mut self) {
         if self.acknowledged && self.submitted > self.generation_start {
             self.recovered_generations = self
                 .expired_generations
@@ -124,6 +124,8 @@ pub fn decoder_image() -> Option<PathBuf> {
         .filter(|p| p.is_absolute() && (cfg!(windows) || p.is_file()))
 }
 
+// The dependency marker alone may come from another platform's feature.
+// Compile a native engine only when this target's actual backend is enabled.
 #[cfg(any(
     all(target_os = "linux", feature = "linux-audio"),
     all(target_os = "macos", feature = "macos-audio"),

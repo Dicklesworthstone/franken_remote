@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+//! Native device/decoder work, owned exclusively by the output worker thread.
 #[path = "../bin/fr_cli/linux/output/threaded.rs"]
 pub(super) mod threaded;
 use super::Report;
@@ -13,12 +15,16 @@ use crate::pulse::{
 };
 #[cfg(target_os = "macos")]
 use crate::{
-    macos_audio::{Error as DeviceError, PlaybackDevice, Selection, State},
+    macos_audio::{
+        Error as DeviceError, PlaybackDevice, Retirement as DeviceRetirement, Selection, State,
+    },
     macos_audio_playout::{Error as PlayoutError, NativePlayout as PulsePlayout, RenderResult},
 };
 #[cfg(windows)]
 use crate::{
-    windows_audio::{Error as DeviceError, PlaybackDevice, Selection, State},
+    windows_audio::{
+        Error as DeviceError, PlaybackDevice, Retirement as DeviceRetirement, Selection, State,
+    },
     windows_audio_playout::{Error as PlayoutError, NativePlayout as PulsePlayout, RenderResult},
 };
 use fr_client::audio::AudioVolumeControl;
@@ -101,10 +107,8 @@ enum Stage {
 pub struct Output {
     image: Option<PathBuf>,
     retirement: Option<Retirement>,
-    #[cfg(target_os = "macos")]
-    device_retirement: Option<crate::macos_audio::Retirement>,
-    #[cfg(windows)]
-    device_retirement: Option<crate::windows_audio::Retirement>,
+    #[cfg(any(target_os = "macos", windows))]
+    device_retirement: Option<DeviceRetirement>,
     selected: Selected,
     origin: Instant,
     stage: Stage,
@@ -246,6 +250,51 @@ impl ViewerAudioOutput for Output {
         live: &mut dyn FnMut() -> bool,
         acknowledge: &mut dyn FnMut(&[u8]) -> Result<(), ViewerAudioRefused>,
     ) -> Result<(), ViewerAudioRefused> {
+        self.service_with_ack(live, &mut |record, _| acknowledge(record))
+    }
+    fn receive(
+        &mut self,
+        bytes: &[u8],
+        live: &mut dyn FnMut() -> bool,
+    ) -> Result<(), ViewerAudioRefused> {
+        self.receive_at(bytes, now(self.origin), live)
+    }
+    fn reset(&mut self) {
+        // Retain the exact retirement until proven complete. A new epoch
+        // cannot overlap its failed decoder, even if negotiation restarts.
+        if let Some(retirement) = &self.retirement {
+            retirement.stop();
+        }
+        self.stage = Stage::Idle;
+        self.failure = None;
+        let mut report = self.report.borrow_mut();
+        report.resets = report.resets.saturating_add(1);
+        report.begin_generation();
+    }
+    fn ended(&mut self, end: ViewerAudioEnd) {
+        self.report.borrow_mut().absent(end_reason(end));
+        match std::mem::replace(&mut self.stage, Stage::Done) {
+            Stage::Playing(mut playout) | Stage::Configuring(mut playout) => {
+                if playout.stop(now(self.origin)).is_ok() {
+                    self.stage = Stage::Stopping(playout);
+                }
+            }
+            Stage::Starting { mut device, .. } => device.disconnect(),
+            stage => self.stage = stage,
+        }
+    }
+}
+// This callback stays on the same native worker and retains the original
+// device, permission checkpoint and setup deadline throughout the ACK wait.
+type AckProgress<'a> = dyn FnMut() -> Result<(), PlayoutError> + 'a;
+type AckSender<'a> = dyn FnMut(&[u8], &mut AckProgress<'_>) -> Result<(), ViewerAudioRefused> + 'a;
+
+impl Output {
+    fn service_with_ack(
+        &mut self,
+        live: &mut dyn FnMut() -> bool,
+        acknowledge: &mut AckSender<'_>,
+    ) -> Result<(), ViewerAudioRefused> {
         let origin = self.origin;
         let mut checkpoint = || {
             if live() {
@@ -295,8 +344,8 @@ impl ViewerAudioOutput for Output {
                     return Ok(());
                 }
                 playout
-                    .acknowledge(&mut checkpoint, |record| {
-                        acknowledge(record).map_err(|_| ())
+                    .acknowledge_with_progress(&mut checkpoint, |record, progress| {
+                        acknowledge(record, progress).map_err(|_| ())
                     })
                     .map_err(|error| self.refuse(error))?;
                 self.report.borrow_mut().acknowledged = true;
@@ -333,38 +382,8 @@ impl ViewerAudioOutput for Output {
         }
         Ok(())
     }
-    fn receive(
-        &mut self,
-        bytes: &[u8],
-        live: &mut dyn FnMut() -> bool,
-    ) -> Result<(), ViewerAudioRefused> {
-        self.receive_at(bytes, now(self.origin), live)
-    }
-    fn reset(&mut self) {
-        // Retain the exact retirement until proven complete. A new epoch
-        // cannot overlap its failed decoder, even if negotiation restarts.
-        if let Some(retirement) = &self.retirement {
-            retirement.stop();
-        }
-        self.stage = Stage::Idle;
-        self.failure = None;
-        let mut report = self.report.borrow_mut();
-        report.resets = report.resets.saturating_add(1);
-        report.begin_generation();
-    }
-    fn ended(&mut self, end: ViewerAudioEnd) {
-        self.report.borrow_mut().absent(end_reason(end));
-        match std::mem::replace(&mut self.stage, Stage::Done) {
-            Stage::Playing(mut playout) | Stage::Configuring(mut playout) => {
-                if playout.stop(now(self.origin)).is_ok() {
-                    self.stage = Stage::Stopping(playout);
-                }
-            }
-            Stage::Starting { mut device, .. } => device.disconnect(),
-            stage => self.stage = stage,
-        }
-    }
 }
+
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../bin/fr_cli/linux/output/tests.rs"]
 mod tests;

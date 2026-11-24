@@ -150,8 +150,21 @@ impl<D: PolledDecoder> PulsePlayout<D> {
     /// This is local send admission, not proof that the remote peer received it.
     pub fn acknowledge(
         &mut self,
-        mut checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
+        checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
         send: impl FnOnce(&[u8]) -> Result<(), ()>,
+    ) -> Result<(), Error> {
+        self.acknowledge_with_progress(checkpoint, |record, _| send(record))
+    }
+
+    /// Keep this original device progressing while a bounded send waits for
+    /// session acceptance. The progress callback only polls the native clock
+    /// and maintains startup silence under the original permission and setup
+    /// deadline; it cannot acknowledge, decode or submit PCM. Success still
+    /// requires accepted bytes followed by one final fresh device check.
+    pub fn acknowledge_with_progress(
+        &mut self,
+        mut checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
+        send: impl FnOnce(&[u8], &mut dyn FnMut() -> Result<(), Error>) -> Result<(), ()>,
     ) -> Result<(), Error> {
         self.check()?;
         if self.acknowledged {
@@ -184,7 +197,17 @@ impl<D: PolledDecoder> PulsePlayout<D> {
                 &mut record,
             )
             .map_err(|e| Error::Receiver(ReceiveError::Wire(e)))?;
-            send(&record).map_err(|()| Error::AcknowledgementUnknown)?;
+            {
+                let mut progress = || {
+                    let clock =
+                        device_clock(&mut this.device, &mut checkpoint).map_err(Error::Device)?;
+                    if clock.now.0 >= this.setup_until.0 {
+                        return Err(Error::Device(DeviceError::Expired));
+                    }
+                    Ok(())
+                };
+                send(&record, &mut progress).map_err(|()| Error::AcknowledgementUnknown)?;
+            }
             let fresh = device_clock(&mut this.device, &mut checkpoint).map_err(Error::Device)?;
             if fresh.now.0 >= this.setup_until.0 {
                 return Err(Error::Device(DeviceError::Expired));

@@ -159,8 +159,8 @@ fn encoded_burst(
     configuration: AudioConfiguration,
     config: fr_core::audio::AudioStreamConfig,
 ) -> (Vec<fr_media::audio::AudioAccessUnit>, Vec<Vec<u8>>) {
+    use crate::opus::Encoder;
     use fr_media::audio::{AudioEncoder, AudioPcmFrame};
-    use fr_native::opus::Encoder;
     let mut codec = Encoder::new();
     codec.configure(config).unwrap();
     let units: Vec<_> = (0..9)
@@ -205,10 +205,10 @@ fn encoded_burst(
 
 #[test]
 fn one_overflow_in_a_ten_ms_burst_preserves_real_opus_history_and_bounded_concealment() {
+    use crate::opus::{Decoder, playout::OpusPlayout};
     use fr_client::audio::playout::{PlayoutClock, PlayoutResult};
     use fr_core::audio::AudioStreamConfig;
     use fr_media::audio::AudioDecoder;
-    use fr_native::opus::{Decoder, playout::OpusPlayout};
     let configuration = AudioConfiguration {
         channels: AudioChannels::Mono,
         frame_duration_ms: 10,

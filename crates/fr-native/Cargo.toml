@@ -79,8 +79,6 @@ windows-audio-api = [
 ]
 # Explicit Windows client render boundary; reusable without codec integration.
 windows-audio-device = ["windows-audio-api", "dep:fr-client"]
-# Explicit client playback through the shared bounded output and private decoder.
-windows-audio = ["windows-audio-device", "windows-opus-process", "opus-playout"]
 windows-audio-capture = ["windows-audio-api"]
 windows-opus-process = [
     "opus-process", "dep:windows", "dep:fr-winsys", "windows/Win32_Security",
@@ -89,6 +87,9 @@ windows-opus-process = [
     "windows/Win32_System_Pipes", "windows/Win32_System_JobObjects",
     "windows/Win32_System_Threading", "windows/Win32_System_WindowsProgramming",
 ]
+# One deferred native output worker shared by the shipping desktop shells.
+native-audio-output = ["dep:fr-client"]
+windows-audio = ["windows-audio-device", "windows-opus-process", "opus-playout", "native-audio-output"]
 windows-host-audio = ["windows-host-media", "windows-audio-capture", "opus"]
 # Explicit host application/system playback capture. Reuses the separate
 # media-worker audio role and the existing statically linked Opus encoder.
@@ -100,7 +101,7 @@ macos-host-audio = ["macos-media", "opus"]
 macos-desktop = ["cli", "dep:fr-files", "dep:fr-transport", "frd/macos-viewer", "macos-clipboard"]
 # Explicit client playback: CoreAudio output and one supervised Opus child per
 # epoch. Does not enable host capture or microphone forwarding.
-macos-audio = ["macos-desktop", "macos-opus-process", "opus-playout"]
+macos-audio = ["macos-desktop", "macos-opus-process", "opus-playout", "native-audio-output"]
 macos-opus-process = ["opus-process"]
 # Mac client capture uses the same private microphone child and AudioUp owner.
 macos-microphone-process = ["microphone-process", "opus"]
@@ -155,7 +156,7 @@ linux-microphone-playout = ["linux-pipewire-mic", "linux-audio-playout", "linux-
 # Opus-encode role and `fr connect --audio` playback. Same libpulse/libopus
 # SONAMEs as above; frd itself never enables this feature or links either.
 linux-opus-process = ["linux-opus", "opus-process"]
-linux-audio = ["linux-pulse-playback", "linux-opus-process"]
+linux-audio = ["linux-pulse-playback", "linux-opus-process", "native-audio-output"]
 linux-displays = ["linux-media"]
 linux-input = ["input-agent", "observation-indicator"]
 # Exact RandR monitor input targets, without the media/FFmpeg worker boundary.

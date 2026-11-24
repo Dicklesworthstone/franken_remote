@@ -1,19 +1,12 @@
 //! Native media adapters. `FFmpeg` and X11 stay behind this named FFI boundary.
 #![deny(unsafe_op_in_unsafe_fn)]
-#[cfg(test)]
+
+// Shared native-output tests reuse the same private Pulse fixture as integration tests.
+#[cfg(all(test, target_os = "linux", feature = "linux-audio"))]
 extern crate self as fr_native;
 
-#[cfg(any(
-    test,
-    feature = "cli",
-    feature = "windows-audio",
-    feature = "linux-audio",
-    feature = "macos-audio"
-))]
+#[cfg(any(feature = "cli", feature = "native-audio-output"))]
 pub mod audio_output;
-#[cfg(all(windows, feature = "windows-audio"))]
-#[path = "pulse/playout.rs"]
-pub mod windows_audio_playout;
 
 #[cfg(any(test, feature = "macos-host-audio", feature = "windows-host-audio"))]
 pub mod host_audio_batch;
@@ -65,6 +58,9 @@ pub mod windows_audio_capture;
 #[cfg(any(test, all(windows, feature = "windows-audio-capture")))]
 #[cfg_attr(not(all(windows, feature = "windows-audio-capture")), allow(dead_code))]
 mod windows_audio_capture_policy;
+#[cfg(all(windows, feature = "windows-audio"))]
+#[path = "pulse/playout.rs"]
+pub mod windows_audio_playout;
 #[cfg(any(test, all(windows, feature = "windows-audio-device")))]
 #[cfg_attr(not(all(windows, feature = "windows-audio-device")), allow(dead_code))]
 mod windows_audio_policy;
