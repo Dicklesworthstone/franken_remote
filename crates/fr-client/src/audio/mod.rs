@@ -10,6 +10,7 @@
 
 pub mod jitter;
 pub mod mic;
+pub mod output;
 pub mod playout;
 pub mod sync;
 pub mod uplink;

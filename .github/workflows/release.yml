@@ -13,7 +13,7 @@ name: release
 #     <same name without .tar.gz>/bin/<programs>, COMMIT, LICENSE, README.md
 #   franken_remote-<tag>-x86_64-pc-windows-gnu.zip
 #     franken_remote-<tag>-x86_64-pc-windows-gnu/FrankenRemote.exe, fr-windows.exe,
-#       frd.exe, fr-media-worker.exe, host.ps1, COMMIT, LICENSE, README.md
+#       fr-opus-worker.exe, OPUS-LICENSE.txt, frd.exe, fr-media-worker.exe, host.ps1, COMMIT, LICENSE, README.md
 #
 # Linux binaries link the distribution's FFmpeg, PipeWire, X11 and Opus
 # libraries through pkg-config (libavcodec60 on 24.04, libavcodec62 on
@@ -203,11 +203,25 @@ jobs:
         run: |
           rustup show active-toolchain
           rustup target add x86_64-pc-windows-gnu
-          brew install mingw-w64
+          brew install mingw-w64 zstd
+      - name: Provision the pinned static Windows Opus SDK
+        run: |
+          set -euo pipefail
+          sdk="$RUNNER_TEMP/fr-opus-sdk"
+          mkdir -p "$sdk"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-opus-1.6.1-2-any.pkg.tar.zst \
+            -o "$sdk/opus.pkg.tar.zst"
+          printf '%s  %s\n' fae981c518ed1ff2c5264eb5a0d590ec1d2ebb222defb2253ca85b2154fd8c04 "$sdk/opus.pkg.tar.zst" | shasum -a 256 -c -
+          zstd -dc "$sdk/opus.pkg.tar.zst" | tar -xf - -C "$sdk" mingw64/lib/libopus.a mingw64/share/licenses/opus/COPYING
+          echo "FR_NATIVE_OPUS_LIBRARY_DIR=$sdk/mingw64/lib" >> "$GITHUB_ENV"
+          echo "FR_OPUS_PACKAGE_LICENSE=$sdk/mingw64/share/licenses/opus/COPYING" >> "$GITHUB_ENV"
       - name: Build FrankenRemote.exe and fr-windows.exe
         # The ISRG roots come from this runner's keychain (fr-mobile-ffi
         # build_support/roots.rs checks their pinned digests).
         run: cargo build --release --locked -p fr-windows --target x86_64-pc-windows-gnu --bin FrankenRemote --bin fr-windows
+      - name: Build the private Windows Opus decoder
+        run: cargo build --release --locked -p fr-native --no-default-features --features windows-opus-process --target x86_64-pc-windows-gnu --bin fr-opus-worker
       - name: Build the interactive Windows host and capture worker
         run: |
           cargo build --release --locked -p frd --features windows-host --target x86_64-pc-windows-gnu --bin frd
@@ -217,9 +231,10 @@ jobs:
           set -euo pipefail
           name="franken_remote-${RELEASE_TAG}-x86_64-pc-windows-gnu"
           mkdir -p "dist/$name"
-          for exe in FrankenRemote.exe fr-windows.exe frd.exe fr-media-worker.exe; do
+          for exe in FrankenRemote.exe fr-windows.exe fr-opus-worker.exe frd.exe fr-media-worker.exe; do
             cp "target/x86_64-pc-windows-gnu/release/$exe" "dist/$name/$exe"
           done
+          cp "$FR_OPUS_PACKAGE_LICENSE" "dist/$name/OPUS-LICENSE.txt"
           cp scripts/windows/host.ps1 "dist/$name/host.ps1"
           git rev-parse HEAD > "dist/$name/COMMIT"
           cp LICENSE README.md "dist/$name/"

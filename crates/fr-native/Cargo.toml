@@ -77,8 +77,10 @@ windows-audio-api = [
     "windows/Win32_System_Performance", "windows/Win32_System_Threading",
     "windows/Win32_System_WindowsProgramming",
 ]
-# Explicit Windows client renderer; no codec or client-shell integration yet.
+# Explicit Windows client render boundary; reusable without codec integration.
 windows-audio-device = ["windows-audio-api", "dep:fr-client"]
+# Explicit client playback through the shared bounded output and private decoder.
+windows-audio = ["windows-audio-device", "windows-opus-process", "opus-playout"]
 windows-audio-capture = ["windows-audio-api"]
 windows-opus-process = [
     "opus-process", "dep:windows", "dep:fr-winsys", "windows/Win32_Security",

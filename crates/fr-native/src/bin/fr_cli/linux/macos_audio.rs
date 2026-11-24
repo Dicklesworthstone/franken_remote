@@ -71,7 +71,7 @@ pub(super) fn prepare(request: Option<&AudioRequest>) -> Result<Option<Report>, 
         return Ok(None);
     };
     audio::decoder_image()?;
-    Ok(Some(Rc::new(RefCell::new(audio::Report::for_request(
+    Ok(Some(Rc::new(RefCell::new(audio::report(
         request,
     )))))
 }
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn local_mute_and_volume_preserve_the_original_attempt_boundary() {
-        let mut report = audio::Report::for_request(&request());
+        let mut report = audio::report(&request());
         let original = report.begin_attempt();
         preferences(&original, 20, true);
         assert_eq!(report.volume.snapshot(), (0.2, true));
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn completion_keeps_volume_mute_and_real_effects_through_later_failure() {
-        let mut report = audio::Report::for_request(&request());
+        let mut report = audio::report(&request());
         report.acknowledged = true;
         report.submitted = 7;
         let output = finish(

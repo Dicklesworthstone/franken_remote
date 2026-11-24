@@ -3,7 +3,9 @@
 //! shortcut, an Apps & features entry, and the folder on the user's `Path`.
 //! Nothing here needs administrator rights or writes outside the user's
 //! profile and `HKEY_CURRENT_USER`.
-use crate::install_plan::{self, APP_EXE, CLI_EXE, PRODUCT, SETTINGS_FILE, UNINSTALL_KEY, Value};
+use crate::install_plan::{
+    self, APP_EXE, CLI_EXE, OPUS_EXE, OPUS_LICENSE, PRODUCT, SETTINGS_FILE, UNINSTALL_KEY, Value,
+};
 use std::{
     num::NonZeroU16,
     os::windows::process::CommandExt,
@@ -87,9 +89,20 @@ pub(super) fn install() -> Result<PathBuf, String> {
     if install_plan::quote(&dir).matches('"').count() != 2 {
         return Err("the program folder's path is not supported".to_owned());
     }
+    let decoder = source.join(OPUS_EXE);
+    if !decoder.is_file() {
+        return Err(format!(
+            "the matching {OPUS_EXE} is missing beside this application; install the complete package"
+        ));
+    }
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("could not create {} ({error})", dir.display()))?;
     if !install_plan::same_path(source, &dir) {
+        copy(&decoder, &dir.join(OPUS_EXE))?;
+        let license = source.join(OPUS_LICENSE);
+        if license.is_file() {
+            copy(&license, &dir.join(OPUS_LICENSE))?;
+        }
         copy(&current, &dir.join(APP_EXE))?;
         let cli = source.join(CLI_EXE);
         if cli.is_file() {
@@ -97,7 +110,7 @@ pub(super) fn install() -> Result<PathBuf, String> {
         }
     }
     let app = dir.join(APP_EXE);
-    let size = [APP_EXE, CLI_EXE]
+    let size = [APP_EXE, CLI_EXE, OPUS_EXE, OPUS_LICENSE]
         .iter()
         .filter_map(|name| std::fs::metadata(dir.join(name)).ok())
         .map(|metadata| metadata.len())
@@ -164,7 +177,7 @@ pub(super) fn uninstall() -> Result<Option<PathBuf>, String> {
     if running_installed() {
         return Ok(Some(dir));
     }
-    for name in [APP_EXE, CLI_EXE] {
+    for name in [APP_EXE, CLI_EXE, OPUS_EXE, OPUS_LICENSE] {
         remove_file(&dir.join(name))?;
     }
     let _ = std::fs::remove_dir(&dir);

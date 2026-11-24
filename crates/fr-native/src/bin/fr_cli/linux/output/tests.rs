@@ -6,7 +6,7 @@ use super::*;
 mod pulse_support;
 use fr_core::audio::{AudioChannels, AudioDirection, AudioGeneration};
 use fr_media::audio::{AudioEncoder, AudioPcmFrame};
-use fr_native::opus::Encoder;
+use crate::opus::Encoder;
 use fr_wire::audio::{self, AudioConfigured, AudioPacket};
 use pulse_support::Server;
 use std::{process::Command, sync::Mutex, thread, time::Duration};
@@ -16,7 +16,7 @@ const BINDING: u32 = 61;
 #[test]
 fn the_native_refusal_keeps_freshness_expiry_distinct_from_device_failure() {
     use fr_client::audio::{jitter::JitterError, playout::PlayoutError as Playback};
-    use fr_native::opus::playout::Error as ReceiveError;
+    use crate::opus::playout::Error as ReceiveError;
     let report = Rc::new(RefCell::new(Report::default()));
     let mut output = Output::new(
         PathBuf::from("/unused"),

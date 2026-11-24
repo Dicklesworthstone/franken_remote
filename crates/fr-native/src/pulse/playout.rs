@@ -13,6 +13,10 @@ use crate::opus::{
 use crate::pulse::{
     Error as DeviceError, PlaybackDevice, STARTUP_US, State, StopOutcome, Submission,
 };
+#[cfg(windows)]
+use crate::windows_audio::{
+    Error as DeviceError, PlaybackDevice, STARTUP_US, State, StopOutcome, Submission,
+};
 use fr_client::{
     audio::{
         AudioVolumeControl,

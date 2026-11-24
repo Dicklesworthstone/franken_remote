@@ -1,21 +1,16 @@
 //! Content-free reporting state; no fixture submission is native playback proof.
-use super::{AudioRequest, Report};
+use super::Report;
 
 #[test]
 fn reconnect_keeps_latest_preference_but_old_handles_cannot_change_the_new_attempt() {
-    let mut report = Report::for_request(&AudioRequest {
-        server: None,
-        sink: None,
-        volume: 37,
-        muted: false,
-    });
+    let mut report = Report::new(0.37, false);
     let mut original = report.begin_attempt();
     assert_eq!(original.volume().to_bits(), 0.37_f32.to_bits());
     original.set_volume(0.25);
     original.set_muted(true);
     #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
     {
-        report.controls = Some(Err(fr_native::file_progress::Error::InvalidParent));
+        report.controls = Some(Err(crate::file_progress::Error::InvalidParent));
     }
     report.acknowledged = true;
     report.submitted = 1;

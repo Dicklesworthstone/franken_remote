@@ -651,8 +651,9 @@ fn build_macos_opus() {
     println!("cargo:rustc-link-lib=static=fropusmacos");
 }
 
-/// Windows host encoding uses the same bounded libopus ABI, with an explicitly
-/// supplied target archive. No DLL search, downloader or decoder child is added.
+/// Windows host encoding and the private client decoder use the same bounded
+/// libopus ABI with an explicitly supplied target archive. No DLL search or
+/// build-time downloader is introduced.
 fn build_windows_opus() {
     println!("cargo:rerun-if-env-changed=FR_NATIVE_OPUS_LIBRARY_DIR");
     if env::var_os("CARGO_FEATURE_OPUS").is_none()

@@ -156,3 +156,12 @@ from the retained offline toolchain. The existing repository-wide documentation
 link failure and unrelated full-workspace/daemon tests are not claimed fixed.
 Platform audio devices, supervised audio-worker/session integration, protected
 native packaging and audible/latency qualification remain open.
+
+## Windows client decoder
+
+The `windows-opus-process` worker runs on Windows with a deadline-aware private pipe
+and a kill-on-close, one-process, memory-bounded Job. The `windows-audio` feature
+uses it with the shared output proxy and WASAPI sink. See
+[Windows playback](docs/windows-audio.md) for source deadlines, device/cleanup
+behavior, packaging and native qualification requirements. Job containment is
+not a Windows security sandbox claim.

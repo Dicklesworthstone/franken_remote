@@ -4,7 +4,7 @@
 //!
 //! Layout (no administrator rights, nothing machine-wide):
 //! * `%LOCALAPPDATA%\Programs\FrankenRemote\` holds `FrankenRemote.exe` and,
-//!   when it was shipped beside it, `fr-windows.exe`.
+//!   `fr-opus-worker.exe`, its license and the optional `fr-windows.exe`.
 //! * `%APPDATA%\Microsoft\Windows\Start Menu\Programs\FrankenRemote.lnk`.
 //! * `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\FrankenRemote`.
 //! * `%LOCALAPPDATA%\FrankenRemote\settings.json` (remembered choices).
@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 pub(crate) const PRODUCT: &str = "FrankenRemote";
 pub(crate) const APP_EXE: &str = "FrankenRemote.exe";
 pub(crate) const CLI_EXE: &str = "fr-windows.exe";
+pub(crate) const OPUS_EXE: &str = "fr-opus-worker.exe";
+pub(crate) const OPUS_LICENSE: &str = "OPUS-LICENSE.txt";
 pub(crate) const SHORTCUT: &str = "FrankenRemote.lnk";
 pub(crate) const SETTINGS_FILE: &str = "settings.json";
 pub(crate) const UNINSTALL_KEY: &str =
@@ -99,12 +101,12 @@ pub(crate) fn quote(path: &Path) -> String {
 /// The deferred cleanup a running uninstaller hands to `cmd.exe`, executed
 /// in the install directory itself. Only fixed relative names appear in it
 /// (no user path is ever parsed by `cmd`): it waits up to about 30 seconds
-/// for the application to exit, deletes the two program files, then removes
+/// for the application to exit, deletes the program files, then removes
 /// the directory only if it is empty.
 pub(crate) fn deferred_cleanup() -> String {
     format!(
         "/d /c \"for /l %i in (1,1,30) do @if exist {APP_EXE} (ping -n 2 127.0.0.1 >nul & del /f /q {APP_EXE} 2>nul) \
-         & del /f /q {CLI_EXE} 2>nul & cd .. & rmdir {PRODUCT} 2>nul\""
+         & del /f /q {CLI_EXE} {OPUS_EXE} {OPUS_LICENSE} 2>nul & cd .. & rmdir {PRODUCT} 2>nul\""
     )
 }
 
@@ -190,7 +192,13 @@ mod tests {
             !script.contains(":\\") && !script.contains("/s"),
             "{script}"
         );
-        for name in [APP_EXE, CLI_EXE, "rmdir FrankenRemote"] {
+        for name in [
+            APP_EXE,
+            CLI_EXE,
+            OPUS_EXE,
+            OPUS_LICENSE,
+            "rmdir FrankenRemote",
+        ] {
             assert!(script.contains(name), "{script}");
         }
         // The only quotes are the outer pair around the /c command.

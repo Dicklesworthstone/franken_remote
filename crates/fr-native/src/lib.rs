@@ -1,5 +1,19 @@
 //! Native media adapters. `FFmpeg` and X11 stay behind this named FFI boundary.
 #![deny(unsafe_op_in_unsafe_fn)]
+#[cfg(test)]
+extern crate self as fr_native;
+
+#[cfg(any(
+    test,
+    feature = "cli",
+    feature = "windows-audio",
+    feature = "linux-audio",
+    feature = "macos-audio"
+))]
+pub mod audio_output;
+#[cfg(all(windows, feature = "windows-audio"))]
+#[path = "pulse/playout.rs"]
+pub mod windows_audio_playout;
 
 #[cfg(any(test, feature = "macos-host-audio", feature = "windows-host-audio"))]
 pub mod host_audio_batch;

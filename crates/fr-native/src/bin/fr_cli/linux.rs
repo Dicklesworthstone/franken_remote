@@ -571,7 +571,7 @@ fn connect(
         }),
         audio: audio_output
             .as_ref()
-            .map(|(_, request)| Rc::new(RefCell::new(audio::Report::for_request(request)))),
+            .map(|(_, request)| Rc::new(RefCell::new(audio::report(request)))),
         microphone,
         files: sends,
         downloads,

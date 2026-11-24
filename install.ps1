@@ -437,7 +437,7 @@ function Expand-Release([string]$ZipPath, [string]$TempDir) {
   $out = Join-Path $TempDir "unpacked"
   Expand-Archive -LiteralPath $ZipPath -DestinationPath $out -Force
   $payload = Join-Path $out $top
-  foreach ($name in @("FrankenRemote.exe", "fr-windows.exe")) {
+  foreach ($name in @(Get-ClientPayloadFiles $Payload)) {
     if (-not (Test-Path -LiteralPath (Join-Path $payload $name) -PathType Leaf)) { throw "The release zip has no $name" }
   }
   if ($InstallHost) { Assert-HostPayload $payload }
@@ -625,10 +625,42 @@ function Get-IsrgRoots([string]$Dir) {
   Write-Ok "ISRG roots verified against the build's pinned digests"
 }
 
+# Source builds use an explicitly pinned target SDK, never a runtime DLL lookup.
+# A local GNU SDK can be supplied instead, including its COPYING license.
+function Get-OpusSdk([string]$TempDir) {
+  if ($env:FR_NATIVE_OPUS_LIBRARY_DIR) {
+    $dir = $env:FR_NATIVE_OPUS_LIBRARY_DIR
+    if (-not [System.IO.Path]::IsPathRooted($dir) -or
+        -not (Test-Path -LiteralPath (Join-Path $dir "libopus.a") -PathType Leaf)) {
+      throw "FR_NATIVE_OPUS_LIBRARY_DIR must be an absolute GNU target SDK directory containing libopus.a"
+    }
+    $script:OpusLicense = Join-Path $dir "COPYING"
+    if (-not (Test-Path -LiteralPath $script:OpusLicense -PathType Leaf)) {
+      $script:OpusLicense = Join-Path (Split-Path $dir -Parent) "share\licenses\opus\COPYING"
+    }
+    if (-not (Test-Path -LiteralPath $script:OpusLicense -PathType Leaf)) {
+      throw "Provide the Opus SDK's COPYING license beside libopus.a (or under share\licenses\opus)"
+    }
+    return $dir
+  }
+  $sdk = Join-Path $script:CacheDir "opus-1.6.1-2"
+  $archive = Join-Path $TempDir "opus.pkg.tar.zst"
+  Write-Info "Downloading the pinned static Windows Opus SDK"
+  Invoke-Download "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-opus-1.6.1-2-any.pkg.tar.zst" $archive
+  Assert-Checksum $archive "fae981c518ed1ff2c5264eb5a0d590ec1d2ebb222defb2253ca85b2154fd8c04"
+  New-Item -ItemType Directory -Force -Path $sdk | Out-Null
+  $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+  if (-not (Test-Path -LiteralPath $tar)) { throw "tar.exe is unavailable; provide FR_NATIVE_OPUS_LIBRARY_DIR with the trusted static GNU SDK and COPYING" }
+  & $tar -xf $archive -C $sdk "mingw64/lib/libopus.a" "mingw64/share/licenses/opus/COPYING" | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "tar.exe could not unpack the Opus SDK; use an updated Windows tar or provide FR_NATIVE_OPUS_LIBRARY_DIR with libopus.a and COPYING" }
+  $script:OpusLicense = Join-Path $sdk "mingw64\share\licenses\opus\COPYING"
+  return (Join-Path $sdk "mingw64\lib")
+}
+
 function Build-FromSource([string]$TempDir) {
   $sourceRef = $Ref
   if (-not $sourceRef) { if ($script:Tag) { $sourceRef = $script:Tag } else { $sourceRef = "main" } }
-  Write-Warn "A source build installs rustup and a MinGW-w64 GCC toolchain if they are missing, needs about 3 GB, and takes 20-60 minutes."
+  Write-Warn "A source build installs rustup and a MinGW-w64 GCC toolchain if they are missing, provisions a pinned static Opus SDK, needs about 3 GB, and takes 20-60 minutes."
   if (-not (Read-YesNo "Build FrankenRemote from source ($sourceRef)?" $true)) { throw "Cancelled" }
   $freeGb = Get-FreeGigabytes $env:LOCALAPPDATA
   if ($null -ne $freeGb -and $freeGb -lt 10) {
@@ -654,6 +686,7 @@ function Build-FromSource([string]$TempDir) {
   $roots = Join-Path $script:CacheDir "isrg-roots"
   Get-IsrgRoots $roots
   $env:FR_MOBILE_ISRG_ROOTS_DIR = $roots
+  $env:FR_NATIVE_OPUS_LIBRARY_DIR = Get-OpusSdk $TempDir
   $env:CARGO_TARGET_DIR = Join-Path $script:CacheDir "target"
   # The git CLI fetches the git dependency far faster than cargo's own client.
   if (Get-Command git.exe -ErrorAction SilentlyContinue) { $env:CARGO_NET_GIT_FETCH_WITH_CLI = "true" }
@@ -674,6 +707,10 @@ function Build-FromSource([string]$TempDir) {
     Write-Info "Building FrankenRemote (release profile; later updates reuse $($env:CARGO_TARGET_DIR))"
     & cargo.exe "+$toolchain" build --release --locked -p fr-windows --bin FrankenRemote --bin fr-windows | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
+    Write-Info "Building the private Windows Opus decoder"
+    & cargo.exe "+$toolchain" build --release --locked -p fr-native --no-default-features --features windows-opus-process --bin fr-opus-worker | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Windows Opus decoder build failed (exit $LASTEXITCODE)" }
+    Copy-Item -LiteralPath $script:OpusLicense -Destination (Join-Path $env:CARGO_TARGET_DIR "release\OPUS-LICENSE.txt") -Force
     if ($InstallHost) {
       Write-Info "Building the interactive Windows host and hardware HEVC capture worker"
       & cargo.exe "+$toolchain" build --release --locked -p frd --features windows-host --bin frd | Out-Host
@@ -692,8 +729,22 @@ function Build-FromSource([string]$TempDir) {
 # Install
 # ---------------------------------------------------------------------------
 
+# Older release packages predate playback. New packages ship the exact helper
+# and its license; include both in same-build checks and installation receipts.
+function Get-ClientPayloadFiles([string]$Payload) {
+  "FrankenRemote.exe"
+  "fr-windows.exe"
+  if (Test-Path -LiteralPath (Join-Path $Payload "fr-opus-worker.exe") -PathType Leaf) {
+    "fr-opus-worker.exe"
+    if (-not (Test-Path -LiteralPath (Join-Path $Payload "OPUS-LICENSE.txt") -PathType Leaf)) {
+      throw "The audio-enabled package has no OPUS-LICENSE.txt"
+    }
+    "OPUS-LICENSE.txt"
+  }
+}
+
 function Test-SameBuild([string]$Payload) {
-  foreach ($name in @("FrankenRemote.exe", "fr-windows.exe")) {
+  foreach ($name in @(Get-ClientPayloadFiles $Payload)) {
     $installed = Join-Path $script:InstallDir $name
     if (-not (Test-Path -LiteralPath $installed)) { return $false }
     if ((Get-Sha256 $installed) -ne (Get-Sha256 (Join-Path $Payload $name))) { return $false }
@@ -760,7 +811,7 @@ function Install-Payload([string]$Payload) {
   $app = Join-Path $Payload "FrankenRemote.exe"
   $process = Start-Process -FilePath $app -ArgumentList "--install", "--quiet" -Wait -PassThru
   if ($process.ExitCode -ne 0) { throw "FrankenRemote --install failed (exit $($process.ExitCode))" }
-  foreach ($name in @("FrankenRemote.exe", "fr-windows.exe")) {
+  foreach ($name in @(Get-ClientPayloadFiles $Payload)) {
     if (-not (Test-Path -LiteralPath (Join-Path $script:InstallDir $name))) { throw "$name is missing from $($script:InstallDir) after installation" }
   }
   if (-not (Test-Path -LiteralPath $script:UninstallKey)) { throw "The Apps & features entry was not registered" }

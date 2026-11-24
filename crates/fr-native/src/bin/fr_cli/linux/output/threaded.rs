@@ -4,10 +4,13 @@
 //! The restricted decoder process and its existing retirement proof are retained.
 use super::{Report, Selected, end_reason, now};
 use fr_client::audio::AudioVolumeControl;
+use fr_client::audio::output::{
+    AudioEnd as ViewerAudioEnd, AudioOutput as ViewerAudioOutput,
+    OutputRefused as ViewerAudioRefused,
+};
 use fr_client::input::ClientInstant;
 use fr_core::audio::{AudioDirection, AudioGeneration, MAX_OPUS_PAYLOAD_BYTES};
 use fr_wire::audio::{self as wire, AudioConfiguration};
-use frd::session_startup::{ViewerAudioEnd, ViewerAudioOutput, ViewerAudioRefused};
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
@@ -203,7 +206,7 @@ impl Job {
 /// owner can fence it and retain final committed output while native cleanup
 /// completes. A different attempt gets a different handle.
 #[derive(Clone)]
-pub(crate) struct Retirement {
+pub struct Retirement {
     current: Rc<RefCell<Option<Retiring>>>,
     /// Terminal for the entire original output, including metadata accepted
     /// before its first native worker exists. Epoch reset never clears this.
@@ -251,15 +254,14 @@ impl Retirement {
             report.failed_generation(reason(fault), fault == Fault::Expired as u8);
         }
     }
-    pub(crate) fn stop(&self) {
+    pub fn stop(&self) {
         self.stopped.set(true);
         if let Some(worker) = self.current.borrow().as_ref() {
             worker.shared.stop();
             worker.thread.thread().unpark();
         }
     }
-    #[cfg(any(test, target_os = "macos"))]
-    pub(crate) fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         self.collect();
         self.current.borrow().as_ref().is_none_or(|worker| {
             worker.thread.is_finished() && worker.shared.retired.load(Ordering::Acquire)
@@ -289,7 +291,7 @@ impl Drop for Exit {
     }
 }
 
-pub(crate) struct Output {
+pub struct Output {
     selected: Selected,
     image: Option<PathBuf>,
     origin: Instant,
@@ -304,12 +306,17 @@ pub(crate) struct Output {
     cleanup: Retirement,
 }
 impl Output {
+    /// Select the current Windows render endpoint on the native worker only.
+    #[cfg(windows)]
+    pub fn windows(report: Rc<RefCell<Report>>, volume: AudioVolumeControl) -> Self {
+        Self::selected(Selected {}, report, volume)
+    }
     #[cfg(target_os = "macos")]
-    pub(crate) fn macos(report: Rc<RefCell<Report>>, volume: AudioVolumeControl) -> Self {
+    pub fn macos(report: Rc<RefCell<Report>>, volume: AudioVolumeControl) -> Self {
         Self::selected(Selected {}, report, volume)
     }
     #[cfg(target_os = "linux")]
-    pub(crate) fn new(
+    pub fn new(
         server: PathBuf,
         sink: Option<String>,
         report: Rc<RefCell<Report>>,
@@ -324,7 +331,7 @@ impl Output {
     ) -> Self {
         Self {
             selected,
-            image: super::super::decoder_image().ok(),
+            image: super::super::decoder_image(),
             origin: Instant::now(),
             job: None,
             pending: None,
@@ -347,8 +354,7 @@ impl Output {
             }
         }
     }
-    #[cfg(any(test, target_os = "macos"))]
-    pub(crate) fn retirement(&self) -> Retirement {
+    pub fn retirement(&self) -> Retirement {
         if let Some(job) = &self.job {
             self.cleanup.track(job);
         }
@@ -766,7 +772,7 @@ fn native(
     }
     output.reset();
     let retirement = output.retirement.clone();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let device_retirement = output.device_retirement.clone();
     drop(output);
     while retirement.as_ref().is_some_and(|r| !r.is_complete()) {
@@ -775,7 +781,7 @@ fn native(
         }
         thread::park_timeout(TICK);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     while device_retirement.as_ref().is_some_and(|r| !r.is_complete()) {
         if Instant::now() >= until {
             return false;
