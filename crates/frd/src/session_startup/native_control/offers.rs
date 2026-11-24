@@ -206,6 +206,13 @@ pub fn with_folder_sync(offer: Offer) -> Result<Offer, negotiation::Error> {
     fr_wire::sync_job_state::prepare_offer(offer)
 }
 
+/// Advertise a locally configured upload job on the original approved drop
+/// lane. The controller must separately accept its ID and choose its own source;
+/// neither this capability nor ordinary upload permission creates a job.
+pub fn with_folder_sync_upload(offer: Offer) -> Result<Offer, negotiation::Error> {
+    fr_wire::sync_job_state::prepare_upload_offer(offer)
+}
+
 /// Both an explicitly configured host drop directory and a finite host source
 /// selection. Each direction retains an independent one-use file attachment;
 /// optional negotiation permits a legacy peer's original single direction.

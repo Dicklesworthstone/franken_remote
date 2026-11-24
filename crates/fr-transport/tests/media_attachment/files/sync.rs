@@ -314,3 +314,200 @@ fn sync_keeps_original_scope_role_blocked_record_and_input_independence() {
         assert!(!link.h.is_closed() && !link.c.is_closed());
     });
 }
+
+fn enable_upload_sync(link: &mut Link, duplex: bool) {
+    enable(link);
+    let mut capabilities = vec![
+        (wire::CHANNEL_SCOPE_CAPABILITY, wire::CHANNEL_SCOPE_VERSION),
+        (sync_job_state::UPLOAD_CAPABILITY, sync_job_state::UPLOAD_VERSION),
+    ];
+    if duplex {
+        capabilities.extend([
+            (wire::DOWNLOAD_CAPABILITY, wire::DOWNLOAD_VERSION),
+            (wire::DUPLEX_CAPABILITY, wire::DUPLEX_VERSION),
+        ]);
+    }
+    for (name, version) in capabilities {
+        link.selection.capabilities.push(Capability {
+            name: name.into(),
+            version,
+            required: false,
+        });
+    }
+    link.selection.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    assert!(sync_job_state::upload_selected(&link.selection));
+    assert!(!sync_job_state::selected(&link.selection));
+    assert_eq!(wire::duplex_selected(&link.selection), duplex);
+}
+
+fn upload_advertised() -> SyncJobState {
+    SyncJobState {
+        sync_direction: SyncDirection::ControllerToHost,
+        ..advertised()
+    }
+}
+
+#[test]
+fn selected_upload_jobs_keep_host_advertisement_and_controller_acceptance_on_real_file_pair() {
+    run_test!(cx, {
+        for duplex in [false, true] {
+            let mut link = Link::new(&cx).await;
+            enable_upload_sync(&mut link, duplex);
+            let _input = attach(&mut link, &cx, 8, MediaRole::Input).await;
+            let (host, viewer, hr, vr) = attach(&mut link, &cx, 9, MediaRole::Files).await;
+            assert_eq!(hr.outbound.messages, Messages::FilesSync);
+            assert_eq!(vr.outbound.messages, Messages::FilesSync);
+            link.selection.capabilities.retain(|cap| {
+                cap.name != sync_job_state::UPLOAD_CAPABILITY
+            });
+            let host = FilesChannel::new(&link.h, host, InputLeaseId::from_raw(123), 9).unwrap();
+            let viewer =
+                FilesChannel::new(&link.c, viewer, InputLeaseId::from_raw(123), 9).unwrap();
+            assert_eq!(host.outgoing().direction, wire::Direction::ToHost);
+            assert!(host.sync_selected() && viewer.sync_selected());
+            transfer_state(&mut link, &cx, &host, &viewer, upload_advertised()).await;
+            transfer_state(
+                &mut link,
+                &cx,
+                &viewer,
+                &host,
+                SyncJobState {
+                    phase: SyncPhase::Accepted,
+                    ..upload_advertised()
+                },
+            )
+            .await;
+            let bytes = encoded_file(&viewer);
+            let until = clock(&cx) + 1_000_000;
+            viewer.send(&mut link.c, &cx, &bytes, until, || true).unwrap();
+            let mut got = false;
+            while !got || !viewer.send_drained(&link.c).unwrap() {
+                assert!(clock(&cx) < until);
+                link.drive(&cx).await;
+                host.dispatch(
+                    &mut link.h,
+                    &cx,
+                    || true,
+                    |record| {
+                        assert_eq!(record, bytes);
+                        assert!(wire::decode(record, host.incoming(), host.limits()).is_ok());
+                        got = true;
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+            }
+            transfer_state(
+                &mut link,
+                &cx,
+                &host,
+                &viewer,
+                SyncJobState {
+                    phase: SyncPhase::Settled,
+                    manifest_revision: 1,
+                    ..upload_advertised()
+                },
+            )
+            .await;
+        }
+    });
+}
+
+#[test]
+fn upload_job_selection_cannot_enable_the_sibling_download_or_change_record_direction() {
+    run_test!(cx, {
+        let mut link = Link::new(&cx).await;
+        enable_upload_sync(&mut link, true);
+        let _input = attach(&mut link, &cx, 8, MediaRole::Input).await;
+        let (upload_h, upload_c, _, _) = attach(&mut link, &cx, 9, MediaRole::Files).await;
+        let (download_h, download_c, hr, vr) =
+            attach(&mut link, &cx, 10, MediaRole::FilesDownload).await;
+        assert_eq!(hr.outbound.messages, Messages::Files);
+        assert_eq!(vr.outbound.messages, Messages::Files);
+        let upload_h =
+            FilesChannel::new(&link.h, upload_h, InputLeaseId::from_raw(123), 9).unwrap();
+        let upload_c =
+            FilesChannel::new(&link.c, upload_c, InputLeaseId::from_raw(123), 9).unwrap();
+        let download_h =
+            FilesChannel::new(&link.h, download_h, InputLeaseId::from_raw(123), 10).unwrap();
+        let download_c =
+            FilesChannel::new(&link.c, download_c, InputLeaseId::from_raw(123), 10).unwrap();
+        assert!(!download_h.sync_selected() && !download_c.sync_selected());
+        assert_eq!(download_h.outgoing().direction, wire::Direction::ToController);
+        let before = link.h.usage();
+        let until = clock(&cx) + 1_000_000;
+        assert_eq!(
+            download_h.send_sync(&mut link.h, &cx, &advertised(), until, || true),
+            Err(Error::WrongRoute)
+        );
+        for direction in [SyncDirection::HostToController, SyncDirection::Bidirectional] {
+            assert_eq!(
+                upload_h.send_sync(
+                    &mut link.h,
+                    &cx,
+                    &SyncJobState { sync_direction: direction, ..upload_advertised() },
+                    until,
+                    || true,
+                ),
+                Err(Error::Malformed)
+            );
+        }
+        assert_eq!(link.h.usage(), before);
+        let before = link.c.usage();
+        assert_eq!(
+            upload_c.send_sync(&mut link.c, &cx, &upload_advertised(), until, || true),
+            Err(Error::Malformed),
+            "the controller's data-source role cannot advertise a host job"
+        );
+        assert_eq!(link.c.usage(), before);
+        let mut foreign = Link::new(&cx).await;
+        let before = foreign.h.usage();
+        assert_eq!(
+            upload_h.send_sync(&mut foreign.h, &cx, &upload_advertised(), until, || true),
+            Err(Error::WrongRoute)
+        );
+        assert_eq!(foreign.h.usage(), before);
+        assert!(!foreign.h.is_closed());
+        transfer_state(&mut link, &cx, &upload_h, &upload_c, upload_advertised()).await;
+    });
+}
+
+#[test]
+fn absent_or_unknown_upload_job_marker_keeps_the_original_plain_file_family() {
+    run_test!(cx, {
+        for version in [None, Some(sync_job_state::UPLOAD_VERSION + 1)] {
+            let mut link = Link::new(&cx).await;
+            enable_upload_sync(&mut link, false);
+            if let Some(version) = version {
+                link.selection.capabilities.iter_mut()
+                    .find(|cap| cap.name == sync_job_state::UPLOAD_CAPABILITY)
+                    .unwrap().version = version;
+            } else {
+                link.selection.capabilities.retain(|cap| {
+                    cap.name != sync_job_state::UPLOAD_CAPABILITY
+                });
+            }
+            assert!(!sync_job_state::upload_selected(&link.selection));
+            let _input = attach(&mut link, &cx, 8, MediaRole::Input).await;
+            let (host, viewer, hr, vr) = attach(&mut link, &cx, 9, MediaRole::Files).await;
+            assert_eq!(hr.outbound.messages, Messages::Files);
+            assert_eq!(vr.outbound.messages, Messages::Files);
+            let host = FilesChannel::new(&link.h, host, InputLeaseId::from_raw(123), 9).unwrap();
+            let viewer =
+                FilesChannel::new(&link.c, viewer, InputLeaseId::from_raw(123), 9).unwrap();
+            assert!(!host.sync_selected() && !viewer.sync_selected());
+            let before = link.h.usage();
+            assert_eq!(
+                host.send_sync(
+                    &mut link.h,
+                    &cx,
+                    &upload_advertised(),
+                    clock(&cx) + 1_000_000,
+                    || true,
+                ),
+                Err(Error::WrongRoute)
+            );
+            assert_eq!(link.h.usage(), before);
+        }
+    });
+}

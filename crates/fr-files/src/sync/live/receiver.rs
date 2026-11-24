@@ -16,6 +16,9 @@ use fr_wire::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    Advertise,
+    Advertising,
+    Acceptance,
     Advertisement,
     Accepting,
     Scan,
@@ -36,6 +39,7 @@ struct Pending {
 /// The ordinary receiver still owns all staging, ATP integrity and permission.
 pub struct ControllerJob {
     directory: DropDirectory,
+    direction: SyncDirection,
     status: JobStatus,
     phase: Phase,
     budget: JobBudget,
@@ -54,6 +58,21 @@ pub struct ControllerJob {
 }
 impl ControllerJob {
     pub fn new(job_id: u64, directory: DropDirectory) -> Result<Self, LiveError> {
+        Self::with_direction(job_id, directory, SyncDirection::HostToController)
+    }
+
+    /// Advertise one locally configured upload destination. The controller
+    /// must explicitly accept this exact job before any source or file record
+    /// is admitted. This does not grant arbitrary host paths or resume a job.
+    pub fn for_host(job_id: u64, directory: DropDirectory) -> Result<Self, LiveError> {
+        Self::with_direction(job_id, directory, SyncDirection::ControllerToHost)
+    }
+
+    fn with_direction(
+        job_id: u64,
+        directory: DropDirectory,
+        direction: SyncDirection,
+    ) -> Result<Self, LiveError> {
         if job_id == 0 {
             return Err(LiveError::InvalidConfig);
         }
@@ -62,8 +81,13 @@ impl ControllerJob {
         }
         Ok(Self {
             directory: directory.with_conflict_tracking(),
-            status: JobStatus::new(job_id),
-            phase: Phase::Advertisement,
+            direction,
+            status: JobStatus::new(job_id, direction),
+            phase: if direction == SyncDirection::HostToController {
+                Phase::Advertisement
+            } else {
+                Phase::Advertise
+            },
             budget: JobBudget::default(),
             pending: None,
             connection: None,
@@ -157,44 +181,19 @@ impl ControllerJob {
         q: &mut QuicRecords,
         authorize: &mut impl FnMut() -> bool,
     ) -> Result<(), LiveError> {
-        if self
-            .connection
-            .as_ref()
-            .is_some_and(|original| !q.is_bound_to(original))
-        {
-            return Err(LiveError::WrongConnection);
-        }
-        let now = receiver.sync_clock(q).map_err(LiveError::Receive)?;
-        if !receiver.sync_tracks(&self.directory) {
-            return Err(LiveError::InvalidConfig);
-        }
-        if self.connection.is_none() {
-            self.connection = Some(q.binding());
-        }
-        if self.phase == Phase::Stopped {
-            return Err(self.status.failure.unwrap_or(LiveError::Cancelled));
-        }
-        if self.last_now.is_some_and(|last| now < last) {
-            return Err(LiveError::Clock);
-        }
-        self.last_now = Some(now);
-        let advertised_until = if let Some(until) = self.advertised_until {
-            until
-        } else {
-            let until = now
-                .checked_add(ACCEPT_LIFETIME_US)
-                .ok_or(LiveError::Clock)?;
-            self.advertised_until = Some(until);
-            until
-        };
-        if self.phase == Phase::Advertisement && now >= advertised_until {
-            return Err(LiveError::Expired);
-        }
+        let now = self.begin_turn(receiver, q)?;
         self.observe(receiver.last_result())?;
         if receiver.sync_round().elapsed(now) {
             return Err(LiveError::Expired);
         }
         self.finish_pending(receiver, q, now)?;
+        if self.phase == Phase::Advertise {
+            self.queue(
+                state(self.status.state.job_id, self.direction, SyncPhase::Advertised, 0),
+                now,
+            )?;
+            self.phase = Phase::Advertising;
+        }
         let idle = receiver.sync_idle(q).map_err(LiveError::Receive)?;
         let admission = if self.phase == Phase::Files && self.completed < self.entries {
             let remaining = self
@@ -257,6 +256,64 @@ impl ControllerJob {
         Ok(())
     }
 
+    /// Bind job direction, original connection and local acceptance lifetime
+    /// before observing receipts or admitting any disk operation.
+    fn begin_turn(&mut self, receiver: &Receiver, q: &QuicRecords) -> Result<u64, LiveError> {
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(|original| !q.is_bound_to(original))
+        {
+            return Err(LiveError::WrongConnection);
+        }
+        let now = receiver.sync_clock(q).map_err(LiveError::Receive)?;
+        let context = receiver.sync_context();
+        let (direction, role) = match self.direction {
+            SyncDirection::HostToController => (
+                fr_wire::files::Direction::ToController,
+                fr_wire::files::Role::Controller,
+            ),
+            SyncDirection::ControllerToHost => (
+                fr_wire::files::Direction::ToHost,
+                fr_wire::files::Role::Host,
+            ),
+            SyncDirection::Bidirectional => return Err(LiveError::WrongDirection),
+        };
+        if context.direction != direction || context.sender != role {
+            return Err(LiveError::WrongDirection);
+        }
+        if !receiver.sync_tracks(&self.directory) {
+            return Err(LiveError::InvalidConfig);
+        }
+        if self.connection.is_none() {
+            self.connection = Some(q.binding());
+        }
+        if self.phase == Phase::Stopped {
+            return Err(self.status.failure.unwrap_or(LiveError::Cancelled));
+        }
+        if self.last_now.is_some_and(|last| now < last) {
+            return Err(LiveError::Clock);
+        }
+        self.last_now = Some(now);
+        let advertised_until = if let Some(until) = self.advertised_until {
+            until
+        } else {
+            let until = now
+                .checked_add(ACCEPT_LIFETIME_US)
+                .ok_or(LiveError::Clock)?;
+            self.advertised_until = Some(until);
+            until
+        };
+        if matches!(
+            self.phase,
+            Phase::Advertise | Phase::Advertising | Phase::Acceptance | Phase::Advertisement
+        ) && now >= advertised_until
+        {
+            return Err(LiveError::Expired);
+        }
+        Ok(now)
+    }
+
     fn finish_pending(
         &mut self,
         receiver: &Receiver,
@@ -273,6 +330,10 @@ impl ControllerJob {
             return Ok(());
         }
         self.pending = None;
+        if self.phase == Phase::Advertising {
+            self.phase = Phase::Acceptance;
+            return Ok(());
+        }
         if self.phase == Phase::Acknowledging {
             let now = receiver.sync_clock(q).map_err(LiveError::Receive)?;
             if !receiver.sync_round().finish(now) {
@@ -299,7 +360,7 @@ impl ControllerJob {
         if record.job_id != self.status.state.job_id {
             return Err(LiveError::WrongJob);
         }
-        if record.sync_direction != SyncDirection::HostToController {
+        if record.sync_direction != self.direction {
             return Err(LiveError::WrongDirection);
         }
         if record.conflict_policy != fr_wire::sync_job_state::ConflictPolicy::KeepBoth {
@@ -313,16 +374,23 @@ impl ControllerJob {
         }
         match self.phase {
             Phase::Advertisement => {
-                if record != state(record.job_id, SyncPhase::Advertised, 0) {
+                if record != state(record.job_id, self.direction, SyncPhase::Advertised, 0) {
                     return Err(LiveError::WrongPhase);
                 }
-                let acceptance = state(record.job_id, SyncPhase::Accepted, 0);
+                let acceptance = state(record.job_id, self.direction, SyncPhase::Accepted, 0);
                 self.queue(acceptance, now)?;
                 self.phase = Phase::Accepting;
             }
+            Phase::Acceptance => {
+                if record != state(record.job_id, self.direction, SyncPhase::Accepted, 0) {
+                    return Err(LiveError::WrongPhase);
+                }
+                self.status.state = record;
+                self.phase = Phase::Scan;
+            }
             Phase::Scan => {
                 let revision = self.revision.checked_add(1).ok_or(LiveError::Resource)?;
-                if record != state(record.job_id, SyncPhase::Scanning, revision) {
+                if record != state(record.job_id, self.direction, SyncPhase::Scanning, revision) {
                     return Err(LiveError::WrongPhase);
                 }
                 let until = now

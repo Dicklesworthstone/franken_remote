@@ -1,4 +1,4 @@
-//! Source-version delivery on one original, explicitly accepted download lane.
+//! Source-version delivery on one original, explicitly accepted file lane.
 use super::{
     ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, HostConfig, JobBudget, JobStatus, LiveError,
     scan::{PreparedRound, Scan, ScanCache, ScanScope, Version},
@@ -27,6 +27,8 @@ use std::{
 enum Step {
     Advertise,
     Accept,
+    Advertisement,
+    BeginRound,
     StartScan,
     Scanning,
     StartTransfer,
@@ -85,10 +87,13 @@ impl ScanRetry {
     }
 }
 
-/// One host-configured source and its bounded, confirmed-version ledger.
+/// One locally selected source and its bounded, confirmed-version ledger.
+/// The host advertises download jobs; an upload source accepts a host-advertised
+/// destination. Neither path scans before that original handshake completes.
 /// A new connection cannot resume this owner, consent or an uncertain result.
 pub struct HostJob {
     config: HostConfig,
+    direction: SyncDirection,
     cx: Cx,
     clock: TimerDriverHandle,
     authority: Authority,
@@ -115,7 +120,8 @@ pub struct HostJob {
 }
 impl std::fmt::Debug for HostJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostFolderJob")
+        f.debug_struct("SourceFolderJob")
+            .field("direction", &self.direction)
             .field("status", &self.status)
             .finish_non_exhaustive()
     }
@@ -128,22 +134,65 @@ impl HostJob {
         permission: Permission,
         q: &QuicRecords,
     ) -> Result<Self, LiveError> {
+        Self::with_direction(
+            config,
+            cx,
+            authority,
+            permission,
+            q,
+            SyncDirection::HostToController,
+        )
+    }
+
+    /// Explicitly accept one host-advertised job with this pinned local source.
+    /// The accepted controller authority must belong to this original upload
+    /// channel. A selected source alone never advertises or creates a host job.
+    pub fn for_controller(
+        config: HostConfig,
+        cx: Cx,
+        authority: Authority,
+        permission: Permission,
+        q: &QuicRecords,
+    ) -> Result<Self, LiveError> {
+        Self::with_direction(
+            config,
+            cx,
+            authority,
+            permission,
+            q,
+            SyncDirection::ControllerToHost,
+        )
+    }
+
+    fn with_direction(
+        config: HostConfig,
+        cx: Cx,
+        authority: Authority,
+        permission: Permission,
+        q: &QuicRecords,
+        direction: SyncDirection,
+    ) -> Result<Self, LiveError> {
         cx.checkpoint().map_err(|_| LiveError::Cancelled)?;
         let clock = cx.timer_driver().ok_or(LiveError::Clock)?;
         let now = clock.now().as_nanos() / 1000;
         let acceptance_until = now
             .checked_add(ACCEPT_LIFETIME_US)
             .ok_or(LiveError::Clock)?;
-        let status = JobStatus::new(config.job_id);
+        let status = JobStatus::new(config.job_id, direction);
         Ok(Self {
             config,
+            direction,
             cx,
             clock,
             authority,
             permission,
             connection: q.binding(),
             stopped: Arc::new(AtomicBool::new(false)),
-            step: Step::Advertise,
+            step: if direction == SyncDirection::HostToController {
+                Step::Advertise
+            } else {
+                Step::Advertisement
+            },
             pending: None,
             scan: None,
             scan_cache: ScanCache::default(),
@@ -222,15 +271,28 @@ impl HostJob {
         if !sender.sync_lane().sync_selected() {
             return Err(LiveError::NotNegotiated);
         }
-        if sender.sync_lane().outgoing().direction != fr_wire::files::Direction::ToController
-            || sender.sync_lane().outgoing().sender != fr_wire::files::Role::Host
-        {
+        let context = sender.sync_lane().outgoing();
+        let (direction, role, authority) = match self.direction {
+            SyncDirection::HostToController => (
+                fr_wire::files::Direction::ToController,
+                fr_wire::files::Role::Host,
+                fr_wire::files::Direction::ToHost,
+            ),
+            SyncDirection::ControllerToHost => (
+                fr_wire::files::Direction::ToHost,
+                fr_wire::files::Role::Controller,
+                fr_wire::files::Direction::ToController,
+            ),
+            SyncDirection::Bidirectional => return Err(LiveError::WrongDirection),
+        };
+        if context.direction != direction || context.sender != role {
             return Err(LiveError::WrongDirection);
         }
-        let context = sender.sync_lane().outgoing();
-        if self.authority.direction() != fr_wire::files::Direction::ToHost
+        if self.authority.direction() != authority
             || self.authority.binding().session != context.session
             || self.authority.binding().lease != context.lease
+            || !self.authority.matches_channel(context.channel)
+            || !self.authority.matches_parent(sender.sync_lane().parent())
         {
             return Err(LiveError::WrongDirection);
         }
@@ -244,7 +306,11 @@ impl HostJob {
             .and_then(|at| self.authority.deadline(at))
             .map_err(|_| LiveError::Cancelled)?;
         sender.sync_lane().check(q).map_err(LiveError::Transport)?;
-        if matches!(self.step, Step::Advertise | Step::Accept) && now >= self.acceptance_until {
+        if matches!(
+            self.step,
+            Step::Advertise | Step::Accept | Step::Advertisement | Step::BeginRound
+        ) && now >= self.acceptance_until
+        {
             return Err(LiveError::Expired);
         }
         if matches!(
@@ -288,7 +354,7 @@ impl HostJob {
         match self.step {
             Step::Advertise => {
                 self.queue(
-                    state(self.config.job_id, SyncPhase::Advertised, 0),
+                    state(self.config.job_id, self.direction, SyncPhase::Advertised, 0),
                     Step::Accept,
                     now,
                 )?;
@@ -296,12 +362,30 @@ impl HostJob {
             Step::Accept => {
                 if let Some(accepted) = self.receive_state(sender, q, authorize)? {
                     self.check_peer(accepted)?;
-                    if accepted != state(self.config.job_id, SyncPhase::Accepted, 0) {
+                    if accepted
+                        != state(self.config.job_id, self.direction, SyncPhase::Accepted, 0)
+                    {
                         return Err(LiveError::WrongPhase);
                     }
                     self.start_round(now)?;
                 }
             }
+            Step::Advertisement => {
+                if let Some(advertised) = self.receive_state(sender, q, authorize)? {
+                    self.check_peer(advertised)?;
+                    if advertised
+                        != state(self.config.job_id, self.direction, SyncPhase::Advertised, 0)
+                    {
+                        return Err(LiveError::WrongPhase);
+                    }
+                    self.queue(
+                        state(self.config.job_id, self.direction, SyncPhase::Accepted, 0),
+                        Step::BeginRound,
+                        now,
+                    )?;
+                }
+            }
+            Step::BeginRound => self.start_round(now)?,
             Step::StartScan => {
                 if !self.scan_retry.begin(now, self.round_until)? {
                     return Ok(());
@@ -427,6 +511,7 @@ impl HostJob {
         self.scan_cache = std::mem::take(&mut prepared.cache);
         let mut announcement = state(
             self.config.job_id,
+            self.direction,
             SyncPhase::Transferring,
             self.status.state.manifest_revision,
         );
@@ -485,7 +570,7 @@ impl HostJob {
         self.scan_retry = ScanRetry::default();
         self.step = Step::StartScan;
         self.queue(
-            state(self.config.job_id, SyncPhase::Scanning, revision),
+            state(self.config.job_id, self.direction, SyncPhase::Scanning, revision),
             Step::StartScan,
             now,
         )
@@ -570,7 +655,7 @@ impl HostJob {
         if value.job_id != self.config.job_id {
             return Err(LiveError::WrongJob);
         }
-        if value.sync_direction != SyncDirection::HostToController {
+        if value.sync_direction != self.direction {
             return Err(LiveError::WrongDirection);
         }
         if matches!(value.phase, SyncPhase::Cancelled | SyncPhase::Failed) {
@@ -578,6 +663,16 @@ impl HostJob {
         }
         Ok(())
     }
+    fn published_bytes(&self, outcome: Outcome) -> Option<u64> {
+        match (self.direction, outcome) {
+            (SyncDirection::HostToController, Outcome::ControllerPublished { bytes, .. })
+            | (SyncDirection::ControllerToHost, Outcome::HostPublished { bytes, .. }) => {
+                Some(bytes)
+            }
+            _ => None,
+        }
+    }
+
     fn observe_report(&mut self, sender: &Sender<'_>) -> Result<(), LiveError> {
         let Some(report) = sender.batch_report() else {
             return Ok(());
@@ -586,7 +681,7 @@ impl HostJob {
             return Err(LiveError::WrongPhase);
         }
         for (index, receipt) in report.receipts().enumerate().skip(self.reported) {
-            if let Outcome::ControllerPublished { bytes, .. } = receipt.outcome {
+            if let Some(bytes) = self.published_bytes(receipt.outcome) {
                 if bytes != self.versions[index].bytes {
                     return Err(LiveError::WrongPhase);
                 }
@@ -610,7 +705,7 @@ impl HostJob {
             // Failed/lost publications never enter this ledger, and a confirmed
             // prefix survives a later failed entry without being replayed.
             for (version, receipt) in self.versions.iter().zip(report.receipts()) {
-                if matches!(receipt.outcome, Outcome::ControllerPublished { .. }) {
+                if self.published_bytes(receipt.outcome).is_some() {
                     self.ledger
                         .insert(version.name.clone(), version.hash.clone());
                 }

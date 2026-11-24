@@ -177,8 +177,8 @@ pub struct MediaChannel {
     credit: bool,
     pub(super) files_direction: FileDirection,
     files_duplex: bool,
-    /// Fixed by this connection's complete folder-sync selection. Only its
-    /// host-to-controller file pair can carry job state.
+    /// Fixed for this exact file direction by its independent bilateral job
+    /// selection. A sibling direction or later offer cannot enable job records.
     files_sync: bool,
     /// Sibling dispatch cannot defer a microphone offer absent from this
     /// original connection's positive selection.
@@ -821,6 +821,22 @@ impl MediaChannel {
         host: bool,
         allowance: u64,
     ) -> Self {
+        let files_duplex = fr_wire::files::duplex_selected(scope.selection);
+        let files_direction = if descriptor.role == MediaRole::FilesDownload
+            || (!files_duplex
+                && scope.selection.capabilities.iter().any(|c| {
+                    c.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                        && c.version == fr_wire::files::DOWNLOAD_VERSION
+                }))
+        {
+            FileDirection::ToController
+        } else {
+            FileDirection::ToHost
+        };
+        let files_sync = match files_direction {
+            FileDirection::ToController => fr_wire::sync_job_state::selected(scope.selection),
+            FileDirection::ToHost => fr_wire::sync_job_state::upload_selected(scope.selection),
+        };
         Self {
             connection,
             state,
@@ -841,19 +857,10 @@ impl MediaChannel {
             receive_armed: !host,
             allowance,
             credit: attachment::credit::selected(scope.selection),
-            files_duplex: fr_wire::files::duplex_selected(scope.selection),
-            files_sync: fr_wire::sync_job_state::selected(scope.selection),
+            files_duplex,
+            files_sync,
             audio_up: fr_wire::audio_up::uplink_selected(scope.selection),
-            files_direction: if descriptor.role == MediaRole::FilesDownload
-                || (!fr_wire::files::duplex_selected(scope.selection)
-                    && scope.selection.capabilities.iter().any(|c| {
-                        c.name == fr_wire::files::DOWNLOAD_CAPABILITY
-                            && c.version == fr_wire::files::DOWNLOAD_VERSION
-                    })) {
-                FileDirection::ToController
-            } else {
-                FileDirection::ToHost
-            },
+            files_direction,
         }
     }
     pub const fn deadline_us(&self) -> u64 {
@@ -861,10 +868,7 @@ impl MediaChannel {
     }
 
     pub(super) fn application_messages(&self, host_direction: bool) -> Messages {
-        if self.files_sync
-            && self.descriptor.role.is_files()
-            && self.files_direction == FileDirection::ToController
-        {
+        if self.files_sync && self.descriptor.role.is_files() {
             Messages::FilesSync
         } else {
             messages(self.descriptor.role, host_direction)

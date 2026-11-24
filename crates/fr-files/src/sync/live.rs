@@ -1,4 +1,4 @@
-//! One-way, locally selected folder jobs on an existing controlled download.
+//! One-way, locally selected folder jobs on an existing controlled file lane.
 //!
 //! A settled round confirms delivery of its selected source versions. It does
 //! not assert that the two directories are identical: independent client edits
@@ -18,6 +18,13 @@ mod receiver;
 mod scan;
 pub use host::HostJob;
 pub use receiver::ControllerJob;
+
+/// A pinned local source for either positively negotiated one-way direction.
+pub type SourceConfig = HostConfig;
+/// Source scanning and ATP delivery; use `for_controller` for an upload job.
+pub type SourceJob = HostJob;
+/// Publication accounting; use `for_host` for a host-advertised upload job.
+pub type ReceiverJob = ControllerJob;
 
 pub const MAX_ENTRIES: u32 = 32;
 // A complete scan must fit the sender's single bounded batch.
@@ -147,9 +154,9 @@ pub struct JobStatus {
     pub cleanup_complete: bool,
 }
 impl JobStatus {
-    pub(super) fn new(job_id: u64) -> Self {
+    pub(super) fn new(job_id: u64, direction: SyncDirection) -> Self {
         Self {
-            state: state(job_id, SyncPhase::Advertised, 0),
+            state: state(job_id, direction, SyncPhase::Advertised, 0),
             failure: None,
             confirmed_publications: 0,
             confirmed_conflicts: 0,
@@ -168,10 +175,15 @@ impl JobStatus {
     }
 }
 
-pub(super) fn state(job_id: u64, phase: SyncPhase, revision: u64) -> SyncJobState {
+pub(super) fn state(
+    job_id: u64,
+    direction: SyncDirection,
+    phase: SyncPhase,
+    revision: u64,
+) -> SyncJobState {
     SyncJobState {
         job_id,
-        sync_direction: SyncDirection::HostToController,
+        sync_direction: direction,
         conflict_policy: ConflictPolicy::KeepBoth,
         phase,
         reason: Reason::None,
@@ -186,7 +198,8 @@ pub(super) fn state(job_id: u64, phase: SyncPhase, revision: u64) -> SyncJobStat
 
 /// One explicit local source, opened without reading any of its entries.
 /// The root descriptor remains the source after pathname replacement. Scanning
-/// starts only after the original controller explicitly accepts this job ID.
+/// starts only after the original host advertisement and matching explicit
+/// controller acceptance have completed on the selected file lane.
 pub struct HostConfig {
     pub(super) job_id: u64,
     pub(super) root: DropDirectory,

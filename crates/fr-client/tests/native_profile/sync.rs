@@ -137,3 +137,120 @@ fn incompatible_or_full_required_profiles_cannot_silently_drop_authority_or_enab
     full.validate().unwrap();
     assert!(with_folder_sync(full).is_err());
 }
+
+fn extended_upload_profile(options: u8) -> Result<negotiation::Offer, negotiation::Error> {
+    let clipboard = options & 1 != 0;
+    let audio = options & 2 != 0;
+    let mut offer = if options & 4 != 0 {
+        native::control_offer_with_duplex(clipboard, audio)
+    } else {
+        native::control_offer_with_auxiliary(clipboard, true, audio)
+    };
+    if options & 8 != 0 {
+        offer = fr_wire::audio_up::with_microphone(offer)?;
+    }
+    if options & 16 != 0 {
+        offer = fr_wire::control::with_pixel_scroll(offer)?;
+    }
+    if options & 32 != 0 {
+        offer = fr_wire::control::with_committed_text(offer)?;
+    }
+    if options & 64 != 0 {
+        offer = fr_wire::display::picture::with_capability(offer)?;
+    }
+    offer.validate()?;
+    Ok(offer)
+}
+
+fn optional_sync_slot(cap: &negotiation::Capability) -> bool {
+    !cap.required
+        && [
+            (fr_wire::quality_decision::CAPABILITY, fr_wire::quality_decision::VERSION),
+            (attachment::BULK_RECORD_CAPABILITY, attachment::BULK_RECORD_VERSION),
+            (attachment::credit::CAPABILITY, attachment::credit::VERSION),
+            (fr_wire::receiver_metrics::CAPABILITY, fr_wire::receiver_metrics::VERSION),
+        ]
+        .iter()
+        .any(|&(name, version)| cap.name == name && cap.version == version)
+}
+
+#[test]
+fn upload_sync_preserves_every_available_native_auxiliary_and_input_profile() {
+    for options in 0u8..128 {
+        let Ok(original) = extended_upload_profile(options) else {
+            // This exact feature-only combination already exceeds its bounds.
+            continue;
+        };
+        let fits = original.capabilities.len() < negotiation::MAX_CAPABILITIES
+            || original.capabilities.iter().any(optional_sync_slot);
+        let sync = native::with_folder_sync_upload(original.clone());
+        if !fits {
+            assert!(sync.is_err(), "no feature may be discarded to make room");
+            continue;
+        }
+        let sync = sync.unwrap();
+        let selected = sync.select().unwrap();
+        assert!(sync_job_state::upload_selected(&selected));
+        assert!(!sync_job_state::selected(&selected));
+        assert_eq!(sync.limits, original.limits);
+        assert!(sync.capabilities.len() <= negotiation::MAX_CAPABILITIES);
+        for retained in original.capabilities.iter().filter(|cap| !optional_sync_slot(cap)) {
+            assert!(sync.capabilities.contains(retained), "lost {}", retained.name);
+        }
+        assert_eq!(native::with_folder_sync_upload(sync.clone()).unwrap(), sync);
+        let original_selection = original.select().unwrap();
+        assert_eq!(
+            fr_wire::files::duplex_selected(&selected),
+            fr_wire::files::duplex_selected(&original_selection)
+        );
+        assert_eq!(
+            fr_wire::audio_control::downlink_selected(&selected),
+            fr_wire::audio_control::downlink_selected(&original_selection)
+        );
+        assert_eq!(
+            fr_wire::audio_up::uplink_selected(&selected),
+            fr_wire::audio_up::uplink_selected(&original_selection)
+        );
+        assert_eq!(
+            fr_wire::control::requestable(&selected.capabilities),
+            fr_wire::control::requestable(&original_selection.capabilities)
+        );
+        for intersection in [
+            original.intersect(&sync).unwrap(),
+            sync.intersect(&original).unwrap(),
+        ] {
+            assert!(!sync_job_state::upload_selected(&intersection.select().unwrap()));
+            for retained in original.capabilities.iter().filter(|cap| !optional_sync_slot(cap)) {
+                assert!(intersection.capabilities.contains(retained));
+            }
+        }
+    }
+    for unavailable in [
+        native::observation_offer(),
+        native::control_offer(),
+        native::control_offer_with_download(false, false),
+    ] {
+        assert!(native::with_folder_sync_upload(unavailable).is_err());
+    }
+}
+
+#[test]
+fn both_explicit_job_directions_survive_complete_duplex_negotiation() {
+    let original = native::control_offer_with_duplex(false, false);
+    for upload_first in [false, true] {
+        let prepared = if upload_first {
+            with_folder_sync(native::with_folder_sync_upload(original.clone()).unwrap()).unwrap()
+        } else {
+            native::with_folder_sync_upload(with_folder_sync(original.clone()).unwrap()).unwrap()
+        };
+        let selected = prepared.select().unwrap();
+        assert!(sync_job_state::selected(&selected));
+        assert!(sync_job_state::upload_selected(&selected));
+        assert!(fr_wire::files::duplex_selected(&selected));
+        assert_eq!(prepared.limits, original.limits);
+        let legacy = original.intersect(&prepared).unwrap().select().unwrap();
+        assert!(fr_wire::files::duplex_selected(&legacy));
+        assert!(!sync_job_state::selected(&legacy));
+        assert!(!sync_job_state::upload_selected(&legacy));
+    }
+}

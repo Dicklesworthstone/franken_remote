@@ -14,6 +14,66 @@ use fr_wire::{
 };
 
 impl Link {
+    /// Real upload attachment and the original accepted controller grant.
+    /// Both legacy upload-only and independently bound duplex upload lanes
+    /// exercise the same production folder owners.
+    pub async fn upload_sync(
+        &mut self,
+        cx: &Cx,
+        sync: bool,
+        duplex: bool,
+    ) -> (
+        FilesChannel,
+        FilesChannel,
+        InputSession,
+        InputClient,
+        Authority,
+    ) {
+        self.selection.role = Role::RequestControl;
+        for name in [
+            attachment::INPUT_CAPABILITY,
+            attachment::FILES_CAPABILITY,
+            files::CAPABILITY,
+            files::CHANNEL_SCOPE_CAPABILITY,
+        ] {
+            self.selection.capabilities.push(Capability {
+                name: name.into(),
+                version: 1,
+                required: true,
+            });
+        }
+        if duplex {
+            for name in [
+                files::DOWNLOAD_CAPABILITY,
+                files::DUPLEX_CAPABILITY,
+            ] {
+                self.selection.capabilities.push(Capability {
+                    name: name.into(),
+                    version: 1,
+                    required: true,
+                });
+            }
+        }
+        if sync {
+            self.selection.capabilities.push(Capability {
+                name: sync_job_state::UPLOAD_CAPABILITY.into(),
+                version: sync_job_state::UPLOAD_VERSION,
+                required: false,
+            });
+        }
+        self.selection
+            .capabilities
+            .sort_by(|a, b| a.name.cmp(&b.name));
+        let _input = channel(self, cx, 8, MediaRole::Input).await;
+        let (host, client) = channel(self, cx, 9, MediaRole::Files).await;
+        let handle = 9;
+        let host = FilesChannel::new(&self.h, host, InputLeaseId::from_raw(2), handle).unwrap();
+        let client = FilesChannel::new(&self.c, client, InputLeaseId::from_raw(2), handle).unwrap();
+        let input = owner(cx);
+        let (client_input, authority) = accepted(cx);
+        (host, client, input, client_input, authority)
+    }
+
     pub async fn download(
         &mut self,
         cx: &Cx,

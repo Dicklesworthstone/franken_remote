@@ -598,18 +598,33 @@ The optional `file-folder-sync` v1 capability permits `SyncJobState` on the
 original host-to-controller file pair, including the distinct duplex download
 role. Both endpoints must also select `native-media-attachment`,
 `native-input-attachment`, `native-file-receive`, `file-atp-full` and
-`file-download`, all version 1, under a controlling role. An upload pair or an
-unselected peer cannot carry job state. The existing 121-byte record and ATP
-file records retain the same connection, session, lease, handle and channel
-binding; job records consume ordinary file queue counts and bytes.
+`file-download`, all version 1, under a controlling role. This download
+capability never permits job state on an upload pair.
 
-Native one-way jobs require an explicit host-configured source/ID and explicit
-client acceptance of that ID into its own keep-both destination. Scanning waits
-for acceptance. A bounded scan/transfer/settlement sequence separates job-state
-exchange from outstanding ATP/source/proof custody; settled counters represent
-confirmed deliveries, not directory equality. Local destination edits and
-deletions do not replay acknowledged source versions. Job state contains no
-local paths, and reconnecting does not restore the original job or consent.
+The independent optional `file-folder-sync-upload` v1 capability permits
+`SyncJobState` on the original controller-to-host file pair. Both endpoints
+must also select `native-media-attachment`, `native-input-attachment`,
+`native-file-receive`, `file-atp-full` and `file-channel-scope`, all version 1,
+under a controlling role. Selecting both file directions additionally requires
+the complete `file-duplex` v1 profile. Neither sync capability enables the
+other direction, and legacy peers retain their existing file behavior. Each
+completed attachment freezes only its own direction's selected message family;
+a later offer or sibling attachment cannot change it. One-way pairs reject job
+records naming the opposite or bidirectional sync direction. The existing
+121-byte record and ATP file records retain the same connection, session,
+lease, handle and channel binding; job records consume ordinary file queue
+counts and bytes.
+
+A one-way job requires an explicit host-configured local directory/ID and
+explicit client acceptance with its separately selected complementary local
+directory. The host always advertises and the controller always accepts,
+including when the host is the receiver. The receiver must use keep-both
+publication; scanning waits for acceptance. A bounded
+scan/transfer/settlement sequence separates job-state exchange from outstanding
+ATP/source/proof custody; settled counters represent confirmed deliveries, not
+directory equality. Local destination edits and deletions do not replay
+acknowledged source versions. Job state contains no local paths, and
+reconnecting does not restore the original job or consent.
 The implemented scope and limits are in [folder synchronization](docs/folder-sync.md).
 
 File messages are an authorization/stream envelope for **existing ATP**;

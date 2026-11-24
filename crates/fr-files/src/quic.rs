@@ -464,6 +464,10 @@ impl HostReceiver {
         Ok(self.clock.now().as_nanos() / 1000)
     }
 
+    pub(crate) fn sync_context(&self) -> fr_wire::files::Context {
+        self.lane.outgoing()
+    }
+
     pub(crate) fn sync_round(&self) -> &worker::RoundDeadline {
         self.task.round_deadline()
     }

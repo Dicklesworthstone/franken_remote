@@ -114,12 +114,11 @@ impl FilesChannel {
     pub const fn limits(&self) -> Limits {
         self.limits
     }
-    /// This original download attachment positively selected bounded job state.
+    /// This original directional attachment positively selected bounded job state.
     /// Local job configuration, acceptance and filesystem authority remain the
     /// file owner's responsibility; ordinary file consent is not sync consent.
     pub fn sync_selected(&self) -> bool {
         self.routes.outbound.messages == Messages::FilesSync
-            && self.outgoing.direction == files::Direction::ToController
     }
     pub fn owns_inbound(&self, route: Route) -> bool {
         route == Route::Stream(self.routes.inbound)
@@ -258,7 +257,19 @@ impl FilesChannel {
 
     fn validate_record(&self, bytes: &[u8], context: Context) -> Result<(), Error> {
         if files::decode(bytes, context, self.limits).is_ok()
-            || (self.sync_selected() && sync_job_state::decode(bytes, context, self.limits).is_ok())
+            || (self.sync_selected()
+                && sync_job_state::decode(bytes, context, self.limits).is_ok_and(|state| {
+                    matches!(
+                        (context.direction, state.sync_direction),
+                        (
+                            files::Direction::ToHost,
+                            sync_job_state::SyncDirection::ControllerToHost
+                        ) | (
+                            files::Direction::ToController,
+                            sync_job_state::SyncDirection::HostToController
+                        )
+                    )
+                }))
         {
             Ok(())
         } else {

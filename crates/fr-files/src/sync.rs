@@ -37,9 +37,11 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-/// Explicitly accepted, one-way jobs on the original native download lane.
+/// Explicitly accepted, one-way jobs on the original native file lanes.
 pub mod live;
-pub use live::{ControllerJob, HostConfig, HostJob, JobStatus, LiveError};
+pub use live::{
+    ControllerJob, HostConfig, HostJob, JobStatus, LiveError, ReceiverJob, SourceConfig, SourceJob,
+};
 
 #[cfg(unix)]
 const STAGING_PREFIX: &str = ".fr-part-";

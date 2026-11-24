@@ -262,6 +262,16 @@ pub fn with_folder_sync(offer: Offer) -> Result<Offer, fr_wire::negotiation::Err
     fr_wire::sync_job_state::prepare_offer(offer)
 }
 
+/// Explicit acceptance of a host-configured upload job with a separately
+/// selected local source. This adds protocol understanding only; a one-use
+/// source request still supplies the actual job ID and scanning permission.
+pub fn with_folder_sync_upload(offer: Offer) -> Result<Offer, fr_wire::negotiation::Error> {
+    if offer.role != Role::RequestControl {
+        return Err(fr_wire::negotiation::Error::RequiredCapability);
+    }
+    fr_wire::sync_job_state::prepare_upload_offer(offer)
+}
+
 /// Explicit independent upload and download selections. The two directions
 /// require positive `file-duplex` negotiation; either legacy single-direction
 /// host can still select its original optional file workflow.

@@ -17,7 +17,7 @@ mod offers;
 pub use offers::{
     CLIPBOARD_CAPABILITIES, FILE_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
     host_offer_with_download, host_offer_with_duplex, host_offer_with_files, with_folder_sync,
-    with_line_scroll, with_quality_decisions, with_receiver_metrics,
+    with_folder_sync_upload, with_line_scroll, with_quality_decisions, with_receiver_metrics,
 };
 
 /// Positive playback selection, including the explicit control-audio extension.
