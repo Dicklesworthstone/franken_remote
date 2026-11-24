@@ -21,6 +21,7 @@
 //!   fr-windows view [stable-id-or-name] [--port N] [--ipv4|--ipv6]
 //!       [--address IP]... [--control] [--no-clipboard] [--seconds N]
 //!       [--fullscreen] [--no-shortcuts]
+//!       [--audio] [--audio-volume 0..100] [--audio-muted]
 //!       [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software]
 //!       [--send FILE]... (requires --control; up to eight regular files, sent once)
 //!       [--receive DIR] [--receive-max-file-bytes N] [--receive-max-session-bytes N]
@@ -73,6 +74,9 @@ mod machines;
 mod options;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod outcome;
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod playback;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod receive_choice;
 // Shared completion capture uses the same Windows/dev-only core as the picker.
@@ -119,7 +123,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows\n       fr-windows app [--port N]\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
      [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--no-clipboard] [--seconds N] \
-     [--fullscreen] [--no-shortcuts] [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE]... [--receive DIR] \
+     [--fullscreen] [--no-shortcuts] [--audio] [--audio-volume 0..100] [--audio-muted] [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE]... [--receive DIR] \
      [--receive-max-file-bytes N] [--receive-max-session-bytes N] \
      [--receive-conflict reject|keep-both]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \

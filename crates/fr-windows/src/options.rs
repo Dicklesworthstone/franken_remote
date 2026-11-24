@@ -140,6 +140,21 @@ pub(crate) struct ReceiveOptions {
     pub conflict: ReceiveConflict,
 }
 
+/// Explicit local playback preferences; receiving audio never grants input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioOptions {
+    pub volume: u8,
+    pub muted: bool,
+}
+impl Default for AudioOptions {
+    fn default() -> Self {
+        Self {
+            volume: 100,
+            muted: false,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
@@ -154,6 +169,8 @@ pub(crate) struct Options {
     /// With `--control`, share text with a host that also enables clipboard.
     /// Defaults on; `--no-clipboard` disables it for this command.
     pub clipboard: bool,
+    /// Receive the host's explicitly enabled playback stream.
+    pub audio: Option<AudioOptions>,
     pub seconds: Option<u64>,
     pub display: DisplayChoice,
     /// Explicit regular files; one bounded batch on the original control grant.
@@ -211,6 +228,7 @@ impl Options {
             family: Family::Automatic,
             control: false,
             clipboard: true,
+            audio: None,
             seconds: None,
             display: DisplayChoice::Primary,
             send: Vec::new(),
@@ -219,6 +237,8 @@ impl Options {
             fullscreen: false,
             shortcuts: true,
         };
+        let mut audio_volume = None;
+        let mut audio_muted = false;
         let mut port_set = false;
         let mut decoder_set = false;
         let mut display_set = false;
@@ -229,6 +249,12 @@ impl Options {
         loop {
             match rest {
                 [] => {
+                    if let Some(audio) = &mut options.audio {
+                        audio.volume = audio_volume.unwrap_or(100);
+                        audio.muted = audio_muted;
+                    } else if audio_volume.is_some() || audio_muted {
+                        return None;
+                    }
                     if let Some(directory) = receive_directory {
                         if receive_max_file_bytes
                             .zip(receive_max_session_bytes)
@@ -251,6 +277,14 @@ impl Options {
                     return ((options.send.is_empty() && options.receive.is_none())
                         || options.control)
                         .then_some(options);
+                }
+                [flag, tail @ ..] if view && flag == "--audio" && options.audio.is_none() => {
+                    options.audio = Some(AudioOptions::default());
+                    rest = tail;
+                }
+                [flag, tail @ ..] if view && flag == "--audio-muted" && !audio_muted => {
+                    audio_muted = true;
+                    rest = tail;
                 }
                 [flag, tail @ ..] if view && flag == "--control" && !options.control => {
                     options.control = true;
@@ -281,6 +315,9 @@ impl Options {
                 }
                 [flag, value, tail @ ..] => {
                     match flag.as_str() {
+                        "--audio-volume" if view && audio_volume.is_none() => {
+                            audio_volume = Some(value.parse::<u8>().ok().filter(|v| *v <= 100)?);
+                        }
                         "--port" if !port_set => {
                             options.port = parse_port(value)?.get();
                             port_set = true;
@@ -456,6 +493,7 @@ mod tests {
                 family: Family::Automatic,
                 control: false,
                 clipboard: true,
+                audio: None,
                 seconds: None,
                 display: DisplayChoice::Primary,
                 decoder: Decoder::Automatic,
@@ -799,5 +837,67 @@ mod tests {
         ] {
             assert!(parse(&args, true).is_none(), "{args:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod playback_options_tests {
+    use super::*;
+    fn parse(args: &[&str], view: bool) -> Option<Options> {
+        Options::parse(
+            &args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            view,
+            8443,
+        )
+    }
+    #[test]
+    fn playback_is_explicit_and_independent_of_input_control() {
+        assert_eq!(parse(&[], true).unwrap().audio, None);
+        let view = parse(&["--audio"], true).unwrap();
+        assert!(!view.control);
+        assert_eq!(view.audio, Some(AudioOptions::default()));
+        let control = parse(
+            &[
+                "--audio-muted",
+                "--control",
+                "--audio-volume",
+                "35",
+                "--audio",
+            ],
+            true,
+        )
+        .unwrap();
+        assert!(control.control);
+        assert_eq!(
+            control.audio,
+            Some(AudioOptions {
+                volume: 35,
+                muted: true
+            })
+        );
+        assert_eq!(
+            parse(&["--audio", "--audio-volume", "0"], true)
+                .unwrap()
+                .audio
+                .unwrap()
+                .volume,
+            0
+        );
+    }
+    #[test]
+    fn no_implicit_playback_from_preferences_or_directory_queries() {
+        for args in [
+            vec!["--audio-muted"],
+            vec!["--audio-volume", "50"],
+            vec!["--audio", "--audio"],
+            vec!["--audio", "--audio-muted", "--audio-muted"],
+            vec!["--audio", "--audio-volume", "101"],
+            vec!["--audio", "--audio-volume", "-1"],
+            vec!["--audio", "--audio-volume", "1.5"],
+            vec!["--audio", "--audio-volume", "20", "--audio-volume", "30"],
+        ] {
+            assert!(parse(&args, true).is_none(), "{args:?}");
+        }
+        assert!(parse(&["--audio"], false).is_none());
     }
 }

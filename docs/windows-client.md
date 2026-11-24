@@ -15,10 +15,18 @@ before building:
 
 ```powershell
 $env:FR_MOBILE_ISRG_ROOTS_DIR = 'C:\build-inputs\isrg-roots'
+$env:FR_NATIVE_OPUS_LIBRARY_DIR = 'C:\trusted-opus-sdk\lib'
 cargo build --locked --release -p fr-windows
+cargo build --locked --release -p fr-native --no-default-features --features windows-opus-process --bin fr-opus-worker
 ```
 
-This input is used only for Windows targets, including cross-compilation.
+The Opus directory must contain the trusted target's static `libopus.a` for GNU
+or `opus.lib` for MSVC. Keep the built `fr-opus-worker.exe` beside both client
+executables and include the SDK's `COPYING` as `OPUS-LICENSE.txt` when packaging.
+The PowerShell installer provisions its pinned GNU SDK automatically; see
+[Windows playback](windows-audio.md#building-and-checking) for details.
+
+The certificate input is used only for Windows targets, including cross-compilation.
 The build accepts exactly one certificate per file, bounded to 8 KiB of PEM
 and 4 KiB of DER, and checks the decoded DER against these existing SHA-256
 pins before embedding either certificate:
@@ -81,7 +89,8 @@ Install for the current user:
 Installation needs no administrator rights and changes nothing outside the
 user's profile:
 
-- Both programs are copied to `%LOCALAPPDATA%\Programs\FrankenRemote`.
+- Both client programs, their matching `fr-opus-worker.exe`, and the codec
+  license are copied to `%LOCALAPPDATA%\Programs\FrankenRemote`.
 - A FrankenRemote shortcut is added to the Start menu.
 - An Apps & features entry is registered for this user, with a quiet
   uninstall command.
@@ -97,8 +106,9 @@ opens the installed copy.
 To remove it, use **Settings > Apps > Installed apps**, or run
 `FrankenRemote --uninstall` (`--quiet` skips the confirmation). Uninstall
 removes the shortcut, the Apps & features entry, the `Path` entry, the saved
-settings and both programs. Files that the running app was started from are
-deleted a moment after it exits. Tailscale is not changed.
+settings, both client programs, the decoder worker, and its license. Files that
+the running app was started from are deleted a moment after it exits. Tailscale
+is not changed.
 
 ### Choose a machine in the app
 
@@ -120,8 +130,8 @@ missing, duplicate or invalid values are refused before discovery or a viewer
 opens. A port cannot be combined with `--install` or `--uninstall`.
 
 `fr-windows app` opens the packaged `FrankenRemote.exe` beside the command-line
-program and waits for that application to close. Keep both executables together
-when running an unpacked release.
+program and waits for that application to close. Keep both client executables
+and their matching `fr-opus-worker.exe` together when running an unpacked release.
 
 The app opens a list of machines read from the installed Tailscale service.
 Its columns are machine, status, system, connection path and Tailscale
@@ -394,6 +404,49 @@ the pending repaint and old overlay knowledge without marking a frame drawn.
 This is evidence of accepted API submission, not measurement of physical
 scanout. Live Direct2D rendering, native cursor handoff, focus changes and
 failed-cleanup qualification on a Windows desktop remain pending.
+
+## Host audio playback
+
+For source builds, packaging, and device checks, see [Windows playback](windows-audio.md).
+
+Enable **Play host audio** in the desktop picker, or request playback explicitly:
+
+```powershell
+fr-windows view remote.example.ts.net --audio
+fr-windows view remote.example.ts.net --control --audio --audio-volume 70
+fr-windows view remote.example.ts.net --audio --audio-muted
+```
+
+Playback is off by default and works in observing and controlling sessions. The
+host must independently enable playback capture and select the audio-down
+capability. This choice does not enable microphone uplink or grant input control.
+A host without audio support leaves the desktop usable and reports audio absence.
+
+The **Audio** menu changes local volume in ten-percent steps and mutes or unmutes
+the current output. `--audio-volume` accepts an integer from 0 to 100;
+`--audio-muted` starts muted. Both require `--audio`. The picker remembers its
+playback checkbox; volume/mute preferences follow replacements inside the same
+viewer window. Every connection receives a fresh preference handle, so a retired
+output cannot change its successor.
+
+The Windows sink uses shared-mode WASAPI on the original default render endpoint
+and an isolated matching `fr-opus-worker.exe` beside the viewer executable.
+Keep that worker with both client executables when installing from a package.
+The worker decodes Opus; the native output thread performs bounded PCM submission
+and checks the original source deadline, device queue, and playback clock.
+A changed endpoint or failed device retires that output generation. Stop fences
+further submission immediately; native device disposal and decoder-process exit
+must be observed before replacing the session.
+
+The final JSON `audio` object reports configuration, submitted PCM frames,
+packet drops, generation failures/recovery, volume, mute, and cleanup. Submission
+counts are device-acceptance receipts, not proof of audible output. Counts and
+the first failure survive reconnects. Pending or unconfirmed cleanup blocks a
+replacement and a successful completion report.
+
+Source regression checks do not qualify a particular Windows driver, endpoint,
+or audible timing. Validate playback, mute, endpoint loss, close/reconnect, and
+latency on the intended Windows hardware before claiming device qualification.
 
 ## Full screen and Windows shortcuts
 

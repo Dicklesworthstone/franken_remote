@@ -24,6 +24,7 @@ mod files;
 mod focus_close;
 mod key_capture;
 mod local_cursor_adapter;
+mod playback;
 mod text;
 mod typing;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -47,6 +48,7 @@ pub use frd::native_files::{
     ConflictPolicy as DownloadConflictPolicy, DirectoryRefusal as DownloadRefusal,
     Limits as DownloadLimits,
 };
+pub use playback::{Playback, PlaybackFactory};
 pub use text::{CapturedText, TextDraft};
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 pub(crate) use upload::Error as UploadError;
@@ -1706,15 +1708,28 @@ pub struct Session {
 }
 impl Session {
     pub fn start(config: Config) -> std::io::Result<Self> {
-        Self::start_inner(config, false)
+        Self::start_inner(config, false, None)
     }
     /// Start with a native UI owner for frd's admitted local cursor requests.
     /// The caller must service this session's exchange and complete its native
     /// cleanup before destroying the UI. The C ABI keeps its existing path.
     pub fn start_with_local_cursor(config: Config) -> std::io::Result<Self> {
-        Self::start_inner(config, true)
+        Self::start_inner(config, true, None)
     }
-    fn start_inner(config: Config, native_cursor: bool) -> std::io::Result<Self> {
+    /// Explicit playback on the original observing or controlling connection.
+    /// The factory runs on the session thread after host admission, and every
+    /// attempt must finish its original playback cleanup before replacement.
+    pub fn start_with_local_cursor_and_playback(
+        config: Config,
+        playback: PlaybackFactory,
+    ) -> std::io::Result<Self> {
+        Self::start_inner(config, true, Some(playback))
+    }
+    fn start_inner(
+        config: Config,
+        native_cursor: bool,
+        playback: Option<PlaybackFactory>,
+    ) -> std::io::Result<Self> {
         if !config.control && (config.upload.is_some() || config.download.is_some()) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1764,7 +1779,7 @@ impl Session {
             .spawn(move || {
                 // A debug build unwinds: still end exactly once, ENDED last.
                 let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(&worker, config);
+                    run(&worker, config, playback);
                 }));
                 if ran.is_ok() {
                     // Normal early refusal never created a source; a serving
@@ -1851,7 +1866,7 @@ fn finish(shared: &Shared, code: u32, detail: Option<String>) {
 }
 
 #[allow(clippy::too_many_lines)] // one runtime, destination dispatch and terminal cleanup
-fn run(shared: &Arc<Shared>, config: Config) {
+fn run(shared: &Arc<Shared>, config: Config, playback: Option<PlaybackFactory>) {
     let Ok(runtime) = RuntimeBuilder::current_thread()
         .enable_platform_reactor(true)
         .build()
@@ -1877,7 +1892,9 @@ fn run(shared: &Arc<Shared>, config: Config) {
     let mut epoch = [0_u8; 16];
     cx.random_bytes(&mut epoch);
     let epoch = u128::from_be_bytes(epoch).max(1);
+    let audio_requested = playback.is_some();
     let mut app = Mobile::new(shared.clone(), control, config.display, local, epoch, watch);
+    app.playback_factory = playback;
     let cfg = Configuration {
         port: config.port,
         family: target.family(),
@@ -1888,11 +1905,12 @@ fn run(shared: &Arc<Shared>, config: Config) {
         max_attempts: 3,
         ..reconnect::Policy::default()
     };
-    let Ok(offer) = control_policy::offer_with_download(
+    let Ok(offer) = control_policy::offer_with_playback(
         control,
         shared.clipboard.report().requested,
         shared.upload.is_some(),
         shared.download.is_some(),
+        audio_requested,
     ) else {
         return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
     };
@@ -2332,6 +2350,8 @@ struct Mobile {
     terminal: Option<ObserverError>,
     clipboard_cleanup: Option<Deadline>,
     files_pending: bool,
+    playback_factory: Option<PlaybackFactory>,
+    playback: Option<Rc<dyn Playback>>,
 }
 impl Mobile {
     fn new(
@@ -2356,6 +2376,8 @@ impl Mobile {
             terminal: None,
             clipboard_cleanup: None,
             files_pending: false,
+            playback_factory: None,
+            playback: None,
         }
     }
 
@@ -2366,7 +2388,10 @@ impl Mobile {
         let Some(observer) = self.observer.as_mut() else {
             return;
         };
-        while self.shared.clipboard.pending() || self.files_pending {
+        while self.shared.clipboard.pending()
+            || self.files_pending
+            || playback::pending(self.playback.as_deref())
+        {
             // Reaping first observes completion, even after this exact original
             // deadline expired. We never renew the clipboard's cleanup budget.
             let _ = observer.reap_clipboard(&self.close_cx, deadline).await;
@@ -2380,7 +2405,10 @@ impl Mobile {
                 let _ = observer.collect_clipboard();
                 self.shared.clipboard.collect();
             }
-            if self.shared.clipboard.pending() || self.files_pending {
+            if self.shared.clipboard.pending()
+                || self.files_pending
+                || playback::pending(self.playback.as_deref())
+            {
                 if let Some(timer) = self.close_cx.timer_driver() {
                     sleep(timer.now(), Duration::from_millis(25)).await;
                 } else {
@@ -2420,7 +2448,11 @@ impl Application for Mobile {
     }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
-        if self.started || self.native_started.get() || self.observer.is_some() {
+        if self.started
+            || self.native_started.get()
+            || self.observer.is_some()
+            || self.playback.is_some()
+        {
             return Err(ObserverError::Order);
         }
         self.started = true;
@@ -2488,6 +2520,10 @@ impl Application for Mobile {
         let display = opened.display();
         let initial = opened.initial_presentation();
         let observer = self.observer.insert(opened);
+        if let Some(factory) = self.playback_factory.as_mut() {
+            self.playback = Some(Rc::from(factory(observer)));
+        }
+        let playback = self.playback.clone();
         self.shared
             .clipboard
             .configure(observer, &self.close_cx, || {
@@ -2528,6 +2564,7 @@ impl Application for Mobile {
             let mut hides_at_request = 0;
             let mut announced_control = false;
             let ui = move |state: InteractiveViewerState<'_>, frame: Option<Presentation>| {
+                playback::poll(playback.as_deref());
                 // Free the bounded content-free receipt slot on every turn,
                 // including while viewing, requesting, stopping or hidden.
                 shared.clipboard.collect();
@@ -2638,6 +2675,7 @@ impl Application for Mobile {
         } else {
             observer
                 .serve_until(move |frame| {
+                    playback::poll(playback.as_deref());
                     if shown(&shared, &mut pending, frame).is_some() {
                         announce_view(&shared);
                     }
@@ -2671,6 +2709,9 @@ impl Application for Mobile {
         self.shared.retire_display();
         self.shared.stop_control(None);
         self.shared.clipboard.retire();
+        if let Some(playback) = &self.playback {
+            playback.stop();
+        }
         if let Some(upload) = &self.shared.upload {
             upload.retire();
         }
@@ -2715,9 +2756,11 @@ impl Application for Mobile {
                 // factory; once it started, losing it proves no cleanup.
                 None => !self.native_started.get(),
             };
-            if !result {
+            let audio = playback::reap(self.playback.as_deref(), cx, deadline).await;
+            if !result || !audio {
                 return Err(CallbackError);
             }
+            self.playback = None;
             self.observer = None;
             self.started = false;
             self.native_started.set(false);
@@ -2728,7 +2771,11 @@ impl Application for Mobile {
         let closing = self.shared.close.load(Ordering::SeqCst);
         match status {
             Status::Connecting { attempt } => {
-                if self.started || self.native_started.get() || self.observer.is_some() {
+                if self.started
+                    || self.native_started.get()
+                    || self.observer.is_some()
+                    || self.playback.is_some()
+                {
                     return Err(CallbackError);
                 }
                 if closing {

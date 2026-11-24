@@ -23,6 +23,8 @@ pub(crate) struct Settings {
     pub control: bool,
     /// With control, share text clipboard (the host must also enable it).
     pub clipboard: bool,
+    /// Receive host playback when the host explicitly enables it.
+    pub audio: bool,
     /// Ask which display to show after the host approves the session.
     pub choose_display: bool,
     /// Open the view full screen, asking for this monitor's own pixel size.
@@ -38,6 +40,7 @@ impl Default for Settings {
             last_machine: None,
             control: true,
             clipboard: true,
+            audio: false,
             choose_display: false,
             fullscreen: true,
             shortcuts: true,
@@ -60,6 +63,7 @@ impl Settings {
             |name: &str, default: bool| map.get(name).and_then(Value::as_bool).unwrap_or(default);
         settings.control = flag("control", settings.control);
         settings.clipboard = flag("clipboard", settings.clipboard);
+        settings.audio = flag("audio", settings.audio);
         settings.choose_display = flag("choose_display", settings.choose_display);
         settings.fullscreen = flag("fullscreen", settings.fullscreen);
         settings.shortcuts = flag("shortcuts", settings.shortcuts);
@@ -76,6 +80,7 @@ impl Settings {
             "version": 1,
             "control": self.control,
             "clipboard": self.clipboard,
+            "audio": self.audio,
             "choose_display": self.choose_display,
             "fullscreen": self.fullscreen,
             "shortcuts": self.shortcuts,
@@ -116,6 +121,9 @@ impl Settings {
                 args.extend(receive.into_arguments());
             }
         }
+        if self.audio {
+            args.push("--audio".to_owned());
+        }
         if self.choose_display {
             args.extend(["--display".to_owned(), "choose".to_owned()]);
         }
@@ -147,6 +155,7 @@ mod tests {
             last_machine: Some("nABC123CNTRL".to_owned()),
             control: false,
             clipboard: false,
+            audio: true,
             choose_display: true,
             fullscreen: false,
             shortcuts: false,
@@ -332,5 +341,26 @@ mod tests {
         let command = ConnectionCommand::parse(&arguments, 8443).unwrap();
         assert_eq!(command.options.port, 47819);
         assert!(command.options.receive.is_none());
+    }
+}
+
+#[cfg(test)]
+mod playback_settings_tests {
+    use super::*;
+    #[test]
+    fn legacy_settings_keep_audio_off_and_explicit_choice_survives_view_only() {
+        assert!(!Settings::from_json(br#"{"version":1,"control":true}"#).audio);
+        assert!(!Settings::from_json(br#"{"audio":"yes"}"#).audio);
+        let settings = Settings {
+            audio: true,
+            control: false,
+            ..Settings::default()
+        };
+        let restored = Settings::from_json(settings.to_json().as_bytes());
+        assert_eq!(restored, settings);
+        let args = restored.viewer_args("nSTABLE1CNTRL", NonZeroU16::new(8443).unwrap(), None);
+        let parsed = crate::options::ConnectionCommand::parse(&args, 8443).unwrap();
+        assert!(parsed.options.audio.is_some());
+        assert!(!parsed.options.control);
     }
 }

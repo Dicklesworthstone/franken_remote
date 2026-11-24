@@ -42,7 +42,7 @@ fr-wire.workspace = true
 fr-mobile-ffi = { workspace = true, features = ["windows-session"] }
 # `capture-probe`: the Windows host media path (Desktop Duplication into a
 # hardware Media Foundation HEVC encoder), checked by this client's decoder.
-fr-native = { workspace = true, default-features = false, features = ["windows-media"] }
+fr-native = { workspace = true, default-features = false, features = ["windows-media", "windows-audio"] }
 fr-media.workspace = true
 fr-tailnet.workspace = true
 # The window, swap chain and video processor (the version Cargo.lock

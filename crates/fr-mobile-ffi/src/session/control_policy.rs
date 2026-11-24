@@ -38,6 +38,32 @@ pub(super) fn offer_with_download(
     with_input(original)
 }
 
+/// Playback is selected only when the shell supplies a local output factory.
+/// The original reconnect offer contains its audio scope before optional input.
+#[allow(clippy::fn_params_excessive_bools)]
+pub(super) fn offer_with_playback(
+    control: bool,
+    clipboard: bool,
+    upload: bool,
+    download: bool,
+    playback: bool,
+) -> Result<Offer, Error> {
+    if !playback {
+        return offer_with_download(control, clipboard, upload, download);
+    }
+    if !control {
+        return Ok(fr_client::native::observation_offer_with_audio());
+    }
+    let original = if download && upload {
+        fr_client::native::control_offer_with_duplex(clipboard, true)
+    } else if download {
+        fr_client::native::control_offer_with_download(clipboard, true)
+    } else {
+        fr_client::native::control_offer_with_auxiliary(clipboard, upload, true)
+    };
+    with_input(original)
+}
+
 fn with_input(original: Offer) -> Result<Offer, Error> {
     // This core's precise producer is the iOS touch interpreter. macOS builds
     // this crate for host tests; its shipping AppKit viewer has a separate
@@ -441,6 +467,47 @@ mod tests {
         assert_eq!(
             offer(false, true, true).unwrap(),
             fr_client::native::observation_offer()
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "ios"))]
+    fn windows_playback_fits_text_clipboard_and_both_file_directions() {
+        let client = offer_with_playback(true, true, true, true, true).unwrap();
+        client.validate().unwrap();
+        let selected = client.select().unwrap();
+        assert!(fr_wire::audio_control::downlink_selected(&selected));
+        assert!(fr_wire::files::duplex_selected(&selected));
+        assert!(requestable(&selected.capabilities).contains(Capability::Text));
+        assert!(
+            selected
+                .capabilities
+                .iter()
+                .any(|cap| cap.name == fr_wire::clipboard::CAPABILITY)
+        );
+        assert!(client.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
+
+        // A legacy host still agrees to the same usable input/file profile;
+        // the optional local output never invents remote capture authority.
+        let legacy = offer_with_playback(true, true, true, true, false).unwrap();
+        let intersection = legacy.intersect(&client).unwrap().select().unwrap();
+        assert!(!fr_wire::audio_control::downlink_selected(&intersection));
+        assert!(fr_wire::files::duplex_selected(&intersection));
+        assert!(requestable(&intersection.capabilities).contains(Capability::Text));
+    }
+
+    #[test]
+    fn explicit_observing_playback_does_not_request_control_or_auxiliary_authority() {
+        let audio = offer_with_playback(false, true, true, true, true).unwrap();
+        assert_eq!(audio, fr_client::native::observation_offer_with_audio());
+        let plain = offer_with_playback(false, true, true, true, false).unwrap();
+        assert_eq!(plain, fr_client::native::observation_offer());
+        let legacy = plain.intersect(&audio).unwrap().select().unwrap();
+        assert!(
+            !legacy
+                .capabilities
+                .iter()
+                .any(|cap| cap.name == fr_wire::audio::CAPABILITY)
         );
     }
 

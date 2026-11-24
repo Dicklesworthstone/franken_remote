@@ -792,4 +792,5 @@ fn native(
 }
 
 #[cfg(test)]
+#[path = "threaded/tests.rs"]
 mod tests;

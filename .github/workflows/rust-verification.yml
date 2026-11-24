@@ -569,9 +569,22 @@ jobs:
       # evidence only; decode and presentation run on a real Windows machine.
       - name: Cross-check the Windows client (x86_64-pc-windows-gnu, deny warnings)
         run: |
+          set -euo pipefail
           rustup target add x86_64-pc-windows-gnu
-          brew install mingw-w64
+          brew install mingw-w64 zstd
+          # The Windows viewer now links the explicitly supplied static Opus
+          # SDK also used by release packaging; never use a host dylib or DLL.
+          sdk="$RUNNER_TEMP/fr-opus-sdk"
+          mkdir -p "$sdk"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-opus-1.6.1-2-any.pkg.tar.zst \
+            -o "$sdk/opus.pkg.tar.zst"
+          printf '%s  %s\n' fae981c518ed1ff2c5264eb5a0d590ec1d2ebb222defb2253ca85b2154fd8c04 "$sdk/opus.pkg.tar.zst" | shasum -a 256 -c -
+          zstd -dc "$sdk/opus.pkg.tar.zst" | tar -xf - -C "$sdk" mingw64/lib/libopus.a
+          export FR_NATIVE_OPUS_LIBRARY_DIR="$sdk/mingw64/lib"
+          echo "FR_NATIVE_OPUS_LIBRARY_DIR=$FR_NATIVE_OPUS_LIBRARY_DIR" >> "$GITHUB_ENV"
           cargo clippy -p fr-windows -p fr-mobile-ffi --features fr-mobile-ffi/windows-session --all-targets --target x86_64-pc-windows-gnu --locked -- -D warnings
+          cargo clippy -p fr-native --no-default-features --features windows-audio --lib --bin fr-opus-worker --target x86_64-pc-windows-gnu --locked --no-deps -- -D warnings
       # Native local consent and capture are host-only feature paths; the
       # Windows viewer graph alone does not compile these entry points.
       - name: Cross-check the Windows host and native boundaries (deny warnings)

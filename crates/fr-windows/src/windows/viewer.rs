@@ -32,6 +32,7 @@
 //! it in order. After positive bounded cleanup the window can wait dormant for
 //! a new foreground event, then open fresh viewing without input or auxiliary
 //! authority. Hidden/failure reports remain distinct from cleanup proof.
+mod audio;
 mod control;
 mod cursor;
 mod display;
@@ -49,6 +50,8 @@ pub struct View {
     pub fullscreen: bool,
     /// While controlling, send Windows shortcuts to the host.
     pub shortcuts: bool,
+    /// Explicit host playback with local-only volume and mute.
+    pub(crate) audio: Option<crate::options::AudioOptions>,
 }
 
 use super::render::Renderer;
@@ -109,6 +112,7 @@ use windows::core::{HSTRING, Interface, w};
 )]
 struct Viewer {
     session: Session,
+    audio: Option<audio::Audio>,
     renderer: Renderer,
     /// The last drawn picture's size and place (input maps through these).
     picture: (u32, u32),
@@ -349,6 +353,18 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
     } else {
         None
     };
+    let audio = if let Some(preferences) = view.audio {
+        match audio::Audio::install(hwnd, preferences) {
+            Ok(audio) => Some(audio),
+            Err(_) => {
+                // SAFETY: our UI-thread window, before any session starts.
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return refuse("audio_menu_unavailable");
+            }
+        }
+    } else {
+        None
+    };
     // Full screen before the first picture size is stated, so the host is
     // asked for this monitor's own pixel size from the start (no reopen).
     if view.fullscreen {
@@ -358,7 +374,7 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
     let size = client_size(hwnd);
     config.picture = Some(size);
     let control = config.control;
-    let Ok(session) = Session::start_with_local_cursor(config.clone()) else {
+    let Ok(session) = audio::start(config.clone(), audio.as_ref()) else {
         return refuse("session_thread_unavailable");
     };
     let Ok(renderer) = Renderer::new(&gpu.device, hwnd, size) else {
@@ -368,6 +384,7 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
     VIEWER.with(|cell| {
         *cell.borrow_mut() = Some(Viewer {
             session,
+            audio,
             renderer,
             picture: (0, 0),
             mapping: None,
@@ -569,6 +586,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         lifetime,
         control::visible_now(),
         finished
+            && v.audio.as_ref().is_none_or(audio::Audio::complete)
             && v.upload_menu
                 .as_ref()
                 .is_none_or(upload::Menu::cleanup_complete)
@@ -648,7 +666,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         v.reconnect(reason.name());
         return Reopen::Waiting;
     }
-    let Ok(session) = Session::start_with_local_cursor(next) else {
+    let Ok(session) = audio::start(next, v.audio.as_ref()) else {
         v.reopen_refusal.get_or_insert(Refusal::Start);
         v.reconnect(Refusal::Start.name());
         return Reopen::Waiting;
@@ -1143,6 +1161,11 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> Completion {
             .or(current_clipboard.reason)
             .map(|reason| format!("{reason:?}"))
     );
+    let audio_ok = viewer.audio.as_ref().is_none_or(audio::Audio::complete);
+    let audio = viewer
+        .audio
+        .as_ref()
+        .map_or(serde_json::Value::Null, audio::Audio::document);
     let upload_ok = viewer
         .upload_menu
         .as_ref()
@@ -1170,7 +1193,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> Completion {
          \"reopens\":{},\"display_changes\":{},\"control_releases\":{},\"focus_releases\":{},\
          \"last_focus_end\":{},\"reopen_refusal\":{},\
          \"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
-         \"seconds\":{:.1},\"clipboard\":{},\"upload\":{},\"download\":{}}}",
+         \"seconds\":{:.1},\"clipboard\":{},\"upload\":{},\"download\":{},\"audio\":{}}}",
         end_name(code),
         shared
             .detail()
@@ -1209,12 +1232,14 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> Completion {
         clipboard,
         upload,
         download,
+        audio,
     );
     let success = stats.drawn > 0
         && matches!(code, end::OK | end::CANCELLED)
         && viewer.reopen_refusal.is_none()
         && upload_ok
-        && download_ok;
+        && download_ok
+        && audio_ok;
     Completion { json, success }
 }
 
@@ -2056,6 +2081,9 @@ extern "system" fn window_proc(
         }
         WM_INITMENUPOPUP => {
             with_viewer(|v| {
+                if let Some(audio) = &v.audio {
+                    audio.refresh();
+                }
                 let file_available = v.can_choose_file() && !v.choosing_file();
                 if let Some(menu) = &mut v.download_menu {
                     menu.refresh();
@@ -2080,6 +2108,14 @@ extern "system" fn window_proc(
                 }
             });
             false
+        }
+        WM_COMMAND if (0x46a0..=0x46a2).contains(&(wparam.0 & 0xffff)) => {
+            with_viewer(|v| {
+                if let Some(audio) = &v.audio {
+                    audio.command(wparam.0 & 0xffff);
+                }
+            });
+            true
         }
         WM_COMMAND if wparam.0 & 0xffff == upload::OPEN => {
             let time = current_message_time();

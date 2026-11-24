@@ -71,9 +71,7 @@ pub(super) fn prepare(request: Option<&AudioRequest>) -> Result<Option<Report>, 
         return Ok(None);
     };
     audio::decoder_image()?;
-    Ok(Some(Rc::new(RefCell::new(audio::report(
-        request,
-    )))))
+    Ok(Some(Rc::new(RefCell::new(audio::report(request)))))
 }
 
 /// Add only the two optional playback boundaries. Keep file directions,

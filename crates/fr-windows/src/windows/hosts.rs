@@ -95,6 +95,7 @@ const ID_FULLSCREEN: usize = 12;
 const ID_SHORTCUTS: usize = 13;
 const ID_RECEIVE: usize = 14;
 const ID_CLEAR_RECEIVE: usize = 15;
+const ID_AUDIO: usize = 16;
 
 /// Who opened the picker: the command line keeps its explicit options; the
 /// application also shows connection options and remembers them.
@@ -163,6 +164,7 @@ struct Controls {
     view: HWND,
     control: HWND,
     clipboard: HWND,
+    audio: HWND,
     display: HWND,
     fullscreen: HWND,
     shortcuts: HWND,
@@ -176,7 +178,7 @@ struct Controls {
 }
 
 impl Controls {
-    fn all(&self) -> [HWND; 20] {
+    fn all(&self) -> [HWND; 21] {
         [
             self.heading,
             self.subtitle,
@@ -188,6 +190,7 @@ impl Controls {
             self.view,
             self.control,
             self.clipboard,
+            self.audio,
             self.display,
             self.fullscreen,
             self.shortcuts,
@@ -339,6 +342,7 @@ impl State {
             let controls = self.controls.get();
             settings.control = checked(controls.control);
             settings.clipboard = checked(controls.clipboard);
+            settings.audio = checked(controls.audio);
             settings.choose_display = checked(controls.display);
             settings.fullscreen = checked(controls.fullscreen);
             settings.shortcuts = checked(controls.shortcuts);
@@ -696,20 +700,22 @@ impl State {
         place(c.refresh, margin + inner - s(100), y, s(100), s(28));
         y += s(38);
         let footer = if self.mode == Mode::Application {
-            s(160)
+            s(190)
         } else {
             s(64)
         };
         place(c.list, margin, y, inner, (height - y - footer).max(s(80)));
         if self.mode == Mode::Application {
-            let row = height - s(152);
+            let row = height - s(182);
             place(c.view, margin, row, s(110), s(24));
             place(c.control, margin + s(116), row, s(150), s(24));
             place(c.clipboard, margin + s(280), row, s(180), s(24));
             place(c.display, margin + s(470), row, s(200), s(24));
-            let row = height - s(122);
+            let row = height - s(152);
             place(c.fullscreen, margin, row, s(266), s(24));
             place(c.shortcuts, margin + s(280), row, s(390), s(24));
+            let row = height - s(122);
+            place(c.audio, margin, row, inner, s(24));
             let row = height - s(92);
             place(c.receive, margin, row, s(150), s(28));
             place(c.clear_receive, margin + s(158), row, s(64), s(28));
@@ -1403,6 +1409,7 @@ fn open(request: &Request) -> windows::core::Result<Picker> {
                 none,
                 ID_SHORTCUTS,
             )?;
+            controls.audio = child(w!("BUTTON"), w!("Play host audio"), check, none, ID_AUDIO)?;
             controls.receive = child(
                 w!("BUTTON"),
                 w!("Receive files\u{2026}"),
@@ -1492,6 +1499,7 @@ fn open(request: &Request) -> windows::core::Result<Picker> {
             set(controls.view, !settings.control);
             set(controls.control, settings.control);
             set(controls.clipboard, settings.clipboard);
+            set(controls.audio, settings.audio);
             set(controls.display, settings.choose_display);
             set(controls.fullscreen, settings.fullscreen);
             set(controls.shortcuts, settings.shortcuts);

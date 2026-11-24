@@ -513,6 +513,8 @@ fn retirement_collects_final_pcm_and_faults_before_replacement() {
     }
 }
 
+#[path = "tests/overflow.rs"]
 mod overflow;
 
+#[path = "tests/replacement.rs"]
 mod replacement;

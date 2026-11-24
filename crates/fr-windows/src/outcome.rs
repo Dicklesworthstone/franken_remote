@@ -102,6 +102,13 @@ pub(crate) fn summarize(completion: &str, machine: &str) -> Summary {
         ),
         _ => format!("The session with {machine} ended unexpectedly ({end})."),
     };
+    if let Some(audio) = document.get("audio").filter(|audio| !audio.is_null()) {
+        if !audio_known(Some(audio)) {
+            message.push_str(" Host audio cleanup could not be confirmed.");
+        } else if audio["absence"].is_string() {
+            message.push_str(" Host audio was unavailable or ended before the desktop.");
+        }
+    }
     if continuation == Continuation::Stop {
         if document["reopens"]
             .as_u64()
@@ -135,6 +142,7 @@ fn summarize_refusal(document: &Value, machine: &str) -> Summary {
                     | "input_menu_unavailable"
                     | "file_menu_unavailable"
                     | "receive_menu_unavailable"
+                    | "audio_menu_unavailable"
                     | "session_thread_unavailable"
             ) {
             Continuation::Picker { expected_exit: 1 }
@@ -182,6 +190,7 @@ fn continuation(document: &Value, end: &str) -> Continuation {
         || !clipboard_known(clipboard, reopens)
         || !upload_known(upload)
         || !download_known(download)
+        || !audio_known(document.get("audio"))
     {
         return Continuation::Stop;
     }
@@ -197,6 +206,41 @@ fn continuation(document: &Value, end: &str) -> Continuation {
     Continuation::Picker {
         expected_exit: i32::from(!succeeded),
     }
+}
+
+fn audio_known(audio: Option<&Value>) -> bool {
+    let Some(audio) = audio.filter(|audio| !audio.is_null()) else {
+        // Previous viewers had no local audio output.
+        return true;
+    };
+    let Some(owners) = audio["owners"].as_u64() else {
+        return false;
+    };
+    audio.is_object()
+        && audio["requested"].as_bool() == Some(true)
+        && audio["configured"].as_bool().is_some()
+        && audio["active"].as_bool() == Some(false)
+        && audio["volume_percent"]
+            .as_u64()
+            .is_some_and(|volume| volume <= 100)
+        && audio["muted"].as_bool().is_some()
+        && [
+            "submitted",
+            "dropped_packets",
+            "resets",
+            "expired_generations",
+            "failed_generations",
+            "recovered_generations",
+        ]
+        .iter()
+        .all(|field| audio[*field].as_u64().is_some())
+        && if owners == 0 {
+            audio["cleanup"] == "not_started"
+                && audio["configured"] == false
+                && audio["submitted"] == 0
+        } else {
+            audio["cleanup"] == "finished"
+        }
 }
 
 fn clipboard_history_incomplete(reopens: u64, clipboard: &Value) -> bool {
@@ -408,6 +452,70 @@ mod tests {
 
     fn summary(document: &Value) -> Summary {
         summarize(&document.to_string(), "studio")
+    }
+
+    #[test]
+    fn audio_cleanup_is_required_even_when_video_finished_normally() {
+        use crate::{
+            options::AudioOptions,
+            playback::{Snapshot, State},
+        };
+        let mut document = ended("ok", 12);
+        let mut audio = State::new(AudioOptions::default());
+        document["audio"] = audio.document();
+        assert!(summary(&document).ok);
+        let (owner, _) = audio.begin().unwrap();
+        document["audio"] = audio.document();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
+        audio.update(
+            owner,
+            Snapshot {
+                complete: true,
+                absence: Some("host_audio_not_selected"),
+                ..Snapshot::default()
+            },
+        );
+        document["audio"] = audio.document();
+        assert!(
+            summary(&document).ok,
+            "optional absence does not fail the desktop"
+        );
+        assert!(
+            summary(&document)
+                .message
+                .contains("Host audio was unavailable")
+        );
+        for cleanup in ["pending", "unconfirmed", "not_started"] {
+            document["audio"]["cleanup"] = cleanup.into();
+            assert_eq!(summary(&document).continuation, Continuation::Stop);
+        }
+    }
+
+    #[test]
+    fn malformed_audio_history_cannot_authorize_another_picker_session() {
+        use crate::{options::AudioOptions, playback::State};
+        let mut document = ended("ok", 12);
+        let original = State::new(AudioOptions::default()).document();
+        for field in [
+            "owners",
+            "configured",
+            "active",
+            "volume_percent",
+            "muted",
+            "submitted",
+            "cleanup",
+        ] {
+            document["audio"] = original.clone();
+            document["audio"].as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                summary(&document).continuation,
+                Continuation::Stop,
+                "{field}"
+            );
+        }
+        document["audio"] = original;
+        document["audio"]["submitted"] = 1.into();
+        assert_eq!(summary(&document).continuation, Continuation::Stop);
     }
 
     #[test]
