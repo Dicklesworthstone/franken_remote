@@ -288,7 +288,7 @@ fn parent(args: &mut impl Iterator<Item = String>) -> Result<(), Error> {
 pub fn run() -> Result<(), Error> {
     windows_capture::above_normal();
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
+    let role = match args.next().as_deref() {
         Some("--probe-encoder") => {
             let backend = args.next().ok_or(Error::Malformed)?;
             parent(&mut args)?;
@@ -305,11 +305,11 @@ pub fn run() -> Result<(), Error> {
                 }
             };
         }
-        Some("--capture") => {}
-        // Presentation belongs to the native client; no audio role yet.
+        Some("--capture") => Role::Capture,
+        Some("--audio") => Role::Audio,
+        // Presentation belongs to the native client.
         _ => return Err(Error::WrongRole),
-    }
-    let role = Role::Capture;
+    };
     parent(&mut args)?;
     // One unbuffered handle from the first record on, as on Linux.
     let mut input = File::from(
@@ -324,6 +324,15 @@ pub fn run() -> Result<(), Error> {
     let mut identity = first.header.identity;
     let mut sequence = Sequence::new(identity.epoch)?;
     sequence.accept(first.header)?;
+    if role == Role::Audio {
+        #[cfg(feature = "windows-host-audio")]
+        return crate::windows_audio::serve(first, sequence, &mut input, &mut output);
+        #[cfg(not(feature = "windows-host-audio"))]
+        {
+            refuse(identity, Error::Unsupported, &mut output, &absolute)?;
+            return Err(Error::Unsupported);
+        }
+    }
     if role != Role::Capture || first.header.kind != Kind::DiscoverMonitors {
         refuse(identity, Error::Unsupported, &mut output, &absolute)?;
         return Err(Error::Unsupported);

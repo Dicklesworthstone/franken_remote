@@ -1,23 +1,34 @@
 //! Native media adapters. `FFmpeg` and X11 stay behind this named FFI boundary.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(any(test, feature = "macos-host-audio"))]
+#[cfg(any(test, feature = "macos-host-audio", feature = "windows-host-audio"))]
 pub mod host_audio_batch;
-#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "opus"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "opus"
+))]
 pub mod opus;
 
+#[cfg(any(
+    test,
+    all(target_os = "macos", feature = "macos-host-audio"),
+    all(windows, feature = "windows-audio-capture")
+))]
+// Portable packer tests do not construct the native owner that uses the
+// read budget, close operation and native-only errors.
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "macos-host-audio"),
+        all(windows, feature = "windows-audio-capture")
+    )),
+    allow(dead_code)
+)]
+#[path = "macos_audio_capture_policy.rs"]
+mod host_audio_capture_policy;
 #[cfg(all(target_os = "macos", feature = "macos-audio"))]
 pub mod macos_audio;
 #[cfg(all(target_os = "macos", feature = "macos-host-audio"))]
 pub mod macos_audio_capture;
-#[cfg(any(test, all(target_os = "macos", feature = "macos-host-audio")))]
-// Portable packer tests do not construct the native owner that uses the
-// read budget, close operation and native-only errors.
-#[cfg_attr(
-    not(all(target_os = "macos", feature = "macos-host-audio")),
-    allow(dead_code)
-)]
-mod macos_audio_capture_policy;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-audio")))]
 // Test-only builds (every platform) compile the policy without the native
 // Core Audio owner that constructs most of its errors.
@@ -26,6 +37,11 @@ mod macos_audio_capture_policy;
     allow(dead_code)
 )]
 mod macos_audio_policy;
+#[cfg(all(windows, feature = "windows-audio-capture"))]
+pub mod windows_audio_capture;
+#[cfg(any(test, all(windows, feature = "windows-audio-capture")))]
+#[cfg_attr(not(all(windows, feature = "windows-audio-capture")), allow(dead_code))]
+mod windows_audio_capture_policy;
 // Both native devices use the same original Opus/ACK/playout owner.
 #[cfg(all(target_os = "macos", feature = "macos-audio"))]
 #[path = "pulse/playout.rs"]

@@ -3,6 +3,7 @@ fn main() {
     build_pipewire_microphone();
     build_opus_process();
     build_macos_opus();
+    build_windows_opus();
     build_macos_audio();
     build_macos_microphone();
     build_keyboard();
@@ -648,6 +649,32 @@ fn build_macos_opus() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=fropusmacos");
+}
+
+/// Windows host encoding uses the same bounded libopus ABI, with an explicitly
+/// supplied target archive. No DLL search, downloader or decoder child is added.
+fn build_windows_opus() {
+    println!("cargo:rerun-if-env-changed=FR_NATIVE_OPUS_LIBRARY_DIR");
+    if env::var_os("CARGO_FEATURE_OPUS").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+    {
+        return;
+    }
+    let library = PathBuf::from(env::var_os("FR_NATIVE_OPUS_LIBRARY_DIR").expect(
+        "Windows Opus requires FR_NATIVE_OPUS_LIBRARY_DIR with the trusted target static archive",
+    ));
+    let name = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        "opus.lib"
+    } else {
+        "libopus.a"
+    };
+    let archive = library.join(name);
+    assert!(
+        library.is_absolute() && archive.is_file(),
+        "FR_NATIVE_OPUS_LIBRARY_DIR must be absolute and contain the trusted target {name}"
+    );
+    println!("cargo:rerun-if-changed={}", archive.display());
+    println!("cargo:rustc-link-search=native={}", library.display());
 }
 
 /// The actual capture and permission roles are the same signed executable.

@@ -58,12 +58,17 @@ pub enum Source {
     /// `ScreenCaptureKit` application/system playback. Audio is not confined
     /// to the selected video display, and this never enables microphone input.
     MacSystem,
+    /// WASAPI playback from the default render endpoint, resolved once by
+    /// the original worker. This endpoint-wide mix can include other logon
+    /// sessions; the local operator must explicitly authorize that scope.
+    WindowsEndpoint,
 }
 impl fmt::Debug for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pulse { monitor, .. } => f.debug_tuple("Pulse").field(monitor).finish(),
             Self::MacSystem => f.write_str("MacSystem"),
+            Self::WindowsEndpoint => f.write_str("WindowsEndpoint"),
         }
     }
 }
@@ -149,6 +154,7 @@ impl Capture {
                 },
             ),
             Source::MacSystem => (1, "", ""),
+            Source::WindowsEndpoint => (2, "", ""),
         };
         let mut b = Vec::with_capacity(CONFIG_FIXED_BYTES + server.len() + sink.len());
         b.extend_from_slice(&self.generation.as_raw().to_be_bytes());
@@ -191,6 +197,7 @@ impl Capture {
                 },
             },
             1 if server_len == 0 && sink_len == 0 => Source::MacSystem,
+            2 if server_len == 0 && sink_len == 0 => Source::WindowsEndpoint,
             _ => return Err(Error::Malformed),
         };
         let capture = Self {

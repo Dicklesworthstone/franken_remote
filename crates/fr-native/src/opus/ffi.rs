@@ -13,7 +13,10 @@ pub(super) const GET_LOOKAHEAD: c_int = 4027;
     target_os = "linux",
     link(name = "libopus.so.0", kind = "dylib", modifiers = "+verbatim")
 )]
-#[cfg_attr(target_os = "macos", link(name = "opus", kind = "static"))]
+#[cfg_attr(
+    any(target_os = "macos", windows),
+    link(name = "opus", kind = "static")
+)]
 unsafe extern "C" {
     pub(super) fn opus_encoder_get_size(channels: c_int) -> c_int;
     pub(super) fn opus_encoder_create(
@@ -39,7 +42,10 @@ pub(super) const RESET_STATE: c_int = 4028;
     target_os = "linux",
     link(name = "libopus.so.0", kind = "dylib", modifiers = "+verbatim")
 )]
-#[cfg_attr(target_os = "macos", link(name = "opus", kind = "static"))]
+#[cfg_attr(
+    any(target_os = "macos", windows),
+    link(name = "opus", kind = "static")
+)]
 unsafe extern "C" {
     pub(super) fn opus_decoder_get_size(channels: c_int) -> c_int;
     pub(super) fn opus_decoder_create(rate: i32, channels: c_int, error: *mut c_int)

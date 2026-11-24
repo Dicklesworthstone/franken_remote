@@ -1,5 +1,36 @@
 # Implementation status
 
+## Explicit Windows host playback audio (2026-11-24)
+
+The optional `windows-host-audio` worker now connects real WASAPI render-loopback
+capture to the existing supervised Opus downlink. The host requires both
+`--audio` and `--audio-endpoint-wide`: the latter explicitly authorizes the
+default render endpoint's playback mix, including possible sound from other
+logon sessions. Observation admission and the viewer's positive audio request
+still gate capture independently of desktop control. The default installer
+keeps audio disabled; this does not add Windows client playback or a host
+virtual-microphone endpoint.
+
+One thread-confined COM owner pins the original endpoint. Shared-mode engine
+conversion supplies 48 kHz signed-16 mono/stereo PCM, with native packet sizes
+checked before reads. Stream frame positions retain sample chronology while
+QPC timestamps retain the original source-age deadline through packing, Opus
+encoding and final publication. Device replacement, invalid timestamps and
+native failure stop that audio source. Packet leases, bounded queues, parent
+supervision and confirmed cleanup preserve the original worker's lifetime.
+
+The twelve actual-source packing/timeline tests and five private audio-record
+tests pass with the pinned nightly. Both the native `windows-audio-capture`
+library and the complete `windows-host-audio` media worker pass `cargo check`
+for `x86_64-pc-windows-gnu`; the latter uses a signature-verified MSYS2 static
+Opus archive. These are source tests and target typechecks, not executable-link,
+device, audible-playback or live-tailnet qualification. Actual endpoint
+conversion, other-session scope, device changes, suspend and native cleanup
+remain untested on Windows hardware.
+
+Plan §§15.4 and 19; tracking `fr-p2-audio-playback-lel`;
+[source build and scope](docs/windows-host-install.md#optional-host-playback-audio).
+
 ## Windows Explorer file-drop uploads (2026-11-23)
 
 A ready, foreground controlling viewer now accepts up to eight regular files

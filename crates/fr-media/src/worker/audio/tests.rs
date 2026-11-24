@@ -129,33 +129,54 @@ fn native_source_is_explicit_and_does_not_reinterpret_pulse_paths() {
     original.extend_from_slice(b"/run/fr-audio/native");
     assert_eq!(pulse, original);
 
-    let mac = Capture {
-        source: Source::MacSystem,
+    for (tag, source) in [(1, Source::MacSystem), (2, Source::WindowsEndpoint)] {
+        let native = Capture {
+            source,
+            ..capture()
+        };
+        let bytes = native.encode().unwrap();
+        assert_eq!(bytes.len(), CONFIG_FIXED_BYTES);
+        assert_eq!(&bytes[16..20], &[0, 0, tag, 0]);
+        assert!(Kind::ConfigureAudio.accepts_length(bytes.len(), &ProtocolLimits::ABSOLUTE));
+        assert_eq!(Capture::decode(&bytes).unwrap(), native);
+        for unknown in [0, 3, 255] {
+            let mut hostile = bytes.clone();
+            hostile[18] = unknown;
+            assert_eq!(Capture::decode(&hostile), Err(Error::Malformed));
+        }
+        for (server, sink) in [(2, 0), (0, 2)] {
+            let mut hostile = bytes.clone();
+            hostile[16] = server;
+            hostile[17] = sink;
+            hostile.extend_from_slice(b"/a");
+            assert_eq!(Capture::decode(&hostile), Err(Error::Malformed));
+        }
+        let mut reserved = bytes.clone();
+        reserved[19] = 1;
+        assert_eq!(Capture::decode(&reserved), Err(Error::Malformed));
+        for end in 0..bytes.len() {
+            assert!(Capture::decode(&bytes[..end]).is_err());
+        }
+    }
+}
+
+#[test]
+fn windows_endpoint_configuration_has_its_own_canonical_private_bytes() {
+    // Independent transcription, including the endpoint tag and absent Linux
+    // strings. Changing the local source never changes the wire audio profile.
+    let bytes = [
+        0, 0, 0, 0, 0, 0, 0, 3, 2, 20, 3, 232, 0, 1, 119, 0, 0, 0, 2, 0,
+    ];
+    let expected = Capture {
+        source: Source::WindowsEndpoint,
         ..capture()
     };
-    let bytes = mac.encode().unwrap();
-    assert_eq!(bytes.len(), CONFIG_FIXED_BYTES);
-    assert_eq!(&bytes[16..20], &[0, 0, 1, 0]);
-    assert!(Kind::ConfigureAudio.accepts_length(bytes.len(), &ProtocolLimits::ABSOLUTE));
-    assert_eq!(Capture::decode(&bytes).unwrap(), mac);
-    for tag in [0, 2, 255] {
-        let mut hostile = bytes.clone();
-        hostile[18] = tag;
-        assert_eq!(Capture::decode(&hostile), Err(Error::Malformed));
-    }
-    for (server, sink) in [(2, 0), (0, 2)] {
-        let mut hostile = bytes.clone();
-        hostile[16] = server;
-        hostile[17] = sink;
-        hostile.extend_from_slice(b"/a");
-        assert_eq!(Capture::decode(&hostile), Err(Error::Malformed));
-    }
-    let mut reserved = bytes.clone();
-    reserved[19] = 1;
-    assert_eq!(Capture::decode(&reserved), Err(Error::Malformed));
-    for end in 0..bytes.len() {
-        assert!(Capture::decode(&bytes[..end]).is_err());
-    }
+    assert_eq!(Capture::decode(&bytes).unwrap(), expected);
+    assert_eq!(expected.encode().unwrap(), bytes);
+    let packets = [unit(7, 0, 120), unit(8, 960, 120)];
+    let body = encode_batch(&packets, CaptureCounters::default(), &expected).unwrap();
+    assert_eq!(decode_batch(&body, &expected).unwrap().packets, packets);
+    assert_eq!(decode_batch(&body, &capture()).unwrap().packets, packets);
 }
 
 #[test]

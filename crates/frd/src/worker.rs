@@ -178,8 +178,14 @@ impl Launch {
     pub fn macos_audio(image: &Path, epoch: u128) -> Result<Self, Error> {
         Self::session(image, epoch, Role::Audio)
     }
+    /// A separate WASAPI loopback child in this original Windows session.
+    /// The operator's endpoint-wide consent never enables capture or input roles.
+    #[cfg(any(windows, test))]
+    pub fn windows_audio(image: &Path, epoch: u128) -> Result<Self, Error> {
+        Self::session(image, epoch, Role::Audio)
+    }
     /// A worker in this process's own desktop session (macOS, Windows).
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(target_os = "macos", windows, test))]
     fn session(image: &Path, epoch: u128, role: Role) -> Result<Self, Error> {
         if !image.is_absolute() || epoch == 0 {
             return Err(Error::InvalidLaunch);
@@ -1502,6 +1508,29 @@ mod tests {
                 Err(Error::Protocol(worker::Error::Malformed))
             ));
         });
+    }
+
+    #[test]
+    fn windows_audio_launch_keeps_its_distinct_role_and_original_epoch() {
+        let image = std::env::current_exe().unwrap();
+        let audio = Launch::windows_audio(&image, 7).unwrap();
+        assert_eq!(audio.role, Role::Audio);
+        assert_eq!(audio.epoch, 7);
+        assert!(audio.display.is_empty() && audio.xauthority.is_none());
+        assert!(audio.target.is_none() && audio.mapped_target.is_none());
+        assert!(audio.local.is_none() && !audio.fit_target);
+        assert!(matches!(
+            Launch::windows_audio(&image, 0),
+            Err(Error::InvalidLaunch)
+        ));
+        assert!(matches!(
+            Launch::windows_audio(std::path::Path::new("relative-worker"), 7),
+            Err(Error::InvalidLaunch)
+        ));
+        // Retain the same ordinary process cleanup custody; this new source
+        // does not create a detached native-thread or process lifetime.
+        let (retained, _retirement) = audio.retain_cleanup().unwrap();
+        assert!(retained.retirement.is_some());
     }
 
     #[cfg(target_os = "macos")]

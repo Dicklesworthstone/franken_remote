@@ -103,6 +103,14 @@ pub(super) fn audio(
     options: &RunOptions,
     json: bool,
 ) -> Result<Option<frd::host_run::AudioOptions>, ExitCode> {
+    if options.audio_endpoint_wide {
+        return Err(run_refusal(
+            json,
+            "audio_source_unsupported",
+            "--audio-endpoint-wide is Windows-only; macOS --audio captures application/system playback through ScreenCaptureKit",
+            2,
+        ));
+    }
     if !options.audio {
         return Ok(None);
     }

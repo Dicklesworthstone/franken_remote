@@ -36,6 +36,56 @@ session, input, approval, certificate, ingress, and hardware checks still apply.
 The one-liner environment equivalents are `FR_INSTALL_HOST=1` and
 `FR_INSTALL_HOST_CONTROL=1`.
 
+## Optional host playback audio
+
+Windows host playback is an explicit source-build option. The default installer
+keeps its existing `windows-host-media` worker and does not require an Opus SDK.
+Build the audio worker with a trusted static libopus archive for the exact target
+architecture and ABI. `FR_NATIVE_OPUS_LIBRARY_DIR` must be an absolute directory
+containing `opus.lib` for MSVC or `libopus.a` for GNU. Record the archive's source,
+license and build configuration with the package; the build downloads no codec
+and introduces no runtime DLL search path.
+
+```powershell
+$env:FR_NATIVE_OPUS_LIBRARY_DIR = 'C:\fr-sdk\opus-x86_64-msvc\lib'
+cargo build --release --locked -p frd --features windows-host --bin frd
+cargo build --release --locked -p fr-native --no-default-features --features windows-host-audio --bin fr-media-worker
+.\target\release\frd.exe run --encoder mediafoundation --approval local --sharing own-user --audio --audio-endpoint-wide
+```
+
+**`--audio-endpoint-wide` authorizes the complete default render endpoint's
+playback mix, which can include audio from other Terminal Services sessions.**
+It is not isolated to the selected display, application or desktop user.
+`--audio` without this explicit acknowledgment is refused on Windows. The flag
+requires `--audio`, is Windows-only, and never enables microphone forwarding.
+Linux's `--audio-server` and `--audio-sink` selections are refused on Windows.
+The receiving Linux or macOS client must independently request `--audio`.
+
+Only an admitted viewer's audio request starts a separate supervised
+`fr-media-worker --audio`. That worker pins the default endpoint at capture
+start, requests shared-mode WASAPI loopback in 48 kHz signed-16 mono/stereo with
+the engine's format conversion, and uses the existing bounded Opus downlink.
+Unsupported initialization leaves audio unavailable. Device invalidation or a
+default-endpoint change ends that source; it never moves a live stream to the
+replacement. A worker built without `windows-host-audio` explicitly refuses the
+audio role. Keep the matching `frd.exe` and worker together; the default host
+installer does not modify its fixed sign-in arguments to enable this option.
+
+Native packet timestamps retain their original source-age deadlines through
+packing, encoding and final publication. Unknown timestamps and reversed clocks
+are terminal, stale samples are discarded, and a quiet endpoint produces no
+invented audio. Capture and codec work remain in the existing parent-supervised
+process; this is process isolation, without an OS-sandbox claim.
+
+Portable policy tests and Windows GNU compilation cover source timing, PCM
+bounds, private records and explicit scope selection. These checks do not link
+or execute a Windows worker. Real endpoint conversion, audibility, other-session
+scope, device changes, suspend and worker cleanup still require Windows device
+qualification before claiming support. The scope
+and loopback contract are documented by Microsoft's
+[loopback recording guide](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording)
+and [stream flags](https://learn.microsoft.com/en-us/windows/win32/coreaudio/audclnt-streamflags-xxx-constants).
+
 ## Start, stop, and remove
 
 Hosting has its own Start-menu commands and **FrankenRemote Host** entry in

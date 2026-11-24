@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 //! Actual host-audio packing policy, shared with portable tests. The native
-//! boundary supplies 48 kHz floating-point PCM and the ORIGINAL source-age
+//! boundary supplies 48 kHz PCM and the ORIGINAL source-age
 //! deadline; neither a read nor a completed frame renews that deadline.
 use std::collections::VecDeque;
 
@@ -30,7 +30,7 @@ pub enum Error {
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "macos-audio-capture: {self:?}")
+        write!(f, "host-audio-capture: {self:?}")
     }
 }
 impl std::error::Error for Error {}
@@ -62,6 +62,7 @@ pub struct Packer {
     partial_start: u64,
     partial_until: u64,
     expected: Option<u64>,
+    rounding_samples: u64,
     ready: VecDeque<Packed>,
     gaps: u32,
 }
@@ -78,6 +79,7 @@ impl Packer {
             partial_start: 0,
             partial_until: 0,
             expected: None,
+            rounding_samples: 1,
             ready: VecDeque::with_capacity(MAX_BATCH_FRAMES),
             gaps: 0,
         })
@@ -85,6 +87,15 @@ impl Packer {
 
     pub const fn gaps(&self) -> u32 {
         self.gaps
+    }
+
+    /// WASAPI supplies exact stream frame positions, not a rounded rational
+    /// timestamp. Even a one-sample hole must remain an explicit source gap.
+    #[cfg(any(test, all(windows, feature = "windows-audio-capture")))]
+    pub fn new_exact(channels: u8, frame_samples: u16) -> Result<Self, Error> {
+        let mut packer = Self::new(channels, frame_samples)?;
+        packer.rounding_samples = 0;
+        Ok(packer)
     }
 
     fn gap(&mut self) {
@@ -104,7 +115,7 @@ impl Packer {
     /// case; a larger forward hole is explicit, and reversal is terminal.
     fn start(&mut self, timestamp: u64) -> Result<u64, Error> {
         match self.expected {
-            Some(expected) if timestamp.abs_diff(expected) <= 1 => Ok(expected),
+            Some(expected) if timestamp.abs_diff(expected) <= self.rounding_samples => Ok(expected),
             Some(expected) if timestamp < expected => Err(Error::Discontinuity),
             Some(_) => {
                 self.discard_partial();
@@ -115,23 +126,44 @@ impl Packer {
         }
     }
 
-    pub fn push(&mut self, stamp: Stamp, pcm: &[f32], now_ns: u64) -> Result<(), Error> {
+    fn validate(&self, stamp: Stamp, values: usize, now_ns: u64) -> Result<(), Error> {
         let frames = usize::try_from(stamp.frames).map_err(|_| Error::BufferLimit)?;
         if frames == 0
             || frames > MAX_CHUNK_SAMPLES
             || usize::try_from(stamp.channels).ok() != Some(self.channels)
-            || frames.checked_mul(self.channels) != Some(pcm.len())
-            || pcm.len() > MAX_CHUNK_VALUES
+            || frames.checked_mul(self.channels) != Some(values)
+            || values > MAX_CHUNK_VALUES
             || stamp.valid_until_ns == 0
             || stamp.valid_until_ns.saturating_sub(now_ns) > SOURCE_AGE_NS
         {
             return Err(Error::Format);
         }
+        Ok(())
+    }
+
+    #[cfg(any(test, all(target_os = "macos", feature = "macos-host-audio")))]
+    pub fn push(&mut self, stamp: Stamp, pcm: &[f32], now_ns: u64) -> Result<(), Error> {
+        self.validate(stamp, pcm.len(), now_ns)?;
         // Validate all values before mutating the accumulator. NaN and infinity
         // never reach a float-to-integer conversion, an allocation or libopus.
         if pcm.iter().any(|value| !value.is_finite()) {
             return Err(Error::Format);
         }
+        self.push_values(stamp, pcm.iter().copied().map(quantize), now_ns)
+    }
+
+    #[cfg(any(test, all(windows, feature = "windows-audio-capture")))]
+    pub fn push_i16(&mut self, stamp: Stamp, pcm: &[i16], now_ns: u64) -> Result<(), Error> {
+        self.validate(stamp, pcm.len(), now_ns)?;
+        self.push_values(stamp, pcm.iter().copied(), now_ns)
+    }
+
+    fn push_values(
+        &mut self,
+        stamp: Stamp,
+        values: impl Iterator<Item = i16>,
+        now_ns: u64,
+    ) -> Result<(), Error> {
         let start = self.start(stamp.timestamp_samples)?;
         self.expected = Some(
             start
@@ -147,19 +179,17 @@ impl Packer {
             return Ok(());
         }
         let frame_values = self.frame_samples * self.channels;
-        for (index, values) in pcm.chunks_exact(self.channels).enumerate() {
+        for (index, value) in values.enumerate() {
             if self.filled == 0 {
                 self.partial_start = start
-                    .checked_add(u64::try_from(index).map_err(|_| Error::Clock)?)
+                    .checked_add(u64::try_from(index / self.channels).map_err(|_| Error::Clock)?)
                     .ok_or(Error::Clock)?;
                 self.partial_until = stamp.valid_until_ns;
             } else {
                 self.partial_until = self.partial_until.min(stamp.valid_until_ns);
             }
-            for value in values {
-                self.partial[self.filled] = quantize(*value);
-                self.filled += 1;
-            }
+            self.partial[self.filled] = value;
+            self.filled += 1;
             if self.filled == frame_values {
                 if self.ready.len() == MAX_BATCH_FRAMES {
                     self.ready.pop_front();
@@ -194,8 +224,17 @@ impl Packer {
         self.partial.fill(0);
         self.filled = 0;
     }
+
+    /// A native discontinuity discards every buffered sample. Preserve the
+    /// last expected source timestamp so a device reset cannot replay old time.
+    #[cfg(any(test, all(windows, feature = "windows-audio-capture")))]
+    pub fn discontinuity(&mut self) {
+        self.clear();
+        self.gap();
+    }
 }
 
+#[cfg(any(test, all(target_os = "macos", feature = "macos-host-audio")))]
 #[allow(clippy::cast_possible_truncation)] // Finite, explicitly clipped s16 PCM.
 fn quantize(value: f32) -> i16 {
     (value.clamp(-1.0, 1.0) * 32_768.0).clamp(-32_768.0, 32_767.0) as i16

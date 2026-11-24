@@ -115,7 +115,8 @@ impl AudioProfile {
             .validate()
             .map_err(|_| Error::InvalidBudget)?;
         if !profile.image.is_absolute()
-            || matches!(profile.source, Source::MacSystem) && !profile.display.is_empty()
+            || matches!(profile.source, Source::MacSystem | Source::WindowsEndpoint)
+                && !profile.display.is_empty()
         {
             return Err(Error::InvalidBudget);
         }
@@ -149,6 +150,13 @@ impl AudioProfile {
                 #[cfg(target_os = "macos")]
                 if self.display.is_empty() {
                     return Launch::macos_audio(&self.image, epoch);
+                }
+                Err(worker::Error::InvalidLaunch)
+            }
+            Source::WindowsEndpoint => {
+                #[cfg(windows)]
+                if self.display.is_empty() {
+                    return Launch::windows_audio(&self.image, epoch);
                 }
                 Err(worker::Error::InvalidLaunch)
             }
@@ -726,3 +734,6 @@ fn media(error: worker::Error) -> Error {
 
 #[cfg(test)]
 mod deadlines;
+
+#[cfg(test)]
+mod profile_tests;

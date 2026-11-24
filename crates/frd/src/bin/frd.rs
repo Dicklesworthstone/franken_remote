@@ -143,7 +143,13 @@ OPTIONS:
                     viewers that request it, including a controlling viewer.
                     Linux records the selected output monitor. macOS captures
                     application/system playback through ScreenCaptureKit; audio
-                    is not confined to the selected display. Opus only; no microphone
+                    is not confined to the selected display. Windows records the
+                    default render endpoint and also requires --audio-endpoint-wide.
+                    Opus only; no microphone
+    --audio-endpoint-wide  Windows-only explicit authorization for endpoint-wide
+                    playback, potentially including other logon sessions. This is
+                    not isolated to the shared display, user or application.
+                    Requires --audio; the selected endpoint is pinned at capture start
     --microphone    Separately permit the controlling client's microphone (off
                     by default). Requires --input-agent, matching installed
                     fr-microphone-worker, fr-opus-worker and fr-observation-indicator.
@@ -1190,6 +1196,14 @@ fn audio(
     options: &frd::host_policy::options::RunOptions,
     json: bool,
 ) -> Result<Option<frd::host_run::AudioOptions>, ExitCode> {
+    if options.audio_endpoint_wide {
+        return Err(run_refusal(
+            json,
+            "audio_source_unsupported",
+            "--audio-endpoint-wide is a Windows-only playback scope; Linux --audio uses the explicitly selected PulseAudio monitor",
+            2,
+        ));
+    }
     if !options.audio {
         return Ok(None);
     }

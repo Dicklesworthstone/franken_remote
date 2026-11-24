@@ -14,6 +14,17 @@ enabled host playback capture in `fr-media-worker --audio`. It enables neither
 client playback nor microphone capture. See [Mac host playback audio](docs/macos-host.md#host-playback-audio)
 for native source scope, lifetime and packaging.
 
+Windows `windows-host-audio` similarly enables only the host playback encoder
+and WASAPI loopback role. It links the trusted target `opus.lib` (MSVC) or
+`libopus.a` (GNU) from the absolute `FR_NATIVE_OPUS_LIBRARY_DIR`; ordinary
+`windows-host-media` builds require neither archive nor audio enable. The
+separate `windows-audio-capture` feature compiles the actual native source
+without the codec. Runtime capture requires both `--audio` and the local
+`--audio-endpoint-wide` acknowledgment, followed by ordinary viewer admission.
+See [Windows host playback](docs/windows-host-install.md#optional-host-playback-audio)
+for endpoint scope, source builds and remaining hardware qualification. This
+adds no Windows client playback or microphone endpoint.
+
 `opus::Encoder` accepts 48 kHz mono/stereo, either direction, and 5/10/20/40/60 ms
 frames. Other durations admitted by the broader shared configuration return
 UnsupportedFormat, not a silently changed duration. The default is AUDIO mode,

@@ -74,6 +74,10 @@ pub struct RunOptions {
     /// Local enable of host playback audio (off by default). Only an admitted
     /// observer that selected audio-down receives it; see `frd run --help`.
     pub audio: bool,
+    /// Windows-only acknowledgment that render-endpoint loopback can include
+    /// playback from other logon sessions, not just the shared desktop.
+    /// Requires the independent `--audio` enable; never saved as host policy.
+    pub audio_endpoint_wide: bool,
     /// Linux-only absolute local `PulseAudio` server socket for playback capture.
     pub audio_server: Option<PathBuf>,
     /// Sink whose monitor is captured; default: the server's default sink.
@@ -182,6 +186,13 @@ impl RunOptions {
                 options.audio = true;
                 continue;
             }
+            if flag == "--audio-endpoint-wide" {
+                if !cfg!(windows) || options.audio_endpoint_wide {
+                    return Err(Error::InvalidArgument);
+                }
+                options.audio_endpoint_wide = true;
+                continue;
+            }
             if flag == "--microphone" {
                 if options.microphone {
                     return Err(Error::InvalidArgument);
@@ -288,7 +299,11 @@ impl RunOptions {
             return Err(Error::InvalidArgument);
         }
         // Audio selection flags without the enable are a typo, never a default.
-        if !options.audio && (options.audio_server.is_some() || options.audio_sink.is_some()) {
+        if !options.audio
+            && (options.audio_endpoint_wide
+                || options.audio_server.is_some()
+                || options.audio_sink.is_some())
+        {
             return Err(Error::InvalidArgument);
         }
         if (options.microphone && options.input_agent.is_none() && !options.control)
@@ -355,9 +370,11 @@ impl RunOptions {
     pub fn macos_refusal(&self, _approval: Approval) -> Option<(&'static str, &'static str)> {
         let refusals: [(bool, &str, &str); 4] = [
             (
-                self.audio_server.is_some() || self.audio_sink.is_some(),
+                self.audio_endpoint_wide
+                    || self.audio_server.is_some()
+                    || self.audio_sink.is_some(),
                 "audio_source_unsupported",
-                "macOS --audio captures application/system playback, not a PulseAudio endpoint; --audio-server and --audio-sink are Linux-only",
+                "macOS --audio captures application/system playback; --audio-server and --audio-sink are Linux-only, and --audio-endpoint-wide is Windows-only",
             ),
             (
                 self.microphone,
@@ -390,7 +407,7 @@ impl RunOptions {
     #[cfg(any(windows, test))]
     #[must_use]
     pub fn windows_refusal(&self, _approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 7] = [
+        let refusals: [(bool, &str, &str); 9] = [
             (
                 self.software_explicit,
                 "software_encoder_unavailable",
@@ -412,9 +429,19 @@ impl RunOptions {
                 "a Windows host injects input itself; use --control instead of --input-agent",
             ),
             (
-                self.audio || self.audio_server.is_some() || self.audio_sink.is_some(),
-                "audio_source_unavailable",
-                "--audio has no Windows backend yet",
+                self.audio_server.is_some() || self.audio_sink.is_some(),
+                "audio_source_unsupported",
+                "Windows --audio captures the default render endpoint; --audio-server and --audio-sink are Linux-only selections",
+            ),
+            (
+                self.audio && !self.audio_endpoint_wide,
+                "audio_scope_not_authorized",
+                "Windows loopback includes all playback on the default render endpoint, potentially from other logon sessions; explicitly add --audio-endpoint-wide to authorize this scope, or omit --audio",
+            ),
+            (
+                self.audio_endpoint_wide && !self.audio,
+                "audio_scope_requires_audio",
+                "--audio-endpoint-wide acknowledges the Windows endpoint-wide scope but does not enable capture; also supply --audio",
             ),
             (
                 self.logind_session.is_some()
@@ -602,7 +629,7 @@ mod tests {
                     audio: true,
                     ..RunOptions::default()
                 },
-                "audio_source_unavailable",
+                "audio_scope_not_authorized",
             ),
             (
                 RunOptions {
@@ -819,3 +846,7 @@ mod tests {
 #[cfg(test)]
 #[path = "options/microphone_tests.rs"]
 mod microphone_tests;
+
+#[cfg(test)]
+#[path = "options/audio_tests.rs"]
+mod audio_tests;

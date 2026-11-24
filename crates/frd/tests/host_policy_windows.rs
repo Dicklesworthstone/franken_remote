@@ -266,10 +266,10 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
             &["--input-agent", r"C:\fr\agent.exe", "--microphone"],
             "microphone_endpoint_unavailable",
         ),
-        (&["--audio"], "audio_source_unavailable"),
+        (&["--audio"], "audio_scope_not_authorized"),
         (
             &["--audio", "--audio-sink", "speakers"],
-            "audio_source_unavailable",
+            "audio_source_unsupported",
         ),
         (&["--logind-session", "1"], "session_monitor_unavailable"),
         (
@@ -288,6 +288,14 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
         let args: Vec<&str> = plain.iter().chain(extra).copied().collect();
         assert_eq!(refusal(&args, Approval::None), Some(code), "{extra:?}");
     }
+    for approval in [Approval::None, Approval::Local] {
+        assert_eq!(
+            refusal(&["--audio", "--audio-endpoint-wide"], approval),
+            None
+        );
+    }
+    assert!(run_options(&["--audio-endpoint-wide"]).is_err());
+    assert!(run_options(&["--audio", "--audio-endpoint-wide", "--audio-endpoint-wide"]).is_err());
     // Host file commands are a Linux and macOS protocol; parsing refuses them.
     assert!(
         run_options(&[

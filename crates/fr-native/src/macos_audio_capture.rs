@@ -8,7 +8,7 @@
 //! and samples. The safe packer converts only finite samples and emits at most
 //! four frames. Every retained frame keeps this exact !Send owner and its
 //! original sleep-inclusive expiry, including through libopus work.
-use crate::{clock, macos_audio_capture_policy as policy};
+use crate::{clock, host_audio_capture_policy as policy};
 use core::{ffi::c_void, ptr::NonNull};
 use fr_core::audio::AudioChannels;
 use fr_media::worker::audio::CaptureCounters;

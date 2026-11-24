@@ -13,6 +13,9 @@ mod macos_audio;
 #[cfg(all(windows, feature = "windows-host-media"))]
 #[path = "media_worker/windows.rs"]
 mod win;
+#[cfg(all(windows, feature = "windows-host-audio"))]
+#[path = "media_worker/windows_audio.rs"]
+mod windows_audio;
 
 #[cfg(target_os = "linux")]
 mod linux {

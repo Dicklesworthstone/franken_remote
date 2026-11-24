@@ -53,12 +53,20 @@ pub(super) fn session_monitor(
     }
 }
 
-/// No playback capture yet; `supported` refused `--audio`.
+/// Explicit endpoint-wide playback authorization. The demand-driven worker
+/// starts only for an admitted viewer that positively negotiated AudioDown.
 pub(super) fn audio(
-    _options: &RunOptions,
-    _json: bool,
+    options: &RunOptions,
+    json: bool,
 ) -> Result<Option<frd::host_run::AudioOptions>, ExitCode> {
-    Ok(None)
+    // Keep the consent gate here as well: a programmatically constructed
+    // request cannot bypass the earlier command/platform validation.
+    if let Some((code, detail)) = options.windows_refusal(Approval::None) {
+        return Err(run_refusal(json, code, detail, 2));
+    }
+    Ok(options
+        .audio
+        .then_some(frd::host_run::AudioOptions::WindowsEndpoint))
 }
 
 /// No microphone endpoint yet; `supported` refused `--microphone`.
@@ -67,4 +75,49 @@ pub(super) fn microphone(
     _json: bool,
 ) -> Result<Option<frd::host_run::MicrophoneOptions>, ExitCode> {
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frd::host_run::AudioOptions;
+
+    #[test]
+    fn playback_requires_endpoint_scope_without_enabling_other_capabilities() {
+        assert_eq!(audio(&RunOptions::default(), false).unwrap(), None);
+        let parse = |args: &[&str]| {
+            RunOptions::parse(&args.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>()).unwrap()
+        };
+        assert!(audio(&parse(&["--audio"]), false).is_err());
+        let options = parse(&["--audio", "--audio-endpoint-wide"]);
+        assert_eq!(
+            audio(&options, false).unwrap(),
+            Some(AudioOptions::WindowsEndpoint)
+        );
+        assert!(!options.control && !options.clipboard && !options.microphone);
+        assert!(options.input_agent.is_none() && options.files.is_none());
+        for args in [
+            &[
+                "--audio",
+                "--audio-endpoint-wide",
+                "--audio-server",
+                r"C:\\pulse",
+            ][..],
+            &[
+                "--audio",
+                "--audio-endpoint-wide",
+                "--audio-sink",
+                "speakers",
+            ][..],
+        ] {
+            let options = parse(args);
+            assert_eq!(
+                options
+                    .windows_refusal(Approval::None)
+                    .map(|(code, _)| code),
+                Some("audio_source_unsupported")
+            );
+            assert!(audio(&options, false).is_err());
+        }
+    }
 }

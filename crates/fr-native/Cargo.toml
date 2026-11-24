@@ -34,9 +34,12 @@ windows = { version = "=0.62.2", optional = true, features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",
+    "Win32_System_Performance",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_UI_HiDpi",
@@ -64,6 +67,10 @@ macos-media = ["media-worker"]
 windows-media = ["dep:windows"]
 # fr-media-worker's Windows capture role around `windows-media`.
 windows-host-media = ["media-worker", "windows-media"]
+# Endpoint-wide Windows host playback, selected only by the local operator.
+# The capture boundary can be compiled independently of the trusted Opus SDK.
+windows-audio-capture = ["dep:windows"]
+windows-host-audio = ["windows-host-media", "windows-audio-capture", "opus"]
 # Explicit host application/system playback capture. Reuses the separate
 # media-worker audio role and the existing statically linked Opus encoder.
 # No desktop client playback or microphone feature is enabled by this flag.

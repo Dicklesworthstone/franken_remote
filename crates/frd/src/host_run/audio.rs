@@ -24,6 +24,9 @@ pub enum AudioOptions {
     },
     /// `ScreenCaptureKit` application/system playback, not display isolation.
     MacSystem,
+    /// Explicitly authorized WASAPI render-endpoint loopback. This scope can
+    /// include playback from other logon sessions, not just the shared desktop.
+    WindowsEndpoint,
 }
 impl AudioOptions {
     fn source(&self) -> Result<Source, Error> {
@@ -35,6 +38,7 @@ impl AudioOptions {
                 })
             }
             Self::MacSystem if cfg!(target_os = "macos") => Ok(Source::MacSystem),
+            Self::WindowsEndpoint if cfg!(windows) => Ok(Source::WindowsEndpoint),
             _ => Err(Error::Configuration),
         }
     }

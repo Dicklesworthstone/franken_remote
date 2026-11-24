@@ -123,12 +123,18 @@ mod tests {
             host.capabilities.len(),
             fr_wire::negotiation::MAX_CAPABILITIES
         );
-        // The full offer has no diagnostic slot to yield. Approval reporting
-        // cannot invent a microphone profile beyond the unchanged wire bound.
+        // A known optional transfer optimization can yield to microphone,
+        // while the original input/observation gates and wire bound remain.
+        let original = host.clone();
+        let host = fr_wire::audio_up::with_microphone(host).unwrap();
         assert_eq!(
-            fr_wire::audio_up::with_microphone(host.clone()),
-            Err(fr_wire::negotiation::Error::Limits)
+            host.capabilities.len(),
+            fr_wire::negotiation::MAX_CAPABILITIES
         );
+        assert_eq!(host.limits, original.limits);
+        for capability in original.capabilities.iter().filter(|cap| cap.required) {
+            assert!(host.capabilities.contains(capability));
+        }
         let mut selected = select(
             &host,
             &fr_client::native::control_offer_with_duplex(true, true),
@@ -159,6 +165,25 @@ mod tests {
             .retain(|cap| cap.name != fr_wire::audio_control::CAPABILITY);
         assert!(!features(&selected).contains(Features::PLAYBACK));
         assert!(features(&selected).contains(Features::CLIPBOARD));
+
+        // This viewer explicitly chooses duplex files and microphone, without
+        // playback. A host's broader offer cannot expand that local choice.
+        let viewer = fr_wire::audio_up::with_microphone(
+            fr_client::native::control_offer_with_duplex(true, false),
+        )
+        .unwrap();
+        let mut selected = select(&host, &viewer);
+        let expected = Features::CLIPBOARD
+            .with(Features::FILE_SEND)
+            .with(Features::FILE_RECEIVE);
+        assert_eq!(features(&selected), expected.with(Features::MICROPHONE));
+        selected.role = Role::Observe;
+        assert_eq!(features(&selected), Features::NONE);
+        selected.role = Role::RequestControl;
+        selected
+            .capabilities
+            .retain(|cap| cap.name != fr_wire::audio_up::CAPABILITY);
+        assert_eq!(features(&selected), expected);
     }
 
     #[test]
