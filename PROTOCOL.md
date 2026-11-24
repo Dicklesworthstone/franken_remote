@@ -510,6 +510,13 @@ input attachment must already be complete before the microphone pair reserves
 resources. Attachment metadata is not a control grant, microphone permission,
 host approval or device readiness.
 
+Adding an explicitly enabled microphone to a full native offer may reclaim one
+known optional capability, in order: quality reporting, bulk record sizing,
+then receiver credit. The existing bounded bulk/credit fallback paths remain
+available. Required entries and unknown versions never yield their slot; all
+selected input, media and file features remain offered. A profile that still
+cannot fit the fixed 24-capability bound is refused with `Limits`.
+
 Its reliable pair reverses playback: controller 0x0060/0x0063, host
 0x0061/0x0063; its 0x0062 datagram route admits controller-to-host packets only.
 Every audio payload carries `Uplink` and this direction's own strictly increasing

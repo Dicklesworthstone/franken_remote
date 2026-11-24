@@ -547,6 +547,9 @@ mod bulk;
 #[path = "native_profile/credit.rs"]
 mod credit;
 
+#[path = "native_profile/microphone.rs"]
+mod microphone;
+
 #[path = "native_profile/quality.rs"]
 mod quality;
 

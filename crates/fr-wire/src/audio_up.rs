@@ -14,8 +14,9 @@ pub const VERSION: u16 = 1;
 
 /// Add the separately enabled microphone profile to a validated native offer.
 /// Call only after the application's capture/endpoint and local consent UI are
-/// configured. An optional diagnostic may yield its slot; no authority, media
-/// or file capability is displaced when the fixed capability bound is full.
+/// configured. Optional quality reporting yields first, followed by optional
+/// bulk sizing and receiver credit, whose bounded legacy paths remain available.
+/// Required entries and all input, media and file capabilities stay intact.
 pub fn with_microphone(mut offer: Offer) -> Result<Offer, Error> {
     offer.validate()?;
     if ![
@@ -41,12 +42,26 @@ pub fn with_microphone(mut offer: Offer) -> Result<Offer, Error> {
             Err(Error::Version)
         };
     }
-    if offer.capabilities.len() == MAX_CAPABILITIES {
-        offer.capabilities.retain(|cap| {
-            cap.name != crate::quality_decision::CAPABILITY
-                || cap.version != crate::quality_decision::VERSION
-                || cap.required
-        });
+    for (name, version) in [
+        (
+            crate::quality_decision::CAPABILITY,
+            crate::quality_decision::VERSION,
+        ),
+        (
+            crate::attachment::BULK_RECORD_CAPABILITY,
+            crate::attachment::BULK_RECORD_VERSION,
+        ),
+        (
+            crate::attachment::credit::CAPABILITY,
+            crate::attachment::credit::VERSION,
+        ),
+    ] {
+        if offer.capabilities.len() < MAX_CAPABILITIES {
+            break;
+        }
+        offer
+            .capabilities
+            .retain(|cap| cap.name != name || cap.version != version || cap.required);
     }
     if offer.capabilities.len() >= MAX_CAPABILITIES {
         return Err(Error::Limits);
@@ -162,30 +177,96 @@ mod tests {
         assert!(!mic.required);
         assert_eq!(with_microphone(client.clone()), Ok(client));
     }
+    const OPTIONAL_FALLBACKS: [(&str, u16); 3] = [
+        (
+            crate::quality_decision::CAPABILITY,
+            crate::quality_decision::VERSION,
+        ),
+        (
+            attachment::BULK_RECORD_CAPABILITY,
+            attachment::BULK_RECORD_VERSION,
+        ),
+        (attachment::credit::CAPABILITY, attachment::credit::VERSION),
+    ];
+
     #[test]
-    fn microphone_can_replace_only_an_optional_diagnostic_at_capacity() {
-        let mut base = offer(Role::Observe);
-        base.capabilities.push(Capability {
-            name: crate::quality_decision::CAPABILITY.into(),
-            version: crate::quality_decision::VERSION,
-            required: false,
-        });
-        fill(&mut base);
-        let selected = with_microphone(base.clone()).unwrap();
-        assert_eq!(selected.capabilities.len(), MAX_CAPABILITIES);
-        for capability in base
-            .capabilities
-            .iter()
-            .filter(|cap| cap.name != crate::quality_decision::CAPABILITY)
-        {
-            assert!(selected.capabilities.contains(capability));
+    fn microphone_reclaims_only_known_optional_slots_at_capacity() {
+        for (name, version) in OPTIONAL_FALLBACKS {
+            let mut base = offer(Role::Observe);
+            base.capabilities.push(Capability {
+                name: name.into(),
+                version,
+                required: false,
+            });
+            fill(&mut base);
+            let selected = with_microphone(base.clone()).unwrap();
+            assert_eq!(selected.capabilities.len(), MAX_CAPABILITIES);
+            for capability in base.capabilities.iter().filter(|cap| cap.name != name) {
+                assert!(selected.capabilities.contains(capability));
+            }
+            assert!(!selected.capabilities.iter().any(|cap| cap.name == name));
+
+            let mut required = base.clone();
+            required
+                .capabilities
+                .iter_mut()
+                .find(|cap| cap.name == name)
+                .unwrap()
+                .required = true;
+            assert_eq!(with_microphone(required), Err(Error::Limits));
+
+            let mut unknown = base;
+            unknown
+                .capabilities
+                .iter_mut()
+                .find(|cap| cap.name == name)
+                .unwrap()
+                .version += 1;
+            assert_eq!(with_microphone(unknown), Err(Error::Limits));
         }
-        base.capabilities
-            .iter_mut()
-            .find(|cap| cap.name == crate::quality_decision::CAPABILITY)
-            .unwrap()
-            .required = true;
-        assert_eq!(with_microphone(base), Err(Error::Limits));
+    }
+
+    #[test]
+    fn microphone_yields_one_slot_in_quality_bulk_credit_order() {
+        for (first, &(yielded, _)) in OPTIONAL_FALLBACKS.iter().enumerate() {
+            let mut base = offer(Role::RequestControl);
+            for &(name, version) in &OPTIONAL_FALLBACKS[first..] {
+                base.capabilities.push(Capability {
+                    name: name.into(),
+                    version,
+                    required: false,
+                });
+            }
+            fill(&mut base);
+            let selected = with_microphone(base.clone()).unwrap();
+            assert_eq!(selected.capabilities.len(), MAX_CAPABILITIES);
+            assert!(!selected.capabilities.iter().any(|cap| cap.name == yielded));
+            for capability in base.capabilities.iter().filter(|cap| cap.name != yielded) {
+                assert!(selected.capabilities.contains(capability));
+            }
+            assert_eq!(with_microphone(selected.clone()), Ok(selected));
+        }
+    }
+
+    #[test]
+    fn microphone_keeps_spare_optimizations_and_refuses_a_full_profile_without_one() {
+        let mut base = offer(Role::RequestControl);
+        for (name, version) in OPTIONAL_FALLBACKS {
+            base.capabilities.push(Capability {
+                name: name.into(),
+                version,
+                required: false,
+            });
+        }
+        base.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+        let selected = with_microphone(base.clone()).unwrap();
+        assert_eq!(selected.capabilities.len(), base.capabilities.len() + 1);
+        assert!(
+            base.capabilities
+                .iter()
+                .all(|cap| selected.capabilities.contains(cap))
+        );
+
         let mut full = offer(Role::RequestControl);
         fill(&mut full);
         assert_eq!(with_microphone(full), Err(Error::Limits));
