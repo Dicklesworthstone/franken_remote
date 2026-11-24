@@ -1,0 +1,66 @@
+name: Verify folder synchronization
+
+# Exercise the real file owners independently of the much larger native
+# desktop build. This is filesystem/UDP/TLS evidence, not desktop qualification.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fr-files/**'
+      - 'crates/fr-client/**'
+      - 'crates/fr-core/**'
+      - 'crates/fr-transport/**'
+      - 'crates/fr-wire/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/verify-folder-sync.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: folder-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+  RUST_MIN_STACK: '16777216'
+
+jobs:
+  files:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Select the repository-pinned compiler
+        run: rustup show active-toolchain
+      - name: Check file-source formatting
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --package fr-files --check
+      - name: Check file owners and all test targets
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy -p fr-files --all-targets --locked -- -D warnings
+      - name: Exercise the complete file package
+        id: tests
+        continue-on-error: true
+        run: cargo test -p fr-files --locked --no-fail-fast
+      - name: Require every verification step
+        env:
+          FORMAT: ${{ steps.fmt.outcome }}
+          CLIPPY: ${{ steps.clippy.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          test "$FORMAT" = success
+          test "$CLIPPY" = success
+          test "$TESTS" = success

@@ -628,3 +628,55 @@ fn folder_offer_exceeding_its_announced_round_never_reaches_the_disk_worker() {
         link.control_progress(&cx).await;
     });
 }
+
+#[test]
+fn idle_rounds_preserve_receipts_before_delivering_a_later_source_change() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let source = Directory::new();
+        let destination = Directory::new();
+        fs::write(source.0.join("selected"), b"version one").unwrap();
+        fs::write(source.0.join("unchanged"), b"stable source").unwrap();
+        let mut running = Running::new(&cx, &source.0, &destination.0, 41).await;
+        running.settled(&cx, 1).await;
+        assert_eq!(running.host.status().confirmed_publications, 2);
+        let original_files = destination.files();
+
+        // Cross the cache's periodic full-scan boundary with no new versions.
+        // An idle scan must retain its cache without inventing publication receipts.
+        for round in 2..=6 {
+            running.settled(&cx, round).await;
+            let host = running.host.status();
+            assert_eq!(host.state.phase, SyncPhase::Settled);
+            assert_eq!((host.state.entries_total, host.state.bytes_total), (0, 0));
+            assert_eq!(host.confirmed_publications, 2);
+            assert_eq!(running.client.status().confirmed_publications, 2);
+            assert_eq!(destination.files(), original_files);
+            running.input_live(&cx);
+        }
+
+        // A same-length edit invalidates the old manifest and delivers once.
+        fs::write(source.0.join("selected"), b"version two").unwrap();
+        running.settled(&cx, 7).await;
+        let host = running.host.status();
+        assert_eq!(host.state.entries_total, 1);
+        assert_eq!(host.state.entries_completed, 1);
+        assert_eq!(host.state.conflicts_kept, 1);
+        assert_eq!(host.confirmed_publications, 3);
+        assert_eq!(running.client.status().confirmed_publications, 3);
+        assert_eq!(
+            fs::read(destination.0.join("selected")).unwrap(),
+            b"version one"
+        );
+        let files = destination.files();
+        assert_eq!(files.len(), 3);
+        assert!(files.values().any(|bytes| bytes == b"version two"));
+        assert_eq!(
+            fs::read(destination.0.join("unchanged")).unwrap(),
+            b"stable source"
+        );
+        running.input_live(&cx);
+        running.retire();
+        assert!(running.host.status().cleanup_complete && running.client.status().cleanup_complete);
+    });
+}

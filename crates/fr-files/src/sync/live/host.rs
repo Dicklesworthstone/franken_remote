@@ -1,7 +1,7 @@
 //! Source-version delivery on one original, explicitly accepted download lane.
 use super::{
     ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, HostConfig, JobBudget, JobStatus, LiveError,
-    scan::{PreparedRound, Scan, ScanScope, Version},
+    scan::{PreparedRound, Scan, ScanCache, ScanScope, Version},
     state,
 };
 use crate::{
@@ -98,6 +98,7 @@ pub struct HostJob {
     step: Step,
     pending: Option<PendingState>,
     scan: Option<Scan>,
+    scan_cache: ScanCache,
     scan_retry: ScanRetry,
     prepared: Option<PreparedRound>,
     versions: Vec<Version>,
@@ -145,6 +146,7 @@ impl HostJob {
             step: Step::Advertise,
             pending: None,
             scan: None,
+            scan_cache: ScanCache::default(),
             scan_retry: ScanRetry::default(),
             prepared: None,
             versions: Vec::new(),
@@ -169,6 +171,7 @@ impl HostJob {
         self.stopped.store(true, Ordering::Release);
         self.permission.revoke();
         self.prepared = None;
+        self.scan_cache = ScanCache::default();
         self.pending = None;
         self.step = Step::Stopped;
         if self.status.failure.is_none() {
@@ -307,6 +310,7 @@ impl HostJob {
                     &self.config,
                     self.status.state.manifest_revision,
                     self.ledger.clone(),
+                    std::mem::take(&mut self.scan_cache),
                     ScanScope {
                         cx: self.cx.clone(),
                         authority: self.authority.clone(),
@@ -392,7 +396,7 @@ impl HostJob {
 
     fn poll_scan(&mut self, now: u64) -> Result<(), LiveError> {
         let scanned = self.scan.as_mut().ok_or(LiveError::WrongPhase)?.poll();
-        let prepared = match scanned {
+        let mut prepared = match scanned {
             Ok(None) => return Ok(()),
             Ok(Some(prepared)) => prepared,
             Err(error) => {
@@ -413,6 +417,9 @@ impl HostJob {
         self.scan = None;
         let count = u32::try_from(prepared.versions.len()).map_err(|_| LiveError::Resource)?;
         self.budget.admit(count, prepared.bytes)?;
+        // Retain verified scan metadata even when this round has no new versions.
+        // Publication evidence remains exclusively in the confirmed ledger.
+        self.scan_cache = std::mem::take(&mut prepared.cache);
         let mut announcement = state(
             self.config.job_id,
             SyncPhase::Transferring,

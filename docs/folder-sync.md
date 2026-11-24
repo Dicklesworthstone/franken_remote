@@ -91,6 +91,21 @@ Once the transfer manifest has been announced, a changed source remains a
 terminal refusal; uncertain or published transfers are never replayed by this
 scan retry.
 
+Live jobs keep a bounded manifest cache inside the original source owner.
+Every scan still enumerates the pinned directory, checks authority and resource
+limits, and opens each regular file without following links. An unchanged name
+set and matching device, inode, size, modification time and change time can
+reuse the preceding manifest. Any change causes a full content scan through the
+existing ATP hashing path. Empty files and timestamps without subsecond
+precision also require a full scan.
+
+A manifest can be reused for at most three consecutive scans. The following
+scan hashes all content again, including when no versions need delivery.
+Successful cache hits do not renew this verification age. The cache is
+discarded when the original job stops and never becomes publication evidence:
+the sender still independently verifies each selected file against its expected
+digest, and only confirmed publication and cleanup advance the version ledger.
+
 Only actual verified publication receipts advance the source-version ledger.
 A file changed between scanning and source preparation is refused before its
 offer, so a different version cannot be credited to the scanned manifest.

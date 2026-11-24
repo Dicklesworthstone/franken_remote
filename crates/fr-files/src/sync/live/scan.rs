@@ -15,6 +15,12 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+#[cfg(unix)]
+pub(super) use super::super::cache::ScanCache;
+#[cfg(not(unix))]
+#[derive(Default)]
+pub(super) struct ScanCache {}
+
 #[derive(Clone)]
 pub(super) struct Version {
     pub(super) name: String,
@@ -25,6 +31,7 @@ pub(super) struct PreparedRound {
     pub(super) selection: Selection,
     pub(super) versions: Vec<Version>,
     pub(super) bytes: u64,
+    pub(super) cache: ScanCache,
 }
 pub(super) struct Scan {
     thread: Option<JoinHandle<Result<PreparedRound, LiveError>>>,
@@ -42,6 +49,7 @@ impl Scan {
         config: &HostConfig,
         revision: u64,
         ledger: BTreeMap<String, String>,
+        cache: ScanCache,
         scope: ScanScope,
     ) -> Result<Self, LiveError> {
         let root = config.root.clone();
@@ -71,9 +79,10 @@ impl Scan {
                 };
                 #[cfg(unix)]
                 {
-                    let manifest =
-                        super::super::source::scan(root.root_fd(), revision, limits, &mut check)
-                            .map_err(LiveError::Source)?;
+                    let mut cache = cache;
+                    let manifest = cache
+                        .scan(root.root_fd(), revision, limits, &mut check)
+                        .map_err(LiveError::Source)?;
                     let mut selection = Selection::new();
                     let mut versions = Vec::new();
                     let mut bytes = 0u64;
@@ -99,11 +108,12 @@ impl Scan {
                         selection,
                         versions,
                         bytes,
+                        cache,
                     })
                 }
                 #[cfg(not(unix))]
                 {
-                    let _ = (root, revision, ledger, limits, &mut check);
+                    let _ = (root, revision, ledger, limits, cache, &mut check);
                     Err(LiveError::Source(SyncError::UnsupportedPlatform))
                 }
             })

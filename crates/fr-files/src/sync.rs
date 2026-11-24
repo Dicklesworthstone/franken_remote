@@ -18,6 +18,8 @@
 use crate::receive::ConflictPolicy;
 use crate::receive::{DropDirectory, Error as ReceiveError, MAX_CHUNK_BYTES, Publication};
 #[cfg(unix)]
+mod cache;
+#[cfg(unix)]
 mod projection;
 #[cfg(unix)]
 mod source;
