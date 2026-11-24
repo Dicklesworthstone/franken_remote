@@ -1,4 +1,4 @@
-//! Read-only, original-owner authorization carried across an async handoff.
+//! Original-owner authorization and release-only expiry across an async handoff.
 use super::{Context, Error, HostInstant, ProtocolLimits, SessionError};
 use fr_core::clipboard::{
     Binding, ClipboardSwitch,
@@ -9,7 +9,7 @@ use std::{
     fmt,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
 
@@ -105,13 +105,76 @@ impl Transport {
     }
 }
 
+// One state belongs to the original item, not a numeric stamp or a clock
+// projection. An unsent handoff can shorten its lifetime; it cannot renew it.
+pub(super) struct Payload(AtomicU8);
+impl Payload {
+    const ACTIVE: u8 = 0;
+    const EXPIRED: u8 = 1;
+    const CANCELLED: u8 = 2;
+    const COMMITTED: u8 = 3;
+    const COMMITTED_CANCELLED: u8 = 4;
+
+    pub(super) fn new() -> Self {
+        Self(AtomicU8::new(Self::ACTIVE))
+    }
+    pub(super) fn invalidate(&self) {
+        let _ = self
+            .0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                Some(
+                    if matches!(state, Self::COMMITTED | Self::COMMITTED_CANCELLED) {
+                        Self::COMMITTED_CANCELLED
+                    } else {
+                        Self::CANCELLED
+                    },
+                )
+            });
+    }
+    pub(super) fn is_expired(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::EXPIRED
+    }
+    pub(super) fn complete(&self) -> bool {
+        // Never overwrite a concurrent release fence with completion.
+        self.0
+            .compare_exchange(
+                Self::ACTIVE,
+                Self::COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+    fn check(&self) -> Result<(), Error> {
+        match self.0.load(Ordering::Acquire) {
+            Self::ACTIVE | Self::COMMITTED => Ok(()),
+            // Earlier records already admitted to transport keep their own
+            // immutable deadlines and ordered cancellation, like superseded
+            // items. Only the wire owner interprets the item's expiry signal.
+            _ => Err(Error::LocalChanged),
+        }
+    }
+    fn expire_unsent(&self) -> bool {
+        match self.0.compare_exchange(
+            Self::ACTIVE,
+            Self::EXPIRED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) | Err(Self::EXPIRED | Self::CANCELLED) => true,
+            Err(_) => false,
+        }
+    }
+}
+
 /// Exact operation deadline and cancellation state, without retaining text.
 /// Cloning cannot extend the deadline or survive the original channel's close.
 #[derive(Clone)]
 pub struct Egress {
     transport: Transport,
     deadline: HostInstant,
-    payload_live: Option<Arc<AtomicBool>>,
+    payload_live: Option<Arc<Payload>>,
+    expirable_unsent: bool,
     switches: (u64, u64),
 }
 impl fmt::Debug for Egress {
@@ -123,13 +186,15 @@ impl Egress {
     pub(super) fn new(
         transport: Transport,
         deadline: HostInstant,
-        payload_live: Option<Arc<AtomicBool>>,
+        payload_live: Option<Arc<Payload>>,
+        expirable_unsent: bool,
     ) -> Self {
         let switches = (transport.local.state(), transport.peer.state());
         Self {
             transport,
             deadline,
             payload_live,
+            expirable_unsent,
             switches,
         }
     }
@@ -138,6 +203,20 @@ impl Egress {
     }
     pub const fn context(&self) -> Context {
         self.transport.context()
+    }
+    /// Retire this exact item's expired, wholly unsubmitted Begin or Chunk.
+    /// The trusted handoff owner must still own all bytes and have observed an
+    /// original host-clock or local handoff deadline. This release-only signal
+    /// cannot extend a deadline, admit bytes, or affect a replacement item. The
+    /// original wire owner emits its ordered Cancel on its next maintenance
+    /// turn, even when its independent clock projection has not reached expiry.
+    /// Commit, Cancel and already completed items cannot use this path.
+    pub fn expire_unsent_payload(&self) -> bool {
+        self.expirable_unsent
+            && self
+                .payload_live
+                .as_ref()
+                .is_some_and(|payload| payload.expire_unsent())
     }
     pub fn check(&self, now: HostInstant) -> Result<(), SessionError> {
         self.transport.check(now)?;
@@ -154,9 +233,7 @@ impl Egress {
             return Err(Error::Expired.into());
         }
         if let Some(live) = &self.payload_live {
-            if !live.load(Ordering::Acquire) {
-                return Err(Error::LocalChanged.into());
-            }
+            live.check()?;
             if !self.transport.local.is_enabled()
                 || !self.transport.peer.is_enabled()
                 || self.switches != (self.transport.local.state(), self.transport.peer.state())

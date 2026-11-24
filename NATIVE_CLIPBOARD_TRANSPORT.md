@@ -286,11 +286,23 @@ An obsolete Begin or Chunk still owned exclusively by the worker outbox or
 bridge pending slot has not entered QUIC. The owner discards that record and
 releases its one handoff slot when the wire owner has already superseded the
 item, preserving the existing Cancel-before-replacement ordering and sequence
-floors. Host-side item expiry permits the same cleanup because the worker and
-bridge use the same actual host timer. Controller-side expiry does not: its
-independent conservative clock cursors may disagree about when the native
-sender expires. A local handoff deadline alone also cannot authorize discarding
-an otherwise live sender's record. These cases remain terminal.
+floors. Expiry of the original item or its shorter local handoff bound now
+permits the same release-only cleanup in both directions. The exact item's
+egress permit carries a one-way expiry signal back to its original wire owner.
+That owner discards its remaining payload and orders `Cancel(Expired)` before
+another copy, even when its independent controller clock cursor has not yet
+reached the expired handoff's bound. No clock projection or deadline is renewed,
+and a retained permit cannot expire a replacement item.
+
+The item distinguishes active, expired, cancelled and committed state. A
+committed item still honors later native-revision and privacy fences, but its
+old Begin/Chunk permits can never regain permission to expire it as unsent.
+If expiry races an accepted Commit, the owner closes the lane and preserves
+the uncertain transport outcome. Earlier records already admitted to QUIC
+retain their original deadlines; the new item signal uses the existing
+supersession/cancellation path rather than inventing a new in-flight expiry.
+This fixes `fr-clipboard-unsent-expiry-629p`: an incomplete copy that never left
+the bounded handoff no longer disables later copies for the whole control lease.
 
 Unsent Commit and Cancel records also retain the terminal fallback: the wire
 sender may already have finished or consumed its one cancellation, so dropping

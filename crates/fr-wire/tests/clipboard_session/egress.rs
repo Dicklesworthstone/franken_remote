@@ -159,3 +159,153 @@ fn ingress_queue_time_is_not_added_to_the_native_receive_lifetime() {
         Err(Error::Replay.into())
     );
 }
+
+#[test]
+fn unsent_expiry_cancels_the_exact_item_before_a_later_copy_on_either_endpoint() {
+    for role in [Role::Host, Role::Controller] {
+        for chunk in [false, true] {
+            let input = owner(10_000_000);
+            let mut c = session(&input, role);
+            let old = stamp(c.offer(1, "old", None, at(0)).unwrap());
+            let begin = handoff(&mut c, 0);
+            let held = if chunk { handoff(&mut c, 0) } else { begin };
+            let permit = held.permit.unwrap();
+            let deadline = permit.deadline();
+            // The handoff has reached its original local cap while this
+            // independent sender cursor is still before the host-clock cap.
+            assert!(permit.expire_unsent_payload());
+            assert!(permit.expire_unsent_payload(), "one-way and idempotent");
+            assert_eq!(permit.deadline(), deadline);
+            assert_eq!(
+                permit.check_operation(at(1)),
+                Err(Error::LocalChanged.into())
+            );
+            assert!(c.maintain(at(1)).unwrap().outgoing_expired);
+            assert_eq!(c.retained_bytes(), 0);
+            assert!(!c.is_closed());
+            input.monitor().deadline(at(1)).unwrap();
+
+            let new = stamp(c.offer(2, "new", None, at(2)).unwrap());
+            assert_ne!(old, new);
+            assert!(
+                permit.expire_unsent_payload(),
+                "old cancellation cannot retarget"
+            );
+            assert!(!c.maintain(at(2)).unwrap().outgoing_expired);
+            let cancel = handoff(&mut c, 2);
+            let message = decode(&cancel.bytes, context(role), &ProtocolLimits::ABSOLUTE).unwrap();
+            assert_eq!(message.stamp, old);
+            assert!(matches!(message.body, Body::Cancel(CancelReason::Expired)));
+            assert!(!cancel.permit.unwrap().expire_unsent_payload());
+            for expected in 0..3 {
+                let next = handoff(&mut c, 2);
+                let message =
+                    decode(&next.bytes, context(role), &ProtocolLimits::ABSOLUTE).unwrap();
+                assert_eq!(message.stamp, new);
+                assert!(matches!(
+                    (expected, message.body),
+                    (0, Body::Begin { .. })
+                        | (1, Body::Chunk { bytes: b"new", .. })
+                        | (2, Body::Commit { .. })
+                ));
+            }
+            assert_eq!(c.retained_bytes(), 0);
+            assert!(!c.is_closed());
+            assert_eq!(permit.check_operation(deadline), Err(Error::Expired.into()));
+        }
+    }
+}
+
+#[test]
+fn committed_item_never_regains_unsent_expiry_after_a_new_selection() {
+    let input = owner(10_000_000);
+    let mut c = session(&input, Role::Controller);
+    c.offer(1, "", None, at(0)).unwrap();
+    let begin = handoff(&mut c, 0).permit.unwrap();
+    let commit = handoff(&mut c, 0).permit.unwrap();
+    assert!(!begin.expire_unsent_payload());
+    assert!(!commit.expire_unsent_payload());
+    commit.check_operation(at(1)).unwrap();
+    c.offer(2, "later", None, at(1)).unwrap();
+    assert!(!begin.expire_unsent_payload());
+    assert!(!commit.expire_unsent_payload());
+    assert_eq!(
+        commit.check_operation(at(1)),
+        Err(Error::LocalChanged.into())
+    );
+    assert!(!c.maintain(at(1)).unwrap().outgoing_expired);
+    assert!(matches!(
+        decode(
+            &handoff(&mut c, 1).bytes,
+            context(Role::Controller),
+            &ProtocolLimits::ABSOLUTE
+        )
+        .unwrap()
+        .body,
+        Body::Begin { .. }
+    ));
+}
+
+#[test]
+fn a_custom_handoff_racing_expiry_with_commit_admission_has_an_uncertain_effect() {
+    struct Race(Egress);
+    impl RecordSink for Race {
+        fn try_send(&mut self, _: &[u8]) -> Result<Admission, TransportFailure> {
+            panic!("original permit required")
+        }
+        fn try_send_checked(
+            &mut self,
+            _: &[u8],
+            commit: Egress,
+        ) -> Result<Admission, TransportFailure> {
+            assert!(
+                !commit.expire_unsent_payload(),
+                "Commit is never safely discarded"
+            );
+            assert!(self.0.expire_unsent_payload());
+            Ok(Admission::Accepted)
+        }
+    }
+    let input = owner(10_000_000);
+    let mut c = session(&input, Role::Host);
+    c.offer(1, "", None, at(0)).unwrap();
+    let mut sink = Race(handoff(&mut c, 0).permit.unwrap());
+    assert_eq!(
+        c.pump(&mut vec![0; 17000], &mut sink, || at(1)),
+        Err(SessionError::Transport)
+    );
+    assert!(c.is_closed());
+    assert_eq!(c.retained_bytes(), 0);
+    input.monitor().deadline(at(1)).unwrap();
+}
+
+#[test]
+fn unsent_expiry_during_view_suspension_keeps_the_original_cancel_and_owner() {
+    let (authority, input) = super::suspension::shared_owner();
+    let mut c = session(&input, Role::Controller);
+    let old = stamp(c.offer(1, "old", None, at(0)).unwrap());
+    let permit = handoff(&mut c, 0).permit.unwrap();
+    assert!(!c.maintain(at(100_000)).unwrap().enabled);
+    assert!(permit.expire_unsent_payload());
+    let state = c.maintain(at(100_000)).unwrap();
+    assert!(state.outgoing_expired);
+    assert!(!state.enabled);
+    assert_eq!(c.retained_bytes(), 0);
+    assert!(!c.is_closed());
+    let mut gate = Gate::default();
+    assert_eq!(pump(&mut c, &mut gate, 100_000), Pump::Suspended);
+    assert_eq!(gate.calls, 0);
+    super::suspension::resume(&authority, &input);
+    assert_eq!(pump(&mut c, &mut gate, 200_000), Pump::CancelAccepted(old));
+    assert!(matches!(
+        decode(
+            &gate.last,
+            context(Role::Controller),
+            &ProtocolLimits::ABSOLUTE
+        )
+        .unwrap()
+        .body,
+        Body::Cancel(CancelReason::Expired)
+    ));
+    assert!(!input.monitor().is_revoked());
+}

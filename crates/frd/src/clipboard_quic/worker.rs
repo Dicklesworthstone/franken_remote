@@ -424,7 +424,7 @@ impl<N: NativeClipboard> Worker<N> {
                 if let Some(item) = &outbox.item
                     && let Err(reason) = item.check_operation(local, host)
                 {
-                    if !item.can_discard(reason, &self.clock, &self.shared.gate.limits()) {
+                    if !item.can_discard(reason, &self.shared.gate.limits()) {
                         return Err(reason);
                     }
                     // No byte left this slot. The existing wire owner emits its

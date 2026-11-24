@@ -2,7 +2,7 @@ use super::*;
 use fr_core::authority::{AuthorityError, ControlStatus};
 use std::sync::{Arc, Mutex};
 
-fn shared_owner() -> (Arc<Mutex<SessionAuthority>>, InputOwner) {
+pub(super) fn shared_owner() -> (Arc<Mutex<SessionAuthority>>, InputOwner) {
     let c = InputCredentials {
         session: RemoteSessionId::from_raw(1),
         lease: InputLeaseId::from_raw(2),
@@ -32,7 +32,7 @@ fn shared_owner() -> (Arc<Mutex<SessionAuthority>>, InputOwner) {
     .unwrap();
     (shared, owner)
 }
-fn resume(shared: &Mutex<SessionAuthority>, owner: &InputOwner) {
+pub(super) fn resume(shared: &Mutex<SessionAuthority>, owner: &InputOwner) {
     owner.monitor().confirm_suspension_release().unwrap();
     shared
         .lock()

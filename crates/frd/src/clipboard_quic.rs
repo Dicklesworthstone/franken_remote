@@ -476,7 +476,7 @@ impl Bridge {
         }
         if let Some(p) = &self.pending
             && let Err(reason) = p.check_operation(local, host)
-            && !p.can_discard(reason, &self.clock, &self.shared.gate.limits())
+            && !p.can_discard(reason, &self.shared.gate.limits())
         {
             return Err(reason);
         }
@@ -488,7 +488,7 @@ impl Bridge {
         if !self
             .pending
             .as_ref()
-            .is_some_and(|p| p.can_discard(reason, &self.clock, &self.shared.gate.limits()))
+            .is_some_and(|p| p.can_discard(reason, &self.shared.gate.limits()))
         {
             return Ok(false);
         }

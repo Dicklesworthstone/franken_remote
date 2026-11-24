@@ -389,73 +389,96 @@ fn an_already_retired_transport_lane_remains_an_optional_failure() {
 }
 
 #[test]
-fn a_controller_clock_expiry_cannot_discard_a_live_wire_sender() {
-    runtime().block_on(async {
-        let mut f = Fixture::new().await;
-        let mut viewer = authority::viewer(&f.cx, f.grant);
-        let mut owner = viewer
-            .attach_clipboard_lane(
-                f.peer.parent(),
-                f.peer.outgoing(),
-                f.peer.limits(),
-                true,
-                ClientInstant(clock(&f.cx)),
-            )
-            .unwrap();
-        let transport = owner.transport();
-        let shared = Shared {
-            gate: transport.transport(),
-            maximum: f.peer.limits().max_control_message_bytes() as usize,
-            inbox: std::sync::Mutex::default(),
-            outbox: std::sync::Mutex::default(),
-            inbound_until: std::sync::atomic::AtomicU64::default(),
-            inbound_bound: std::sync::atomic::AtomicU64::default(),
-            wake: std::sync::OnceLock::default(),
-        };
-        let timer = Clock::Controller(transport);
-        owner
-            .offer(601, "controller item", None, ClientInstant(clock(&f.cx)))
-            .unwrap();
-        let mut sink = shared::Sink {
-            shared: &shared,
-            clock: &timer,
-            cx: &f.cx,
-        };
-        let mut scratch = vec![0; shared.maximum];
-        assert_eq!(
-            owner.pump(&mut scratch, &mut sink, || ClientInstant(clock(&f.cx))),
-            Ok(Pump::RecordAccepted)
-        );
-        let record = shared.outbox.lock().unwrap().item.take().unwrap();
-        let expired = Error::Session(
-            record
-                .permit
-                .check_operation(record.permit.deadline())
-                .unwrap_err(),
-        );
-        assert!(!record.can_discard(expired, &timer, &ProtocolLimits::ABSOLUTE));
-        assert!(!record.can_discard(Error::HandoffExpired, &timer, &ProtocolLimits::ABSOLUTE));
-        owner
-            .offer(
-                602,
-                "controller replacement",
-                None,
-                ClientInstant(clock(&f.cx)),
-            )
-            .unwrap();
-        let changed = Error::Session(
-            record
-                .permit
-                .check_operation(HostInstant::from_micros(clock(&f.cx)))
-                .unwrap_err(),
-        );
-        assert_eq!(
-            changed,
-            Error::Session(SessionError::Clipboard(
-                fr_core::clipboard::Error::LocalChanged
-            ))
-        );
-        assert!(record.can_discard(changed, &timer, &ProtocolLimits::ABSOLUTE));
-        f.stop();
-    });
+fn a_controller_handoff_expiry_signals_the_original_sender_before_later_copies() {
+    for host_expiry in [false, true] {
+        runtime().block_on(async {
+            let mut f = Fixture::new().await;
+            let mut viewer = authority::viewer(&f.cx, f.grant);
+            let mut owner = viewer
+                .attach_clipboard_lane(
+                    f.peer.parent(),
+                    f.peer.outgoing(),
+                    f.peer.limits(),
+                    true,
+                    ClientInstant(clock(&f.cx)),
+                )
+                .unwrap();
+            let transport = owner.transport();
+            let shared = Shared {
+                gate: transport.transport(),
+                maximum: f.peer.limits().max_control_message_bytes() as usize,
+                inbox: std::sync::Mutex::default(),
+                outbox: std::sync::Mutex::default(),
+                inbound_until: std::sync::atomic::AtomicU64::default(),
+                inbound_bound: std::sync::atomic::AtomicU64::default(),
+                wake: std::sync::OnceLock::default(),
+            };
+            let timer = Clock::Controller(transport);
+            owner
+                .offer(601, "controller item", None, ClientInstant(clock(&f.cx)))
+                .unwrap();
+            let mut sink = shared::Sink {
+                shared: &shared,
+                clock: &timer,
+                cx: &f.cx,
+            };
+            let mut scratch = vec![0; shared.maximum];
+            assert_eq!(
+                owner.pump(&mut scratch, &mut sink, || ClientInstant(clock(&f.cx))),
+                Ok(Pump::RecordAccepted)
+            );
+            // Exactly the bridge's exclusive, wholly unsubmitted custody.
+            let record = shared.outbox.lock().unwrap().item.take().unwrap();
+            let old =
+                fr_wire::clipboard::decode(&record.bytes.0, f.peer.outgoing(), &f.peer.limits())
+                    .unwrap()
+                    .stamp;
+            let original = record.permit.deadline();
+            let reason = if host_expiry {
+                Error::Session(record.permit.check_operation(original).unwrap_err())
+            } else {
+                Error::HandoffExpired
+            };
+            assert!(record.can_discard(reason, &f.peer.limits()));
+            assert_eq!(record.permit.deadline(), original);
+            shared.outbox.lock().unwrap().busy = false;
+            owner
+                .offer(
+                    602,
+                    "controller replacement",
+                    None,
+                    ClientInstant(clock(&f.cx)),
+                )
+                .unwrap();
+            assert_eq!(
+                owner.pump(&mut scratch, &mut sink, || ClientInstant(clock(&f.cx))),
+                Ok(Pump::CancelAccepted(old))
+            );
+            let cancel = shared.outbox.lock().unwrap().item.take().unwrap();
+            let message =
+                fr_wire::clipboard::decode(&cancel.bytes.0, f.peer.outgoing(), &f.peer.limits())
+                    .unwrap();
+            assert_eq!(message.stamp, old);
+            assert!(matches!(
+                message.body,
+                Body::Cancel(fr_wire::clipboard::CancelReason::Expired)
+            ));
+            assert!(!cancel.can_discard(reason, &f.peer.limits()));
+            shared.outbox.lock().unwrap().busy = false;
+            assert_eq!(
+                owner.pump(&mut scratch, &mut sink, || ClientInstant(clock(&f.cx))),
+                Ok(Pump::RecordAccepted)
+            );
+            let next = shared.outbox.lock().unwrap().item.take().unwrap();
+            let message =
+                fr_wire::clipboard::decode(&next.bytes.0, f.peer.outgoing(), &f.peer.limits())
+                    .unwrap();
+            assert!(matches!(message.body, Body::Begin { .. }));
+            assert!(message.stamp.sequence > old.sequence);
+            assert!(shared.gate.is_open());
+            assert!(!f.link.c.is_closed());
+            assert!(!f.link.h.is_closed());
+            f.stop();
+        });
+    }
 }

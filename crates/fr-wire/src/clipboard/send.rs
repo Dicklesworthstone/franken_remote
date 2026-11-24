@@ -80,6 +80,9 @@ impl Sender {
     pub const fn is_finished(&self) -> bool {
         self.finished
     }
+    pub(super) const fn next_is_commit(&self) -> bool {
+        !self.finished && self.step > self.begin.chunks
+    }
     /// Calling twice after backpressure yields identical bytes; nothing is sent
     /// or consumed by encoding. One record per fair runtime scheduling turn.
     pub fn encode_next(&self, out: &mut [u8]) -> Result<Option<usize>, WireError> {

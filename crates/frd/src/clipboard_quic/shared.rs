@@ -151,33 +151,31 @@ impl Outgoing {
         }
         Ok(())
     }
-    /// Only a still-incomplete wire Sender can release a discarded handoff with
-    /// its existing Cancel. The one busy slot prevents it advancing to Commit.
-    /// `LocalChanged` proves that owner already fenced the item. Host expiry uses
-    /// the same actual timer as the wire owner, whose next maintenance cancels it.
-    /// Controller cursors are independent: neither their expiry nor a tighter
-    /// local handoff bound proves that the wire Sender has expired.
+    /// Only an exact, wholly unsubmitted Begin/Chunk can retire one item. The
+    /// busy slot prevents the original wire owner from advancing to Commit.
+    /// Notify that owner of either original expiry before dropping its bytes:
+    /// an independent controller cursor need not have reached the same bound.
+    /// Its next maintenance emits the existing ordered Cancel. Native-admitted
+    /// records, Commit and Cancel retain their ordinary terminal expiry rules.
     pub(super) fn can_discard(
         &self,
         reason: Error,
-        clock: &Clock,
         limits: &fr_core::limits::ProtocolLimits,
     ) -> bool {
         use fr_core::clipboard::Error as ClipboardError;
         use fr_wire::clipboard::{Body, decode, session::SessionError};
 
-        let fenced = matches!(
-            reason,
-            Error::Session(SessionError::Clipboard(ClipboardError::LocalChanged))
-        ) || (matches!(clock, Clock::Host(_))
-            && matches!(
-                reason,
-                Error::Session(SessionError::Clipboard(ClipboardError::Expired))
-            ));
-        fenced
-            && decode(&self.bytes.0, self.permit.context(), limits).is_ok_and(|message| {
-                matches!(message.body, Body::Begin { .. } | Body::Chunk { .. })
-            })
+        if !decode(&self.bytes.0, self.permit.context(), limits)
+            .is_ok_and(|message| matches!(message.body, Body::Begin { .. } | Body::Chunk { .. }))
+        {
+            return false;
+        }
+        match reason {
+            Error::Session(SessionError::Clipboard(ClipboardError::LocalChanged)) => true,
+            Error::Session(SessionError::Clipboard(ClipboardError::Expired))
+            | Error::HandoffExpired => self.permit.expire_unsent_payload(),
+            _ => false,
+        }
     }
 }
 /// `busy` covers queued, executing, deferred AND uncollected results, not just

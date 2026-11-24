@@ -545,15 +545,54 @@ fn a_pause_preserves_an_unexpired_handoff_and_its_original_deadline() {
 }
 
 #[test]
-fn a_local_only_deadline_cannot_skip_a_still_live_wire_sender() {
+fn a_local_handoff_deadline_cancels_only_that_item_while_its_sender_clock_lags() {
     let mut f = Fixture::new(false);
     f.step().unwrap();
-    f.copy("must not skip");
+    f.copy("original item");
     f.step().unwrap();
+    let original = f
+        .shared
+        .outbox
+        .lock()
+        .unwrap()
+        .item
+        .as_ref()
+        .unwrap()
+        .permit
+        .deadline();
     f.shared.outbox.lock().unwrap().item.as_mut().unwrap().until = 1;
+    f.permission.paused.store(true, Ordering::Release);
     f.clock.advance_to(Time::from_nanos(1_000));
-    assert_eq!(f.step(), Err(Error::HandoffExpired));
-    assert!(!f.shared.gate.is_open());
+    f.step().unwrap();
+    assert!(f.shared.gate.is_open());
+    assert!(!f.shared.outbox.lock().unwrap().busy);
+    assert_eq!(original, HostInstant::from_micros(3_000_000));
+    f.copy("new after local expiry");
+    f.step().unwrap();
+    assert_eq!(f.os.lock().unwrap().reads, 1, "no text read while paused");
+    f.permission.paused.store(false, Ordering::Release);
+    f.step().unwrap();
+    let cancel = f.take();
+    assert_eq!(
+        decode(&cancel.bytes.0, context(), &ProtocolLimits::ABSOLUTE)
+            .unwrap()
+            .body,
+        Body::Cancel(fr_wire::clipboard::CancelReason::Expired)
+    );
+    for _ in 0..3 {
+        f.step().unwrap();
+        let record = f.take();
+        assert_eq!(
+            record.permit.deadline(),
+            HostInstant::from_micros(3_000_001)
+        );
+    }
+    assert!(f.shared.gate.is_open());
+    let os = f.os.lock().unwrap();
+    assert_eq!(
+        (os.opens, os.watches, os.reads, os.suspends, os.closes),
+        (1, 1, 2, 0, 0)
+    );
 }
 
 #[test]

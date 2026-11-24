@@ -16,11 +16,8 @@ use fr_core::clipboard::authority::Monitor;
 
 pub mod egress;
 pub mod observation;
-use egress::{Egress, Transport};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use egress::{Egress, Payload, Transport};
+use std::sync::Arc;
 pub mod synchronize;
 use fr_core::{
     clipboard::{
@@ -135,7 +132,7 @@ struct Pending {
 pub struct ChannelSession {
     receiver: ClipboardSession,
     transport: Transport,
-    payload_live: Option<Arc<AtomicBool>>,
+    payload_live: Option<Arc<Payload>>,
     monitor: Monitor,
     outgoing: Context,
     incoming: Context,
@@ -318,7 +315,7 @@ impl ChannelSession {
     }
     fn invalidate_payload(&mut self) {
         if let Some(live) = self.payload_live.take() {
-            live.store(false, Ordering::Release);
+            live.invalidate();
         }
     }
     fn discard_pending(&mut self, reason: CancelReason) {
@@ -362,7 +359,12 @@ impl ChannelSession {
                 return Err(error.into());
             }
         }
-        if self.pending.as_ref().is_some_and(|p| now >= p.deadline) {
+        if self.pending.as_ref().is_some_and(|p| now >= p.deadline)
+            || self
+                .payload_live
+                .as_ref()
+                .is_some_and(|payload| payload.is_expired())
+        {
             state.outgoing_expired = true;
             self.discard_pending(CancelReason::Expired);
         }
@@ -430,7 +432,7 @@ impl ChannelSession {
             return Err(Error::Expired.into());
         }
         let sender = Sender::new(text, stamp, self.outgoing, self.limits)?;
-        self.payload_live = Some(Arc::new(AtomicBool::new(true)));
+        self.payload_live = Some(Arc::new(Payload::new()));
         self.pending = Some(Pending {
             sender,
             deadline,
@@ -509,6 +511,11 @@ impl ChannelSession {
             } else {
                 self.payload_live.clone()
             },
+            !cancellation
+                && self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| !pending.sender.next_is_commit()),
         );
         let mut call = ExternalCall {
             owner: self,
@@ -533,11 +540,24 @@ impl ChannelSession {
         pending.started = true;
         pending.sender.accepted();
         if pending.sender.is_finished() {
-            call.owner.pending = None;
-            Ok(Pump::ItemAccepted(stamp))
+            call.owner.complete_outgoing(stamp)
         } else {
             Ok(Pump::RecordAccepted)
         }
+    }
+    fn complete_outgoing(&mut self, stamp: Stamp) -> Result<Pump, SessionError> {
+        if !self
+            .payload_live
+            .as_ref()
+            .is_some_and(|payload| payload.complete())
+        {
+            // A custom multi-record handoff raced expiry with Commit
+            // admission. Its effect is uncertain; never cancel-and-retry.
+            self.close();
+            return Err(SessionError::Transport);
+        }
+        self.pending = None;
+        Ok(Pump::ItemAccepted(stamp))
     }
     /// Feed the opposite direction through the existing authority/publication
     /// bridge. Malformed framing closes BOTH directions. A remote publication
