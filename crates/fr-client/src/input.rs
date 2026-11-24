@@ -754,20 +754,7 @@ impl InputClient {
     ) -> Result<(InputEvent<'a>, u32, u32), Error> {
         Ok(match action {
             Action::Mode(mode) => {
-                self.require(match mode {
-                    PointerMode::Absolute => Capability::Absolute,
-                    PointerMode::Relative => Capability::Relative,
-                })?;
-                // The old opaque-ticket API cannot prove a post-mode ticket.
-                if self.ticket_state.is_none() {
-                    return Err(Error::Unsupported);
-                }
-                if self.pending_actions() != 0
-                    || self.keys.iter().any(|held| *held)
-                    || self.buttons.iter().any(|held| *held)
-                {
-                    return Err(Error::InvalidTransition);
-                }
+                self.mode_transition_ready(mode)?;
                 (self.pointer_state.mode(mode)?, 0, 0)
             }
             Action::Relative { x, y } => {
@@ -860,6 +847,23 @@ impl InputClient {
                 (InputEvent::Text(text), count, count)
             }
         })
+    }
+    fn mode_transition_ready(&self, mode: PointerMode) -> Result<(), Error> {
+        self.require(match mode {
+            PointerMode::Absolute => Capability::Absolute,
+            PointerMode::Relative => Capability::Relative,
+        })?;
+        // The old opaque-ticket API cannot prove a post-mode ticket.
+        if self.ticket_state.is_none() {
+            return Err(Error::Unsupported);
+        }
+        if self.pending_actions() != 0
+            || self.keys.iter().any(|held| *held)
+            || self.buttons.iter().any(|held| *held)
+        {
+            return Err(Error::InvalidTransition);
+        }
+        Ok(())
     }
     /// Preserve terminal receipts even during closing drain. Replayed receipts
     /// cannot free a new slot or re-enable input. A valid failed/partial/unknown

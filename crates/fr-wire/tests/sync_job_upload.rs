@@ -24,7 +24,10 @@ fn plain_upload() -> Offer {
         (attachment::INPUT_CAPABILITY, attachment::INPUT_VERSION),
         (attachment::FILES_CAPABILITY, attachment::FILES_VERSION),
         (files::CAPABILITY, files::VERSION),
-        (files::CHANNEL_SCOPE_CAPABILITY, files::CHANNEL_SCOPE_VERSION),
+        (
+            files::CHANNEL_SCOPE_CAPABILITY,
+            files::CHANNEL_SCOPE_VERSION,
+        ),
     ] {
         add(&mut offer, name, version);
     }
@@ -71,7 +74,9 @@ fn upload_jobs_require_bilateral_exact_control_and_original_upload_boundaries() 
     observer.role = SessionRole::Observe;
     assert!(!sync_job_state::upload_selected(&observer));
     let mut duplicated = selected.clone();
-    duplicated.capabilities.push(selected.capabilities[0].clone());
+    duplicated
+        .capabilities
+        .push(selected.capabilities[0].clone());
     assert!(!sync_job_state::upload_selected(&duplicated));
     let mut unordered = selected;
     unordered.capabilities.reverse();
@@ -89,24 +94,46 @@ fn each_sync_direction_stays_independent_and_two_file_directions_require_duplex(
     download
         .capabilities
         .retain(|cap| cap.name != files::CHANNEL_SCOPE_CAPABILITY);
-    add(&mut download, files::DOWNLOAD_CAPABILITY, files::DOWNLOAD_VERSION);
+    add(
+        &mut download,
+        files::DOWNLOAD_CAPABILITY,
+        files::DOWNLOAD_VERSION,
+    );
     let download = sync_job_state::prepare_offer(download).unwrap();
     assert!(sync_job_state::selected(&download.select().unwrap()));
-    assert!(!sync_job_state::upload_selected(&download.select().unwrap()));
+    assert!(!sync_job_state::upload_selected(
+        &download.select().unwrap()
+    ));
     assert!(sync_job_state::prepare_upload_offer(download).is_err());
 
     let mut ambiguous = upload;
-    add(&mut ambiguous, files::DOWNLOAD_CAPABILITY, files::DOWNLOAD_VERSION);
-    assert!(!sync_job_state::upload_selected(&ambiguous.select().unwrap()));
+    add(
+        &mut ambiguous,
+        files::DOWNLOAD_CAPABILITY,
+        files::DOWNLOAD_VERSION,
+    );
+    assert!(!sync_job_state::upload_selected(
+        &ambiguous.select().unwrap()
+    ));
     assert!(sync_job_state::prepare_upload_offer(ambiguous.clone()).is_err());
-    add(&mut ambiguous, files::DUPLEX_CAPABILITY, files::DUPLEX_VERSION);
+    add(
+        &mut ambiguous,
+        files::DUPLEX_CAPABILITY,
+        files::DUPLEX_VERSION,
+    );
     let both = sync_job_state::prepare_offer(ambiguous).unwrap();
     let selected = both.select().unwrap();
     assert!(files::duplex_selected(&selected));
     assert!(sync_job_state::selected(&selected));
     assert!(sync_job_state::upload_selected(&selected));
-    assert_eq!(sync_job_state::prepare_upload_offer(both.clone()).unwrap(), both);
-    for missing in [sync_job_state::CAPABILITY, sync_job_state::UPLOAD_CAPABILITY] {
+    assert_eq!(
+        sync_job_state::prepare_upload_offer(both.clone()).unwrap(),
+        both
+    );
+    for missing in [
+        sync_job_state::CAPABILITY,
+        sync_job_state::UPLOAD_CAPABILITY,
+    ] {
         let mut peer = both.clone();
         peer.capabilities.retain(|cap| cap.name != missing);
         let selected = both.intersect(&peer).unwrap().select().unwrap();
@@ -132,12 +159,15 @@ fn upload_helper_is_idempotent_and_requires_a_complete_original_drop_profile() {
     );
     for cap in &plain.capabilities {
         let mut missing = plain.clone();
-        missing.capabilities.retain(|candidate| candidate.name != cap.name);
+        missing
+            .capabilities
+            .retain(|candidate| candidate.name != cap.name);
         assert!(sync_job_state::prepare_upload_offer(missing).is_err());
     }
     for (required, version) in [(true, 1), (false, 2)] {
         let mut incompatible = prepared.clone();
-        let cap = incompatible.capabilities
+        let cap = incompatible
+            .capabilities
             .iter_mut()
             .find(|cap| cap.name == sync_job_state::UPLOAD_CAPABILITY)
             .unwrap();
@@ -160,10 +190,19 @@ fn full_upload_profiles_preserve_features_required_caps_unknown_versions_and_lim
     full.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     assert!(sync_job_state::prepare_upload_offer(full.clone()).is_err());
     for (name, version) in [
-        (fr_wire::quality_decision::CAPABILITY, fr_wire::quality_decision::VERSION),
-        (attachment::BULK_RECORD_CAPABILITY, attachment::BULK_RECORD_VERSION),
+        (
+            fr_wire::quality_decision::CAPABILITY,
+            fr_wire::quality_decision::VERSION,
+        ),
+        (
+            attachment::BULK_RECORD_CAPABILITY,
+            attachment::BULK_RECORD_VERSION,
+        ),
         (attachment::credit::CAPABILITY, attachment::credit::VERSION),
-        (fr_wire::receiver_metrics::CAPABILITY, fr_wire::receiver_metrics::VERSION),
+        (
+            fr_wire::receiver_metrics::CAPABILITY,
+            fr_wire::receiver_metrics::VERSION,
+        ),
     ] {
         let mut candidate = full.clone();
         *candidate.capabilities.last_mut().unwrap() = Capability {
@@ -181,7 +220,11 @@ fn full_upload_profiles_preserve_features_required_caps_unknown_versions_and_lim
         assert!(!prepared.capabilities.iter().any(|cap| cap.name == name));
         for (required, altered_version) in [(true, version), (false, version + 1)] {
             let mut protected = candidate.clone();
-            let cap = protected.capabilities.iter_mut().find(|cap| cap.name == name).unwrap();
+            let cap = protected
+                .capabilities
+                .iter_mut()
+                .find(|cap| cap.name == name)
+                .unwrap();
             cap.required = required;
             cap.version = altered_version;
             assert!(sync_job_state::prepare_upload_offer(protected).is_err());

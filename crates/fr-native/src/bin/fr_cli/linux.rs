@@ -485,6 +485,7 @@ fn connect(
     automation: bool,
 ) -> Result<String, Failure> {
     let before_start = |error| receive_connection_before_start(connection, error);
+    connection.validate_folder_source().map_err(before_start)?;
     let selected = if connection.choose_host {
         if automation {
             return Err(before_start(Failure::new(
@@ -535,11 +536,15 @@ fn connect(
             None
         };
         // Classify and pin initial uploads before any network I/O.
-        let sends = files::select(
-            chosen.as_deref().unwrap_or(&connection.upload.paths),
-            connection.upload.file_drop,
-            connection.upload.file_commands,
-        )?;
+        let sends = if let Some(source) = &connection.upload.sync_source {
+            files::select_folder(source)?
+        } else {
+            files::select(
+                chosen.as_deref().unwrap_or(&connection.upload.paths),
+                connection.upload.file_drop,
+                connection.upload.file_commands,
+            )?
+        };
         let configuration = desktop_configuration(cx, connection)?;
         let audio_output = audio::resolve(connection.audio.as_ref())?;
         let microphone =
@@ -692,6 +697,19 @@ fn connect(
                     Failure::new(
                         "files_sync_capability_limit",
                         "The selected folder job cannot fit the native capability offer. Reduce the optional file or audio features before connecting.",
+                        2,
+                    )
+                })
+                .map_err(before_start)?
+        } else {
+            offer
+        };
+        let offer = if connection.upload.sync_source.is_some() {
+            fr_client::native::with_folder_sync_upload(offer)
+                .map_err(|_| {
+                    Failure::new(
+                        "files_sync_capability_limit",
+                        "The selected upload job cannot fit the native capability offer.",
                         2,
                     )
                 })
@@ -2883,6 +2901,7 @@ mod tests {
             microphone: None,
             upload: crate::options::UploadOptions {
                 paths: Vec::new(),
+                sync_source: None,
                 choose_files: false,
                 file_drop: false,
                 file_commands: false,

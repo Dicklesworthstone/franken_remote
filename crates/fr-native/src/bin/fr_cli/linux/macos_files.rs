@@ -15,6 +15,7 @@ pub(super) fn receive(
     connection: &Connection,
     chosen: Option<&Path>,
 ) -> Result<Option<Directory>, Failure> {
+    connection.validate_folder_source()?;
     if connection.choose_receive_directory != chosen.is_some()
         || (chosen.is_some() && connection.receive.is_some())
     {
@@ -47,6 +48,7 @@ pub(super) fn select(
     chosen: Option<&[std::path::PathBuf]>,
     download: Option<Directory>,
 ) -> Result<Files, Failure> {
+    connection.validate_folder_source()?;
     if (connection.receive.is_some() || connection.choose_receive_directory) != download.is_some() {
         return Err(Failure::new(
             "receive_directory_choice_invalid",
@@ -63,6 +65,19 @@ pub(super) fn select(
             "The original local file choice is missing or ambiguous. Start a new connection with one explicit selection.",
             2,
         ));
+    }
+    if let Some(source) = &connection.upload.sync_source {
+        let selection = upload::folder_source(source)?;
+        return Files::from_requests(None, None)
+            .map_err(upload::selection_failure)?
+            .with_folder_upload(selection)
+            .map_err(|absence| {
+                Failure::new(
+                    upload::absence_code(absence),
+                    "The original folder source cannot share another file selection. Start a new controlling connection for this job.",
+                    2,
+                )
+            });
     }
     let upload = upload::select(chosen.unwrap_or(&connection.upload.paths))?;
     let download = download
@@ -102,6 +117,10 @@ impl Summary {
             }
             Some(Status::Configured(snapshot)) => upload::Summary::from_snapshot(sizes, &snapshot),
         };
+        upload.folder_job = files.upload_folder_job_status();
+        if upload.folder_job.is_some() {
+            upload.absence = None;
+        }
         for batch in files.dropped_batches() {
             upload.append_later(&batch.sizes, batch.status.as_ref().map_err(|code| *code));
         }

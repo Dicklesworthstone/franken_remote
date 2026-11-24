@@ -114,6 +114,39 @@ qualification is claimed.
 Plan §§12.3 and 13.3; tracking `fr-ktuc`;
 [shared recovery](SHARED_RECOVERY.md#bitrate-during-reference-recovery-fr-ktuc).
 
+## Controller-to-host native folder jobs (2026-11-24)
+
+Native one-way jobs now also have a controller-to-host path. A Linux or macOS
+host selects `--sync-destination DIR --sync-job ID --files-conflict keep-both`;
+the controlling client selects `--sync-source DIR --sync-job ID`. The host
+advertises its locally pinned destination and the client accepts the matching
+job before scanning. The independent `file-folder-sync-upload` v1 capability
+does not broaden ordinary upload or existing download consent.
+
+The original bounded source/cache, ATP sender, tracked receiver and publication
+ledger serve this direction. Source and destination consent are consumed once,
+remain bound to the original connection and input authority, and cannot replay
+after reconnect. Cancellation during attachment is checked before the authority
+handoff or source-job creation. The native job excludes simultaneous downloads
+and ordinary competing selections. Its `upload_folder_job` report retains
+cumulative rounds, confirmed publications/conflicts, original failure and
+positive cleanup evidence. See [commands and limits](docs/folder-sync.md).
+
+Pinned-toolchain evidence: workspace formatting passes; all 350 `fr-wire`
+tests pass, including the five new upload-capability regressions; all 29 client
+`native_profile` tests pass, including the two new upload/duplex combinations.
+Strict wire all-targets Clippy and client native-profile Clippy pass. A small
+behavior-preserving input-admission helper extraction fixes a lint in concurrent
+relative-input work; its 18 `input_roundtrip` tests also pass.
+
+The new real UDP/ATP, filesystem, daemon and native-selector regressions are
+source reviewed but unexecuted. The broader all-targets check stopped with
+compiler SIGKILL in the unchanged pinned Asupersync dependency before reaching
+the transfer/runtime crates. These results do not qualify native execution or
+live hardware/tailnet use. Core source: `2b7957e`; parent tracking
+`fr-p4-folder-sync-p6i` remains open for bidirectional reconciliation, recursive
+trees, reconnect resumption and the remaining qualification.
+
 ## Explicit native one-way folder jobs (2026-11-23)
 
 The previously local-only folder engine now has original-connection host and

@@ -130,12 +130,17 @@ OPTIONS:
                     selects --receive DIR --receive-conflict keep-both --sync-job ID.
                     Occupied names become conflict copies; no deletes or replay
                     after this original connection ends.
-    --sync-job ID   Nonzero local job identifier paired with --sync-source.
-                    The controller must explicitly accept this same ID.
+    --sync-destination DIR  Linux/macOS, with --once, --input-agent and explicit
+                    --files-conflict keep-both: receive a standing controller-to-host
+                    job into this private flat directory. The controller selects
+                    --sync-source DIR --sync-job ID. Cannot combine with --files,
+                    --send, --send-control or --sync-source. No reconnect replay.
+    --sync-job ID   Nonzero local job identifier paired with --sync-source or
+                    --sync-destination. The controller explicitly accepts this ID.
     --files-conflict reject|keep-both  Taken destination names are refused by
                     default. keep-both publishes the complete verified file/tree
                     under a conflict-marked name; never merges or overwrites.
-                    Requires --files; selected only by this host operator
+                    Requires --files or --sync-destination; selected only by this host operator
     --files-max-file-bytes N     Largest accepted file (default 268435456)
     --files-max-session-bytes N  Total declared bytes per controlled session,
                     refused offers included (default 1073741824)
@@ -778,7 +783,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             2,
         );
     }
-    if options.files.is_some() && options.input_agent.is_none() && !options.control {
+    if (options.files.is_some() || options.sync_destination.is_some())
+        && options.input_agent.is_none()
+        && !options.control
+    {
         return run_refusal(
             json,
             "files_requires_input_agent",

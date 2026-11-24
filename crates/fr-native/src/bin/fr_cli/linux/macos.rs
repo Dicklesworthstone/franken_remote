@@ -319,6 +319,7 @@ fn connect_profile(
     automation: bool,
 ) -> Result<String, Failure> {
     let prepared = (|| {
+        connection.validate_folder_source()?;
         check(connection)?;
         let audio = playback::prepare(connection.audio.as_ref())?;
         let microphone = microphone::prepare(connection.microphone.as_ref())?;
@@ -549,6 +550,17 @@ fn connect_selected(
                 Failure::new(
                     "files_sync_capability_limit",
                     "The selected folder job cannot fit the native capability offer. Reduce the optional file or audio features before connecting.",
+                    2,
+                )
+            })?
+        } else {
+            offer
+        };
+        let offer = if connection.upload.sync_source.is_some() {
+            fr_client::native::with_folder_sync_upload(offer).map_err(|_| {
+                Failure::new(
+                    "files_sync_capability_limit",
+                    "The selected upload job cannot fit the native capability offer.",
                     2,
                 )
             })?

@@ -165,10 +165,19 @@ fn extended_upload_profile(options: u8) -> Result<negotiation::Offer, negotiatio
 fn optional_sync_slot(cap: &negotiation::Capability) -> bool {
     !cap.required
         && [
-            (fr_wire::quality_decision::CAPABILITY, fr_wire::quality_decision::VERSION),
-            (attachment::BULK_RECORD_CAPABILITY, attachment::BULK_RECORD_VERSION),
+            (
+                fr_wire::quality_decision::CAPABILITY,
+                fr_wire::quality_decision::VERSION,
+            ),
+            (
+                attachment::BULK_RECORD_CAPABILITY,
+                attachment::BULK_RECORD_VERSION,
+            ),
             (attachment::credit::CAPABILITY, attachment::credit::VERSION),
-            (fr_wire::receiver_metrics::CAPABILITY, fr_wire::receiver_metrics::VERSION),
+            (
+                fr_wire::receiver_metrics::CAPABILITY,
+                fr_wire::receiver_metrics::VERSION,
+            ),
         ]
         .iter()
         .any(|&(name, version)| cap.name == name && cap.version == version)
@@ -194,8 +203,16 @@ fn upload_sync_preserves_every_available_native_auxiliary_and_input_profile() {
         assert!(!sync_job_state::selected(&selected));
         assert_eq!(sync.limits, original.limits);
         assert!(sync.capabilities.len() <= negotiation::MAX_CAPABILITIES);
-        for retained in original.capabilities.iter().filter(|cap| !optional_sync_slot(cap)) {
-            assert!(sync.capabilities.contains(retained), "lost {}", retained.name);
+        for retained in original
+            .capabilities
+            .iter()
+            .filter(|cap| !optional_sync_slot(cap))
+        {
+            assert!(
+                sync.capabilities.contains(retained),
+                "lost {}",
+                retained.name
+            );
         }
         assert_eq!(native::with_folder_sync_upload(sync.clone()).unwrap(), sync);
         let original_selection = original.select().unwrap();
@@ -219,8 +236,14 @@ fn upload_sync_preserves_every_available_native_auxiliary_and_input_profile() {
             original.intersect(&sync).unwrap(),
             sync.intersect(&original).unwrap(),
         ] {
-            assert!(!sync_job_state::upload_selected(&intersection.select().unwrap()));
-            for retained in original.capabilities.iter().filter(|cap| !optional_sync_slot(cap)) {
+            assert!(!sync_job_state::upload_selected(
+                &intersection.select().unwrap()
+            ));
+            for retained in original
+                .capabilities
+                .iter()
+                .filter(|cap| !optional_sync_slot(cap))
+            {
                 assert!(intersection.capabilities.contains(retained));
             }
         }

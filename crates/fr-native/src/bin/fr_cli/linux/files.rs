@@ -18,7 +18,7 @@ use fr_native::{
     desktop::{Desktop, Error as DesktopError},
     viewer_window::{DroppedBatchStatus, FileDropControl},
 };
-use frd::native_files::{Selection, SendControl, local};
+use frd::native_files::{Selection, SendControl, UploadSelection, local};
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -52,7 +52,8 @@ pub(super) fn retain_offer(offer: &mut fr_wire::negotiation::Offer, upload: bool
             fr_wire::attachment::FILES_CAPABILITY | fr_wire::files::CAPABILITY => {
                 upload || download
             }
-            fr_wire::files::CHANNEL_SCOPE_CAPABILITY => upload,
+            fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+            | fr_wire::sync_job_state::UPLOAD_CAPABILITY => upload,
             fr_wire::files::DOWNLOAD_CAPABILITY | fr_wire::sync_job_state::CAPABILITY => download,
             fr_wire::files::DUPLEX_CAPABILITY => upload && download,
             _ => true,
@@ -62,6 +63,7 @@ pub(super) fn retain_offer(offer: &mut fr_wire::negotiation::Offer, upload: bool
 /// The explicit selection and the current attempt's content-free handle.
 pub(super) struct Local {
     selection: Option<Selection>,
+    sync_source: Option<UploadSelection>,
     sizes: Vec<Option<u64>>,
     attempt: Option<Attempt>,
     file_drop: bool,
@@ -95,6 +97,7 @@ pub(super) fn select(
     if paths.is_empty() {
         return Ok((file_drop || file_commands).then(|| Local {
             selection: None,
+            sync_source: None,
             sizes: Vec::new(),
             attempt: None,
             file_drop,
@@ -106,6 +109,7 @@ pub(super) fn select(
     let sizes = selection.sizes().collect();
     Ok(Some(Local {
         selection: Some(selection),
+        sync_source: None,
         sizes,
         attempt: None,
         file_drop: true,
@@ -113,9 +117,29 @@ pub(super) fn select(
     }))
 }
 
+/// Pin one explicit folder source before network I/O. Only the matching host
+/// advertisement and original control grant can start its first scan.
+pub(super) fn select_folder(
+    source: &crate::options::FolderSource,
+) -> Result<Option<Local>, Failure> {
+    let selection = crate::file_reports::upload::folder_source(source)?;
+    Ok(Some(Local {
+        selection: None,
+        sync_source: Some(selection),
+        sizes: Vec::new(),
+        attempt: None,
+        file_drop: false,
+        commands: None,
+    }))
+}
+
 impl Local {
     pub(super) fn can_configure_upload(&self) -> bool {
         self.selection.is_some()
+            || self
+                .sync_source
+                .as_ref()
+                .is_some_and(UploadSelection::is_available)
             || self.file_drop
             || self
                 .commands
@@ -159,6 +183,17 @@ impl Local {
         if !self.can_configure_upload() {
             // The command-only choice was already consumed. Keep its original
             // results; a later Desktop gets no replacement intake or endpoint.
+            return;
+        }
+        if let Some(source) = &self.sync_source {
+            self.attempt = Some(match desktop.configure_folder_upload(source) {
+                Ok(control) => Attempt::Configured {
+                    control,
+                    drops: None,
+                },
+                Err(DesktopError::Files(absence)) => Attempt::Absent(absence_code(absence)),
+                Err(_) => Attempt::Absent("files_unavailable"),
+            });
             return;
         }
         // ready invokes this only before the original control decision is
@@ -214,6 +249,12 @@ impl Local {
             Ok(status) => Summary::from_status(&self.sizes, status),
             Err(code) => Summary::unavailable(&self.sizes, code),
         };
+        if let Some(Attempt::Configured { control, .. }) = &self.attempt {
+            out.folder_job = control.folder_job_status();
+            if out.folder_job.is_some() {
+                out.absence = None;
+            }
+        }
         if let Some(drops) = drops {
             // The original owner bounds this to eight additional batches,
             // each with at most eight selections. No path is retained here.

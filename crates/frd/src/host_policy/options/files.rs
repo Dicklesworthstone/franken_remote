@@ -52,12 +52,19 @@ impl RunOptions {
     }
 
     fn validate_folder_sync(&self) -> Result<(), Error> {
-        if self.sync_source.is_some() != self.sync_job.is_some() {
+        let directions =
+            usize::from(self.sync_source.is_some()) + usize::from(self.sync_destination.is_some());
+        if directions > 1 || (directions == 1) != self.sync_job.is_some() {
             return Err(Error::InvalidArgument);
         }
-        let Some(source) = &self.sync_source else {
+        let Some(source) = self.sync_source.as_ref().or(self.sync_destination.as_ref()) else {
             return Ok(());
         };
+        if self.sync_destination.is_some()
+            && (self.files.is_some() || self.files_conflict != Some(ConflictPolicy::KeepBoth))
+        {
+            return Err(Error::InvalidArgument);
+        }
         if !cfg!(any(target_os = "linux", target_os = "macos"))
             || self.sync_job == Some(0)
             || !self.once
@@ -79,6 +86,7 @@ impl RunOptions {
     /// input. No spelling can select replacement, merging or automatic resume.
     pub fn file_conflict_policy(&self) -> Result<ConflictPolicy, Error> {
         if self.files.is_none()
+            && self.sync_destination.is_none()
             && (self.files_conflict.is_some()
                 || self.files_max_file_bytes.is_some()
                 || self.files_max_session_bytes.is_some())
@@ -96,7 +104,9 @@ impl RunOptions {
         let conflict = self
             .file_conflict_policy()
             .map_err(|_| DirectoryRefusal::Limits)?;
-        let Some(path) = &self.files else {
+        self.validate_folder_sync()
+            .map_err(|_| DirectoryRefusal::Limits)?;
+        let Some(path) = self.files.as_ref().or(self.sync_destination.as_ref()) else {
             return Ok(None);
         };
         let defaults = Limits::default();
@@ -106,8 +116,16 @@ impl RunOptions {
                 .files_max_session_bytes
                 .unwrap_or(defaults.max_session_bytes),
         };
-        Directory::open(path, limits)
-            .map(|directory| Some(directory.with_conflict_policy(conflict)))
+        let directory = Directory::open(path, limits)?.with_conflict_policy(conflict);
+        if self.sync_destination.is_some() {
+            let job_id = self.sync_job.ok_or(DirectoryRefusal::Limits)?;
+            directory
+                .with_sync_job(job_id)
+                .map(Some)
+                .map_err(|_| DirectoryRefusal::Limits)
+        } else {
+            Ok(Some(directory))
+        }
     }
 }
 

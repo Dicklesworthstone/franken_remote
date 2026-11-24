@@ -31,7 +31,22 @@ pub struct SendSnapshot {
 /// A clone can inspect or request cancellation of ONE explicit selection. It
 /// cannot grant control, start a source, resubmit a selection or renew a deadline.
 #[derive(Clone)]
-pub struct SendControl(Arc<Mutex<SendSnapshot>>);
+pub struct SendControl(Arc<Mutex<ControlState>>);
+struct ControlState {
+    snapshot: SendSnapshot,
+    folder_job: Option<fr_files::sync::JobStatus>,
+}
+impl std::ops::Deref for ControlState {
+    type Target = SendSnapshot;
+    fn deref(&self) -> &SendSnapshot {
+        &self.snapshot
+    }
+}
+impl std::ops::DerefMut for ControlState {
+    fn deref_mut(&mut self) -> &mut SendSnapshot {
+        &mut self.snapshot
+    }
+}
 impl fmt::Debug for SendControl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("FileSendControl")
@@ -41,21 +56,24 @@ impl fmt::Debug for SendControl {
 }
 impl SendControl {
     pub(crate) fn new() -> Self {
-        Self(Arc::new(Mutex::new(SendSnapshot {
-            status: SendStatus {
-                phase: SendPhase::WaitingForControl,
-                absence: None,
-                report: None,
+        Self(Arc::new(Mutex::new(ControlState {
+            snapshot: SendSnapshot {
+                status: SendStatus {
+                    phase: SendPhase::WaitingForControl,
+                    absence: None,
+                    report: None,
+                },
+                stage: None,
+                current: None,
+                cancel_requested: false,
+                pause_requested: false,
+                paused: None,
+                cleanup: None,
             },
-            stage: None,
-            current: None,
-            cancel_requested: false,
-            pause_requested: false,
-            paused: None,
-            cleanup: None,
+            folder_job: None,
         })))
     }
-    fn lock(&self) -> MutexGuard<'_, SendSnapshot> {
+    fn lock(&self) -> MutexGuard<'_, ControlState> {
         // Only private, bounded status updates run under this lock; never I/O.
         self.0
             .lock()
@@ -65,7 +83,29 @@ impl SendControl {
         self.lock().status
     }
     pub fn snapshot(&self) -> SendSnapshot {
-        *self.lock()
+        self.lock().snapshot
+    }
+    /// Standing-job progress is independent of any individual round's batch.
+    pub fn folder_job_status(&self) -> Option<fr_files::sync::JobStatus> {
+        self.lock().folder_job
+    }
+    pub(crate) fn record_folder_job(&self, job: fr_files::sync::JobStatus) {
+        let mut state = self.lock();
+        state.folder_job = Some(job);
+        if job.cleanup_complete {
+            // This source-owner proof includes both the original scan worker
+            // and sender cleanup, including observations after parent reap.
+            state.cleanup = Some(Ok(()));
+        }
+        if let Some(error) = job.failure {
+            state.status.phase = SendPhase::Ended;
+            state
+                .status
+                .absence
+                .get_or_insert(Absence::Refused(super::sync_send_error(error)));
+        } else if state.status.phase != SendPhase::Ended {
+            state.status.phase = SendPhase::Sending;
+        }
     }
     /// Request file-only cancellation on the next ordinary owner turn. This
     /// never cancels the desktop context or revokes its input/clipboard grants.
@@ -154,7 +194,7 @@ impl SendControl {
         snapshot.paused = paused;
         if let Some(report) = report {
             snapshot.status.report = Some(*report);
-            if report.complete {
+            if report.complete && snapshot.folder_job.is_none() {
                 snapshot.status.phase = SendPhase::Finished;
             }
         }

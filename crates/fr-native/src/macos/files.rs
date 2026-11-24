@@ -12,7 +12,7 @@ use fr_wire::negotiation::Offer;
 use frd::{
     native_files::{
         Absence, Directory, ReceiveControl, ReceiveRequest, ReceiveStatus, SelectRefusal,
-        Selection, SendControl, SendIntake, SendRequest, SendSnapshot, local,
+        Selection, SendControl, SendIntake, SendRequest, SendSnapshot, UploadSelection, local,
     },
     session_startup::{FileSendError, NativeObserver},
 };
@@ -95,6 +95,7 @@ impl<Request, Control> Direction<Request, Control> {
 #[derive(Debug)]
 enum Upload {
     Selected(SendRequest),
+    Folder(UploadSelection),
     Deferred,
 }
 
@@ -213,11 +214,40 @@ impl Files {
         })
     }
 
+    /// Select one standing reverse job before connecting. This slice has one
+    /// file-authority projection, so a simultaneous download or ordinary upload
+    /// refuses before either local source is consumed.
+    pub fn with_folder_upload(mut self, selection: UploadSelection) -> Result<Self, Absence> {
+        if self.upload.is_some()
+            || self.download.is_some()
+            || self.commands.is_some()
+            || self.selections.is_some()
+            || !selection.is_available()
+        {
+            return Err(Absence::Unavailable);
+        }
+        self.upload = Some(Direction::new(Upload::Folder(selection)));
+        Ok(self)
+    }
+    fn refuse_folder_selector(&mut self) -> bool {
+        let Some(upload) = &mut self.upload else {
+            return false;
+        };
+        if !matches!(upload.pending, Some(Upload::Folder(_))) {
+            return false;
+        }
+        upload.pending_cancelled = true;
+        upload.outcome = Some(Err(Absence::Unavailable));
+        true
+    }
     /// Opt in to later explicit selections on the first configured upload.
     /// With no initial sources, negotiate an empty lane whose contents remain
     /// absent until a same-user command names a new bounded selection.
     #[must_use]
     pub fn with_commands(mut self) -> Self {
+        if self.refuse_folder_selector() {
+            return self;
+        }
         self.commands.get_or_insert_with(Commands::default);
         self.upload
             .get_or_insert_with(|| Direction::new(Upload::Deferred));
@@ -228,6 +258,9 @@ impl Files {
     /// pasteboard or path is read here; reconnect cannot renew this owner.
     #[must_use]
     pub fn with_file_drop(mut self) -> Self {
+        if self.refuse_folder_selector() {
+            return self;
+        }
         self.selections
             .get_or_insert_with(macos_file_drop::Owner::default);
         self.upload
@@ -282,11 +315,27 @@ impl Files {
         })
     }
 
+    pub(crate) fn folder_upload_available(&self) -> bool {
+        self.upload.as_ref().is_some_and(|upload| {
+            upload.will_offer()
+                && matches!(upload.pending.as_ref(), Some(Upload::Folder(source)) if source.is_available())
+        })
+    }
+    /// Retained standing-job evidence from this original upload only.
+    pub fn upload_folder_job_status(&self) -> Option<fr_files::sync::JobStatus> {
+        self.upload.as_ref()?.control()?.folder_job_status()
+    }
     /// Offer only directions whose explicit local request is still unspent.
     /// Reuse the existing optional profiles, including positive duplex
     /// negotiation. The independent clipboard choice grants no file access.
     pub fn offer(&self, clipboard: bool) -> Offer {
-        let upload = self.upload.as_ref().is_some_and(Direction::will_offer);
+        let upload = self.upload.as_ref().is_some_and(|upload| {
+            upload.will_offer()
+                && match upload.pending.as_ref() {
+                    Some(Upload::Folder(source)) => source.is_available(),
+                    _ => true,
+                }
+        });
         let download = self.download.as_ref().is_some_and(Direction::will_offer);
         match (upload, download, clipboard) {
             (true, true, _) => fr_client::native::control_offer_with_duplex(clipboard, false),
@@ -336,6 +385,7 @@ impl Files {
         if self.commands.is_none() && self.selections.is_none() {
             return match request {
                 Upload::Selected(request) => observer.configure_file_send(request),
+                Upload::Folder(source) => observer.configure_folder_upload(&source),
                 Upload::Deferred => Err(Absence::Unavailable),
             };
         }
@@ -344,6 +394,7 @@ impl Files {
         // original bounded intake, immutable policy and authority checks.
         let configured = match request {
             Upload::Selected(request) => observer.configure_file_send_with_intake(request),
+            Upload::Folder(_) => return Err(Absence::Unavailable),
             Upload::Deferred => observer.configure_file_drop(),
         };
         let (control, intake) = match configured {
@@ -567,6 +618,106 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.name == name)
+    }
+
+    #[test]
+    fn reverse_job_consent_is_explicit_single_direction_and_never_reads_source_contents() {
+        let fixture = Fixture::new();
+        let selection = UploadSelection::folder_job(&fixture.0, 41).unwrap();
+        for files in [
+            Files::new(Some(fixture.upload()), None).unwrap(),
+            Files::new(None, Some(fixture.download())).unwrap(),
+            Files::default().with_commands(),
+            Files::default().with_file_drop(),
+        ] {
+            assert!(matches!(
+                files.with_folder_upload(selection.clone()),
+                Err(Absence::Unavailable)
+            ));
+            assert!(
+                selection.is_available(),
+                "a competing choice cannot consume the source"
+            );
+        }
+        let files = Files::from_requests(None, None)
+            .unwrap()
+            .with_folder_upload(selection.clone())
+            .unwrap();
+        assert!(files.has_upload() && !files.has_download());
+        assert!(files.folder_upload_available());
+        assert_eq!(files.upload_sizes(), []);
+        assert_eq!(files.upload_status(), Some(Status::NotStarted));
+        assert!(files.upload_folder_job_status().is_none());
+        assert!(files.upload_control().is_none());
+        assert!(selection.is_available());
+        let offer = fr_client::native::with_folder_sync_upload(files.offer(false)).unwrap();
+        assert!(has(&offer, fr_wire::sync_job_state::UPLOAD_CAPABILITY));
+        assert!(has(&offer, fr_wire::files::CHANNEL_SCOPE_CAPABILITY));
+        assert!(!has(&offer, fr_wire::files::DOWNLOAD_CAPABILITY));
+        assert_eq!(
+            fs::read(fixture.0.join("selected.txt")).unwrap(),
+            b"selected"
+        );
+    }
+
+    #[test]
+    fn reverse_job_cancellation_or_handoff_removes_its_reconnect_offer() {
+        let fixture = Fixture::new();
+        for cancelled in [false, true] {
+            let selection = UploadSelection::folder_job(&fixture.0, 41).unwrap();
+            let mut files = Files::default().with_folder_upload(selection).unwrap();
+            assert!(files.folder_upload_available());
+            if cancelled {
+                files.cancel_upload();
+                assert_eq!(
+                    files.upload_status(),
+                    Some(Status::Unavailable(Absence::Refused(
+                        FileSendError::Cancelled
+                    )))
+                );
+            } else {
+                // The exact original ownership move used by configure; this
+                // does not simulate control, worker startup or a publication.
+                let selected = files.upload.as_mut().unwrap().pending.take().unwrap();
+                assert!(matches!(selected, Upload::Folder(_)));
+                drop(selected);
+            }
+            assert!(!files.folder_upload_available());
+            assert!(!has(
+                &files.offer(false),
+                fr_wire::attachment::FILES_CAPABILITY
+            ));
+            assert!(files.upload_folder_job_status().is_none());
+            assert!(files.commands_complete());
+        }
+    }
+
+    #[test]
+    fn later_native_selectors_cannot_share_a_standing_source_lane() {
+        let fixture = Fixture::new();
+        for commands in [false, true] {
+            let selection = UploadSelection::folder_job(&fixture.0, 41).unwrap();
+            let files = Files::default()
+                .with_folder_upload(selection.clone())
+                .unwrap();
+            let files = if commands {
+                files.with_commands()
+            } else {
+                files.with_file_drop()
+            };
+            assert!(!files.folder_upload_available());
+            assert!(!files.file_drop_requested());
+            assert!(files.command_results().is_none());
+            assert_eq!(
+                files.upload_status(),
+                Some(Status::Unavailable(Absence::Unavailable))
+            );
+            assert!(!has(
+                &files.offer(false),
+                fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+            ));
+            assert!(selection.is_available());
+        }
     }
 
     #[test]

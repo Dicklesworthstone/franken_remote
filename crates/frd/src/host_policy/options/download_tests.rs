@@ -286,3 +286,90 @@ fn standing_folder_source_requires_an_explicit_original_controlled_share() {
     missing_scope.input_agent = None;
     assert!(missing_scope.validate_file_send().is_err());
 }
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reverse_folder_destination_requires_explicit_keep_both_and_one_controlled_share() {
+    let options = parse(&[
+        "--once",
+        "--input-agent",
+        "/local/agent",
+        "--sync-destination",
+        "/local/destination",
+        "--sync-job",
+        "41",
+        "--files-conflict",
+        "keep-both",
+    ])
+    .unwrap();
+    assert_eq!(
+        options.sync_destination,
+        Some(PathBuf::from("/local/destination"))
+    );
+    assert_eq!(options.sync_job, Some(41));
+    assert!(options.files.is_none() && options.sync_source.is_none());
+    assert!(options.send.is_empty() && options.send_control.is_none());
+    assert!(options.validate_file_send().is_ok());
+
+    for extra in [
+        vec!["--files", "/local/another"],
+        vec!["--sync-source", "/local/source"],
+        vec!["--send", "/local/file"],
+        vec!["--send-control", "desk"],
+    ] {
+        let mut args = vec![
+            "--once",
+            "--input-agent",
+            "/local/agent",
+            "--sync-destination",
+            "/local/destination",
+            "--sync-job",
+            "41",
+            "--files-conflict",
+            "keep-both",
+        ];
+        args.extend(extra);
+        assert!(parse(&args).is_err(), "{args:?}");
+    }
+    let mut invalid = options;
+    invalid.files_conflict = None;
+    assert!(invalid.validate_file_send().is_err());
+    assert!(invalid.open_files().is_err());
+    invalid.files_conflict = Some(super::ConflictPolicy::KeepBoth);
+    invalid.once = false;
+    assert!(invalid.validate_file_send().is_err());
+    invalid.once = true;
+    invalid.input_agent = None;
+    assert!(invalid.validate_file_send().is_err());
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reverse_folder_options_reject_missing_id_and_unsafe_source_scope() {
+    for extra in [
+        vec!["--sync-destination", "/local/destination"],
+        vec![
+            "--sync-destination",
+            "/local/destination",
+            "--sync-job",
+            "0",
+        ],
+        vec!["--sync-destination", "relative", "--sync-job", "41"],
+        vec![
+            "--sync-destination",
+            "/local/../destination",
+            "--sync-job",
+            "41",
+        ],
+    ] {
+        let mut args = vec![
+            "--once",
+            "--input-agent",
+            "/local/agent",
+            "--files-conflict",
+            "keep-both",
+        ];
+        args.extend(extra);
+        assert!(parse(&args).is_err(), "{args:?}");
+    }
+}

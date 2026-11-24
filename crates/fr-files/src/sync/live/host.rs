@@ -362,8 +362,7 @@ impl HostJob {
             Step::Accept => {
                 if let Some(accepted) = self.receive_state(sender, q, authorize)? {
                     self.check_peer(accepted)?;
-                    if accepted
-                        != state(self.config.job_id, self.direction, SyncPhase::Accepted, 0)
+                    if accepted != state(self.config.job_id, self.direction, SyncPhase::Accepted, 0)
                     {
                         return Err(LiveError::WrongPhase);
                     }
@@ -570,7 +569,12 @@ impl HostJob {
         self.scan_retry = ScanRetry::default();
         self.step = Step::StartScan;
         self.queue(
-            state(self.config.job_id, self.direction, SyncPhase::Scanning, revision),
+            state(
+                self.config.job_id,
+                self.direction,
+                SyncPhase::Scanning,
+                revision,
+            ),
             Step::StartScan,
             now,
         )

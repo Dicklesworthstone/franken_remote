@@ -182,6 +182,16 @@ impl NativeObserver {
         }
         self.viewer.configure_clipboard(config)
     }
+    /// Install one reverse folder job on this original control-capable observer.
+    pub fn configure_folder_upload(
+        &mut self,
+        selection: &crate::native_files::UploadSelection,
+    ) -> Result<crate::native_files::SendControl, crate::native_files::Absence> {
+        if self.input.is_none() {
+            return Err(crate::native_files::Absence::Unavailable);
+        }
+        self.viewer.configure_folder_upload(selection)
+    }
     /// `fr connect --control --send`: hand this attempt's explicit selection
     /// to the controller's drop lane before serving. Only a control-capable
     /// observer can; typed absence when the host did not select the lane.

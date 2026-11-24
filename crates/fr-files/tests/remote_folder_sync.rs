@@ -141,7 +141,16 @@ impl Running {
         duplex: bool,
         negotiated: bool,
     ) -> Self {
-        Self::configured(cx, source, destination, accepted_id, true, duplex, negotiated).await
+        Self::configured(
+            cx,
+            source,
+            destination,
+            accepted_id,
+            true,
+            duplex,
+            negotiated,
+        )
+        .await
     }
 
     async fn configured(
@@ -195,9 +204,13 @@ impl Running {
             )
         }
         .unwrap();
-        let sender =
-            Sender::owning(cx.clone(), source_connection, source_lane, SendPolicy::default())
-                .unwrap();
+        let sender = Sender::owning(
+            cx.clone(),
+            source_connection,
+            source_lane,
+            SendPolicy::default(),
+        )
+        .unwrap();
         let (client, receiver) = receiver_owner(
             cx,
             destination,
@@ -226,7 +239,9 @@ impl Running {
             (&mut self.link.h, &mut self.link.c)
         };
         let host = self.host.service(&mut self.sender, source, || true);
-        let client = self.client.service(&mut self.receiver, destination, || true);
+        let client = self
+            .client
+            .service(&mut self.receiver, destination, || true);
         self.link.drive(cx).await;
         (host, client)
     }
@@ -609,19 +624,11 @@ fn upload_offer_exceeding_its_announced_round_never_reaches_the_host_disk_worker
 }
 
 fn source_connection(link: &mut Link, upload: bool) -> &mut fr_transport::quic::QuicRecords {
-    if upload {
-        &mut link.c
-    } else {
-        &mut link.h
-    }
+    if upload { &mut link.c } else { &mut link.h }
 }
 
 fn destination_connection(link: &mut Link, upload: bool) -> &mut fr_transport::quic::QuicRecords {
-    if upload {
-        &mut link.h
-    } else {
-        &mut link.c
-    }
+    if upload { &mut link.h } else { &mut link.c }
 }
 
 #[allow(clippy::too_many_lines)] // Retain the complete original wire/admission/refusal scenario.
@@ -679,15 +686,24 @@ async fn oversized_round(cx: &Cx, upload: bool) {
             client.service(&mut receiver, &mut link.h, || true).unwrap();
             link.drive(cx).await;
             source_lane
-                .dispatch(&mut link.c, cx, || true, |bytes| {
-                    assert_eq!(
-                        sync_job_state::decode(bytes, source_lane.incoming(), source_lane.limits())
+                .dispatch(
+                    &mut link.c,
+                    cx,
+                    || true,
+                    |bytes| {
+                        assert_eq!(
+                            sync_job_state::decode(
+                                bytes,
+                                source_lane.incoming(),
+                                source_lane.limits()
+                            )
                             .unwrap(),
-                        state
-                    );
-                    advertised = true;
-                    Ok(Disposition::Consumed)
-                })
+                            state
+                        );
+                        advertised = true;
+                        Ok(Disposition::Consumed)
+                    },
+                )
                 .unwrap();
         }
         state.phase = SyncPhase::Accepted;
@@ -701,14 +717,24 @@ async fn oversized_round(cx: &Cx, upload: bool) {
         }
     } else {
         source_lane
-            .send_sync(source_connection(&mut link, upload), cx, &state, until, || true)
+            .send_sync(
+                source_connection(&mut link, upload),
+                cx,
+                &state,
+                until,
+                || true,
+            )
             .unwrap();
         let mut accepted = false;
         while !accepted {
             assert!(clock(cx) < until);
             link.drive(cx).await;
             client
-                .service(&mut receiver, destination_connection(&mut link, upload), || true)
+                .service(
+                    &mut receiver,
+                    destination_connection(&mut link, upload),
+                    || true,
+                )
                 .unwrap();
             source_lane
                 .dispatch(
@@ -716,9 +742,12 @@ async fn oversized_round(cx: &Cx, upload: bool) {
                     cx,
                     || true,
                     |bytes| {
-                        let acceptance =
-                            sync_job_state::decode(bytes, source_lane.incoming(), source_lane.limits())
-                                .unwrap();
+                        let acceptance = sync_job_state::decode(
+                            bytes,
+                            source_lane.incoming(),
+                            source_lane.limits(),
+                        )
+                        .unwrap();
                         assert_eq!(acceptance.phase, SyncPhase::Accepted);
                         accepted = true;
                         Ok(Disposition::Consumed)
@@ -726,7 +755,6 @@ async fn oversized_round(cx: &Cx, upload: bool) {
                 )
                 .unwrap();
         }
-
     }
     state.manifest_revision = 1;
     for phase in [SyncPhase::Scanning, SyncPhase::Transferring] {
@@ -736,7 +764,13 @@ async fn oversized_round(cx: &Cx, upload: bool) {
             state.bytes_total = 3;
         }
         source_lane
-            .send_sync(source_connection(&mut link, upload), cx, &state, until, || true)
+            .send_sync(
+                source_connection(&mut link, upload),
+                cx,
+                &state,
+                until,
+                || true,
+            )
             .unwrap();
         while client.status().state != state
             || !source_lane
@@ -746,7 +780,11 @@ async fn oversized_round(cx: &Cx, upload: bool) {
             assert!(clock(cx) < until);
             link.drive(cx).await;
             client
-                .service(&mut receiver, destination_connection(&mut link, upload), || true)
+                .service(
+                    &mut receiver,
+                    destination_connection(&mut link, upload),
+                    || true,
+                )
                 .unwrap();
         }
     }
@@ -766,14 +804,22 @@ async fn oversized_round(cx: &Cx, upload: bool) {
     )
     .unwrap();
     source_lane
-        .send(source_connection(&mut link, upload), cx, &bytes[..n], until, || true)
+        .send(
+            source_connection(&mut link, upload),
+            cx,
+            &bytes[..n],
+            until,
+            || true,
+        )
         .unwrap();
     let mut refused = false;
     loop {
         assert!(clock(cx) < until);
-        if let Err(error) =
-            client.service(&mut receiver, destination_connection(&mut link, upload), || true)
-        {
+        if let Err(error) = client.service(
+            &mut receiver,
+            destination_connection(&mut link, upload),
+            || true,
+        ) {
             assert_eq!(error, LiveError::Resource);
             break;
         }
@@ -889,7 +935,10 @@ fn upload_jobs_preserve_host_files_and_deliver_changed_source_versions_on_both_l
                 running.host.status().state.sync_direction,
                 fr_wire::sync_job_state::SyncDirection::ControllerToHost
             );
-            assert_eq!(running.host.status().state.phase, SyncPhase::ConflictRecorded);
+            assert_eq!(
+                running.host.status().state.phase,
+                SyncPhase::ConflictRecorded
+            );
             assert_eq!(running.host.status().confirmed_publications, 3);
             assert_eq!(running.client.status().confirmed_publications, 3);
             assert_eq!(running.host.status().confirmed_conflicts, 1);
@@ -898,7 +947,12 @@ fn upload_jobs_preserve_host_files_and_deliver_changed_source_versions_on_both_l
                 fs::read(destination.0.join("report.txt")).unwrap(),
                 b"original host document"
             );
-            assert!(destination.files().values().any(|bytes| bytes == b"controller version one"));
+            assert!(
+                destination
+                    .files()
+                    .values()
+                    .any(|bytes| bytes == b"controller version one")
+            );
 
             // Independent host edits/deletion must not cause replay of an
             // acknowledged controller version. New controller versions do.
@@ -916,10 +970,21 @@ fn upload_jobs_preserve_host_files_and_deliver_changed_source_versions_on_both_l
                 b"independent host edit"
             );
             assert!(!destination.0.join("empty").exists());
-            assert_eq!(fs::read(destination.0.join("added")).unwrap(), b"new controller file");
+            assert_eq!(
+                fs::read(destination.0.join("added")).unwrap(),
+                b"new controller file"
+            );
             let second = destination.files();
-            assert!(second.values().any(|bytes| bytes == b"controller version one"));
-            assert!(second.values().any(|bytes| bytes == b"controller version two"));
+            assert!(
+                second
+                    .values()
+                    .any(|bytes| bytes == b"controller version one")
+            );
+            assert!(
+                second
+                    .values()
+                    .any(|bytes| bytes == b"controller version two")
+            );
             running.settled(&cx, 3).await;
             assert_eq!(running.host.status().state.entries_total, 0);
             assert_eq!(running.host.status().confirmed_publications, 5);
@@ -940,8 +1005,7 @@ fn an_upload_source_waits_for_host_advertisement_before_scanning_or_sending() {
         // This source entry would fail a scan. Merely selecting the local
         // source cannot cause that scan before the original host advertises.
         std::os::unix::fs::symlink(&source.0, source.0.join("unselected")).unwrap();
-        let mut running =
-            Running::upload(&cx, &source.0, &destination.0, 41, false, true).await;
+        let mut running = Running::upload(&cx, &source.0, &destination.0, 41, false, true).await;
         let until = clock(&cx) + 100_000;
         while clock(&cx) < until {
             running
@@ -973,8 +1037,7 @@ fn a_different_upload_job_id_never_creates_or_scans_a_host_job() {
         let source = Directory::new();
         let destination = Directory::new();
         std::os::unix::fs::symlink(&source.0, source.0.join("not-selected")).unwrap();
-        let mut running =
-            Running::upload(&cx, &source.0, &destination.0, 42, true, true).await;
+        let mut running = Running::upload(&cx, &source.0, &destination.0, 42, true, true).await;
         let until = clock(&cx) + 1_000_000;
         loop {
             assert!(clock(&cx) < until, "mismatched upload job was not refused");
@@ -1001,10 +1064,11 @@ fn upload_jobs_require_the_separate_positive_capability() {
         let source = Directory::new();
         let destination = Directory::new();
         fs::write(source.0.join("selected"), b"no unnegotiated transfer").unwrap();
-        let mut running =
-            Running::upload(&cx, &source.0, &destination.0, 41, false, false).await;
+        let mut running = Running::upload(&cx, &source.0, &destination.0, 41, false, false).await;
         assert_eq!(
-            running.host.service(&mut running.sender, &mut running.link.c, || true),
+            running
+                .host
+                .service(&mut running.sender, &mut running.link.c, || true),
             Err(LiveError::NotNegotiated)
         );
         assert!(running.receiver.last_result().is_none());
@@ -1021,15 +1085,18 @@ fn a_replacement_connection_cannot_resume_an_original_upload_job() {
         let source = Directory::new();
         let destination = Directory::new();
         fs::write(source.0.join("selected"), b"original controller source").unwrap();
-        let mut running =
-            Running::upload(&cx, &source.0, &destination.0, 41, false, true).await;
+        let mut running = Running::upload(&cx, &source.0, &destination.0, 41, false, true).await;
         let mut replacement = Link::new(&cx).await;
         assert_eq!(
-            running.host.service(&mut running.sender, &mut replacement.c, || true),
+            running
+                .host
+                .service(&mut running.sender, &mut replacement.c, || true),
             Err(LiveError::WrongConnection)
         );
         assert!(matches!(
-            running.client.service(&mut running.receiver, &mut replacement.h, || true),
+            running
+                .client
+                .service(&mut running.receiver, &mut replacement.h, || true),
             Err(LiveError::WrongConnection
                 | LiveError::Receive(fr_files::quic::Error::WrongConnection))
         ));
@@ -1054,10 +1121,13 @@ fn cancelling_an_upload_preserves_the_confirmed_prefix_and_kept_host_conflict() 
         fs::write(source.0.join("a-confirmed"), b"confirmed controller file").unwrap();
         fs::write(source.0.join("z-partial"), vec![0x53; 4 * 1024 * 1024]).unwrap();
         fs::write(destination.0.join("a-confirmed"), b"original host file").unwrap();
-        let mut running =
-            Running::upload(&cx, &source.0, &destination.0, 41, true, true).await;
+        let mut running = Running::upload(&cx, &source.0, &destination.0, 41, true, true).await;
         let until = clock(&cx) + 2_000_000;
-        while running.receiver.progress().is_none_or(|p| p.id != 2 || p.staged_bytes == 0) {
+        while running
+            .receiver
+            .progress()
+            .is_none_or(|p| p.id != 2 || p.staged_bytes == 0)
+        {
             assert!(clock(&cx) < until, "second upload file did not stage");
             let (source, destination) = running.step(&cx).await;
             source.unwrap();
@@ -1073,8 +1143,15 @@ fn cancelling_an_upload_preserves_the_confirmed_prefix_and_kept_host_conflict() 
         assert_eq!(running.client.status().confirmed_publications, 1);
         let files = destination.files();
         assert_eq!(files.len(), 2);
-        assert!(files.values().any(|bytes| bytes == b"confirmed controller file"));
-        assert_eq!(fs::read(destination.0.join("a-confirmed")).unwrap(), b"original host file");
+        assert!(
+            files
+                .values()
+                .any(|bytes| bytes == b"confirmed controller file")
+        );
+        assert_eq!(
+            fs::read(destination.0.join("a-confirmed")).unwrap(),
+            b"original host file"
+        );
         running.input_live(&cx);
         running.link.control_progress(&cx).await;
     });
@@ -1087,8 +1164,7 @@ fn mutation_after_upload_scan_cannot_publish_a_different_source_version() {
         let source = Directory::new();
         let destination = Directory::new();
         fs::write(source.0.join("selected"), b"version one").unwrap();
-        let mut running =
-            Running::upload(&cx, &source.0, &destination.0, 41, false, true).await;
+        let mut running = Running::upload(&cx, &source.0, &destination.0, 41, false, true).await;
         let until = clock(&cx) + 2_000_000;
         while running.host.status().state.phase != SyncPhase::Transferring {
             assert!(clock(&cx) < until);
@@ -1101,7 +1177,10 @@ fn mutation_after_upload_scan_cannot_publish_a_different_source_version() {
         loop {
             assert!(clock(&cx) < until);
             if let (Err(error), _) = running.step(&cx).await {
-                assert_eq!(error, LiveError::Send(fr_files::sender::Error::SourceChanged));
+                assert_eq!(
+                    error,
+                    LiveError::Send(fr_files::sender::Error::SourceChanged)
+                );
                 break;
             }
         }

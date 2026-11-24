@@ -38,7 +38,7 @@ pub(super) fn between_turns(
 #[derive(Default)]
 pub(in crate::session_startup) struct Lane {
     /// Taken by each direction's one offer attempt; never retried after outcome.
-    configuration: Option<Configuration>,
+    configuration: Option<(Configuration, Option<u64>)>,
     selection: Option<SendRequest>,
     interactive: Option<Box<Sending>>,
     sync: Option<fr_files::sync::HostConfig>,
@@ -50,8 +50,18 @@ impl Lane {
     pub(in crate::session_startup) fn has_download(&self) -> bool {
         self.selection.is_some() || self.interactive.is_some() || self.sync.is_some()
     }
-    pub(in crate::session_startup) fn add_upload(&mut self, directory: &Directory) {
-        self.configuration = Some(directory.configuration());
+    pub(in crate::session_startup) fn has_upload_job(&self) -> bool {
+        self.configuration
+            .as_ref()
+            .is_some_and(|(_, job)| job.is_some())
+    }
+    pub(in crate::session_startup) fn add_upload(
+        &mut self,
+        directory: &Directory,
+    ) -> Result<(), crate::native_files::Absence> {
+        let job = directory.take_sync_job()?;
+        self.configuration = Some((directory.configuration(), job));
+        Ok(())
     }
     pub(in crate::session_startup) fn add_download(&mut self, selection: SendRequest) {
         self.selection = Some(selection);
@@ -93,10 +103,14 @@ impl Lane {
         if host.control_renewed_until().is_none() {
             return;
         }
-        if let Some(configuration) = self.configuration.take()
+        if let Some((configuration, job)) = self.configuration.take()
             && let Some(request) = request(host, view, nonce)
         {
-            let _ = host.offer_file_drop(request, configuration);
+            if let Some(job_id) = job {
+                let _ = host.offer_folder_upload(request, configuration, job_id);
+            } else {
+                let _ = host.offer_file_drop(request, configuration);
+            }
         }
         if let Some(selection) = self.selection.take()
             && let Some(request) = request(host, view, nonce)

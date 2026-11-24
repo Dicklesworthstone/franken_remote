@@ -189,7 +189,12 @@ impl ControllerJob {
         self.finish_pending(receiver, q, now)?;
         if self.phase == Phase::Advertise {
             self.queue(
-                state(self.status.state.job_id, self.direction, SyncPhase::Advertised, 0),
+                state(
+                    self.status.state.job_id,
+                    self.direction,
+                    SyncPhase::Advertised,
+                    0,
+                ),
                 now,
             )?;
             self.phase = Phase::Advertising;

@@ -43,10 +43,7 @@ impl Link {
             });
         }
         if duplex {
-            for name in [
-                files::DOWNLOAD_CAPABILITY,
-                files::DUPLEX_CAPABILITY,
-            ] {
+            for name in [files::DOWNLOAD_CAPABILITY, files::DUPLEX_CAPABILITY] {
                 self.selection.capabilities.push(Capability {
                     name: name.into(),
                     version: 1,

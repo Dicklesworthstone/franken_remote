@@ -282,3 +282,29 @@ fn conflict_preference_never_relaxes_drop_directory_safety() {
         );
     }
 }
+
+#[test]
+fn reverse_folder_destination_reaches_the_original_pinned_keep_both_owner() {
+    let destination = Scratch::new();
+    let options = parse(&[
+        "--once",
+        "--input-agent",
+        "/local/agent",
+        "--sync-destination",
+        destination.0.to_str().unwrap(),
+        "--sync-job",
+        "41",
+        "--files-conflict",
+        "keep-both",
+    ])
+    .unwrap();
+    let directory = options.open_files().unwrap().unwrap();
+    assert!(directory.requires_sync_job());
+    assert_eq!(directory.sync_job_id(), Some(41));
+    assert_eq!(directory.clone().sync_job_id(), Some(41));
+    assert_eq!(
+        directory.configuration().directory.conflict_policy(),
+        ConflictPolicy::KeepBoth
+    );
+    assert!(directory.with_sync_job(42).is_err());
+}

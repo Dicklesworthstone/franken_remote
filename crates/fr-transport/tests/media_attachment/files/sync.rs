@@ -319,7 +319,10 @@ fn enable_upload_sync(link: &mut Link, duplex: bool) {
     enable(link);
     let mut capabilities = vec![
         (wire::CHANNEL_SCOPE_CAPABILITY, wire::CHANNEL_SCOPE_VERSION),
-        (sync_job_state::UPLOAD_CAPABILITY, sync_job_state::UPLOAD_VERSION),
+        (
+            sync_job_state::UPLOAD_CAPABILITY,
+            sync_job_state::UPLOAD_VERSION,
+        ),
     ];
     if duplex {
         capabilities.extend([
@@ -334,7 +337,9 @@ fn enable_upload_sync(link: &mut Link, duplex: bool) {
             required: false,
         });
     }
-    link.selection.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    link.selection
+        .capabilities
+        .sort_by(|a, b| a.name.cmp(&b.name));
     assert!(sync_job_state::upload_selected(&link.selection));
     assert!(!sync_job_state::selected(&link.selection));
     assert_eq!(wire::duplex_selected(&link.selection), duplex);
@@ -357,9 +362,9 @@ fn selected_upload_jobs_keep_host_advertisement_and_controller_acceptance_on_rea
             let (host, viewer, hr, vr) = attach(&mut link, &cx, 9, MediaRole::Files).await;
             assert_eq!(hr.outbound.messages, Messages::FilesSync);
             assert_eq!(vr.outbound.messages, Messages::FilesSync);
-            link.selection.capabilities.retain(|cap| {
-                cap.name != sync_job_state::UPLOAD_CAPABILITY
-            });
+            link.selection
+                .capabilities
+                .retain(|cap| cap.name != sync_job_state::UPLOAD_CAPABILITY);
             let host = FilesChannel::new(&link.h, host, InputLeaseId::from_raw(123), 9).unwrap();
             let viewer =
                 FilesChannel::new(&link.c, viewer, InputLeaseId::from_raw(123), 9).unwrap();
@@ -379,7 +384,9 @@ fn selected_upload_jobs_keep_host_advertisement_and_controller_acceptance_on_rea
             .await;
             let bytes = encoded_file(&viewer);
             let until = clock(&cx) + 1_000_000;
-            viewer.send(&mut link.c, &cx, &bytes, until, || true).unwrap();
+            viewer
+                .send(&mut link.c, &cx, &bytes, until, || true)
+                .unwrap();
             let mut got = false;
             while !got || !viewer.send_drained(&link.c).unwrap() {
                 assert!(clock(&cx) < until);
@@ -433,19 +440,28 @@ fn upload_job_selection_cannot_enable_the_sibling_download_or_change_record_dire
         let download_c =
             FilesChannel::new(&link.c, download_c, InputLeaseId::from_raw(123), 10).unwrap();
         assert!(!download_h.sync_selected() && !download_c.sync_selected());
-        assert_eq!(download_h.outgoing().direction, wire::Direction::ToController);
+        assert_eq!(
+            download_h.outgoing().direction,
+            wire::Direction::ToController
+        );
         let before = link.h.usage();
         let until = clock(&cx) + 1_000_000;
         assert_eq!(
             download_h.send_sync(&mut link.h, &cx, &advertised(), until, || true),
             Err(Error::WrongRoute)
         );
-        for direction in [SyncDirection::HostToController, SyncDirection::Bidirectional] {
+        for direction in [
+            SyncDirection::HostToController,
+            SyncDirection::Bidirectional,
+        ] {
             assert_eq!(
                 upload_h.send_sync(
                     &mut link.h,
                     &cx,
-                    &SyncJobState { sync_direction: direction, ..upload_advertised() },
+                    &SyncJobState {
+                        sync_direction: direction,
+                        ..upload_advertised()
+                    },
                     until,
                     || true,
                 ),
@@ -479,13 +495,16 @@ fn absent_or_unknown_upload_job_marker_keeps_the_original_plain_file_family() {
             let mut link = Link::new(&cx).await;
             enable_upload_sync(&mut link, false);
             if let Some(version) = version {
-                link.selection.capabilities.iter_mut()
+                link.selection
+                    .capabilities
+                    .iter_mut()
                     .find(|cap| cap.name == sync_job_state::UPLOAD_CAPABILITY)
-                    .unwrap().version = version;
+                    .unwrap()
+                    .version = version;
             } else {
-                link.selection.capabilities.retain(|cap| {
-                    cap.name != sync_job_state::UPLOAD_CAPABILITY
-                });
+                link.selection
+                    .capabilities
+                    .retain(|cap| cap.name != sync_job_state::UPLOAD_CAPABILITY);
             }
             assert!(!sync_job_state::upload_selected(&link.selection));
             let _input = attach(&mut link, &cx, 8, MediaRole::Input).await;

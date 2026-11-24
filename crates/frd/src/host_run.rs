@@ -684,6 +684,7 @@ fn finish_runtime_offer(
     adaptive_capture: bool,
     scales: bool,
     folder_sync: bool,
+    folder_sync_upload: bool,
 ) -> Result<Offer, serial::Error> {
     if scales {
         offer = fr_wire::display::picture::with_capability(offer)
@@ -691,6 +692,10 @@ fn finish_runtime_offer(
     }
     if folder_sync {
         offer = crate::session_startup::with_folder_sync(offer)
+            .map_err(|_| serial::Error::Configuration)?;
+    }
+    if folder_sync_upload {
+        offer = crate::session_startup::with_folder_sync_upload(offer)
             .map_err(|_| serial::Error::Configuration)?;
     }
     // Default rescue is optional. Real input, audio, file jobs and hardware
@@ -1080,7 +1085,11 @@ fn run_inner(
         .file_send
         .as_ref()
         .is_some_and(|selection| selection.is_available() && selection.sync_job_id().is_some());
-    if options.microphone.is_some() || folder_sync {
+    let folder_sync_upload = options
+        .files
+        .as_ref()
+        .is_some_and(|directory| directory.sync_job_id().is_some());
+    if options.microphone.is_some() || folder_sync || folder_sync_upload {
         let offer = selected_offer(
             (
                 control,
@@ -1102,9 +1111,14 @@ fn run_inner(
                 Error::Configuration
             }
         })?;
-        if folder_sync {
-            crate::session_startup::with_folder_sync(offer).map_err(|_| Error::Configuration)?;
-        }
+        finish_runtime_offer(
+            offer,
+            options.adaptive_capture,
+            false,
+            folder_sync,
+            folder_sync_upload,
+        )
+        .map_err(|_| Error::Configuration)?;
     }
     let Some(encoder) =
         awaiting_permission(stop, report, awaited_permission, permission_recheck, || {
@@ -1878,6 +1892,11 @@ impl Share<'_> {
             self.options.file_send.as_ref().is_some_and(|selection| {
                 selection.is_available() && selection.sync_job_id().is_some()
             });
+        let folder_sync_upload = self
+            .options
+            .files
+            .as_ref()
+            .is_some_and(|directory| directory.sync_job_id().is_some());
         // ScreenCaptureKit scales in hardware, so a VideoToolbox host can send
         // a viewer pictures sized for its screen. Other captures stay native.
         let scales = scales_pictures(encoder);
@@ -1912,6 +1931,7 @@ impl Share<'_> {
                             adaptive_capture,
                             scales,
                             folder_sync,
+                            folder_sync_upload,
                         )?;
                         Ok(request)
                     },
@@ -2442,7 +2462,8 @@ mod tests {
                 )
                 .unwrap();
                 let offer =
-                    finish_runtime_offer(request.session.offer, adaptive, false, false).unwrap();
+                    finish_runtime_offer(request.session.offer, adaptive, false, false, false)
+                        .unwrap();
                 offer.validate().unwrap();
                 assert_eq!(offer.limits, ProtocolLimits::ABSOLUTE);
                 assert_eq!(
@@ -2537,7 +2558,8 @@ mod tests {
                             }
                             Ok::<_, fr_wire::negotiation::Error>(previous)
                         })();
-                        let actual = finish_runtime_offer(current.clone(), false, scales, folder);
+                        let actual =
+                            finish_runtime_offer(current.clone(), false, scales, folder, false);
                         if let Ok(previous) = previous {
                             let actual =
                                 actual.expect("existing hardware/file profile stays available");

@@ -1,8 +1,9 @@
 # Folder synchronization
 
 `fr_files::sync::live` connects an explicitly configured host folder to one
-explicitly accepted native controller download. It repeatedly delivers new
-source versions through the existing ATP sender, receiver and disk worker.
+explicitly accepted native controller source or destination. One-way jobs can
+send in either direction. They repeatedly deliver new source versions through
+the existing ATP sender, receiver and disk worker.
 `fr_files::sync` also retains the local reconciliation API described below.
 Plan §15.6 and bead `fr-p4-folder-sync-p6i` own the complete feature; the native
 one-way integration is tracked separately by `fr-p4-folder-sync-p6i.1`.
@@ -62,6 +63,41 @@ source, transport and capture-credit pacing continue. Requested audio,
 clipboard, both file directions and required control/privacy capabilities stay
 selected. A peer that requires decoder-load reporting cannot use this fallback.
 
+### Send a controller folder to the host
+
+On a Linux or macOS host, explicitly choose the receiving directory and its
+conflict policy for one controlled share:
+
+```sh
+frd run --once --input-agent /absolute/fr-input-agent \
+  --sync-destination /private/host-destination --sync-job 41 \
+  --files-conflict keep-both
+```
+
+On the native Linux or macOS controller, accept that ID with a private source:
+
+```sh
+fr connect NODE_ID --control --experimental-native --display only \
+  --sync-source /private/controller-source --sync-job 41
+```
+
+The host advertises its destination job; the controller accepts it before
+scanning. The controller never advertises a host job or sends a host path.
+Both peers must select the independent `file-folder-sync-upload` v1 capability
+on the original upload attachment. The older download-only capability cannot
+enable this direction, and an unselected peer receives no ordinary-file
+fallback. The same bounded source owner, cache, ATP sender and tracked KeepBoth
+receiver handle both directions.
+
+This first reverse native job exclusively owns its file direction and the
+client's original authority projection. Do not combine the controller source
+with ordinary sends, file pickers, drops, local file commands, or downloads.
+The host destination excludes `--files`, `--send`, `--send-control`, and
+`--sync-source`. These combinations are refused before source admission; they
+do not silently discard a selection. Directory clones share one-use job consent,
+and a consumed job cannot fall back to ordinary receiving on another session.
+This does not yet implement a bidirectional reconciliation job.
+
 ### Bounds and delivery semantics
 
 The live job scans at five-second intervals after the preceding round has
@@ -69,19 +105,19 @@ settled. Each scan allows at most 32 flat regular files, 64 MiB per file and
 256 MiB of source content. Subdirectories, symlinks and special files refuse the
 job. Across all rounds, the live job allows 64 attempted file versions and
 1 GiB of attempted content; the receiver's independently selected lower limits
-still apply. The controller charges each announced round against those job
+still apply. The receiver charges each announced round against those job
 limits before accepting its file offers. Each decoded ATP offer must also fit
 the remaining bytes of the round and the per-file ceiling before the receiver
 can queue a staging operation. Scanning uses one supervised worker and one bounded result. Each
 round has a five-minute deadline, and each retained state record keeps its
 original one-second delivery deadline, capped by the active round. The
-controller starts its own monotonic round timer on the admitted scanning
+receiver starts its own monotonic round timer on the admitted scanning
 record. That deadline also fences its disk worker at publication and remains
 active until the settlement acknowledgment drains. A round does not start while prior ATP,
 publication proof, source cleanup or job-state custody remains outstanding.
 
 A source edited or removed during the pre-transfer scan can be scanned again
-within the same round. The host makes at most three scan attempts, separated by
+within the same round. The source owner makes at most three scan attempts, separated by
 at least 100 ms, after joining each preceding worker. Retries retain the same
 job, manifest revision, pinned root, authority and original five-minute deadline.
 They neither announce another round nor spend transfer quota. Cancellation,
@@ -111,7 +147,7 @@ A file changed between scanning and source preparation is refused before its
 offer, so a different version cannot be credited to the scanned manifest.
 Occupied destination names always preserve both versions. Editing or removing
 a received copy does not replay a previously acknowledged source version; a
-later host change remains eligible for a new delivery. `Settled` confirms the
+later source change remains eligible for a new delivery. `Settled` confirms the
 round's deliveries, rather than asserting equality of the two directories.
 
 Cancellation, lost authority, expiry or disconnect ends the original job.
@@ -122,7 +158,7 @@ never turn a failed cleanup or uncertain durability result into success.
 Neither the job, its accepted destination nor its ledger is replayed by a
 reconnecting viewer. Start a new explicit job to authorize another session.
 
-This path is one-way host-to-controller delivery of flat regular files.
+Native jobs select one direction for delivery of flat regular files.
 Bidirectional remote reconciliation, recursive jobs, persistent jobs across
 reconnects and native desktop/live-tailnet qualification remain separate work
 under the parent bead. The existing local two-way engine is not evidence that
@@ -229,3 +265,21 @@ A stopped job retains those counts. Read `failure` for the original reason
 `cleanup` for the receiver worker's join outcome. A cancelled job can report
 `cleanup: "finished"` after the worker exits with its earlier publications
 intact. Ordinary file downloads omit the `folder_job` member.
+
+For a controller-to-host job, the native CLI upload report includes
+`upload_folder_job`. It carries the job ID, phase, revision, settled-round count,
+confirmed publication/conflict counts, original failure, and source cleanup
+status. An empty round can settle without a transfer. These cumulative counts
+are independent of the ordinary finite-batch file list. A terminal job retains
+already confirmed effects; `cleanup: "unconfirmed"` never claims worker cleanup
+succeeded. The host receiver separately retains its publication receipts.
+
+The reverse capability and native offer builders have passed the pinned
+`fr-wire --all-targets` test suite (350 tests, including five new upload
+capability regressions) and `fr-client --test native_profile` (29 tests,
+including both new upload/duplex profile regressions). Workspace
+`cargo fmt --check` also passes. The transport, filesystem and native runtime
+regressions have been source reviewed but remain unexecuted: the broader
+check stopped with compiler SIGKILL inside the unchanged pinned Asupersync
+dependency, before reaching those crates. No new live hardware or tailnet
+qualification is claimed.

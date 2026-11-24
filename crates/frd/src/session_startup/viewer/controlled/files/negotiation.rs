@@ -20,6 +20,10 @@ use std::time::Duration;
 
 pub(super) enum Destination {
     Send(Policy),
+    Sync(
+        fr_files::sync::SourceConfig,
+        crate::native_files::SendControl,
+    ),
     Receive(
         Configuration,
         ReceiveControl,
@@ -33,7 +37,11 @@ pub(super) enum Advance {
 }
 pub(super) enum Attached {
     Cancelled,
-    Sender(Box<Sender<'static>>, Permission),
+    Sender(
+        Box<Sender<'static>>,
+        Permission,
+        Option<Box<fr_files::sync::SourceJob>>,
+    ),
     Receiver(Box<super::download::Receiving>, Permission),
 }
 
@@ -48,7 +56,7 @@ pub(super) struct Pending {
     lease: InputLeaseId,
     handle: Option<u128>,
     permission: Permission,
-    destination: Destination,
+    pub(super) destination: Destination,
     until: u64,
     last: u64,
     channel: Option<MediaChannel>,
@@ -59,10 +67,17 @@ fn attachment_kind(bytes: &[u8]) -> bool {
         .is_some_and(|kind| (0x0018..=0x001c).contains(&u16::from_be_bytes([kind[0], kind[1]])))
 }
 impl Pending {
+    pub(super) fn is_sync_upload(&self) -> bool {
+        matches!(self.destination, Destination::Sync(_, _))
+    }
     pub(super) fn is_download(&self) -> bool {
         matches!(self.destination, Destination::Receive(_, _, _))
     }
     pub(super) fn stopped(&self) {
+        if let Destination::Sync(_, control) = &self.destination {
+            control.end(crate::native_files::Absence::Refused(Error::Cancelled));
+            control.cleaned(Some(Ok(())));
+        }
         if let Destination::Receive(_, control, _) = &self.destination {
             control.end(crate::native_files::Absence::Refused(Error::Cancelled));
             control.cleaned(Ok(()));
@@ -243,9 +258,17 @@ impl Pending {
     ) -> Result<Attached, Error> {
         let control = match &self.destination {
             Destination::Receive(_, control, _) => Some(control.clone()),
-            Destination::Send(_) => None,
+            Destination::Send(_) | Destination::Sync(_, _) => None,
+        };
+        let upload_control = match &self.destination {
+            Destination::Sync(_, control) => Some(control.clone()),
+            _ => None,
         };
         let result = self.start_inner(q, input);
+        if let (Some(control), Err(error)) = (upload_control, &result) {
+            control.end(crate::native_files::Absence::SetupFailed(*error));
+            control.cleaned(Some(Ok(())));
+        }
         if let (Some(control), Err(error)) = (control, &result) {
             // Every fallible receive-construction step precedes the disk
             // worker's successful spawn. Once that succeeds, start_inner only
@@ -277,7 +300,34 @@ impl Pending {
         match self.destination {
             Destination::Send(policy) => {
                 let sender = Sender::owning(self.cx, q, lane, policy)?;
-                Ok(Attached::Sender(Box::new(sender), self.permission))
+                Ok(Attached::Sender(Box::new(sender), self.permission, None))
+            }
+            Destination::Sync(config, control) => {
+                if control.cancel_requested() {
+                    lane.retire(q, &self.cx).map_err(Error::Transport)?;
+                    control.end(crate::native_files::Absence::Refused(Error::Cancelled));
+                    control.cleaned(Some(Ok(())));
+                    return Ok(Attached::Cancelled);
+                }
+                let authority = input
+                    .file_receive_authority(self.parent, id, self.lease, ClientInstant(now))
+                    .map_err(|_| Error::Cancelled)?;
+                let mut sender = Sender::owning(self.cx.clone(), q, lane, Policy::default())?;
+                sender.set_paused(q, control.pause_requested())?;
+                let job = fr_files::sync::SourceJob::for_controller(
+                    config,
+                    self.cx,
+                    fr_files::session::Authority::from_controller(authority),
+                    self.permission.clone(),
+                    q,
+                )
+                .map_err(crate::native_files::sync_send_error)?;
+                control.record_folder_job(job.status());
+                Ok(Attached::Sender(
+                    Box::new(sender),
+                    self.permission,
+                    Some(Box::new(job)),
+                ))
             }
             Destination::Receive(configuration, control, sync) => {
                 if control.cancel_requested() {
@@ -382,6 +432,17 @@ impl ControlledViewer {
         timeout: Duration,
     ) -> Result<(), Error> {
         let download = matches!(destination, Destination::Receive(_, _, _));
+        if download
+            && (self.files.upload.sync_send.is_some()
+                || self
+                    .files
+                    .upload
+                    .pending
+                    .as_ref()
+                    .is_some_and(Pending::is_sync_upload))
+        {
+            return Err(Error::Busy);
+        }
         let duplex = fr_wire::files::duplex_selected(&self.session.opened.selection);
         let slot = self.files.slot(download);
         let other = self.files.slot(!download);

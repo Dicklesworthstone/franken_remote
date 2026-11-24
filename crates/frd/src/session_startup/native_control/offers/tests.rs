@@ -564,7 +564,10 @@ fn upload_sync_requires_both_explicit_drop_owners_without_enabling_download_jobs
                     (&syncing_host, &syncing_client, true),
                 ] {
                     let selection = select(h, c);
-                    assert_eq!(fr_wire::sync_job_state::upload_selected(&selection), expected);
+                    assert_eq!(
+                        fr_wire::sync_job_state::upload_selected(&selection),
+                        expected
+                    );
                     assert!(!fr_wire::sync_job_state::selected(&selection));
                     assert_eq!(fr_wire::files::duplex_selected(&selection), duplex);
                     assert!(super::super::files_lane(&selection).is_ok());
@@ -573,9 +576,10 @@ fn upload_sync_requires_both_explicit_drop_owners_without_enabling_download_jobs
                 }
                 let legacy_download =
                     fr_client::native::control_offer_with_download(clipboard, audio);
-                assert!(!fr_wire::sync_job_state::upload_selected(
-                    &select(&syncing_host, &legacy_download)
-                ));
+                assert!(!fr_wire::sync_job_state::upload_selected(&select(
+                    &syncing_host,
+                    &legacy_download
+                )));
             }
         }
     }

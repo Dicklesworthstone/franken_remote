@@ -93,7 +93,12 @@ pub fn prepare_upload_offer(
     ) {
         return Err(crate::negotiation::Error::RequiredCapability);
     }
-    prepare_job_offer(offer, &UPLOAD_REQUIREMENTS, UPLOAD_CAPABILITY, UPLOAD_VERSION)
+    prepare_job_offer(
+        offer,
+        &UPLOAD_REQUIREMENTS,
+        UPLOAD_CAPABILITY,
+        UPLOAD_VERSION,
+    )
 }
 
 fn prepare_job_offer(
@@ -138,9 +143,9 @@ fn prepare_job_offer(
         if offer.capabilities.len() < negotiation::MAX_CAPABILITIES {
             break;
         }
-        offer.capabilities.retain(|cap| {
-            cap.name != optional || cap.version != known_version || cap.required
-        });
+        offer
+            .capabilities
+            .retain(|cap| cap.name != optional || cap.version != known_version || cap.required);
     }
     if offer.capabilities.len() >= negotiation::MAX_CAPABILITIES {
         return Err(negotiation::Error::Invalid);
@@ -169,12 +174,16 @@ pub fn selected(selection: &crate::negotiation::Selection) -> bool {
 /// Positive upload-job selection on an original controller-to-host pair.
 /// Download-only peers and ambiguous legacy dual-direction offers stay out.
 pub fn upload_selected(selection: &crate::negotiation::Selection) -> bool {
-    job_selected(selection, &UPLOAD_REQUIREMENTS, UPLOAD_CAPABILITY, UPLOAD_VERSION)
-        && (!has_capability(
-            &selection.capabilities,
-            crate::files::DOWNLOAD_CAPABILITY,
-            crate::files::DOWNLOAD_VERSION,
-        ) || crate::files::duplex_selected(selection))
+    job_selected(
+        selection,
+        &UPLOAD_REQUIREMENTS,
+        UPLOAD_CAPABILITY,
+        UPLOAD_VERSION,
+    ) && (!has_capability(
+        &selection.capabilities,
+        crate::files::DOWNLOAD_CAPABILITY,
+        crate::files::DOWNLOAD_VERSION,
+    ) || crate::files::duplex_selected(selection))
 }
 
 fn job_selected(

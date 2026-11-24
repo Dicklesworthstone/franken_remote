@@ -21,7 +21,7 @@ pub(super) enum Advance {
 }
 
 pub(super) enum Target {
-    Receive(Configuration),
+    Receive(Configuration, Option<Box<fr_files::sync::ReceiverJob>>),
     Send {
         /// None establishes an idle sender for later explicit local selections.
         /// It is not an empty ATP batch and starts no source worker.
@@ -34,13 +34,13 @@ pub(super) enum Target {
 impl Target {
     fn permission(&self) -> &Permission {
         match self {
-            Self::Receive(configuration) => &configuration.permission,
+            Self::Receive(configuration, _) => &configuration.permission,
             Self::Send { permission, .. } => permission,
         }
     }
 }
 pub(super) enum Attached {
-    Receiver(Box<HostReceiver>),
+    Receiver(Box<HostReceiver>, Option<Box<fr_files::sync::ReceiverJob>>),
     Sender(Box<super::download::Outgoing>),
 }
 
@@ -55,6 +55,9 @@ pub(super) struct Pending {
     last: u64,
 }
 impl Pending {
+    pub(super) fn is_sync_upload(&self) -> bool {
+        matches!(self.target, Target::Receive(_, Some(_)))
+    }
     pub(super) fn is_download(&self) -> bool {
         matches!(self.target, Target::Send { .. })
     }
@@ -143,9 +146,9 @@ impl Pending {
         let lane = FilesChannel::new(q, self.channel, self.authority.binding().lease, self.handle)
             .map_err(Error::Transport)?;
         match self.target {
-            Target::Receive(configuration) => {
+            Target::Receive(configuration, sync) => {
                 HostReceiver::spawn_with_authority(self.cx, q, lane, self.authority, configuration)
-                    .map(|receiver| Attached::Receiver(Box::new(receiver)))
+                    .map(|receiver| Attached::Receiver(Box::new(receiver), sync))
                     .map_err(Error::Receiver)
             }
             Target::Send {
@@ -232,7 +235,7 @@ impl ControlledHost {
         {
             return Err(Error::NotNegotiated);
         }
-        self.offer_file_target(request, handle, Target::Receive(configuration))
+        self.offer_file_target(request, handle, Target::Receive(configuration, None))
     }
 
     pub(super) fn offer_file_target(
@@ -242,6 +245,19 @@ impl ControlledHost {
         target: Target,
     ) -> Result<(), Error> {
         let download = matches!(target, Target::Send { .. });
+        // This native slice retains one original controller file-authority
+        // projection. Refuse a second direction before spending its attachment.
+        if download
+            && (self.files.upload.sync_receive.is_some()
+                || self
+                    .files
+                    .upload
+                    .pending
+                    .as_ref()
+                    .is_some_and(Pending::is_sync_upload))
+        {
+            return Err(Error::AlreadyAttached);
+        }
         let duplex = files::duplex_selected(&self.session.opened.selected);
         if self.files.slot(download).used || (!duplex && self.files.slot(!download).used) {
             return Err(Error::AlreadyAttached);

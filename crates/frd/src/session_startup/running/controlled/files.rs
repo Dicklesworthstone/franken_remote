@@ -4,6 +4,7 @@
 //! services this lane only after input and renewal; no application callback sees
 //! its records. Retirement never erases an already committed publication.
 mod download;
+mod upload;
 pub(in crate::session_startup::running) use download::send_error;
 mod negotiation;
 mod slots;
@@ -50,6 +51,7 @@ pub(super) struct Slot {
     stopped: bool,
     pending: Option<Pending>,
     receiver: Option<HostReceiver>,
+    sync_receive: Option<Box<fr_files::sync::ReceiverJob>>,
     sender: Option<Box<download::Outgoing>>,
     reason: Option<Error>,
     cleanup: Option<Result<(), worker::Error>>,
@@ -64,6 +66,9 @@ impl Slot {
         self.stopped = true;
         if self.pending.take().is_some() {
             self.reason.get_or_insert(Error::Cancelled);
+        }
+        if let Some(sync) = &mut self.sync_receive {
+            sync.stop();
         }
         if let Some(receiver) = &mut self.receiver {
             receiver.stop();
@@ -147,7 +152,10 @@ impl Slot {
             let pending = self.pending.take().ok_or(quic::Error::Closed)?;
             let result = pending.start(q);
             match result {
-                Ok(negotiation::Attached::Receiver(receiver)) => self.receiver = Some(*receiver),
+                Ok(negotiation::Attached::Receiver(receiver, sync)) => {
+                    self.receiver = Some(*receiver);
+                    self.sync_receive = sync;
+                }
                 Ok(negotiation::Attached::Sender(sender)) => self.sender = Some(sender),
                 Err(Error::Transport(error)) => {
                     self.reason.get_or_insert(Error::Transport(error));
@@ -181,7 +189,13 @@ impl Slot {
         let Some(receiver) = &mut self.receiver else {
             return Ok(());
         };
-        if let Err(error) = receiver.service(q, authorize) {
+        let result = match &mut self.sync_receive {
+            Some(sync) => sync
+                .service(receiver, q, authorize)
+                .map_err(upload::receive_error),
+            None => receiver.service(q, authorize).map(|_| ()),
+        };
+        if let Err(error) = result {
             // This owner retires only the optional file pair. A native transport
             // failure still reaches the parent through its ordinary I/O checks.
             self.reason.get_or_insert(Error::Receiver(error));
@@ -206,6 +220,15 @@ impl Slot {
                 && let Err(error) = receiver.collect_after_close()
             {
                 self.reason.get_or_insert(Error::Receiver(error));
+            }
+        }
+        if let Some(sync) = &mut self.sync_receive {
+            if let Err(error) = sync.collect_after_close(receiver) {
+                self.reason
+                    .get_or_insert(Error::Receiver(upload::receive_error(error)));
+            }
+            if let Some(cleanup) = self.cleanup {
+                sync.cleaned(cleanup);
             }
         }
     }
@@ -319,6 +342,10 @@ impl ControlledHost {
         if self.files.upload.pending.is_some() {
             self.close();
             return Err(Error::Cancelled);
+        }
+        self.files.upload.stopped = true;
+        if let Some(sync) = &mut self.files.upload.sync_receive {
+            sync.stop();
         }
         if let Some(receiver) = &mut self.files.upload.receiver {
             let result = receiver

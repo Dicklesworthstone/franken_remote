@@ -219,6 +219,17 @@ impl StreamingHost {
         let session = self.host.session().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::files_lane(&session.opened.selected)?;
+        if directory.requires_sync_job() {
+            if directory.sync_job_id().is_none() {
+                return Err(Absence::Unavailable);
+            }
+            if !fr_wire::sync_job_state::upload_selected(&session.opened.selected) {
+                return Err(Absence::NotNegotiated);
+            }
+            if self.files.as_ref().is_some_and(files::Lane::has_download) {
+                return Err(Absence::Unavailable);
+            }
+        }
         if self.files.as_ref().is_some_and(files::Lane::has_download)
             && !fr_wire::files::duplex_selected(&session.opened.selected)
         {
@@ -226,7 +237,7 @@ impl StreamingHost {
         }
         self.files
             .get_or_insert_with(files::Lane::default)
-            .add_upload(directory);
+            .add_upload(directory)?;
         Ok(())
     }
     /// Consume one selected batch or one deferred local command surface for
@@ -238,7 +249,12 @@ impl StreamingHost {
         selection: &crate::native_files::HostSelection,
     ) -> Result<(), crate::native_files::Absence> {
         use crate::native_files::Absence;
-        if self.stream.served || self.files.as_ref().is_some_and(files::Lane::has_download) {
+        if self.stream.served
+            || self
+                .files
+                .as_ref()
+                .is_some_and(|lane| lane.has_download() || lane.has_upload_job())
+        {
             return Err(Absence::Unavailable);
         }
         let session = self.host.session().map_err(|_| Absence::Unavailable)?;

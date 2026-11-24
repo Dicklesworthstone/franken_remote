@@ -2288,6 +2288,9 @@ impl Application for Session {
             if name == fr_wire::sync_job_state::CAPABILITY {
                 return self.files.borrow().folder_sync_available();
             }
+            if name == fr_wire::sync_job_state::UPLOAD_CAPABILITY {
+                return self.files.borrow().folder_upload_available();
+            }
             !matches!(
                 name,
                 fr_wire::attachment::FILES_CAPABILITY

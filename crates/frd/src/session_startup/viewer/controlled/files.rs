@@ -2,6 +2,7 @@
 mod download;
 mod negotiation;
 mod slots;
+mod upload;
 use super::{ControlledViewer, permitted};
 use asupersync::cx::Cx;
 use fr_files::{
@@ -26,6 +27,8 @@ pub(super) struct Slot {
     used: bool,
     pending: Option<Pending>,
     sender: Option<Sender<'static>>,
+    sync_send: Option<Box<fr_files::sync::SourceJob>>,
+    sync_cleanup: Option<Result<(), Error>>,
     receiver: Option<Box<download::Receiving>>,
     permission: Option<Permission>,
     failure: Option<Error>,
@@ -69,6 +72,9 @@ impl Slot {
         // I/O owns the connection. Fence source work BEFORE requesting retirement;
         // the transport keeps its own payload/authority/deadline checks intact.
         self.failure.get_or_insert(Error::Cancelled);
+        if let Some(sync) = &mut self.sync_send {
+            sync.stop();
+        }
         sender.request_cancel();
         true
     }
@@ -91,6 +97,9 @@ impl Slot {
         }
         if !self.stopped {
             self.stopped = true;
+            if let Some(sync) = &mut self.sync_send {
+                sync.stop();
+            }
             if let Some(receiving) = &mut self.receiver {
                 receiving.stop(q, cleanup)?;
             }
@@ -163,9 +172,10 @@ impl Slot {
                     self.stopped = true;
                     self.failure.get_or_insert(Error::Cancelled);
                 }
-                Ok(negotiation::Attached::Sender(sender, permission)) => {
+                Ok(negotiation::Attached::Sender(sender, permission, sync)) => {
                     self.sender = Some(*sender);
                     self.permission = Some(permission);
+                    self.sync_send = sync;
                 }
                 Ok(negotiation::Attached::Receiver(receiver, permission)) => {
                     self.receiver = Some(receiver);
@@ -192,13 +202,24 @@ impl Slot {
         if let Some(sender) = &mut self.sender {
             let permission = self.permission.as_ref().ok_or(Error::Closed)?;
             let mut authorize = || permitted(input, control, cx);
-            if let Err(error) = sender.service(q, || permission.is_approved() && authorize()) {
+            let result = match &mut self.sync_send {
+                Some(sync) => sync
+                    .service(sender, q, || permission.is_approved() && authorize())
+                    .map_err(crate::native_files::sync_send_error),
+                None => sender
+                    .service(q, || permission.is_approved() && authorize())
+                    .map(|_| ()),
+            };
+            if let Err(error) = result {
                 self.failure.get_or_insert(error);
                 // Local source/proof failure is terminal for files, not for desktop
                 // input. Sender retires the pair and preserves its real receipt.
                 // A substituted/closed connection still fails the containing owner.
                 if error == Error::WrongConnection || q.is_closed() {
                     return Err(error);
+                }
+                if let Some(sync) = &mut self.sync_send {
+                    sync.stop();
                 }
                 sender.cancel(q)?;
                 self.stopped = true;
@@ -211,6 +232,7 @@ impl Slot {
             .as_ref()
             .is_none_or(|r| r.receiver.cleanup_finished())
             && self.sender.as_ref().is_none_or(Sender::cleanup_finished)
+            && (self.sync_send.is_none() || self.sync_cleanup.is_some())
     }
     fn try_finish_cleanup(&mut self) -> Option<Result<(), Error>> {
         if !self.stopped || self.pending.is_some() {
@@ -220,10 +242,22 @@ impl Slot {
             receiving
                 .collect()
                 .map(|result| result.map_err(|_| Error::Worker))
+        } else if let Some(sender) = &mut self.sender {
+            if let Some(sync) = &mut self.sync_send {
+                let job = sync
+                    .try_finish_cleanup(sender)
+                    .map(|result| result.map_err(crate::native_files::sync_send_error));
+                let source = sender.try_finish_cleanup();
+                self.sync_cleanup = match (job, source) {
+                    (Some(job), Some(source)) => Some(job.and(source)),
+                    _ => None,
+                };
+                self.sync_cleanup
+            } else {
+                sender.try_finish_cleanup()
+            }
         } else {
-            self.sender
-                .as_mut()
-                .map_or(Some(Ok(())), Sender::try_finish_cleanup)
+            Some(Ok(()))
         };
         if let Some(Err(error)) = result {
             self.failure.get_or_insert(error);
@@ -376,7 +410,7 @@ impl ControlledViewer {
     }
     fn admit_file_send(&mut self) -> Result<(), Error> {
         self.check().map_err(|_| Error::Closed)?;
-        if self.files.upload.pending.is_some() {
+        if self.files.upload.pending.is_some() || self.files.upload.sync_send.is_some() {
             return Err(Error::Busy);
         }
         if !self.files.upload.permits_source() || self.files.upload.stopped {
@@ -401,6 +435,9 @@ impl ControlledViewer {
     /// Collect only a complete report after the original source has been joined.
     /// This remains usable after close and cannot reopen a retired file lane.
     pub fn take_file_batch_report(&mut self) -> Option<Report> {
+        if self.files.upload.sync_send.is_some() {
+            return None;
+        }
         self.files
             .upload
             .sender
@@ -445,6 +482,9 @@ impl ControlledViewer {
     }
     /// This remains available after controller shutdown and never replays a file.
     pub fn take_file_result(&mut self) -> Option<Receipt> {
+        if self.files.upload.sync_send.is_some() {
+            return None;
+        }
         self.files
             .upload
             .sender

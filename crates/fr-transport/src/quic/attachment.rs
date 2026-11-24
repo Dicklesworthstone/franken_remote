@@ -827,8 +827,7 @@ impl MediaChannel {
                 && scope.selection.capabilities.iter().any(|c| {
                     c.name == fr_wire::files::DOWNLOAD_CAPABILITY
                         && c.version == fr_wire::files::DOWNLOAD_VERSION
-                }))
-        {
+                })) {
             FileDirection::ToController
         } else {
             FileDirection::ToHost

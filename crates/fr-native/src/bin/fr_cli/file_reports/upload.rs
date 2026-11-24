@@ -25,6 +25,20 @@ pub(crate) fn select(paths: &[PathBuf]) -> Result<Option<Selection>, Failure> {
         .map_err(selection_failure)
 }
 
+/// Pin a folder source without reading its entries. Only the original host
+/// advertisement, matching job ID and accepted control grant can start a scan.
+pub(crate) fn folder_source(
+    source: &crate::options::FolderSource,
+) -> Result<frd::native_files::UploadSelection, Failure> {
+    frd::native_files::UploadSelection::folder_job(&source.path, source.job_id).map_err(|_| {
+        Failure::new(
+            "files_sync_source_invalid",
+            "Choose an existing private source directory and the host's nonzero job ID. No folder scan or connection was started.",
+            2,
+        )
+    })
+}
+
 /// A bounded, content-free refusal for initial selection or descriptor cloning.
 pub(crate) fn selection_failure(refusal: SelectRefusal) -> Failure {
     let what = match refusal.reason {
@@ -133,6 +147,8 @@ pub(crate) struct Summary {
     pub(crate) command_requests: Vec<(u64, usize, usize)>,
     /// One original source's cleanup and progress, independent of publication.
     pub(crate) evidence: Option<SourceEvidence>,
+    /// Cumulative original standing-job outcomes; a settled round is not closure.
+    pub(crate) folder_job: Option<fr_files::sync::JobStatus>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceEvidence {
@@ -381,11 +397,52 @@ impl Summary {
             }
             out.push_str("]}");
         }
+        out.push_str(&self.folder_job_json());
         out
+    }
+    fn folder_job_json(&self) -> String {
+        let Some(job) = self.folder_job else {
+            return String::new();
+        };
+        let failure = job.failure.map_or_else(
+            || "null".to_owned(),
+            |error| crate::output::quoted(error.code()),
+        );
+        format!(
+            ",\"upload_folder_job\":{{\"id\":{},\"phase\":\"{}\",\"revision\":{},\"rounds_settled\":{},\"confirmed_publications\":{},\"confirmed_conflicts\":{},\"failure\":{failure},\"cleanup\":\"{}\"}}",
+            job.state.job_id,
+            super::download::phase_name(job.state.phase),
+            job.state.manifest_revision,
+            job.rounds_settled,
+            job.confirmed_publications,
+            job.confirmed_conflicts,
+            if job.cleanup_complete {
+                "finished"
+            } else {
+                "unconfirmed"
+            },
+        )
     }
     /// One sentence for the text completion.
     pub(crate) fn text(&self) -> String {
-        let mut text = self.transfer_text();
+        let mut text = self.folder_job.map_or_else(
+            || self.transfer_text(),
+            |job| {
+                format!(
+                    " Folder upload job {} is {} at revision {} with {} settled rounds and {} confirmed publications, including {} conflict copies. Source cleanup is {}.",
+                    job.state.job_id,
+                    super::download::phase_name(job.state.phase),
+                    job.state.manifest_revision,
+                    job.rounds_settled,
+                    job.confirmed_publications,
+                    job.confirmed_conflicts,
+                    if job.cleanup_complete { "finished" } else { "unconfirmed" },
+                )
+            },
+        );
+        if let Some(error) = self.folder_job.and_then(|job| job.failure) {
+            let _ = write!(text, " Folder job stopped: {}.", error.code());
+        }
         if let Some(evidence) = &self.evidence {
             let _ = write!(text, " Upload source cleanup: {}.", evidence.cleanup);
         }
@@ -502,6 +559,45 @@ impl Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn standing_upload_retains_cumulative_publications_and_original_failure() {
+        use fr_files::sync::{JobStatus, LiveError};
+        use fr_wire::sync_job_state::{ConflictPolicy, SyncDirection, SyncJobState, SyncPhase};
+
+        let summary = Summary {
+            folder_job: Some(JobStatus {
+                state: SyncJobState {
+                    job_id: 41,
+                    sync_direction: SyncDirection::ControllerToHost,
+                    conflict_policy: ConflictPolicy::KeepBoth,
+                    phase: SyncPhase::Cancelled,
+                    reason: Reason::Permission,
+                    entries_total: 1,
+                    entries_completed: 1,
+                    conflicts_kept: 1,
+                    bytes_total: 7,
+                    bytes_completed: 7,
+                    manifest_revision: 3,
+                },
+                failure: Some(LiveError::Cancelled),
+                confirmed_publications: 3,
+                confirmed_conflicts: 1,
+                rounds_settled: 2,
+                cleanup_complete: true,
+            }),
+            ..Summary::default()
+        };
+        let value = json(&summary);
+        assert_eq!(value["upload_folder_job"]["confirmed_publications"], 3);
+        assert_eq!(value["upload_folder_job"]["confirmed_conflicts"], 1);
+        assert_eq!(value["upload_folder_job"]["rounds_settled"], 2);
+        assert_eq!(value["upload_folder_job"]["failure"], "sync_cancelled");
+        assert_eq!(value["upload_folder_job"]["cleanup"], "finished");
+        assert!(summary.text().contains("3 confirmed publications"));
+        assert!(!summary.text().contains("nothing sent"));
+        assert!(json(&Summary::default()).get("upload_folder_job").is_none());
+    }
+
     /// No sent entries; `assert_eq!` prints the actual list on failure.
     const NOTHING_SENT: [(usize, u64, bool); 0] = [];
 

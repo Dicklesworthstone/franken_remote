@@ -192,6 +192,8 @@ enum ClipboardMode {
     FileDrop,
     FileDownload,
     FolderSync,
+    FolderSyncUpload,
+    FolderSyncUploadDuplex,
     FileDuplex,
     Combined,
     Microphone,
@@ -287,6 +289,8 @@ async fn fixture_with_recovery(
             | ClipboardMode::FileDrop
             | ClipboardMode::FileDownload
             | ClipboardMode::FolderSync
+            | ClipboardMode::FolderSyncUpload
+            | ClipboardMode::FolderSyncUploadDuplex
             | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
             | ClipboardMode::MicrophoneCombined
@@ -302,6 +306,8 @@ async fn fixture_with_recovery(
     if matches!(
         clipboard,
         ClipboardMode::FileDrop
+            | ClipboardMode::FolderSyncUpload
+            | ClipboardMode::FolderSyncUploadDuplex
             | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
             | ClipboardMode::MicrophoneCombined
@@ -314,7 +320,10 @@ async fn fixture_with_recovery(
     }
     if matches!(
         clipboard,
-        ClipboardMode::FileDownload | ClipboardMode::FileDuplex | ClipboardMode::FolderSync
+        ClipboardMode::FileDownload
+            | ClipboardMode::FileDuplex
+            | ClipboardMode::FolderSync
+            | ClipboardMode::FolderSyncUploadDuplex
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::DOWNLOAD_CAPABILITY.into(),
@@ -322,10 +331,23 @@ async fn fixture_with_recovery(
             required: false,
         });
     }
-    if clipboard == ClipboardMode::FileDuplex {
+    if matches!(
+        clipboard,
+        ClipboardMode::FileDuplex | ClipboardMode::FolderSyncUploadDuplex
+    ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::DUPLEX_CAPABILITY.into(),
             version: fr_wire::files::DUPLEX_VERSION,
+            required: false,
+        });
+    }
+    if matches!(
+        clipboard,
+        ClipboardMode::FolderSyncUpload | ClipboardMode::FolderSyncUploadDuplex
+    ) {
+        wire_capabilities.push(WireCapability {
+            name: fr_wire::sync_job_state::UPLOAD_CAPABILITY.into(),
+            version: fr_wire::sync_job_state::UPLOAD_VERSION,
             required: false,
         });
     }

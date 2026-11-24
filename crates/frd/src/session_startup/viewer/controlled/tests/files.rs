@@ -393,3 +393,5 @@ mod owners;
 mod download;
 
 mod duplex;
+
+mod upload_sync;

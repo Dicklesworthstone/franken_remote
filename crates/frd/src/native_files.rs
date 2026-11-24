@@ -9,9 +9,10 @@
 //!
 //! A batch is consumed once, in order, and stops at its first failure. Clipboard
 //! and files have independent consent, tickets, workers and cancellation. Neither
-//! grants authority to the other. There is no automatic replay, resumption,
-//! browsing, synchronization or picker UI. Native copy drops can submit fresh
-//! selections on the original upload intake. Status retains actual publication
+//! grants authority to the other. Explicit folder jobs reuse that original
+//! authority and bounded lane; their local choices are consumed once. There is
+//! no automatic reconnect replay or remote browsing. Native copy drops can submit
+//! fresh selections on an ordinary upload intake. Status retains actual publication
 //! separately from progress, refusal and cleanup, without names or contents.
 #[cfg(not(windows))]
 use crate::sys::rustix;
@@ -29,6 +30,7 @@ use std::{
     fs::File,
     io,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -106,6 +108,8 @@ impl DirectoryRefusal {
 pub struct Directory {
     directory: DropDirectory,
     limits: Limits,
+    /// Shared one-use acceptance across every startup-profile clone.
+    sync_job: Option<Arc<Mutex<Option<u64>>>>,
 }
 impl fmt::Debug for Directory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -179,7 +183,11 @@ impl Directory {
             }
             _ => DirectoryRefusal::Unavailable,
         })?;
-        Ok(Self { directory, limits })
+        Ok(Self {
+            directory,
+            limits,
+            sync_job: None,
+        })
     }
     /// A host-operator choice, never an option taken from the transfer manifest.
     /// The pinned directory and shared reservations survive changes on a clone;
@@ -188,6 +196,41 @@ impl Directory {
     pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
         self.directory = self.directory.with_conflict_policy(policy);
         self
+    }
+    /// Configure one locally selected upload job. Reconnecting cannot reuse
+    /// this choice; all directory clones share its one-use consumption.
+    pub fn with_sync_job(mut self, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
+        if job_id == 0 || self.sync_job.is_some() {
+            return Err(fr_files::sync::LiveError::InvalidConfig);
+        }
+        if self.directory.conflict_policy() != ConflictPolicy::KeepBoth {
+            return Err(fr_files::sync::LiveError::KeepBothRequired);
+        }
+        self.sync_job = Some(Arc::new(Mutex::new(Some(job_id))));
+        Ok(self)
+    }
+    /// A spent standing choice never becomes ordinary receive consent.
+    pub const fn requires_sync_job(&self) -> bool {
+        self.sync_job.is_some()
+    }
+    pub fn sync_job_id(&self) -> Option<u64> {
+        self.sync_job.as_ref().and_then(|job| {
+            *job.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        })
+    }
+    pub(crate) fn take_sync_job(&self) -> Result<Option<u64>, Absence> {
+        let Some(job) = &self.sync_job else {
+            return Ok(None);
+        };
+        if self.directory.conflict_policy() != ConflictPolicy::KeepBoth {
+            return Err(Absence::Unavailable);
+        }
+        job.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(Some)
+            .ok_or(Absence::Unavailable)
     }
     pub const fn limits(&self) -> Limits {
         self.limits
@@ -486,6 +529,9 @@ pub use intake::SendIntake;
 mod host_intake;
 pub use host_intake::HostSendIntake;
 mod download;
+mod upload;
+pub use upload::UploadSelection;
+pub(crate) use upload::sync_send_error;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod local;
 pub(crate) use download::HostDownload;

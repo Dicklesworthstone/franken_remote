@@ -96,7 +96,9 @@ pub struct RunOptions {
     pub send_control: Option<String>,
     /// Explicit one-way folder source for one original controlled connection.
     pub sync_source: Option<PathBuf>,
-    /// Nonzero job identifier that the receiving controller must accept.
+    /// Explicit private destination for a controller-to-host folder job.
+    pub sync_destination: Option<PathBuf>,
+    /// Nonzero host-configured job identifier that the controller must accept.
     pub sync_job: Option<u64>,
     /// Local collision handling for both files and whole trees. Absent: reject.
     pub files_conflict: Option<ConflictPolicy>,
@@ -244,6 +246,9 @@ impl RunOptions {
                 "--send" => options.send.push(PathBuf::from(value)),
                 "--send-control" => set(&mut options.send_control, value.to_owned())?,
                 "--sync-source" => set(&mut options.sync_source, PathBuf::from(value))?,
+                "--sync-destination" => {
+                    set(&mut options.sync_destination, PathBuf::from(value))?;
+                }
                 "--sync-job" => set(&mut options.sync_job, bytes(value)?)?,
                 "--files-conflict" => {
                     set(&mut options.files_conflict, files::parse_conflict(value)?)?;

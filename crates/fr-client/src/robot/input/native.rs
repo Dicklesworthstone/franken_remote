@@ -509,7 +509,7 @@ impl Ledger {
         self.encoded_with_effect(id, binding, space, sequence, false)
     }
     /// Record an explicitly encoded host-local mode transition. Its successful
-    /// receipt must be AppliedLocally, never an OS-submission claim. Ordinary
+    /// receipt must be `AppliedLocally`, never an OS-submission claim. Ordinary
     /// encoded actions continue to require a genuine native-submission result.
     pub fn encoded_local(
         &mut self,

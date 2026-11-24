@@ -550,6 +550,34 @@ impl StreamingViewer {
         self.clipboard = Some(app);
         Ok(control)
     }
+    /// Consume one explicit source only when the reverse job was negotiated.
+    /// The original controller must still accept the host's matching job ID.
+    pub(crate) fn configure_folder_upload(
+        &mut self,
+        selection: &crate::native_files::UploadSelection,
+    ) -> Result<crate::native_files::SendControl, crate::native_files::Absence> {
+        use crate::native_files::Absence;
+        if self.served
+            || self
+                .files
+                .as_ref()
+                .is_some_and(|lane| lane.has_send() || lane.has_receive())
+        {
+            return Err(Absence::Unavailable);
+        }
+        let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;
+        session.check().map_err(|_| Absence::Unavailable)?;
+        super::super::native_control::files_lane(&session.opened.selection)?;
+        if !fr_wire::sync_job_state::upload_selected(&session.opened.selection) {
+            return Err(Absence::NotNegotiated);
+        }
+        let source = selection.take()?;
+        let control = crate::native_files::SendControl::new();
+        self.files
+            .get_or_insert_with(files::Lane::default)
+            .add_folder_upload(source, control.clone())?;
+        Ok(control)
+    }
     /// Hand ONE attempt's explicit selection to the controller's drop lane,
     /// once, before service. Typed absence unless this session selected the
     /// lane (host `--files`). Nothing opens or reads now: the
@@ -644,7 +672,12 @@ impl StreamingViewer {
         request: crate::native_files::ReceiveRequest,
     ) -> Result<crate::native_files::ReceiveControl, crate::native_files::Absence> {
         use crate::native_files::Absence;
-        if self.served || self.files.as_ref().is_some_and(files::Lane::has_receive) {
+        if self.served
+            || self
+                .files
+                .as_ref()
+                .is_some_and(|lane| lane.has_receive() || lane.has_folder_upload())
+        {
             return Err(Absence::Unavailable);
         }
         let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;

@@ -1,0 +1,135 @@
+//! Explicit local source consent for one reverse folder job; never saved or replayed.
+use super::Failure;
+use std::path::{Component, PathBuf};
+
+pub struct FolderSource {
+    pub path: PathBuf,
+    pub job_id: u64,
+}
+
+pub(super) fn accept(
+    path: Option<PathBuf>,
+    job_id: Option<u64>,
+    control: bool,
+    conflicting_selection: bool,
+) -> Result<Option<FolderSource>, Failure> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Err(Failure::new(
+            "files_sync_platform_unavailable",
+            "Standing folder sources require the native Linux or macOS client.",
+            2,
+        ));
+    }
+    if !control || conflicting_selection {
+        return Err(Failure::new(
+            "files_sync_selection_conflict",
+            "A standing upload requires --control and its own --sync-source. Omit ordinary sends, file pickers, drops, commands and downloads for this original job.",
+            2,
+        ));
+    }
+    if !path.is_absolute()
+        || path.as_os_str().len() > 4096
+        || path.components().any(|part| part == Component::ParentDir)
+    {
+        return Err(Failure::new(
+            "files_sync_source_invalid",
+            "Select one existing absolute private source directory without parent traversal.",
+            2,
+        ));
+    }
+    let job_id = job_id.filter(|id| *id != 0).ok_or_else(|| {
+        Failure::new(
+            "files_sync_job_required",
+            "--sync-source requires the nonzero --sync-job ID advertised by the host.",
+            2,
+        )
+    })?;
+    Ok(Some(FolderSource { path, job_id }))
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use crate::options::{Command, parse};
+    use std::path::Path;
+
+    fn command(extra: &str) -> Result<crate::options::Options, crate::Failure> {
+        parse(
+            &format!("connect nHOST --experimental-native --display only {extra}")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn reverse_source_is_an_explicit_controlled_job_without_download_consent() {
+        let Command::Connect(connection) =
+            command("--control --sync-source /private/source --sync-job 41")
+                .unwrap()
+                .command
+        else {
+            panic!("connection");
+        };
+        assert!(connection.uploads());
+        let source = connection.upload.sync_source.as_ref().unwrap();
+        assert_eq!(source.path, Path::new("/private/source"));
+        assert_eq!(source.job_id, 41);
+        assert!(connection.upload.paths.is_empty() && connection.receive.is_none());
+        assert!(!connection.upload.file_drop && !connection.upload.file_commands);
+    }
+
+    #[test]
+    fn programmatic_native_options_cannot_discard_another_selection() {
+        for conflict in 0..7 {
+            let Command::Connect(mut connection) =
+                command("--control --sync-source /private/source --sync-job 41")
+                    .unwrap()
+                    .command
+            else {
+                panic!("connection");
+            };
+            assert!(connection.validate_folder_source().is_ok());
+            match conflict {
+                0 => connection.control = false,
+                1 => connection.upload.paths.push("/private/other".into()),
+                2 => connection.upload.choose_files = true,
+                3 => connection.upload.file_drop = true,
+                4 => connection.upload.file_commands = true,
+                5 => connection.choose_receive_directory = true,
+                _ => {
+                    let Command::Connect(other) =
+                        command("--control --receive /private/destination")
+                            .unwrap()
+                            .command
+                    else {
+                        panic!("connection");
+                    };
+                    connection.receive = other.receive;
+                }
+            }
+            assert!(connection.validate_folder_source().is_err());
+        }
+    }
+
+    #[test]
+    fn reverse_source_cannot_borrow_unrelated_local_selections_or_authority() {
+        for extra in [
+            "--view-only --sync-source /private/source --sync-job 41",
+            "--control --sync-source /private/source",
+            "--control --sync-source relative --sync-job 41",
+            "--control --sync-source /private/../source --sync-job 41",
+            "--control --sync-source /private/source --sync-job 0",
+            "--control --sync-source /private/source --sync-job 41 --send /private/file",
+            "--control --sync-source /private/source --sync-job 41 --choose-files",
+            "--control --sync-source /private/source --sync-job 41 --file-drop",
+            "--control --sync-source /private/source --sync-job 41 --file-commands",
+            "--control --sync-source /private/source --sync-job 41 --receive /private/destination",
+            "--control --sync-source /private/source --sync-job 41 --choose-receive-directory",
+        ] {
+            assert!(command(extra).is_err(), "{extra}");
+        }
+    }
+}

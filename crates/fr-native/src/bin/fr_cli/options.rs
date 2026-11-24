@@ -1,6 +1,10 @@
 use super::Failure;
 use std::{collections::BTreeSet, path::PathBuf};
 
+#[path = "options/sync_source.rs"]
+mod sync_source;
+pub use sync_source::FolderSource;
+
 #[path = "options/doctor.rs"]
 mod doctor;
 pub use doctor::{DoctorOptions, NativeDoctorOptions};
@@ -204,13 +208,35 @@ pub struct PickOnly {
 }
 /// The longest `--app-notice`, in printable ASCII bytes (the pickers' label bound).
 pub const MAX_APP_NOTICE: usize = 384;
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(feature = "linux-desktop", feature = "macos-desktop", test))]
 impl Connection {
     pub fn uploads(&self) -> bool {
         self.upload.choose_files
             || self.upload.file_drop
             || self.upload.file_commands
             || !self.upload.paths.is_empty()
+            || self.upload.sync_source.is_some()
+    }
+    /// Native setup also validates programmatic options before pinning roots.
+    /// A standing source must never silently discard another local selection.
+    pub fn validate_folder_source(&self) -> Result<(), Failure> {
+        if self.upload.sync_source.is_some()
+            && (!self.control
+                || !self.upload.paths.is_empty()
+                || self.upload.choose_files
+                || self.upload.file_drop
+                || self.upload.file_commands
+                || self.receive.is_some()
+                || self.choose_receive_directory
+                || self.pick.is_some())
+        {
+            return Err(Failure::new(
+                "files_sync_selection_conflict",
+                "A standing folder upload requires its original controlling connection without another file selection.",
+                2,
+            ));
+        }
+        Ok(())
     }
 }
 #[allow(dead_code)]
@@ -218,6 +244,8 @@ pub struct UploadOptions {
     /// `--send PATH` (repeatable, with `--control` only): files or directories
     /// explicitly selected for the original upload. Empty selects no source.
     pub paths: Vec<PathBuf>,
+    /// One pinned source selected for an explicitly accepted host folder job.
+    pub sync_source: Option<FolderSource>,
     /// `--choose-files`: a native local picker before any connection opens.
     /// Its explicit selection becomes this original upload, never a reconnect choice.
     pub choose_files: bool,
@@ -831,6 +859,7 @@ fn parse_command(
     let mut file_commands = false;
     let mut receive = None;
     let mut sync_job = None;
+    let mut sync_source = None;
     let mut choose_receive_directory = false;
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
@@ -929,6 +958,7 @@ fn parse_command(
             "--file-drop" if connect => file_drop = true,
             "--file-commands" if connect => file_commands = true,
             "--receive" if connect => receive = Some(next_path(args, &mut index)?),
+            "--sync-source" if connect => sync_source = Some(next_path(args, &mut index)?),
             "--sync-job" if connect => {
                 sync_job = Some(receive::job_id(next_arg(args, &mut index)?)?);
             }
@@ -979,6 +1009,7 @@ fn parse_command(
                 || file_commands
                 || choose_receive_directory
                 || sync_job.is_some()
+                || sync_source.is_some()
                 || receive.is_some()))
     {
         return Err(usage());
@@ -998,7 +1029,25 @@ fn parse_command(
         receive_max_session_bytes,
         receive_keep_both,
     )?;
-    let receive = receive::accept_job(receive, sync_job)?;
+    let sync_source = sync_source::accept(
+        sync_source,
+        sync_job,
+        control,
+        !send.is_empty()
+            || choose_files
+            || file_drop
+            || file_commands
+            || receive.is_some()
+            || choose_receive_directory,
+    )?;
+    let receive = receive::accept_job(
+        receive,
+        if sync_source.is_some() {
+            None
+        } else {
+            sync_job
+        },
+    )?;
     if (hosts_file.is_some() && !saved) || (choose_host && (saved || by_name)) {
         return Err(usage());
     }
@@ -1167,6 +1216,7 @@ fn parse_command(
                 microphone,
                 upload: UploadOptions {
                     paths: send,
+                    sync_source,
                     choose_files,
                     file_drop,
                     file_commands,

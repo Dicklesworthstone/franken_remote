@@ -502,6 +502,22 @@ impl Desktop {
             .as_ref()
             .and_then(crate::file_progress::clipboard::Owner::control)
     }
+    /// Accept one standing upload job with the same source and control owner.
+    /// Its progress handle remains valid through cancellation and cleanup.
+    pub fn configure_folder_upload(
+        &mut self,
+        selection: &frd::native_files::UploadSelection,
+    ) -> Result<frd::native_files::SendControl, Error> {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
+        let control = observer
+            .configure_folder_upload(selection)
+            .map_err(Error::Files)?;
+        self.file_controls = Some(control.clone());
+        Ok(control)
+    }
     /// `fr connect --control --send`: hand this attempt's explicit local
     /// selection to the controller's drop lane before service. Nothing is read
     /// here; no source starts before the grant and the host's one-use offer.

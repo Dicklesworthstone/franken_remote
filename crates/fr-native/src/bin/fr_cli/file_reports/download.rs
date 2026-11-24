@@ -258,7 +258,7 @@ impl Summary {
     }
 }
 
-const fn phase_name(phase: fr_wire::sync_job_state::SyncPhase) -> &'static str {
+pub(super) const fn phase_name(phase: fr_wire::sync_job_state::SyncPhase) -> &'static str {
     use fr_wire::sync_job_state::SyncPhase;
     match phase {
         SyncPhase::Advertised => "advertised",

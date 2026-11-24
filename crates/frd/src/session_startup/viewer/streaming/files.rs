@@ -12,20 +12,36 @@ use fr_files::{
 };
 
 mod download;
+mod upload;
 
 /// At most one explicitly selected source and destination on this controller.
 /// Requests and status handles are independent; neither creates the other.
 #[derive(Default)]
 pub(in crate::session_startup) struct Lane {
     send: Option<Box<Sending>>,
+    folder_upload: Option<Box<upload::Lane>>,
     receive: Option<Box<download::Lane>>,
 }
 impl Lane {
     pub(in crate::session_startup) fn has_send(&self) -> bool {
-        self.send.is_some()
+        self.send.is_some() || self.folder_upload.is_some()
+    }
+    pub(in crate::session_startup) fn has_folder_upload(&self) -> bool {
+        self.folder_upload.is_some()
     }
     pub(in crate::session_startup) fn has_receive(&self) -> bool {
         self.receive.is_some()
+    }
+    pub(in crate::session_startup) fn add_folder_upload(
+        &mut self,
+        source: fr_files::sync::SourceConfig,
+        control: SendControl,
+    ) -> Result<(), Absence> {
+        if self.has_send() || self.has_receive() {
+            return Err(Absence::Unavailable);
+        }
+        self.folder_upload = Some(Box::new(upload::Lane::new(source, control)));
+        Ok(())
     }
     pub(in crate::session_startup) fn add_send(
         &mut self,
@@ -41,7 +57,7 @@ impl Lane {
         self.install(Sending::deferred(Policy::default(), control))
     }
     fn install(&mut self, sending: Sending) -> Result<(), Absence> {
-        if self.send.is_some() {
+        if self.has_send() {
             return Err(Absence::Unavailable);
         }
         self.send = Some(Box::new(sending));
@@ -53,6 +69,9 @@ impl Lane {
         }
     }
     pub(in crate::session_startup) fn close_intake(&self) {
+        if let Some(lane) = &self.folder_upload {
+            lane.stop();
+        }
         if let Some(send) = &self.send {
             send.close_intake();
         }
@@ -62,13 +81,16 @@ impl Lane {
         request: crate::native_files::ReceiveRequest,
         control: crate::native_files::ReceiveControl,
     ) -> Result<(), Absence> {
-        if self.receive.is_some() {
+        if self.receive.is_some() || self.has_folder_upload() {
             return Err(Absence::Unavailable);
         }
         self.receive = Some(Box::new(download::Lane::new(request, control)));
         Ok(())
     }
     pub(in crate::session_startup) fn viewer(&mut self, viewer: &mut ControlledViewer) {
+        if let Some(lane) = &mut self.folder_upload {
+            lane.viewer(viewer);
+        }
         if let Some(lane) = &mut self.send {
             lane.viewer(viewer);
         }
@@ -77,6 +99,9 @@ impl Lane {
         }
     }
     pub(in crate::session_startup) fn observe(&self, viewer: &ControlledViewer) {
+        if let Some(lane) = &self.folder_upload {
+            lane.observe(viewer);
+        }
         if let Some(lane) = &self.send {
             lane.observe(viewer);
         }
@@ -85,6 +110,9 @@ impl Lane {
         }
     }
     pub(in crate::session_startup) fn without_control(&mut self) {
+        if let Some(lane) = &mut self.folder_upload {
+            lane.without_control();
+        }
         if let Some(lane) = &mut self.send {
             lane.close_intake();
             lane.request = None;
