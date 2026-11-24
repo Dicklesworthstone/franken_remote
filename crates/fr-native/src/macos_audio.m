@@ -23,8 +23,6 @@ enum {
 };
 #define FR_AUDIO_BUFFERS 3
 #define FR_AUDIO_MAX_OWNERS 4
-#define FR_AUDIO_MAX_FRAMES 961
-#define FR_AUDIO_QUEUE_FRAMES 1920
 
 typedef struct {
     uint64_t samples;
@@ -46,7 +44,7 @@ typedef struct {
     mach_timebase_info_data_t timebase;
     FrAudioSleepOffset original_sleep_offset;
     uint32_t channels;
-    uint32_t buffer_bytes;
+    uint32_t largest_frames;
     uint64_t lead;
     uint64_t submitted_end;
     AudioQueueBufferRef buffers[FR_AUDIO_BUFFERS];
@@ -130,11 +128,8 @@ static int device_properties(FrAudioOutput *owner, bool initial) {
         stream_latencies[i] = value;
     }
     uint64_t frames = (uint64_t)buffer + latency + safety + stream_latency;
-    double lead = ceil((double)frames * 48000.0 / rate) + 240.0;
-    // Include the largest drift-corrected 20 ms frame inside the 40 ms bound.
-    // A high-latency device (including many wireless outputs) is refused.
-    if (!isfinite(lead) || lead < 240.0 ||
-        lead > FR_AUDIO_QUEUE_FRAMES - FR_AUDIO_MAX_FRAMES)
+    uint64_t lead;
+    if (!fr_audio_output_lead(frames, rate, owner->largest_frames, &lead))
         return FR_AUDIO_BOUNDS;
     UInt32 stream_count = bytes / sizeof streams[0];
     if (!initial) {
@@ -164,7 +159,7 @@ static int device_properties(FrAudioOutput *owner, bool initial) {
     memcpy(owner->streams, streams, bytes);
     memcpy(owner->stream_latencies, stream_latencies,
            stream_count * sizeof stream_latencies[0]);
-    owner->lead = (uint64_t)lead;
+    owner->lead = lead;
     return FR_AUDIO_OK;
 }
 
@@ -209,8 +204,8 @@ int fr_macos_audio_destroy(void *handle) {
 int fr_macos_audio_create(uint32_t channels, uint32_t largest_frames, void **out) {
     if (!out) return FR_AUDIO_CONFIG;
     *out = NULL;
-    if ((channels != 1 && channels != 2) || largest_frames < 2 ||
-        largest_frames > FR_AUDIO_MAX_FRAMES) return FR_AUDIO_CONFIG;
+    if ((channels != 1 && channels != 2) ||
+        (largest_frames != FR_AUDIO_MAX_10MS_FRAMES && largest_frames != FR_AUDIO_MAX_20MS_FRAMES)) return FR_AUDIO_CONFIG;
     unsigned count = atomic_load_explicit(&owners, memory_order_acquire);
     do {
         if (count >= FR_AUDIO_MAX_OWNERS) return FR_AUDIO_BUSY;
@@ -227,7 +222,7 @@ int fr_macos_audio_create(uint32_t channels, uint32_t largest_frames, void **out
     if (mach_timebase_info(&owner->timebase) != KERN_SUCCESS ||
         !sleep_offset(owner, &owner->original_sleep_offset)) return FR_AUDIO_CLOCK;
     owner->channels = channels;
-    owner->buffer_bytes = largest_frames * channels * sizeof(int16_t);
+    owner->largest_frames = largest_frames;
     if (current_device(&owner->device) != FR_AUDIO_OK || owner->device == kAudioObjectUnknown)
         return FR_AUDIO_UNAVAILABLE;
     int checked = device_properties(owner, true);
@@ -251,8 +246,9 @@ int fr_macos_audio_create(uint32_t channels, uint32_t largest_frames, void **out
                               &owner->uid, sizeof owner->uid) != noErr ||
         AudioQueueCreateTimeline(owner->queue, &owner->timeline) != noErr)
         return FR_AUDIO_UNAVAILABLE;
+    uint32_t buffer_bytes = largest_frames * channels * sizeof(int16_t);
     for (unsigned i = 0; i < FR_AUDIO_BUFFERS; ++i) {
-        if (AudioQueueAllocateBuffer(owner->queue, owner->buffer_bytes, &owner->buffers[i]) != noErr ||
+        if (AudioQueueAllocateBuffer(owner->queue, buffer_bytes, &owner->buffers[i]) != noErr ||
             !owner->buffers[i]) return FR_AUDIO_ALLOC;
     }
     // Silent startup only, enough to exercise the real queue clock. Never count
@@ -297,10 +293,9 @@ int fr_macos_audio_submit(void *handle, const int16_t *pcm, uint32_t samples,
     FrAudioOutput *owner = handle;
     if (!owner || !pcm || !permission ||
         atomic_load_explicit(&owner->closed, memory_order_acquire)) return FR_AUDIO_CLOSED;
-    if (samples == 0 || samples > FR_AUDIO_MAX_FRAMES || start > end || end - start != samples ||
+    if (samples == 0 || samples > owner->largest_frames || start > end || end - start != samples ||
         start < owner->submitted_end || end > UINT64_C(9007199254740992)) return FR_AUDIO_CONFIG;
     uint32_t bytes = samples * owner->channels * sizeof(int16_t);
-    if (bytes > owner->buffer_bytes) return FR_AUDIO_BOUNDS;
     unsigned slot = FR_AUDIO_BUFFERS;
     for (unsigned i = 0; i < FR_AUDIO_BUFFERS; ++i) {
         bool expected = false;

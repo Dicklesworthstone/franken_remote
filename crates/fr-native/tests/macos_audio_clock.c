@@ -4,6 +4,22 @@
 #include <assert.h>
 
 int main(void) {
+    uint64_t lead;
+    // A 1024-frame buffer at 48 kHz fits a negotiated 10 ms packet. The
+    // identical output must still refuse a 20 ms packet (1264 + 961 > 1920).
+    assert(fr_audio_output_lead(1024, 48000, 481, &lead) && lead == 1264);
+    assert(!fr_audio_output_lead(1024, 48000, 961, &lead));
+    for (uint32_t packet = 481; packet <= 961; packet += 480) {
+        uint64_t limit = 1920 - packet - 240;
+        assert(fr_audio_output_lead(limit, 48000, packet, &lead));
+        assert(lead + packet == 1920);
+        assert(!fr_audio_output_lead(limit + 1, 48000, packet, &lead));
+    }
+    assert(fr_audio_output_lead(1024, 44100, 481, &lead) && lead == 1355);
+    assert(!fr_audio_output_lead(1, NAN, 481, &lead));
+    assert(!fr_audio_output_lead(UINT64_MAX, 8000, 481, &lead));
+    assert(!fr_audio_output_lead(1, 48000, 480, &lead));
+
     FrAudioSleepOffset original, current;
     assert(fr_audio_sleep_offset(110, 102, 114, 1, 1, &original));
     assert(original.lower == 8 && original.upper == 12);
