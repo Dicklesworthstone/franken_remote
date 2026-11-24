@@ -41,18 +41,19 @@ try:
                 time.sleep(.35)
         elif frame==2 and not forced:
             time.sleep(60 if MODE=='stall' else .35)
-        rate_recovery=MODE in ('rate-at-recovery','rate-deferred-recovery')
+        rate_recovery=MODE in ('rate-at-recovery','rate-deferred-recovery','path-deferred-recovery')
+        cut=1_200_000 if MODE=='path-deferred-recovery' else 1_000_000
         if rate_recovery and frame==2:
             # A static observation retains the requested rate without applying
             # it. This still retires candidate 2 and preserves reference 1.
-            assert k==20 and not forced and target==1_000_000 and last==1
+            assert k==20 and not forced and target==cut and last==1
             reply(h,279,struct.pack('>QQQI',frame,last,observed,bitrate))
             continue
         if rate_recovery and frame==3:
             # The original source recovery scheduler must supply the force bit;
             # a legacy capture would cancel the pending target at this boundary.
-            assert k==20 and forced and target==1_000_000
-            if MODE=='rate-deferred-recovery':
+            assert k==20 and forced and target==cut
+            if MODE in ('rate-deferred-recovery','path-deferred-recovery'):
                 # Inject an old-rate reply to exercise the native dwell contract.
                 # Request metadata is never proof of an actual reconfiguration.
                 target=bitrate
@@ -61,6 +62,9 @@ try:
             # Generation installation must explicitly supersede a deferred
             # old-scope target before the next ordinary capture.
             assert k==20 and target==bitrate==2_000_000
+        if MODE=='path-deferred-recovery' and frame==4:
+            # The same connection still owns the deferred path-pressure cut.
+            assert k==20 and target==cut and bitrate==2_000_000
         is_idr=last is None or changed_rate or (forced and MODE not in ('ignore-force','late-ignore-force'))
         reference=0 if is_idr else last
         payload=PARAMETERS if is_idr else b'synthetic-dependent'

@@ -862,6 +862,14 @@ unconfirmed until the original result supplies a valid IDR. Idle or unknown
 path evidence cannot justify an increase and withdraws an unsent optimistic
 probe. Sampling cannot make a stale picture fresh.
 
+On a private native connection, ACKs from a draining flight during reference
+recovery cannot justify raising the bitrate of the replacement IDR. Healthy
+path dwell starts again after decoder startup. A measured transport-path cut
+that the encoder deferred through the recovery IDR remains pending on that same
+connection. Installing a new decoder generation clears proposals based on the
+old sender or decoder. Normal capture credit and native IDR confirmation still
+govern when any retained cut takes effect.
+
 Validation: 43 tests compiling the production path tracker, path-activity
 telemetry and bitrate policy passed, including five new recovery-sampling
 regressions. Three additional real TLS/UDP service regressions exercise the

@@ -909,8 +909,13 @@ struct VideoServices<'a, S> {
 impl<S> VideoServices<'_, S> {
     /// Sampling continues while a failed reference waits for recovery, using
     /// this same connection and rate owner. It never starts a capture.
-    fn observe_path(&mut self, q: &QuicRecords, current: u64) -> Result<(), Error> {
-        path_rate::observe(
+    fn observe_path(
+        &mut self,
+        view: path_rate::View,
+        q: &QuicRecords,
+        current: u64,
+    ) -> Result<(), Error> {
+        view.observe(
             self.path,
             self.bitrate.as_deref_mut(),
             q.path_load(),
@@ -1189,7 +1194,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
         // queue until the session's own records expire behind them (fr-7al9).
         // Below about half the encoder's rate skipping is not enough: a queue
         // the path keeps holding lowers the rate toward what it delivers.
-        self.observe_path(q, current)?;
+        self.observe_path(path_rate::View::Streaming, q, current)?;
         let credit = self.sender.stream_credit(self.capacity);
         let interval = self.capture_interval(current, credit, observation)?;
         let wake = self.input_wake.due(

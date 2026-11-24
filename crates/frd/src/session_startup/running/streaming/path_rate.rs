@@ -6,28 +6,52 @@
 //! function grants no capture credit, freshness, or authority. Call only after
 //! the session's current permission and original deadline checks.
 use crate::media::shared_publisher::path_queue::PathQueue;
-use fr_media::bitrate::{Controller, Error};
+use fr_media::bitrate::{Controller, Error, PathEvidence};
 use fr_transport::quic::PathLoad;
 
-pub(super) fn observe(
-    path: &mut PathQueue,
-    bitrate: Option<&mut Controller>,
-    load: Option<PathLoad>,
-    now: u64,
-) -> Result<(), Error> {
-    path.observe(load, now);
-    if let Some(bitrate) = bitrate {
-        bitrate.observe_path_evidence(now, path.evidence(now))?;
+#[derive(Clone, Copy)]
+pub(super) enum View {
+    Streaming,
+    Recovering,
+}
+
+impl View {
+    pub(super) fn observe(
+        self,
+        path: &mut PathQueue,
+        bitrate: Option<&mut Controller>,
+        load: Option<PathLoad>,
+        now: u64,
+    ) -> Result<(), Error> {
+        path.observe(load, now);
+        if let Some(bitrate) = bitrate {
+            let evidence = match (self, path.evidence(now)) {
+                // Acknowledgements can drain the old flight or unrelated
+                // reliable traffic before the replacement IDR is decodable.
+                (Self::Recovering, PathEvidence::Clear) => PathEvidence::Unknown,
+                (_, evidence) => evidence,
+            };
+            bitrate.observe_path_evidence(now, evidence)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fr_media::bitrate::{PathEvidence, Reason};
+    use fr_media::bitrate::Reason;
 
     const INITIAL: u32 = 2_000_000;
+
+    fn observe(
+        path: &mut PathQueue,
+        bitrate: Option<&mut Controller>,
+        load: Option<PathLoad>,
+        at: u64,
+    ) -> Result<(), Error> {
+        View::Recovering.observe(path, bitrate, load, at)
+    }
 
     fn load(rtt: u64, bytes: u64, packets: u64) -> PathLoad {
         PathLoad {
@@ -194,6 +218,57 @@ mod tests {
             assert!(bitrate.pending().is_none());
             assert_eq!(bitrate.begin_capture().unwrap().bitrate(), applied);
         }
+    }
+
+    fn busy_ack(at: u64) -> PathLoad {
+        let packets = at / 10_000;
+        PathLoad {
+            busy_packets_acked: packets,
+            busy_acked_at_us: Some(at),
+            ..load(5_000, 12_000, packets)
+        }
+    }
+
+    #[test]
+    fn busy_acks_during_recovery_cannot_raise_the_rate_of_the_replacement_idr() {
+        let mut path = PathQueue::default();
+        let mut bitrate = reduced();
+        let applied = bitrate.applied_bitrate();
+        for at in (200_000..=4_200_000).step_by(10_000) {
+            View::Streaming
+                .observe(&mut path, Some(&mut bitrate), Some(busy_ack(at)), at)
+                .unwrap();
+        }
+        assert_eq!(bitrate.pending().unwrap().reason(), Reason::Headroom);
+        for at in (4_210_000..=9_210_000).step_by(10_000) {
+            View::Recovering
+                .observe(&mut path, Some(&mut bitrate), Some(busy_ack(at)), at)
+                .unwrap();
+            assert_eq!(path.evidence(at), PathEvidence::Clear, "real ACK progress");
+            assert_eq!(bitrate.pending(), None);
+        }
+        let idr = bitrate.begin_capture().unwrap();
+        assert_eq!(idr.bitrate(), applied);
+        bitrate
+            .complete_capture(idr, applied, true, 9_210_000)
+            .unwrap();
+
+        // The restored decoder gets a new, full healthy interval.
+        for at in (9_220_000..13_220_000).step_by(10_000) {
+            View::Streaming
+                .observe(&mut path, Some(&mut bitrate), Some(busy_ack(at)), at)
+                .unwrap();
+            assert_eq!(bitrate.pending(), None);
+        }
+        View::Streaming
+            .observe(
+                &mut path,
+                Some(&mut bitrate),
+                Some(busy_ack(13_220_000)),
+                13_220_000,
+            )
+            .unwrap();
+        assert_eq!(bitrate.pending().unwrap().reason(), Reason::Headroom);
     }
 
     #[test]

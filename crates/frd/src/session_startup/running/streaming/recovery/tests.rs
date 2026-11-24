@@ -397,6 +397,11 @@ fn recovery_idr_can_defer_the_cut_without_claiming_it_or_replaying_old_scope_int
     recover_on_original_owners(true, "rate-deferred-recovery", Some(2_000_000));
 }
 
+#[test]
+fn recovery_idr_deferral_preserves_the_original_paths_congestion_cut() {
+    recover_on_original_owners(true, "path-deferred-recovery", Some(1_200_000));
+}
+
 /// Seed a known pressure proposal before the peer requests recovery. The source
 /// fixture either applies it on frame 2 or defers it through an unchanged result.
 /// This tests real IPC/result ownership, not a network estimator.
@@ -459,8 +464,29 @@ fn recover_on_original_owners(metrics: bool, mode: &'static str, expected_bitrat
         // A loss burst plus receive silence outlives the reference deadline.
         // Start the canonical loop only after this real timer elapsed, so its
         // normal selective repair cannot make the intentionally lost frame whole.
-        asupersync::time::sleep(c.now(), Duration::from_millis(150)).await;
-        if expected_bitrate.is_some() {
+        let delay = if mode == "path-deferred-recovery" {
+            210
+        } else {
+            150
+        };
+        asupersync::time::sleep(c.now(), Duration::from_millis(delay)).await;
+        if mode == "path-deferred-recovery" {
+            host.enable_adaptive_capture(Duration::from_millis(200))
+                .unwrap();
+            host.stream.enable_adaptive_bitrate().unwrap();
+            // Seed only the estimator input. Production owners carry the cut
+            // over the original source IPC and decoder-generation change.
+            let budget = host.stream.bitrate.as_mut().unwrap();
+            let current = now(&h).unwrap();
+            let queued = fr_media::bitrate::PathEvidence::Queued {
+                delivered_bits_per_second: 0,
+            };
+            budget
+                .observe_path_evidence(current - 200_000, queued)
+                .unwrap();
+            budget.observe_path_evidence(current, queued).unwrap();
+            assert_eq!(budget.pending().unwrap().bitrate(), 1_200_000);
+        } else if expected_bitrate.is_some() {
             request_lower_bitrate(&mut host, now(&h).unwrap());
         }
         let stop = viewer.control();

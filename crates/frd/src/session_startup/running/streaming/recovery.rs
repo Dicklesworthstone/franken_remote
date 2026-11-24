@@ -128,7 +128,11 @@ fn install_evidence(host: &mut StreamingHost) -> Result<(), Error> {
         controller.reset_receiver_evidence();
     }
     if let Some(controller) = &mut host.stream.bitrate {
-        controller.reset_evidence().map_err(bitrate_error)?;
+        // Only the decoder generation changed. The original connection
+        // still owns its measured path pressure and any deferred path cut.
+        controller
+            .reset_receiver_evidence()
+            .map_err(bitrate_error)?;
     }
     let session = host.host.session()?;
     let view = host
@@ -253,7 +257,8 @@ impl<S: Services> Admission<'_, S> {
                     .check()
                     .map_err(Error::Media)?
                     .as_micros();
-                self.video.observe_path(q, current)?;
+                self.video
+                    .observe_path(path_rate::View::Recovering, q, current)?;
                 Ok(())
             }
             result => result,
@@ -275,7 +280,8 @@ impl<S: Services> Admission<'_, S> {
             .check()
             .map_err(Error::Media)?
             .as_micros();
-        self.video.observe_path(q, current)?;
+        self.video
+            .observe_path(path_rate::View::Recovering, q, current)?;
         if let Some(local) = &mut self.local_failure
             && !local.notified
         {
@@ -574,13 +580,14 @@ impl<S: Services> Services for Waiting<'_, S> {
         // already scheduled recovery capture can carry a newly justified cut;
         // idle/unknown samples also withdraw stale optimistic probes.
         let current = self.control.check().map_err(Error::Media)?.as_micros();
-        path_rate::observe(
-            self.path,
-            self.bitrate.as_deref_mut(),
-            q.path_load(),
-            current,
-        )
-        .map_err(bitrate_error)
+        path_rate::View::Recovering
+            .observe(
+                self.path,
+                self.bitrate.as_deref_mut(),
+                q.path_load(),
+                current,
+            )
+            .map_err(bitrate_error)
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
         self.check().map_err(|_| ())?;
