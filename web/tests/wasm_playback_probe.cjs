@@ -127,7 +127,7 @@ test("the public sample's exact hvcC and six complete access units retain their 
     const sample = f.window.FrankenHevcProbeSample;
     const digest = createHash("sha256").update(sample.parameters("1").hvcc);
     for (let index = 0; index < 6; index++) digest.update(sample.picture(index));
-    assert.equal(digest.digest("hex"), "c7ba68e2ca69d08df7116a26573d1036d7b3ed599095e7520b700812c92c8d87");
+    assert.equal(digest.digest("hex"), "2ea5344208a06d5c37e9dfef94372d7fd29dcbf21244e8c644d92dd190a63959");
 });
 
 test("the fixed sample passes real Rust admission through idle, burst, reset and positive cleanup", async () => {

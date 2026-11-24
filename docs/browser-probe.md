@@ -74,14 +74,24 @@ ffmpeg -nostdin -v error -i sample.mp4 -f framemd5 decoded.framemd5
 ```
 
 The existing extraction helpers in `spikes/browser-hevc/run.py` decode ffprobe
-hex records and derive the codec string. The sample contains one IDR followed
+hex records and derive the codec string. On the tested libx265 build, the
+FFmpeg color options above left SPS VUI primaries and transfer unspecified
+(value 2). The fixture explicitly describes both fields as BT.709 (value 1):
+within this exact 111-byte `hvcC`, bytes 87 and 88 each change from `0x40` to
+`0x20`. Every other configuration byte and all six compressed pictures stay
+bit-exact. These offsets describe this fixed sample, not a general SPS parser.
+The original unspecified VUI is rejected by the production Rust owner; its
+color checks remain unchanged. No remux or regeneration is claimed for this
+metadata correction.
+
+The sample contains one IDR followed
 by five P pictures, with no B frames, reordering or in-band parameter sets.
 Its `hvcC` is 111 bytes; the access units are 7,773, 1,707, 2,343, 2,288, 2,411
 and 2,369 bytes. The SHA-256 of the exact `hvcC` followed by these six access
 units is:
 
 ```text
-c7ba68e2ca69d08df7116a26573d1036d7b3ed599095e7520b700812c92c8d87
+2ea5344208a06d5c37e9dfef94372d7fd29dcbf21244e8c644d92dd190a63959
 ```
 
 ## Automated execution
