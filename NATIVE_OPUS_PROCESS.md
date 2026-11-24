@@ -1,11 +1,11 @@
 # Supervised per-epoch Opus decoder
 
-The opt-in `linux-opus-process` and `macos-opus-process` features supply `ProcessDecoder` and the
-`fr-opus-worker` executable. It uses the existing Opus codec and AudioPlayout,
+The opt-in `linux-opus-process`, `macos-opus-process` and `windows-opus-process`
+features supply `ProcessDecoder` and the `fr-opus-worker` executable. It uses the existing Opus codec and AudioPlayout,
 not a new runtime, jitter buffer, transport, audio device or codec family.
 
 The client posts at most one configuration/packet/concealment operation and
-polls one result. A native supervisor owns process creation, socket I/O and
+polls one result. A native supervisor owns process creation, private IPC and
 reaping; the session thread never waits for a child. There are at most four
 supervisors per process, including cancelled owners awaiting actual reaping.
 Each epoch gets a new child; there is no automatic restart or in-process fallback.
@@ -14,7 +14,7 @@ measured from submission, not from each read or poll. AudioPlayout independently
 retains the earlier original arrival and device-slot deadlines. A response that
 misses its original slot is rejected, never replayed or relabelled as fresh.
 
-The child binds parent-task death, clears its inherited environment, and uses
+The Unix child binds parent-task death, clears its inherited environment, and uses
 only its parent's connected Unix stream on stdin/stdout. Before configuration
 or packet parsing, Linux x86-64 confinement closes other descriptors and installs
 `no_new_privs` plus a TSYNC seccomp allowlist. The allowlist admits only IPC on
@@ -35,6 +35,30 @@ OS sandbox or protection against a malicious same-user process**. Linux still
 requires its seccomp sandbox; the platform distinction never enables an
 unconfined Linux fallback.
 
+The Windows child uses the same versioned exchange, original epoch and operation
+deadlines. The parent pins the executable and its directory ancestry with the
+existing protected-file policy before launch, rejecting network paths, reparse
+points, alternate streams and ambiguous Win32 names. The private duplex named
+pipe has an unpredictable name, a logon-scoped DACL, one initial instance and
+remote-client rejection; both endpoint process IDs are checked. The parent uses
+bounded nonblocking byte I/O, preserving partial writes and the original deadline.
+No pending asynchronous operation retains borrowed Rust memory.
+
+`CreateProcessW` receives an explicit inherited-handle list containing only that
+private pipe and a write-only NUL stderr handle. A creation-time job attribute
+puts the child in its original non-breakaway, kill-on-close job before execution,
+with a one-process limit and 256 MiB process-memory limit. The child independently
+checks its job limits, private handles and exact parent, and retains a handle-based
+parent-exit watchdog before reading codec input. Missing job support or failed
+setup refuses; there is no late uncontained-launch or in-process fallback.
+
+Windows retirement requires both the original process's signaled handle and an
+empty original job, followed by release of its handles and executable pins. An
+uncertain cleanup retains its admission credit. This is resource and lifetime
+containment, **not a Windows OS sandbox**: the same-user child can still open files
+and network connections. Windows, the loader, the protected installation and its
+statically linked trusted Opus archive remain in the trusted computing base.
+
 The parent validates complete versioned replies, transaction, original epoch,
 direction, channel count, timestamp and exact sample/byte count before accepting
 PCM. Configuring is not acknowledgement; only a real child configuration reply
@@ -50,6 +74,22 @@ The supervisor sleeps on its condition variable while idle; only an outstanding
 native operation uses bounded 10 ms cancellation-check intervals.
 
 ## Verification
+
+### Windows source checks (2026-11-24)
+
+The real `windows-opus-process` library and `fr-opus-worker` pass Windows-target
+`cargo check` and strict package Clippy (`--no-deps`, `-D warnings`) with the
+pinned nightly and a verified trusted AMD64 static Opus archive. The matching
+worker also builds and links as a real AMD64 Windows executable with that
+archive and the verified MinGW toolchain. Tests cover
+path/namespace admission, partial I/O, original deadlines, real Windows pipe
+backpressure and actual child codec/PLC, cancellation, capacity and cleanup.
+The Windows native tests have not executed here. A Linux policy-test run was
+killed while compiling the unrelated Asupersync dev dependency, before tests.
+These target checks do not qualify process execution on Windows, an OS sandbox,
+audio hardware, audibility or live remote playback.
+
+### Earlier Linux codec qualification
 
 The implementation's selected test build ran 10 actual-process tests, four
 private-IPC codec tests, and all 17 unchanged native encoder/decoder tests:

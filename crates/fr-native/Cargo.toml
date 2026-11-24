@@ -27,6 +27,7 @@ rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"
 # Windows host capture (`windows-media`): Desktop Duplication, the D3D11 video
 # processor and Media Foundation hardware encoders. The version Cargo.lock
 # already carries for the Windows client; only the bindings named compile.
+fr-winsys = { workspace = true, optional = true, default-features = false, features = ["protected-files"] }
 windows = { version = "=0.62.2", optional = true, features = ["Win32_Foundation"] }
 
 [dev-dependencies]
@@ -79,6 +80,13 @@ windows-audio-api = [
 # Explicit Windows client renderer; no codec or client-shell integration yet.
 windows-audio-device = ["windows-audio-api", "dep:fr-client"]
 windows-audio-capture = ["windows-audio-api"]
+windows-opus-process = [
+    "opus-process", "dep:windows", "dep:fr-winsys", "windows/Win32_Security",
+    "windows/Win32_Security_Authorization", "windows/Win32_Security_Cryptography",
+    "windows/Win32_Storage_FileSystem", "windows/Win32_System_IO",
+    "windows/Win32_System_Pipes", "windows/Win32_System_JobObjects",
+    "windows/Win32_System_Threading", "windows/Win32_System_WindowsProgramming",
+]
 windows-host-audio = ["windows-host-media", "windows-audio-capture", "opus"]
 # Explicit host application/system playback capture. Reuses the separate
 # media-worker audio role and the existing statically linked Opus encoder.

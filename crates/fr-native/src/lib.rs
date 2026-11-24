@@ -101,7 +101,10 @@ pub use linux::*;
         target_os = "macos",
         any(feature = "macos-desktop", feature = "macos-media")
     ),
-    all(windows, feature = "windows-media")
+    all(
+        windows,
+        any(feature = "windows-media", feature = "windows-opus-process")
+    )
 ))]
 mod error;
 #[cfg(any(
@@ -113,7 +116,10 @@ mod error;
         target_os = "macos",
         any(feature = "macos-desktop", feature = "macos-media")
     ),
-    all(windows, feature = "windows-media")
+    all(
+        windows,
+        any(feature = "windows-media", feature = "windows-opus-process")
+    )
 ))]
 pub use error::NativeError;
 

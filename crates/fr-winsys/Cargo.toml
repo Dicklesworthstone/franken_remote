@@ -11,35 +11,43 @@ publish = false
 # check's interface reads). Other platforms compile an empty crate.
 [target.'cfg(windows)'.dependencies]
 # The version Cargo.lock already carries for fr-windows and fr-native.
-windows = { version = "=0.62.2", features = [
-    "Wdk_Foundation",
-    "Wdk_Storage_FileSystem",
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_Media",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_Security_Cryptography",
-    "Win32_Storage_FileSystem",
-    "Win32_System_DataExchange",
-    "Win32_System_IO",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_Pipes",
-    "Win32_System_RemoteDesktop",
-    "Win32_System_StationsAndDesktops",
-    "Win32_System_SystemInformation",
-    "Win32_System_Threading",
-    "Win32_System_WindowsProgramming",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Input_KeyboardAndMouse",
-    # The clipboard indicator's notification-area icon.
-    "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-] }
+windows = { version = "=0.62.2", features = ["Win32_Foundation"] }
+
+[features]
+# Existing host/client consumers retain their complete Windows boundary.
+default = ["full"]
+# Isolated codec workers need trusted image admission without GUI/input APIs.
+protected-files = [
+    "windows/Wdk_Foundation",
+    "windows/Wdk_Storage_FileSystem",
+    "windows/Win32_Foundation",
+    "windows/Win32_Security",
+    "windows/Win32_Security_Authorization",
+    "windows/Win32_Storage_FileSystem",
+    "windows/Win32_System_IO",
+    "windows/Win32_System_Pipes",
+    "windows/Win32_System_Threading",
+]
+full = [
+    "protected-files",
+    "windows/Win32_Graphics_Gdi",
+    "windows/Win32_Media",
+    "windows/Win32_NetworkManagement_IpHelper",
+    "windows/Win32_NetworkManagement_Ndis",
+    "windows/Win32_Networking_WinSock",
+    "windows/Win32_Security_Cryptography",
+    "windows/Win32_System_DataExchange",
+    "windows/Win32_System_LibraryLoader",
+    "windows/Win32_System_Memory",
+    "windows/Win32_System_RemoteDesktop",
+    "windows/Win32_System_StationsAndDesktops",
+    "windows/Win32_System_SystemInformation",
+    "windows/Win32_System_WindowsProgramming",
+    "windows/Win32_UI_HiDpi",
+    "windows/Win32_UI_Input_KeyboardAndMouse",
+    "windows/Win32_UI_Shell",
+    "windows/Win32_UI_WindowsAndMessaging",
+]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

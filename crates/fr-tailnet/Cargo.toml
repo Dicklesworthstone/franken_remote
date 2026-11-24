@@ -35,7 +35,7 @@ nix = { version = "=0.31.3", default-features = false, features = ["socket"] }
 # Windows: tailscaled's named-pipe LocalAPI, through the Win32 boundary
 # crate (this crate forbids unsafe code).
 [target.'cfg(windows)'.dependencies]
-fr-winsys.workspace = true
+fr-winsys = { workspace = true, features = ["full"] }
 
 [lints]
 workspace = true

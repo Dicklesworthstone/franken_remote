@@ -4,9 +4,21 @@
 //! At most four supervisors exist, including cancelled-but-not-reaped owners.
 //! No automatic worker restart, native fallback or unbounded reaper queue.
 pub mod child;
+mod exchange;
 mod protocol;
+#[cfg(not(windows))]
 pub mod socket;
+#[cfg(not(windows))]
 mod supervisor;
+#[cfg(windows)]
+#[path = "process/windows_supervisor.rs"]
+mod supervisor;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+mod windows_child;
+#[cfg(any(windows, test))]
+mod windows_policy;
 use super::CodecLimits;
 use fr_client::audio::playout::decoder::PolledDecoder;
 use fr_core::audio::AudioStreamConfig;
@@ -132,7 +144,17 @@ impl ProcessDecoder {
     /// The path is selected locally and must be an installed absolute image.
     /// Native process creation happens only after configure on its supervisor.
     pub fn new(image: &Path, limits: CodecLimits) -> Result<(Self, Retirement), AudioMediaError> {
+        #[cfg(not(windows))]
         if !image.is_absolute() || !image.is_file() {
+            return Err(AudioMediaError::UnsupportedFormat);
+        }
+        #[cfg(windows)]
+        if image
+            .to_str()
+            .is_none_or(|p| windows_policy::image_root(p).is_err())
+        {
+            // The admitted supervisor opens and pins the real protected image.
+            // No filesystem or remote-path operation runs on this caller.
             return Err(AudioMediaError::UnsupportedFormat);
         }
         let shared = Arc::new(Shared {

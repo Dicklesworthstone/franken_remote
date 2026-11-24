@@ -1,9 +1,8 @@
 //! One bounded native supervisor owns process creation, IPC and actual reaping.
 //! Mutexes protect only mailbox transitions, never foreign/OS work or waits.
 use super::{
-    Arc, AudioMediaError as Error, AudioStreamConfig, CodecLimits, Duration, Instant, Job,
-    Ordering, PathBuf, Reply, Shared, Slot,
-    protocol::{self, CONFIG, Header, PACKET, PLC},
+    Arc, AudioMediaError as Error, AudioStreamConfig, CodecLimits, Duration, Instant, Ordering,
+    PathBuf, Shared, Slot, exchange,
 };
 use std::{
     io::{Read, Write},
@@ -88,6 +87,11 @@ impl Write for Exchange<'_> {
         Ok(())
     }
 }
+impl exchange::Endpoint for Exchange<'_> {
+    fn set_deadline(&mut self, until: Instant) {
+        self.until = until;
+    }
+}
 pub(super) fn run(
     image: PathBuf,
     c: AudioStreamConfig,
@@ -144,51 +148,5 @@ fn serve(
         shared,
         until,
     };
-    let mut h = Header::new(c, 1, CONFIG)?;
-    h.bytes = 8;
-    protocol::write(&mut exchange, h, false, &protocol::config_body(c, l)?)?;
-    if Header::read(&mut exchange, true)? != h.config_reply() {
-        return Err(Error::InvalidPayload);
-    }
-    shared.reply(Ok(Reply::Ready));
-    let mut serial = 1u64;
-    let mut next = None;
-    loop {
-        let job = {
-            let mut mail = shared.mail.lock().map_err(|_| Error::Fatal)?;
-            while mail.job.is_none() && !mail.stop {
-                mail = shared.wake.wait(mail).map_err(|_| Error::Fatal)?;
-            }
-            if mail.stop {
-                return Ok(());
-            }
-            mail.job.take().ok_or(Error::Fatal)?
-        };
-        serial = serial.checked_add(1).ok_or(Error::BufferOverflow)?;
-        exchange.until = job.1;
-        let mut h = Header::new(c, serial, PACKET)?;
-        match job.0 {
-            Job::Packet(p) => {
-                h.sequence = p.sequence();
-                h.at = p.timestamp_samples();
-                h.bytes = u32::try_from(p.payload().len()).map_err(|_| Error::BufferOverflow)?;
-                protocol::write(&mut exchange, h, false, p.payload())?;
-            }
-            Job::Plc(samples) => {
-                h.kind = PLC;
-                h.samples = samples;
-                let (seq, at) = next.ok_or(Error::NeedMoreInput)?;
-                h.sequence = seq;
-                h.at = at;
-                protocol::write(&mut exchange, h, false, &[])?;
-            }
-        }
-        let pcm = protocol::read_pcm(&mut exchange, h)?;
-        next = Some((
-            h.sequence.checked_add(1).ok_or(Error::BufferOverflow)?,
-            h.at.checked_add(u64::from(h.samples))
-                .ok_or(Error::BufferOverflow)?,
-        ));
-        shared.reply(Ok(Reply::Pcm(Box::new(pcm))));
-    }
+    exchange::serve(c, l, shared, &mut exchange)
 }

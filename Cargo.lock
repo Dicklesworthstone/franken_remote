@@ -644,6 +644,7 @@ dependencies = [
  "fr-media",
  "fr-tailnet",
  "fr-transport",
+ "fr-winsys",
  "fr-wire",
  "frd",
  "rustix",

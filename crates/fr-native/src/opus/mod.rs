@@ -12,13 +12,21 @@ mod encoder;
 mod ffi;
 
 #[cfg(all(
-    any(target_os = "linux", target_os = "macos"),
+    any(
+        target_os = "linux",
+        target_os = "macos",
+        all(windows, feature = "windows-opus-process")
+    ),
     feature = "opus-process"
 ))]
 pub mod process;
 
 #[cfg(all(
-    any(target_os = "linux", target_os = "macos"),
+    any(
+        target_os = "linux",
+        target_os = "macos",
+        all(windows, feature = "windows-opus-process")
+    ),
     feature = "opus-playout"
 ))]
 pub mod playout;

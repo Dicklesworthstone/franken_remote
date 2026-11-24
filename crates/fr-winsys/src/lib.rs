@@ -3,27 +3,27 @@
 //! hold FFI (fr-native, fr-windows) keep their own bindings.
 //!
 //! Every unsafe block states the invariant that makes it sound.
-#[cfg(windows)]
+#[cfg(all(windows, feature = "full"))]
 pub mod approval;
-#[cfg(any(windows, test))]
+#[cfg(any(test, all(windows, feature = "full")))]
 mod approval_policy;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "full"))]
 pub mod certs;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "full"))]
 pub mod clipboard;
-#[cfg(any(windows, test))]
+#[cfg(any(test, all(windows, feature = "protected-files")))]
 mod file_selection_policy;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "protected-files"))]
 pub mod fs;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "full"))]
 pub mod indicator;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "full"))]
 pub mod input;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "full"))]
 pub mod net;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "protected-files"))]
 pub mod pipe;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "full"))]
 pub mod session;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "full"))]
 pub mod time;

@@ -26,6 +26,8 @@ pub fn confine() -> Result<(), Error> {
     }
 }
 pub fn run(parent: u32) -> Result<(), Error> {
+    #[cfg(windows)]
+    super::windows_child::prepare(parent)?;
     #[cfg(target_os = "linux")]
     {
         crate::bind_parent(parent).map_err(|_| Error::Fatal)?;
