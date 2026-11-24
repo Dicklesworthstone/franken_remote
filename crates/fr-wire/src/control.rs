@@ -59,8 +59,9 @@ pub fn requestable(selection: &[crate::negotiation::Capability]) -> Capabilities
 
 /// Explicit opt-in by a precise-scroll producer or a positively probed native
 /// executor. Legacy profiles do not call this. At the existing offer ceiling,
-/// optional diagnostics yield first, then optional bulk sizing/credit (whose
-/// bounded legacy paths remain available). Required capabilities never yield.
+/// quality reporting yields first, then optional bulk sizing and credit.
+/// Decoder metrics yield last. The bounded legacy transport and source pacing
+/// remain available. Required and unknown-version capabilities never yield.
 pub fn with_pixel_scroll(
     offer: crate::negotiation::Offer,
 ) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
@@ -96,17 +97,30 @@ fn with_optional_input(
             Err(Error::RequiredCapability)
         };
     }
-    for optional in [
-        crate::quality_decision::CAPABILITY,
-        crate::attachment::BULK_RECORD_CAPABILITY,
-        crate::attachment::credit::CAPABILITY,
+    for (optional, known_version) in [
+        (
+            crate::quality_decision::CAPABILITY,
+            crate::quality_decision::VERSION,
+        ),
+        (
+            crate::attachment::BULK_RECORD_CAPABILITY,
+            crate::attachment::BULK_RECORD_VERSION,
+        ),
+        (
+            crate::attachment::credit::CAPABILITY,
+            crate::attachment::credit::VERSION,
+        ),
+        (
+            crate::receiver_metrics::CAPABILITY,
+            crate::receiver_metrics::VERSION,
+        ),
     ] {
         if offer.capabilities.len() < MAX_CAPABILITIES {
             break;
         }
         offer
             .capabilities
-            .retain(|cap| cap.name != optional || cap.required);
+            .retain(|cap| cap.name != optional || cap.version != known_version || cap.required);
     }
     if offer.capabilities.len() >= MAX_CAPABILITIES {
         return Err(Error::Invalid);

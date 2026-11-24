@@ -11,6 +11,52 @@ use fr_wire::{
 };
 
 #[test]
+fn linux_send_text_with_playback_clipboard_and_duplex_keeps_all_requested_channels() {
+    use fr_client::native::control_offer_with_duplex;
+    use fr_core::input_submission::Capability;
+
+    let original = control_offer_with_duplex(true, true);
+    assert_eq!(original.capabilities.len(), negotiation::MAX_CAPABILITIES);
+    let configured = control::with_committed_text(original.clone()).unwrap();
+    let encoded = bytes(&Message::ClientHello(configured.clone()));
+    assert_eq!(
+        negotiation::decode(&encoded, negotiation::MAX_RECORD, 0).unwrap(),
+        Message::ClientHello(configured.clone())
+    );
+    let selection = configured.select().unwrap();
+    assert!(control::requestable(&selection.capabilities).contains(Capability::Text));
+    assert!(fr_wire::audio_control::downlink_selected(&selection));
+    assert!(fr_wire::files::duplex_selected(&selection));
+    assert_eq!(configured.limits, original.limits);
+    for cap in &original.capabilities {
+        assert_eq!(
+            configured.capabilities.contains(cap),
+            cap.name != receiver_metrics::CAPABILITY
+        );
+    }
+    let legacy = original.intersect(&configured).unwrap().select().unwrap();
+    assert!(!control::requestable(&legacy.capabilities).contains(Capability::Text));
+    assert!(fr_wire::audio_control::downlink_selected(&legacy));
+    assert!(fr_wire::files::duplex_selected(&legacy));
+
+    // A peer's mandatory or unknown-version metrics boundary is never a free slot.
+    for (required, version) in [(true, receiver_metrics::VERSION), (false, 2)] {
+        let mut pinned = original.clone();
+        let metrics = pinned
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.name == receiver_metrics::CAPABILITY)
+            .unwrap();
+        metrics.required = required;
+        metrics.version = version;
+        assert_eq!(
+            control::with_committed_text(pinned),
+            Err(negotiation::Error::Invalid)
+        );
+    }
+}
+
+#[test]
 fn explicit_mac_pixel_scroll_fits_all_current_clipboard_file_profiles_and_keeps_legacy_control() {
     use fr_client::native::{
         control_offer_with_auxiliary, control_offer_with_download, control_offer_with_duplex,
