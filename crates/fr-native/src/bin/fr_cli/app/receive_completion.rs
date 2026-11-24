@@ -252,6 +252,7 @@ struct FolderJob {
     revision: u64,
     rounds_settled: u64,
     confirmed_publications: u64,
+    confirmed_conflicts: Option<u64>,
     failure: Option<&'static str>,
     cleanup: Cleanup,
 }
@@ -292,11 +293,18 @@ impl FolderJob {
                 .get("confirmed_publications")
                 .and_then(Value::as_u64)
                 .ok_or(())?,
+            confirmed_conflicts: value
+                .get("confirmed_conflicts")
+                .map(|count| count.as_u64().ok_or(()))
+                .transpose()?,
             failure,
             cleanup: Cleanup::parse(value.get("cleanup"))?,
         };
         if job.id == 0
             || job.rounds_settled > job.revision
+            || job
+                .confirmed_conflicts
+                .is_some_and(|n| n > job.confirmed_publications)
             || job.confirmed_publications > 64
             || matches!(job.cleanup, Cleanup::NotStarted)
             || match job.phase {
@@ -311,7 +319,7 @@ impl FolderJob {
     }
 
     fn json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "id": self.id,
             "phase": self.phase,
             "revision": self.revision,
@@ -319,7 +327,11 @@ impl FolderJob {
             "confirmed_publications": self.confirmed_publications,
             "failure": self.failure,
             "cleanup": self.cleanup.code(),
-        })
+        });
+        if let Some(count) = self.confirmed_conflicts {
+            value["confirmed_conflicts"] = json!(count);
+        }
+        value
     }
 }
 
@@ -499,6 +511,9 @@ impl Record {
                 " Folder job {}: {}, {} rounds settled, {} confirmed publications.",
                 job.id, job.phase, job.rounds_settled, job.confirmed_publications,
             );
+            if let Some(count) = job.confirmed_conflicts {
+                let _ = write!(notice, " Conflict copies kept: {count}.");
+            }
             if let Some(failure) = job.failure {
                 let _ = write!(notice, " Job ended: {failure}.");
             }

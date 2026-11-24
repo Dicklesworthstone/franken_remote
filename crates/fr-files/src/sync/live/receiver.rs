@@ -440,6 +440,16 @@ impl ControllerJob {
             .ok_or(LiveError::Resource)?;
         self.status.state.entries_completed = self.completed;
         self.status.state.bytes_completed = self.published_bytes;
+        // Count the conflict at publication, including the final receipt that
+        // can arrive during cleanup. A later failed round never erases it.
+        let total = self.directory.conflicts_kept();
+        let round = total
+            .checked_sub(self.conflict_start)
+            .and_then(|count| u32::try_from(count).ok())
+            .filter(|count| *count <= self.completed)
+            .ok_or(LiveError::Resource)?;
+        self.status.state.conflicts_kept = round;
+        self.status.confirmed_conflicts = u32::try_from(total).map_err(|_| LiveError::Resource)?;
         if published.publication != Publication::Durable {
             return Err(LiveError::DurabilityUnknown);
         }
@@ -453,15 +463,7 @@ impl ControllerJob {
         {
             return Err(LiveError::WrongPhase);
         }
-        let conflicts = self
-            .directory
-            .conflicts_kept()
-            .checked_sub(self.conflict_start)
-            .and_then(|count| u32::try_from(count).ok())
-            .ok_or(LiveError::Resource)?;
-        if conflicts > self.completed {
-            return Err(LiveError::Resource);
-        }
+        let conflicts = self.status.state.conflicts_kept;
         let reply = SyncJobState {
             phase: if conflicts == 0 {
                 SyncPhase::Settled

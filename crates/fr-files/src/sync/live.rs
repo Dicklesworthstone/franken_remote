@@ -140,6 +140,9 @@ pub struct JobStatus {
     pub state: SyncJobState,
     pub failure: Option<LiveError>,
     pub confirmed_publications: u32,
+    /// Original-session keep-both publications. The host learns this count
+    /// from settled rounds; the receiver learns it from its disk owner.
+    pub confirmed_conflicts: u32,
     pub rounds_settled: u64,
     pub cleanup_complete: bool,
 }
@@ -149,6 +152,7 @@ impl JobStatus {
             state: state(job_id, SyncPhase::Advertised, 0),
             failure: None,
             confirmed_publications: 0,
+            confirmed_conflicts: 0,
             rounds_settled: 0,
             cleanup_complete: false,
         }

@@ -380,6 +380,11 @@ impl HostJob {
         {
             return Err(LiveError::WrongPhase);
         }
+        self.status.confirmed_conflicts = self
+            .status
+            .confirmed_conflicts
+            .checked_add(settled.conflicts_kept)
+            .ok_or(LiveError::Resource)?;
         self.status.state = settled;
         self.status.rounds_settled = self
             .status

@@ -80,6 +80,26 @@ fn folder_completion_keeps_original_job_and_publications_after_cancellation() {
 }
 
 #[test]
+fn folder_completion_preserves_available_conflict_counts_and_leaves_legacy_counts_unknown() {
+    let mut value = folder_completion(false);
+    assert!(
+        !check_job(&value, Some(41))
+            .unwrap()
+            .contains("Conflict copies")
+    );
+    value["folder_job"]["confirmed_conflicts"] = json!(1);
+    assert!(
+        check_job(&value, Some(41))
+            .unwrap()
+            .contains("Conflict copies kept: 1")
+    );
+    let inspection = inspect_job(&capture(&value), true, Some(41), None).unwrap();
+    let mut failure = Failure::new("session_failed", "The original viewer stopped.", 1);
+    inspection.preserve(&mut failure);
+    assert_eq!(retained(failure)["folder_job"], value["folder_job"]);
+}
+
+#[test]
 fn wrong_missing_or_unrequested_folder_job_never_authorizes_another_picker() {
     let value = folder_completion(false);
     for job in [None, Some(42)] {
@@ -148,6 +168,8 @@ fn folder_job_metadata_is_bounded_sanitized_and_consistent_with_owner_cleanup() 
         ("id", json!(0)),
         ("rounds_settled", json!(4)),
         ("confirmed_publications", json!(65)),
+        ("confirmed_conflicts", json!(2)),
+        ("confirmed_conflicts", json!(-1)),
         ("phase", json!("/private/untrusted")),
         ("failure", json!("/private/untrusted")),
         ("failure", Value::Null),

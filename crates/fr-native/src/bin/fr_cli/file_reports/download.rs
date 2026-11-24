@@ -178,12 +178,13 @@ impl Summary {
             );
             let _ = write!(
                 out,
-                ",\"folder_job\":{{\"id\":{},\"phase\":\"{}\",\"revision\":{},\"rounds_settled\":{},\"confirmed_publications\":{},\"failure\":{failure},\"cleanup\":\"{}\"}}",
+                ",\"folder_job\":{{\"id\":{},\"phase\":\"{}\",\"revision\":{},\"rounds_settled\":{},\"confirmed_publications\":{},\"confirmed_conflicts\":{},\"failure\":{failure},\"cleanup\":\"{}\"}}",
                 state.job_id,
                 phase_name(state.phase),
                 state.manifest_revision,
                 job.rounds_settled,
                 job.confirmed_publications,
+                job.confirmed_conflicts,
                 self.cleanup,
             );
         }
@@ -225,12 +226,13 @@ impl Summary {
         if let Some(job) = self.folder_job {
             let _ = write!(
                 out,
-                " Folder job {} is {} at revision {} with {} settled rounds and {} confirmed publications. Folder job cleanup is {}.",
+                " Folder job {} is {} at revision {} with {} settled rounds and {} confirmed publications, including {} conflict copies. Folder job cleanup is {}.",
                 job.state.job_id,
                 phase_name(job.state.phase),
                 job.state.manifest_revision,
                 job.rounds_settled,
                 job.confirmed_publications,
+                job.confirmed_conflicts,
                 self.cleanup,
             );
             if let Some(failure) = job.failure {
@@ -372,6 +374,7 @@ mod tests {
             },
             failure: None,
             confirmed_publications: 2,
+            confirmed_conflicts: 1,
             rounds_settled: 3,
             cleanup_complete: false,
         };
@@ -383,7 +386,7 @@ mod tests {
             report["folder_job"],
             serde_json::json!({
                 "id":41,"phase":"settled","revision":3,"rounds_settled":3,
-                "confirmed_publications":2,"failure":null,"cleanup":"pending"
+                "confirmed_publications":2,"confirmed_conflicts":1,"failure":null,"cleanup":"pending"
             })
         );
         job.state.phase = SyncPhase::Failed;

@@ -264,6 +264,7 @@ fn standing_job_transfers_real_versions_keeps_conflicts_and_respects_independent
         assert_eq!(second.state.entries_total, 2);
         assert_eq!(second.state.entries_completed, 2);
         assert_eq!(second.state.conflicts_kept, 1);
+        assert_eq!(second.confirmed_conflicts, 2);
         assert_eq!(second.confirmed_publications, 5);
         assert_eq!(
             fs::read(destination.0.join("large.bin")).unwrap(),
@@ -291,6 +292,8 @@ fn standing_job_transfers_real_versions_keeps_conflicts_and_respects_independent
         assert_eq!(third.state.phase, SyncPhase::Settled);
         assert_eq!((third.state.entries_total, third.state.bytes_total), (0, 0));
         assert_eq!(third.confirmed_publications, 5);
+        assert_eq!(third.confirmed_conflicts, 2);
+        assert_eq!(running.client.status().confirmed_conflicts, 2);
         assert_eq!(running.client.status().confirmed_publications, 5);
         assert_eq!(destination.files(), second_files);
         running.input_live(&cx);
@@ -385,6 +388,7 @@ fn cancel_during_second_file_preserves_confirmed_prefix_and_cleans_private_stagi
         let destination = Directory::new();
         fs::write(source.0.join("a-confirmed"), b"confirmed first").unwrap();
         fs::write(source.0.join("z-partial"), vec![0x53; 4 * 1024 * 1024]).unwrap();
+        fs::write(destination.0.join("a-confirmed"), b"client original").unwrap();
         let mut running = Running::new(&cx, &source.0, &destination.0, 41).await;
         let until = clock(&cx) + 2_000_000;
         while running
@@ -400,17 +404,24 @@ fn cancel_during_second_file_preserves_confirmed_prefix_and_cleans_private_stagi
         assert_eq!(running.host.status().confirmed_publications, 1);
         assert_eq!(
             fs::read(destination.0.join("a-confirmed")).unwrap(),
-            b"confirmed first"
+            b"client original"
         );
         assert!(!destination.0.join("z-partial").exists());
         running.retire();
         assert_eq!(running.host.status().failure, Some(LiveError::Cancelled));
         assert_eq!(running.host.status().rounds_settled, 0);
         assert_eq!(running.host.status().confirmed_publications, 1);
-        assert_eq!(destination.files().len(), 1);
+        // The host did not receive a settled-round acknowledgement, but the
+        // receiver can prove the committed collision from its own disk owner.
+        assert_eq!(running.host.status().confirmed_conflicts, 0);
+        assert_eq!(running.client.status().confirmed_conflicts, 1);
+        assert_eq!(running.client.status().state.conflicts_kept, 1);
+        let files = destination.files();
+        assert_eq!(files.len(), 2);
+        assert!(files.values().any(|bytes| bytes == b"confirmed first"));
         assert_eq!(
             fs::read(destination.0.join("a-confirmed")).unwrap(),
-            b"confirmed first"
+            b"client original"
         );
         running.input_live(&cx);
         running.link.control_progress(&cx).await;
