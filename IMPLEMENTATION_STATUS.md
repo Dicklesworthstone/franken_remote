@@ -1,5 +1,37 @@
 # Implementation status
 
+## Receive authority and native clipboard recovery (2026-11-24)
+
+Inbound QUIC dispatch now rechecks the original connection lifetime, operation
+guard, caller authorization, cancellation and clock after readiness callbacks
+and between datagram callbacks. Revocation inside a callback cannot authorize
+another application delivery. Optional lane retirement revalidates the exact
+stream before dispatch; datagram expiry cannot transfer readiness to a promoted
+successor or refresh its original receipt. Added actual UDP/TLS regressions cover
+all four stop sources, blocked siblings, expiry, original receipts and clipboard
+retirement while bidirectional control/input remain live.
+See `QUIC_RECORDS.md` and `fr-inbound-dispatch-authority-47l6`.
+
+The native clipboard bridge now retires only the exact wholly unsent Begin or
+Chunk whose original item or local handoff deadline expires. Its original wire
+owner clears retained text and orders Cancel(Expired) before another copy,
+including when the independent controller/worker clock cursors differ during
+view suspension. Original deadlines and privacy generations remain unchanged.
+Commit/Cancel expiry and uncertain admission remain terminal; old permits cannot
+retire replacement or already committed items. Added wire, bridge and worker
+regressions cover these boundaries. See `NATIVE_CLIPBOARD_TRANSPORT.md` and
+`fr-clipboard-unsent-expiry-629p`.
+
+Validation: the portable `fr-wire` suite passed all 352 tests, and strict
+`cargo clippy --locked --offline -p fr-wire --all-targets -- -D warnings`
+passed after the pinned-nightly compatibility and function-size cleanup.
+Pinned formatting on touched Rust files and `git diff --check` passed.
+The native transport/daemon and full-workspace gates remain unverified:
+earlier builds hit shared disk exhaustion and executor disconnection; resumed
+native dependency compilation and GitHub checks were still pending when this
+source checkpoint was committed. The two beads remain in progress. This is
+source and portable-test evidence, not native-device or tailnet qualification.
+
 ## Explicit Windows host playback audio (2026-11-24)
 
 The optional `windows-host-audio` worker now connects real WASAPI render-loopback

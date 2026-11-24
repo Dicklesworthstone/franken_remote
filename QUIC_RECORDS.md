@@ -48,6 +48,26 @@ also bounds fully staged reliable buffers awaiting release. The session's
 independent watchdog must cancel the Cx on revoke/expiry while I/O is suspended.
 This adapter does not create observation authority or input leases.
 
+Receive callback boundaries (2026-11-24, `fr-inbound-dispatch-authority-47l6`).
+Every retained datagram candidate and reliable-record dispatch rechecks the
+original connection lifetime, operation guard, per-call authorization,
+cancellation and monotonic clock. Readiness is a local callback: returning true
+cannot override a stop or extend a receipt deadline. A blocked datagram handler
+cannot permit another retained route or native arrival to dispatch under the
+authority sampled before that callback. Reliable framing and validation finish
+before the final dispatch check, and the receive turn checks again before
+advancing connection flow credit.
+
+Those checks can retire an optional lane or expire a held audio packet. Dispatch
+revalidates the exact stream route and readable state. A successor promoted into
+a datagram slot needs its own readiness callback and keeps its original receipt;
+neither expiry nor a skipped candidate consumes another route's live record.
+Actual UDP/TLS fixtures in `tests/receive_dispatch.rs` exercise all four stop
+sources, blocked-route scanning, receipt expiry and unchanged live receipts.
+The clipboard attachment regression retires the pair inside readiness and
+continues control/input traffic in both directions. Native qualification remains
+separate from this transport-framing evidence.
+
 During async I/O the connection is moved out of the owner. Dropping the drive
 future drops that connection rather than allowing unsafe continuation after
 partial effects. Completed or cancelled work cannot be replayed on a new

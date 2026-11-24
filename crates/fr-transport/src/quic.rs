@@ -1524,8 +1524,10 @@ impl QuicRecords {
     }
     fn receive_datagram(
         &mut self,
-        current: u64,
+        cx: &Cx,
+        authorize: &mut dyn FnMut() -> bool,
         remaining: &mut usize,
+        ready: &mut dyn FnMut(Route) -> bool,
         handler: &mut DatagramHandler<'_>,
     ) -> Result<usize, Error> {
         // Promote a parked arrival whose route has drained BEFORE offering
@@ -1533,18 +1535,24 @@ impl QuicRecords {
         // offer, then reading the next native record, parked that record behind
         // it at once: the visit consumed nothing, ended the turn, and a route
         // that any pass had blocked drained one datagram per turn.
-        let parked = self.pending_datagrams.waiting(current);
-        if self.pending_datagrams.receive_one(current, handler)? != 0 {
+        let current = self.check(cx, authorize)?;
+        self.pending_datagrams.waiting(current);
+        if self.receive_pending_datagram(cx, authorize, ready, handler)? != 0 {
             return Ok(1);
         }
         // A parked arrival waits for its route: read no further native record.
-        if parked {
+        let current = self.check(cx, authorize)?;
+        if self.pending_datagrams.waiting(current) {
             return Ok(0);
         }
         // Budget native records EXAMINED, separately from records consumed by
         // handlers. Retired bindings and a flooded blocked route cannot make
         // this loop unbounded, nor force one idle turn per discarded packet.
         while *remaining != 0 {
+            // A blocked handler may have revoked its original owner or used
+            // up a deadline. Neither another native arrival nor its receipt
+            // inherits the sample taken before that callback.
+            let current = self.check(cx, authorize)?;
             let Some(bytes) = self
                 .native
                 .as_mut()
@@ -1589,7 +1597,51 @@ impl QuicRecords {
                 // Parked behind its full route: the rest stays native-queued.
                 break;
             }
-            if self.pending_datagrams.receive_one(current, handler)? != 0 {
+            if self.receive_pending_datagram(cx, authorize, ready, handler)? != 0 {
+                return Ok(1);
+            }
+        }
+        Ok(0)
+    }
+    /// At most one accepted datagram per visit. Every callback boundary keeps
+    /// the original connection, attachment and receipt checks; a blocked route
+    /// cannot dispatch a sibling with authority sampled before it blocked.
+    fn receive_pending_datagram(
+        &mut self,
+        cx: &Cx,
+        authorize: &mut dyn FnMut() -> bool,
+        ready: &mut dyn FnMut(Route) -> bool,
+        handler: &mut DatagramHandler<'_>,
+    ) -> Result<usize, Error> {
+        for _ in 0..MAX_DATAGRAMS {
+            let index = self.pending_datagrams.next_slot();
+            if self.pending_datagrams.packet(index).is_none() {
+                continue;
+            }
+            self.check(cx, authorize)?;
+            let Some((route, _, original_receipt)) = self.pending_datagrams.packet(index) else {
+                continue;
+            };
+            let accept = ready(Route::Datagram(route));
+            // Readiness is a local callback, not authority. It can observe a
+            // stop or outlive a receipt even when it eventually returns true.
+            // This full check also retires optional lanes and expires custody.
+            self.check(cx, authorize)?;
+            if !accept {
+                continue;
+            }
+            let Some((current_route, bytes, receipt)) = self.pending_datagrams.packet(index) else {
+                continue;
+            };
+            if current_route != route || receipt != original_receipt {
+                // Expiry can promote a buffered audio successor in this slot.
+                // It needs its own readiness callback, never the old one's.
+                continue;
+            }
+            if handler(Route::Datagram(route), bytes, receipt).map_err(|()| Error::Handler)?
+                == Disposition::Consumed
+            {
+                self.pending_datagrams.consume(index);
                 return Ok(1);
             }
         }
@@ -1611,29 +1663,29 @@ impl QuicRecords {
         // hold a burst of video fragments to two per turn.
         let mut idle = 0;
         while count < TURN_RECORDS && idle < lanes {
-            let current = self.check(cx, authorize)?;
+            self.check(cx, authorize)?;
             let which = self.cursor % lanes;
             self.cursor = (self.cursor + 1) % lanes;
             let before = count;
             if which == self.inbound.len() {
                 count += self.receive_datagram(
-                    current,
+                    cx,
+                    authorize,
                     &mut datagram_budget,
-                    &mut |route, bytes, receipt| {
-                        if ready(route) {
-                            handler(route, bytes, Some(receipt))
-                        } else {
-                            Ok(Disposition::Blocked)
-                        }
-                    },
+                    ready,
+                    &mut |route, bytes, receipt| handler(route, bytes, Some(receipt)),
                 )?;
             } else {
-                count += self.receive_stream(which, current, cx, ready, &mut |route, bytes| {
-                    handler(route, bytes, None)
-                })?;
+                count +=
+                    self.receive_stream(which, cx, authorize, ready, &mut |route, bytes| {
+                        handler(route, bytes, None)
+                    })?;
             }
             idle = if count == before { idle + 1 } else { 0 };
         }
+        // Also observe a stop from the final blocked/accepted callback when no
+        // further lane is visited. No flow-credit update follows stale authority.
+        self.check(cx, authorize)?;
         // QUIC connection flow control counts all reliable application bytes.
         // Advance from actual drained bytes, not arrival, ACK, or decode reports.
         let limit = self
@@ -1651,26 +1703,35 @@ impl QuicRecords {
         }
         Ok(count)
     }
+    fn receive_stream_readable(&self, which: usize, route: StreamRoute) -> bool {
+        self.inbound
+            .get(which)
+            .is_some_and(|s| s.route == route && !s.fin)
+            && !self
+                .attachments
+                .iter()
+                .any(|r| r.inbound == route.stream && !r.readable())
+    }
     /// One visit to inbound stream lane `which`: at most one complete record.
     fn receive_stream(
         &mut self,
         which: usize,
-        current: u64,
         cx: &Cx,
+        authorize: &mut dyn FnMut() -> bool,
         ready: &mut dyn FnMut(Route) -> bool,
         handler: &mut StreamHandler<'_>,
     ) -> Result<usize, Error> {
         let mut count = 0;
-        let s = &mut self.inbound[which];
-        if s.fin
-            || !ready(Route::Stream(s.route))
-            || self
-                .attachments
-                .iter()
-                .any(|r| r.inbound == s.route.stream && !r.readable())
-        {
+        let route = self.inbound[which].route;
+        if !self.receive_stream_readable(which, route) {
             return Ok(0);
         }
+        let accept = ready(Route::Stream(route));
+        let current = self.check(cx, authorize)?;
+        if !accept || !self.receive_stream_readable(which, route) {
+            return Ok(0);
+        }
+        let s = &mut self.inbound[which];
         if s.framing.frame(current)?.is_none() {
             if s.remainder.is_empty() {
                 s.remainder = self
@@ -1690,6 +1751,15 @@ impl QuicRecords {
         }
         if let Some(bytes) = s.framing.frame(current)? {
             validate_record(bytes, s.route.maximum, s.route.binding, s.route.messages)?;
+        }
+        // Complete framing/allocation before the last dispatch check. An
+        // optional record that expires here retires only its original pair.
+        let current = self.check(cx, authorize)?;
+        if !self.receive_stream_readable(which, route) {
+            return Ok(0);
+        }
+        let s = &mut self.inbound[which];
+        if let Some(bytes) = s.framing.frame(current)? {
             if handler(Route::Stream(s.route), bytes).map_err(|()| Error::Handler)?
                 == Disposition::Consumed
             {

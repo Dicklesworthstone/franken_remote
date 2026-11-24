@@ -16,7 +16,9 @@
 //! Each retained packet keeps its own original bytes and deadline. A video
 //! recovery can still delay audio behind a parked video fragment; this change
 //! does not discard video references to solve that separate limitation.
-use super::{Bytes, DatagramRoute, Disposition, Error, MAX_DATAGRAMS, Route};
+use super::{Bytes, DatagramRoute, Error, MAX_DATAGRAMS};
+#[cfg(test)]
+use super::{Disposition, Route};
 use core::cmp::Ordering;
 use fr_wire::input::{InputDelivery, InputDirection, decode_input};
 
@@ -192,9 +194,31 @@ impl PendingDatagrams {
         Ok(true)
     }
 
-    /// At most one consumed record, with bounded round-robin polling. Blocked
-    /// routes retain their exact bytes but cannot prevent another ready route
-    /// from consuming its record. Expired custody never reaches the callback.
+    /// Visit one fixed slot. The connection owner rechecks authority and the
+    /// original clock between visits and after its readiness callback, before
+    /// borrowing a payload. No record is removed merely by examining its route.
+    pub(super) fn next_slot(&mut self) -> usize {
+        let index = self.cursor;
+        self.cursor = (self.cursor + 1) % MAX_DATAGRAMS;
+        index
+    }
+
+    pub(super) fn packet(&self, index: usize) -> Option<(DatagramRoute, &[u8], DatagramReceipt)> {
+        let pending = self.slots[index].as_ref()?;
+        Some((pending.route, &pending.bytes, pending.receipt))
+    }
+
+    /// Called only after the exact slot's consumer accepted its record. Audio
+    /// promotion preserves the next packet's original receipt and expiry.
+    pub(super) fn consume(&mut self, index: usize) {
+        let route = self.slots[index].as_ref().expect("consumed datagram").route;
+        self.slots[index] = self.take_audio_for(route);
+    }
+
+    /// Pure queue-policy helper for the custody tests. Production dispatch
+    /// belongs to `QuicRecords` so it can re-enter all connection checks between
+    /// callbacks without retaining a borrow of this inbox.
+    #[cfg(test)]
     pub(super) fn receive_one(
         &mut self,
         current: u64,
@@ -202,21 +226,14 @@ impl PendingDatagrams {
     ) -> Result<usize, Error> {
         self.expire(current);
         for _ in 0..MAX_DATAGRAMS {
-            let index = self.cursor;
-            self.cursor = (self.cursor + 1) % MAX_DATAGRAMS;
-            let Some(pending) = self.slots[index].as_ref() else {
+            let index = self.next_slot();
+            let Some((route, bytes, receipt)) = self.packet(index) else {
                 continue;
             };
-            if handler(
-                Route::Datagram(pending.route),
-                &pending.bytes,
-                pending.receipt,
-            )
-            .map_err(|()| Error::Handler)?
+            if handler(Route::Datagram(route), bytes, receipt).map_err(|()| Error::Handler)?
                 == Disposition::Consumed
             {
-                let route = pending.route;
-                self.slots[index] = self.take_audio_for(route);
+                self.consume(index);
                 return Ok(1);
             }
         }

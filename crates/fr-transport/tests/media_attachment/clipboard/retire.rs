@@ -199,6 +199,86 @@ fn a_retirement_request_in_an_authorization_callback_retires_only_the_pair() {
 }
 
 #[test]
+fn readiness_retirement_discards_the_original_record_and_preserves_critical_routes() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let (_hi, _ci, hi, ci) = attach(&mut l, &cx, 8, MediaRole::Input).await;
+        let (hp, cp, ha, ca) = attach(&mut l, &cx, 9, MediaRole::Clipboard).await;
+        let h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
+        let c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
+        quiet(&mut l, &cx).await;
+        let bytes = chunk(&c);
+        let until = clock(&cx) + 1_000_000;
+        c.send(&mut l.c, &cx, &bytes, until, || true).unwrap();
+        let mut held = false;
+        while !held {
+            assert!(clock(&cx) < until, "clipboard record did not arrive");
+            l.drive(&cx).await;
+            l.h.receive_ready(
+                &cx,
+                || true,
+                |route| route == Route::Stream(ha.inbound),
+                |_, record| {
+                    assert_eq!(record, bytes);
+                    held = true;
+                    Ok(Disposition::Blocked)
+                },
+            )
+            .unwrap();
+        }
+        let mut requested = false;
+        assert_eq!(
+            l.h.receive_ready(
+                &cx,
+                || true,
+                |route| {
+                    if route == Route::Stream(ha.inbound) {
+                        requested = true;
+                        h.request_retirement();
+                        true
+                    } else {
+                        false
+                    }
+                },
+                |_, _| panic!("retired clipboard bytes must not reach their handler"),
+            ),
+            Ok(0)
+        );
+        assert!(
+            requested,
+            "the held record must reach its readiness callback"
+        );
+        assert!(!l.h.has_route(Route::Stream(ha.inbound)));
+        assert!(!l.h.has_route(Route::Stream(ha.outbound)));
+        assert!(h.check(&l.h).is_err());
+        peer_retired(&mut l, &cx, ca.outbound).await;
+        assert!(c.check(&l.c).is_err());
+        let hr = l.hr;
+        let cr = l.cr;
+        for (host, send, receive, kind, binding) in [
+            (true, hr.outbound, cr.inbound, 0x12, 7),
+            (false, cr.outbound, hr.inbound, 0x12, 7),
+            (true, hi.outbound, ci.inbound, 0x17, 8),
+            (false, ci.outbound, hi.inbound, 0x40, 8),
+        ] {
+            input::transfer(
+                &mut l,
+                &cx,
+                host,
+                Route::Stream(send),
+                Route::Stream(receive),
+                &record(kind, binding, 96),
+            )
+            .await;
+        }
+        assert!(!l.h.is_closed());
+        assert!(!l.c.is_closed());
+    });
+}
+
+#[test]
 fn final_authorization_retirement_refuses_new_bytes_and_preserves_critical_routes() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
