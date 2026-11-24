@@ -63,6 +63,17 @@ record. That deadline also fences its disk worker at publication and remains
 active until the settlement acknowledgment drains. A round does not start while prior ATP,
 publication proof, source cleanup or job-state custody remains outstanding.
 
+A source edited or removed during the pre-transfer scan can be scanned again
+within the same round. The host makes at most three scan attempts, separated by
+at least 100 ms, after joining each preceding worker. Retries retain the same
+job, manifest revision, pinned root, authority and original five-minute deadline.
+They neither announce another round nor spend transfer quota. Cancellation,
+unsafe entries, permission failures and other faults remain terminal. Continuous
+source changes exhaust the bounded attempts and report the last source failure.
+Once the transfer manifest has been announced, a changed source remains a
+terminal refusal; uncertain or published transfers are never replayed by this
+scan retry.
+
 Only actual verified publication receipts advance the source-version ledger.
 A file changed between scanning and source preparation is refused before its
 offer, so a different version cannot be credited to the scanned manifest.

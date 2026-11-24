@@ -819,3 +819,69 @@ fn a_failed_conflict_round_returns_a_baseline_for_its_committed_prefix() {
     .unwrap();
     assert_eq!(settled.published, [] as [PublishedSyncEntry; 0]);
 }
+
+#[test]
+fn a_changed_scan_discards_its_snapshot_and_a_later_scan_reads_the_stable_version() {
+    use std::io::Write;
+
+    let dir = TempSyncDir::new("scan-change-then-stable");
+    let path = dir.path().join("changing.bin");
+    fs::write(&path, vec![7; 4096]).unwrap();
+    let limits = SyncLimits {
+        max_chunk_bytes: 1024,
+        ..SyncLimits::default()
+    };
+    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let mut changes = 0;
+    let result = scan_directory_checked(dir.path(), 9, limits, || {
+        // Change length at every existing cancellation checkpoint. This
+        // necessarily includes hashing without relying on directory order,
+        // filesystem timestamp resolution or a racing background writer.
+        writer.write_all(b"x").unwrap();
+        changes += 1;
+        Ok(())
+    });
+    assert_eq!(result, Err(SyncError::SourceChanged));
+    assert!(changes > 1);
+    drop(writer);
+
+    let stable = scan_directory(dir.path(), 9, limits).unwrap();
+    assert_eq!(stable.revision(), 9);
+    assert_eq!(stable.entries().len(), 1);
+    let file = stable.entries().get("changing.bin").unwrap();
+    assert_eq!(file.size(), fs::metadata(&path).unwrap().len());
+    assert_eq!(stable.total_bytes(), file.size());
+}
+
+#[test]
+fn an_enumerated_source_removal_invalidates_the_snapshot_instead_of_skipping_it() {
+    let dir = TempSyncDir::new("scan-disappearing-entry");
+    let retired = TempSyncDir::new("scan-retired-entry");
+    fs::write(dir.path().join("a-large.bin"), vec![7; 128 * 1024]).unwrap();
+    fs::write(dir.path().join("b-later.txt"), b"selected version").unwrap();
+    let limits = SyncLimits {
+        max_chunk_bytes: 1024,
+        ..SyncLimits::default()
+    };
+    let mut checks = 0;
+    let result = scan_directory_checked(dir.path(), 12, limits, || {
+        checks += 1;
+        if checks == 20 {
+            // Enumeration has completed; the first file's many hashing
+            // chunks precede opening the sorted second entry.
+            fs::rename(
+                dir.path().join("b-later.txt"),
+                retired.path().join("b-later.txt"),
+            )
+            .unwrap();
+        }
+        Ok(())
+    });
+    assert!(checks >= 20);
+    assert_eq!(result, Err(SyncError::SourceChanged));
+
+    let stable = scan_directory(dir.path(), 12, limits).unwrap();
+    assert_eq!(stable.revision(), 12);
+    assert_eq!(stable.entries().len(), 1);
+    assert!(stable.entries().contains_key("a-large.bin"));
+}

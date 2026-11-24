@@ -69,6 +69,11 @@ fn open_regular(root: BorrowedFd<'_>, name: &str) -> Result<File, SyncError> {
     let fd = fs::openat(root, name, flags, Mode::empty()).map_err(|errno| {
         if errno == crate::rx::io::Errno::LOOP {
             SyncError::SymlinkForbidden
+        } else if errno == crate::rx::io::Errno::NOENT {
+            // All callers use a name already enumerated or manifested under
+            // this retained root. Losing that entry invalidates the snapshot;
+            // root/enumeration I/O errors keep their own terminal error kind.
+            SyncError::SourceChanged
         } else {
             SyncError::from(errno)
         }

@@ -7,6 +7,7 @@ use super::{
 use crate::{
     sender::{Outcome, Sender, batch},
     session::{Authority, Permission},
+    sync::SyncError,
 };
 use asupersync::{cx::Cx, time::TimerDriverHandle};
 use fr_transport::quic::{self, ConnectionBinding, Disposition, QuicRecords};
@@ -42,6 +43,48 @@ struct PendingState {
     next: Step,
 }
 
+const MAX_SCAN_ATTEMPTS: u8 = 3;
+const SCAN_RETRY_DELAY_US: u64 = 100_000;
+
+/// A failed, joined scan has not offered any files. It may inspect a newer
+/// source version, but never acquire a new round deadline or transfer budget.
+#[derive(Default)]
+struct ScanRetry {
+    attempts: u8,
+    not_before: u64,
+}
+impl ScanRetry {
+    fn begin(&mut self, now: u64, round_until: u64) -> Result<bool, LiveError> {
+        if now >= round_until {
+            return Err(LiveError::Expired);
+        }
+        if now < self.not_before {
+            return Ok(false);
+        }
+        if self.attempts >= MAX_SCAN_ATTEMPTS {
+            return Err(LiveError::Source(SyncError::SourceChanged));
+        }
+        self.attempts += 1;
+        Ok(true)
+    }
+
+    fn defer(&mut self, error: LiveError, now: u64, round_until: u64) -> Result<(), LiveError> {
+        if error != LiveError::Source(SyncError::SourceChanged)
+            || self.attempts >= MAX_SCAN_ATTEMPTS
+        {
+            return Err(error);
+        }
+        let not_before = now
+            .checked_add(SCAN_RETRY_DELAY_US)
+            .ok_or(LiveError::Clock)?;
+        if not_before >= round_until {
+            return Err(LiveError::Expired);
+        }
+        self.not_before = not_before;
+        Ok(())
+    }
+}
+
 /// One host-configured source and its bounded, confirmed-version ledger.
 /// A new connection cannot resume this owner, consent or an uncertain result.
 pub struct HostJob {
@@ -55,6 +98,7 @@ pub struct HostJob {
     step: Step,
     pending: Option<PendingState>,
     scan: Option<Scan>,
+    scan_retry: ScanRetry,
     prepared: Option<PreparedRound>,
     versions: Vec<Version>,
     ledger: BTreeMap<String, String>,
@@ -101,6 +145,7 @@ impl HostJob {
             step: Step::Advertise,
             pending: None,
             scan: None,
+            scan_retry: ScanRetry::default(),
             prepared: None,
             versions: Vec::new(),
             ledger: BTreeMap::new(),
@@ -255,6 +300,9 @@ impl HostJob {
                 }
             }
             Step::StartScan => {
+                if !self.scan_retry.begin(now, self.round_until)? {
+                    return Ok(());
+                }
                 self.scan = Some(Scan::start(
                     &self.config,
                     self.status.state.manifest_revision,
@@ -344,11 +392,23 @@ impl HostJob {
 
     fn poll_scan(&mut self, now: u64) -> Result<(), LiveError> {
         let scanned = self.scan.as_mut().ok_or(LiveError::WrongPhase)?.poll();
-        if scanned.is_err() {
-            self.scan = None;
-        }
-        let Some(prepared) = scanned? else {
-            return Ok(());
+        let prepared = match scanned {
+            Ok(None) => return Ok(()),
+            Ok(Some(prepared)) => prepared,
+            Err(error) => {
+                // poll() joins the old worker before yielding an error. Keep
+                // the original Scanning revision while the source settles;
+                // the controller is still waiting for its first manifest.
+                self.scan = None;
+                let retry_now = self.clock.now().as_nanos() / 1000;
+                if retry_now < self.last {
+                    return Err(LiveError::Clock);
+                }
+                self.last = retry_now;
+                self.scan_retry.defer(error, retry_now, self.round_until)?;
+                self.step = Step::StartScan;
+                return Ok(());
+            }
         };
         self.scan = None;
         let count = u32::try_from(prepared.versions.len()).map_err(|_| LiveError::Resource)?;
@@ -410,6 +470,7 @@ impl HostJob {
         self.round_until = now
             .checked_add(self.config.round_lifetime_us)
             .ok_or(LiveError::Clock)?;
+        self.scan_retry = ScanRetry::default();
         self.step = Step::StartScan;
         self.queue(
             state(self.config.job_id, SyncPhase::Scanning, revision),
@@ -577,5 +638,100 @@ impl HostJob {
 impl Drop for HostJob {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_source_waits_before_a_second_scan_of_the_same_round() {
+        let mut retry = ScanRetry::default();
+        let until = 1_000_000;
+        assert_eq!(retry.begin(10, until), Ok(true));
+        retry
+            .defer(LiveError::Source(SyncError::SourceChanged), 20, until)
+            .unwrap();
+        for now in [20, 50_000, 100_019] {
+            assert_eq!(retry.begin(now, until), Ok(false));
+            assert_eq!(retry.attempts, 1);
+        }
+        assert_eq!(retry.begin(100_020, until), Ok(true));
+        assert_eq!(retry.attempts, 2);
+    }
+
+    #[test]
+    fn repeated_edits_exhaust_three_scans_and_preserve_the_last_failure() {
+        let mut retry = ScanRetry::default();
+        let until = 1_000_000;
+        let changed = LiveError::Source(SyncError::SourceChanged);
+        for now in [0, 100_000] {
+            assert_eq!(retry.begin(now, until), Ok(true));
+            assert_eq!(retry.defer(changed, now, until), Ok(()));
+        }
+        assert_eq!(retry.begin(200_000, until), Ok(true));
+        assert_eq!(retry.defer(changed, 200_000, until), Err(changed));
+        assert_eq!(retry.attempts, 3);
+        assert_eq!(retry.not_before, 200_000);
+        assert_eq!(retry.begin(300_000, until), Err(changed));
+        assert_eq!(retry.attempts, 3);
+    }
+
+    #[test]
+    fn retry_never_extends_the_original_round_or_starts_at_its_deadline() {
+        let changed = LiveError::Source(SyncError::SourceChanged);
+        let mut retry = ScanRetry::default();
+        assert_eq!(retry.begin(0, 200_000), Ok(true));
+        retry.defer(changed, 0, 200_000).unwrap();
+        assert_eq!(retry.begin(200_000, 200_000), Err(LiveError::Expired));
+        assert_eq!(retry.attempts, 1);
+
+        let mut retry = ScanRetry::default();
+        assert_eq!(retry.begin(0, 100_000), Ok(true));
+        assert_eq!(retry.defer(changed, 0, 100_000), Err(LiveError::Expired));
+        assert_eq!(retry.not_before, 0);
+    }
+
+    #[test]
+    fn authority_unsafe_sources_and_resource_failures_are_never_retried() {
+        for error in [
+            LiveError::Cancelled,
+            LiveError::Expired,
+            LiveError::Clock,
+            LiveError::Panicked,
+            LiveError::Worker,
+            LiveError::Cleanup,
+            LiveError::Resource,
+            LiveError::Source(SyncError::AuthorityRevoked),
+            LiveError::Source(SyncError::RootChanged),
+            LiveError::Source(SyncError::SymlinkForbidden),
+            LiveError::Source(SyncError::SubdirectoryUnsupported),
+            LiveError::Source(SyncError::UnsupportedEntryKind),
+            LiveError::Source(SyncError::EntryLimitExceeded),
+            LiveError::Source(SyncError::FileSizeLimitExceeded),
+            LiveError::Source(SyncError::TotalBytesLimitExceeded),
+            LiveError::Source(SyncError::Io(std::io::ErrorKind::PermissionDenied)),
+            LiveError::Source(SyncError::Io(std::io::ErrorKind::NotFound)),
+            LiveError::Send(crate::sender::Error::SourceChanged),
+        ] {
+            let mut retry = ScanRetry::default();
+            assert_eq!(retry.begin(0, 1_000_000), Ok(true));
+            assert_eq!(retry.defer(error, 0, 1_000_000), Err(error));
+            assert_eq!(retry.not_before, 0);
+            assert_eq!(retry.attempts, 1);
+        }
+    }
+
+    #[test]
+    fn retry_timestamp_overflow_refuses_without_installing_a_wait() {
+        let mut retry = ScanRetry::default();
+        let now = u64::MAX - 1;
+        assert_eq!(retry.begin(now, u64::MAX), Ok(true));
+        assert_eq!(
+            retry.defer(LiveError::Source(SyncError::SourceChanged), now, u64::MAX),
+            Err(LiveError::Clock)
+        );
+        assert_eq!(retry.not_before, 0);
     }
 }
