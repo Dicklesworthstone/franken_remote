@@ -5,6 +5,7 @@
 //! changes codec parameters, discards encoded references or extends a deadline.
 
 const PRESSURE_DWELL_US: u64 = 100_000;
+const RECEIVER_RESCUE_DWELL_US: u64 = 1_000_000;
 const REDUCE_DWELL_US: u64 = 250_000;
 const PROBE_DWELL_US: u64 = 2_000_000;
 const IDLE_DWELL_US: u64 = 1_000_000;
@@ -112,6 +113,9 @@ pub struct Report {
 pub struct Controller {
     policy: Policy,
     interval: u64,
+    // None is the explicitly enabled adaptive policy. Default native rescue
+    // stays dormant at the configured cadence until sustained receiver proof.
+    receiver_rescue: Option<bool>,
     last_now: Option<u64>,
     adjusted: Option<u64>,
     busy_since: [Option<u64>; 3],
@@ -139,6 +143,7 @@ impl Controller {
         Ok(Self {
             policy,
             interval: policy.conservative(),
+            receiver_rescue: None,
             last_now: None,
             adjusted: None,
             busy_since: [None; 3],
@@ -157,6 +162,23 @@ impl Controller {
             decisions: [None; 16],
             decision_next: 0,
         })
+    }
+    /// Preserve the configured cadence until one second of measured receiver
+    /// pressure accumulates. Unknown intervals contribute no time and retain
+    /// only the existing bounded grace; local pressure alone cannot engage it.
+    /// Once engaged, bounded reductions and measured probes return to the
+    /// baseline before this policy becomes dormant again. Query validity,
+    /// source deadlines and recovery budgets are never changed here.
+    pub fn for_receiver_overload(policy: Policy) -> Result<Self, Error> {
+        let mut controller = Self::new(policy)?;
+        controller.interval = policy.minimum_interval_us;
+        controller.receiver_rescue = Some(false);
+        Ok(controller)
+    }
+    /// Receiver rescue must not opt its owner into local-pressure bitrate
+    /// adaptation. The owner's existing path bitrate controller stays separate.
+    pub const fn is_receiver_rescue(&self) -> bool {
+        self.receiver_rescue.is_some()
     }
     pub const fn policy(&self) -> Policy {
         self.policy
@@ -249,17 +271,19 @@ impl Controller {
         let (pressure, pressure_us) = self.track_pressure(s);
         let (remote, receiver_ready, receiver_pressure_us) =
             self.track_receiver(receiver, s.now_us);
+        let dormant = self.receiver_rescue == Some(false);
         let fresh = self
             .source
             .is_some_and(|o| s.now_us - o.at_us <= SOURCE_EVIDENCE_US);
-        let idle = fresh
+        let idle = !dormant
+            && fresh
             && self.source.is_some_and(|o| {
                 !o.changed
                     && self
                         .unchanged_since
                         .is_some_and(|t| o.at_us - t >= IDLE_DWELL_US)
             });
-        if changed && fresh && self.idle_pending_wake {
+        if !dormant && changed && fresh && self.idle_pending_wake {
             self.mode = Mode::Active;
             self.idle_pending_wake = false;
             // Wake is conservative, never an optimistic probe through pressure.
@@ -278,6 +302,7 @@ impl Controller {
             reason = Reason::VerifiedIdle;
         }
         let headroom = receiver_ready
+            && (!self.is_receiver_rescue() || matches!(receiver, ReceiverEvidence::Measured(_)))
             && fresh
             && !idle
             && self.mode == Mode::Active
@@ -298,10 +323,15 @@ impl Controller {
                 .is_none_or(|work| work <= self.interval * 3 / 4)
             && s.send != Availability::Blocked
             && s.capture_credit != Availability::Blocked;
-        let headroom_us = self.track_headroom(s.now_us, headroom, uncertain);
-        if reason == Reason::Hold && self.mode == Mode::Active {
+        let headroom_us = if dormant {
+            0
+        } else {
+            self.track_headroom(s.now_us, headroom, uncertain)
+        };
+        if !dormant && reason == Reason::Hold && self.mode == Mode::Active {
             reason = self.adjust_for_load(s.now_us, pressure_us, receiver_pressure_us, headroom_us);
         }
+        reason = self.adjust_rescue(s.now_us, receiver_pressure_us, reason);
         Ok(Report {
             sample: s,
             previous_interval_us: previous,
@@ -313,6 +343,29 @@ impl Controller {
             receiver,
             receiver_pressure_us,
         })
+    }
+    fn adjust_rescue(&mut self, now: u64, pressure_us: [u64; 2], reason: Reason) -> Reason {
+        if self.receiver_rescue == Some(false) {
+            if let Some(index) = pressure_us
+                .iter()
+                .position(|&duration| duration >= RECEIVER_RESCUE_DWELL_US)
+                && self.interval < self.policy.maximum_interval_us
+            {
+                self.receiver_rescue = Some(true);
+                self.interval = (self.interval * 2).min(self.policy.maximum_interval_us);
+                self.adjusted = Some(now);
+                self.reset_headroom();
+                return [Reason::ReceiverBacklog, Reason::DecoderWork][index];
+            }
+        } else if self.receiver_rescue == Some(true)
+            && reason == Reason::HeadroomProbe
+            && self.interval == self.policy.minimum_interval_us
+        {
+            self.receiver_rescue = Some(false);
+            self.idle_pending_wake = false;
+            self.reset_receiver_evidence();
+        }
+        reason
     }
     fn track_receiver(
         &mut self,

@@ -38,7 +38,7 @@ async fn connection_with(
     clipboard: bool,
 ) -> (Host, Viewer) {
     let configuration = HostConfiguration {
-        offer: host_offer_with(true, clipboard),
+        offer: with_receiver_metrics(host_offer_with(true, clipboard)).unwrap(),
         binding: ControlBinding {
             id: 7,
             host_boot: HostBootId::from_raw(11),
@@ -319,7 +319,16 @@ fn exclusive_control(adaptive: bool) {
                         .is_some_and(|source| !source.changed)
             }));
         } else {
-            assert!(driver.capture_pacing().is_none());
+            let pacing = driver
+                .capture_pacing()
+                .expect("default controlled receiver rescue");
+            assert!(pacing.is_receiver_rescue());
+            assert_eq!(pacing.interval_us(), 50_000);
+            assert!(
+                pacing
+                    .decisions()
+                    .all(|decision| { decision.previous_interval_us == decision.interval_us })
+            );
         }
         // The executor saw exactly the press, then its fence, then the
         // release-only cleanup of the held key, then an orderly stop.

@@ -175,7 +175,16 @@ fn shared_dispatch(adaptive: bool) {
             assert_eq!(pacing.policy().maximum_interval_us, 200_000);
             assert!(pacing.report().is_some());
         } else {
-            assert!(driver.capture_pacing().is_none());
+            let pacing = driver
+                .capture_pacing()
+                .expect("default receiver rescue owner");
+            assert!(pacing.is_receiver_rescue());
+            assert_eq!(pacing.interval_us(), 50_000);
+            assert!(
+                pacing
+                    .decisions()
+                    .all(|decision| { decision.previous_interval_us == decision.interval_us })
+            );
         }
         reap_driver(&mut driver, &mut retirement).await;
         driver.release();

@@ -167,6 +167,78 @@ fn shared_decoder_load_reduces_capture_then_probes_after_the_original_decoder_ca
 }
 
 #[test]
+fn default_receiver_rescue_uses_live_feedback_then_recovers_on_the_same_session() {
+    let rt = support::runtime();
+    let cleanup_cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(Box::pin(async {
+        let mut group = Box::pin(group_with_source_lifetime(
+            &rt,
+            1,
+            &[fr_wire::receiver_metrics::CAPABILITY],
+            true,
+            SendPolicy::default(),
+            HostDuration::from_micros(12_500_000),
+        ))
+        .await;
+        ready(&mut group).await;
+        // A real retained decode obligation takes longer than the configured
+        // 50 ms cadence. Neither work duration nor query expiry is fabricated.
+        group.peers[0].enable_feedback(55_000);
+        group
+            .publisher
+            .enable_receiver_rescue(Duration::from_millis(50), Duration::from_millis(200))
+            .unwrap();
+        let initial = group.publisher.pacing().unwrap();
+        assert!(initial.is_receiver_rescue());
+        assert_eq!(initial.interval_us(), 50_000);
+        let worker = group.publisher.worker_id();
+        let started = now(&group.peers[0].h).unwrap();
+        let source = group.publisher.serve(Duration::from_millis(50), |_| {});
+        let network = async {
+            let peer = &mut group.peers[0];
+            while now(&peer.h).unwrap() < started + 7_000_000 {
+                if now(&peer.h).unwrap() >= started + 2_000_000 {
+                    // Already accepted work completes under its original
+                    // deadline. New work becomes fast on this SAME decoder.
+                    peer.decode_delay_us = 0;
+                }
+                peer.turn().await.unwrap();
+            }
+            assert!(peer.frames.len() > 20);
+            assert!(peer.feedback.as_ref().unwrap().sent > 10);
+            let host = peer.shared.as_mut().unwrap();
+            assert!(host.statistics().feedback_reports > 10);
+            assert!(host.renewed_until().unwrap().as_micros() > started + 3_000_000);
+            assert!(peer.control.check().is_ok());
+            host.close();
+        };
+        let (result, ()) = Box::pin(support::both(source, network)).await;
+        assert_eq!(result, Err(crate::media::shared_publisher::Error::Closed));
+        let pacing = group.publisher.pacing().unwrap();
+        let engaged = pacing
+            .decisions()
+            .find(|report| matches!(report.reason, Reason::DecoderWork | Reason::ReceiverBacklog))
+            .expect("solicited production feedback engages default rescue");
+        assert_eq!(engaged.previous_interval_us, 50_000);
+        assert_eq!(engaged.interval_us, 100_000);
+        assert!(
+            engaged
+                .receiver_pressure_us
+                .iter()
+                .any(|&duration| duration >= 1_000_000)
+        );
+        assert!(engaged.sample.now_us >= started + 1_000_000);
+        assert!(pacing.decisions().any(|report| {
+            report.reason == Reason::HeadroomProbe
+                && matches!(report.receiver, ReceiverEvidence::Measured(_))
+        }));
+        assert!(pacing.interval_us() < 200_000);
+        assert_eq!(group.publisher.worker_id(), worker);
+        cleanup(&mut group, &cleanup_cx).await;
+    }));
+}
+
+#[test]
 fn healthy_shared_decoder_keeps_progress_when_a_slow_sibling_leaves() {
     let rt = support::runtime();
     let cleanup_cx = rt.request_cx_with_budget(Budget::INFINITE);

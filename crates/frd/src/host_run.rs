@@ -678,6 +678,29 @@ fn selected_offer(
     Ok(offer)
 }
 
+fn finish_runtime_offer(
+    mut offer: Offer,
+    adaptive_capture: bool,
+    scales: bool,
+    folder_sync: bool,
+) -> Result<Offer, serial::Error> {
+    if scales {
+        offer = fr_wire::display::picture::with_capability(offer)
+            .map_err(|_| serial::Error::Configuration)?;
+    }
+    if folder_sync {
+        offer = crate::session_startup::with_folder_sync(offer)
+            .map_err(|_| serial::Error::Configuration)?;
+    }
+    // Default rescue is optional. Real input, audio, file jobs and hardware
+    // picture scaling keep their existing slots. A full profile stays valid
+    // and retains fixed cadence without negotiated receiver feedback.
+    if !adaptive_capture && offer.capabilities.len() < fr_wire::negotiation::MAX_CAPABILITIES {
+        offer = with_receiver_metrics(offer).map_err(|_| serial::Error::Configuration)?;
+    }
+    Ok(offer)
+}
+
 fn request(
     attempt: u64,
     host_boot: HostBootId,
@@ -1883,16 +1906,12 @@ impl Share<'_> {
                         if require_approval {
                             approval::require(&mut request);
                         }
-                        if scales {
-                            request.session.offer =
-                                fr_wire::display::picture::with_capability(request.session.offer)
-                                    .map_err(|_| serial::Error::Configuration)?;
-                        }
-                        if folder_sync {
-                            request.session.offer =
-                                crate::session_startup::with_folder_sync(request.session.offer)
-                                    .map_err(|_| serial::Error::Configuration)?;
-                        }
+                        request.session.offer = finish_runtime_offer(
+                            request.session.offer,
+                            adaptive_capture,
+                            scales,
+                            folder_sync,
+                        )?;
                         Ok(request)
                     },
                     approval: move |original, role| notify.submit(&original, role),
@@ -2402,13 +2421,13 @@ mod tests {
     }
 
     #[test]
-    fn only_explicit_adaptive_requests_offer_receiver_metrics_including_full_duplex() {
-        for profile in [
-            (None, false, false, false, false),
-            (Some(core()), false, false, false, false),
-            (Some(core()), true, true, false, false),
-            (Some(core()), true, false, true, false),
-            (Some(core()), true, true, true, false),
+    fn default_and_explicit_adaptive_requests_offer_optional_receiver_metrics() {
+        for (profile, default_metrics) in [
+            ((None, false, false, false, false), true),
+            ((Some(core()), false, false, false, false), true),
+            ((Some(core()), true, true, false, false), true),
+            ((Some(core()), true, false, true, false), true),
+            ((Some(core()), true, true, true, false), false),
         ] {
             for adaptive in [false, true] {
                 let request = request(
@@ -2421,7 +2440,8 @@ mod tests {
                     adaptive,
                 )
                 .unwrap();
-                let offer = request.session.offer;
+                let offer =
+                    finish_runtime_offer(request.session.offer, adaptive, false, false).unwrap();
                 offer.validate().unwrap();
                 assert_eq!(offer.limits, ProtocolLimits::ABSOLUTE);
                 assert_eq!(
@@ -2430,8 +2450,120 @@ mod tests {
                             && cap.version == fr_wire::receiver_metrics::VERSION
                             && !cap.required
                     }),
-                    adaptive
+                    adaptive || default_metrics
                 );
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Preserve the full bounded native-feature composition matrix.
+    fn automatic_receiver_metrics_never_displace_valid_native_feature_profiles() {
+        for options in 0u8..32 {
+            let clipboard = options & 1 != 0;
+            let audio = options & 2 != 0;
+            let files = options & 4 != 0;
+            let download = options & 8 != 0;
+            let microphone = options & 16 != 0;
+            for input in 0u8..8 {
+                let mut capabilities = core();
+                for (bit, capability) in [
+                    (1, Capability::LineScroll),
+                    (2, Capability::PixelScroll),
+                    (4, Capability::Text),
+                ] {
+                    if input & bit != 0 {
+                        capabilities = capabilities.with(capability);
+                    }
+                }
+                // Recreate the previously available feature-only profile;
+                // rescue may add telemetry, never turn a valid profile invalid.
+                let original = (|| {
+                    let base = if download {
+                        let base = if files {
+                            host_offer_with_duplex(true, clipboard, audio)
+                        } else {
+                            host_offer_with_download(true, clipboard, audio, true)
+                        };
+                        if capabilities.contains(Capability::LineScroll) {
+                            with_line_scroll(base)
+                        } else {
+                            base
+                        }
+                    } else {
+                        offer(Some(capabilities), clipboard, audio, files)
+                    };
+                    let base = if microphone {
+                        fr_wire::audio_up::with_microphone(base)?
+                    } else {
+                        base
+                    };
+                    let base = if capabilities.contains(Capability::PixelScroll) {
+                        fr_wire::control::with_pixel_scroll(base)?
+                    } else {
+                        base
+                    };
+                    let base = if capabilities.contains(Capability::Text) {
+                        fr_wire::control::with_committed_text(base)?
+                    } else {
+                        base
+                    };
+                    base.validate()?;
+                    Ok::<_, fr_wire::negotiation::Error>(base)
+                })();
+                let current = selected_offer(
+                    (Some(capabilities), clipboard, files, download, microphone),
+                    audio,
+                    false,
+                );
+                let Ok(original) = original else {
+                    assert!(current.is_err());
+                    continue;
+                };
+                let current = current.expect("a valid existing profile must remain available");
+                for scales in [false, true] {
+                    for folder in [false, true] {
+                        if folder && !download {
+                            continue;
+                        }
+                        let previous = (|| {
+                            let mut previous = original.clone();
+                            if scales {
+                                previous = fr_wire::display::picture::with_capability(previous)?;
+                            }
+                            if folder {
+                                previous = crate::session_startup::with_folder_sync(previous)?;
+                            }
+                            Ok::<_, fr_wire::negotiation::Error>(previous)
+                        })();
+                        let actual = finish_runtime_offer(current.clone(), false, scales, folder);
+                        if let Ok(previous) = previous {
+                            let actual =
+                                actual.expect("existing hardware/file profile stays available");
+                            actual.validate().unwrap();
+                            assert_eq!(actual.limits, previous.limits);
+                            assert!(
+                                actual.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES
+                            );
+                            assert!(
+                                previous
+                                    .capabilities
+                                    .iter()
+                                    .all(|cap| actual.capabilities.contains(cap))
+                            );
+                            assert_eq!(
+                                actual
+                                    .capabilities
+                                    .iter()
+                                    .any(|cap| cap.name == fr_wire::receiver_metrics::CAPABILITY),
+                                previous.capabilities.len()
+                                    < fr_wire::negotiation::MAX_CAPABILITIES
+                            );
+                        } else {
+                            assert!(actual.is_err());
+                        }
+                    }
+                }
             }
         }
     }

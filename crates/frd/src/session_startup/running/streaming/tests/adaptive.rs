@@ -518,3 +518,24 @@ fn pacing_configuration_cannot_replace_a_running_or_stopped_controller() {
             .unwrap();
     });
 }
+
+#[test]
+fn receiver_rescue_preserves_a_fractional_slow_capture_baseline() {
+    run(|c, h| async move {
+        let (mut host, _, _, _) = Box::pin(fixture(&c, &h, "healthy", SendPolicy::default())).await;
+        let baseline = Duration::from_nanos(333_333_333);
+        host.stream.policy.capture_interval = baseline;
+        host.stream.enable_receiver_rescue(baseline).unwrap();
+        let pacing = host.pacing().unwrap();
+        assert!(pacing.is_receiver_rescue());
+        assert_eq!(pacing.policy().minimum_interval_us, 333_334);
+        assert_eq!(pacing.policy().maximum_interval_us, 333_334);
+        assert_eq!(pacing.interval_us(), 333_334);
+        assert!(host.stream.enable_receiver_rescue(baseline).is_err());
+        drop(host.serve(|| Ok(1), || None, block));
+        assert!(host.stream.enable_receiver_rescue(baseline).is_err());
+        host.reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
+            .await
+            .unwrap();
+    });
+}

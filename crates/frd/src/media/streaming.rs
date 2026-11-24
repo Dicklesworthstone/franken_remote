@@ -129,6 +129,18 @@ impl Stream {
     /// verification, reference retention and authority deadlines are untouched.
     /// This does not estimate link bandwidth or provide aggregate bitrate control.
     pub fn enable_adaptive_capture(&mut self, maximum: Duration) -> Result<(), super::Error> {
+        self.enable_capture_pacing(maximum, false)
+    }
+    /// Keep baseline raw cadence until the original negotiated receiver proves
+    /// sustained overload. This does not enable local-pressure bitrate changes.
+    pub(crate) fn enable_receiver_rescue(&mut self, maximum: Duration) -> Result<(), super::Error> {
+        self.enable_capture_pacing(maximum, true)
+    }
+    fn enable_capture_pacing(
+        &mut self,
+        maximum: Duration,
+        receiver_rescue: bool,
+    ) -> Result<(), super::Error> {
         self.control.check()?;
         if self.served || self.pacing.is_some() {
             return Err(super::Error::InvalidFrame);
@@ -136,13 +148,22 @@ impl Stream {
         let minimum_interval_us =
             u64::try_from(self.policy.capture_interval.as_nanos().div_ceil(1000))
                 .map_err(|_| super::Error::InvalidFrame)?;
-        let maximum_interval_us =
-            u64::try_from(maximum.as_micros()).map_err(|_| super::Error::InvalidFrame)?;
+        let maximum_interval_us = u64::try_from(if receiver_rescue {
+            maximum.as_nanos().div_ceil(1000)
+        } else {
+            maximum.as_micros()
+        })
+        .map_err(|_| super::Error::InvalidFrame)?;
+        let policy = fr_media::pacing::Policy {
+            minimum_interval_us,
+            maximum_interval_us,
+        };
         self.pacing = Some(
-            fr_media::pacing::Controller::new(fr_media::pacing::Policy {
-                minimum_interval_us,
-                maximum_interval_us,
-            })
+            if receiver_rescue {
+                fr_media::pacing::Controller::for_receiver_overload(policy)
+            } else {
+                fr_media::pacing::Controller::new(policy)
+            }
             .map_err(super::Error::Pacing)?,
         );
         Ok(())

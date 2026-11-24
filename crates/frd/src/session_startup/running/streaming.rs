@@ -1100,7 +1100,9 @@ impl<S> VideoServices<'_, S> {
                 controller.update(sample)
             }
             .map_err(|error| Error::Media(crate::media::Error::Pacing(error)))?;
-            if let Some(bitrate) = &mut self.bitrate {
+            if !controller.is_receiver_rescue()
+                && let Some(bitrate) = &mut self.bitrate
+            {
                 bitrate.observe(&report).map_err(bitrate_error)?;
             }
             if report.interval_us != report.previous_interval_us

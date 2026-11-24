@@ -909,6 +909,18 @@ async fn bootstrap(
         stream
             .enable_adaptive_bitrate()
             .map_err(|e| budget.fail(Error::Media(e)))?;
+    } else if negotiation.capabilities.iter().any(|capability| {
+        capability.name == fr_wire::receiver_metrics::CAPABILITY
+            && capability.version == fr_wire::receiver_metrics::VERSION
+    }) {
+        stream
+            .enable_receiver_rescue(
+                policy
+                    .streaming
+                    .capture_interval
+                    .max(Duration::from_millis(200)),
+            )
+            .map_err(|e| budget.fail(Error::Media(e)))?;
     }
     stream
         .enable_path_bitrate()

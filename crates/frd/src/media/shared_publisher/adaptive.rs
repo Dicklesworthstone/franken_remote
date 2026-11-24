@@ -132,6 +132,9 @@ impl CapturePacing {
     pub(super) fn interval_us(&self) -> u64 {
         self.controller.interval_us()
     }
+    pub(super) const fn receiver_rescue(&self) -> bool {
+        self.controller.is_receiver_rescue()
+    }
     pub(super) fn bitrate_mut(&mut self) -> Option<&mut bitrate::Controller> {
         self.bitrate.as_mut()
     }
@@ -164,7 +167,9 @@ impl CapturePacing {
     ) -> Result<(), Error> {
         if self.receiver_views != *views {
             self.controller.reset_receiver_evidence();
-            if let Some(bitrate) = &mut self.bitrate {
+            if !self.controller.is_receiver_rescue()
+                && let Some(bitrate) = &mut self.bitrate
+            {
                 // Receiver bindings change during recovery while the original
                 // transport cohort survives. Clear local evidence and probes,
                 // but retain a conservative cut justified by those same paths.
@@ -317,7 +322,9 @@ impl CapturePacing {
                 peers.receiver,
             )
             .map_err(pacing_error)?;
-        if let Some(bitrate) = &mut self.bitrate {
+        if !self.controller.is_receiver_rescue()
+            && let Some(bitrate) = &mut self.bitrate
+        {
             bitrate.observe(&report).map_err(bitrate_error)?;
         }
         Ok(report.interval_us)
@@ -339,10 +346,20 @@ fn bitrate_error(error: bitrate::Error) -> Error {
 /// Otherwise receiver slowdown needs positive live pressure from EVERY eligible
 /// viewer. Pick one complete Load, in stable subscriber order; never synthesize
 /// a healthy receiver by combining counters from different viewers.
+#[cfg(test)]
 fn peer_evidence(
     now: u64,
     interval: u64,
     samples: impl Iterator<Item = (Option<(u64, Availability)>, ReceiverEvidence)>,
+) -> PeerEvidence {
+    receiver_evidence(now, interval, samples, false)
+}
+
+fn receiver_evidence(
+    now: u64,
+    interval: u64,
+    samples: impl Iterator<Item = (Option<(u64, Availability)>, ReceiverEvidence)>,
+    prefer_measured: bool,
 ) -> PeerEvidence {
     let mut any = false;
     let mut any_ready = false;
@@ -367,7 +384,13 @@ fn peer_evidence(
             ReceiverEvidence::Measured(load) => receiver_headroom(load, interval),
             ReceiverEvidence::Unknown => false,
         };
-        if healthy.is_none() && send == Availability::Ready && headroom {
+        if send == Availability::Ready
+            && headroom
+            && (healthy.is_none()
+                || (prefer_measured
+                    && matches!(healthy, Some(ReceiverEvidence::Unobserved))
+                    && matches!(receiver, ReceiverEvidence::Measured(_))))
+        {
             healthy = Some(receiver);
         }
         if let ReceiverEvidence::Measured(load) = receiver
@@ -400,8 +423,13 @@ fn receiver_headroom(load: Load, interval: u64) -> bool {
         && load.work_us.is_some_and(|work| work <= interval * 3 / 4)
 }
 impl Members {
-    pub(super) fn peer_evidence(&self, now: u64, interval: u64) -> PeerEvidence {
-        peer_evidence(
+    pub(super) fn peer_evidence(
+        &self,
+        now: u64,
+        interval: u64,
+        receiver_rescue: bool,
+    ) -> PeerEvidence {
+        receiver_evidence(
             now,
             interval,
             self.entries
@@ -416,6 +444,7 @@ impl Members {
                         entry.receiver_sample.current(entry.view, now),
                     )
                 }),
+            receiver_rescue,
         )
     }
 }
@@ -429,16 +458,38 @@ impl Publisher {
         capture_interval: Duration,
         maximum: Duration,
     ) -> Result<(), Error> {
+        self.enable_capture_pacing(capture_interval, maximum, false)
+    }
+    /// Preserve baseline source cadence unless every eligible viewer supplies
+    /// sustained, still-valid receiver pressure. A healthy sibling vetoes rescue.
+    pub(crate) fn enable_receiver_rescue(
+        &mut self,
+        capture_interval: Duration,
+        maximum: Duration,
+    ) -> Result<(), Error> {
+        let maximum = Duration::from_micros(
+            u64::try_from(maximum.as_nanos().div_ceil(1000)).map_err(|_| Error::InvalidBudget)?,
+        );
+        self.enable_capture_pacing(capture_interval, maximum, true)
+    }
+    fn enable_capture_pacing(
+        &mut self,
+        capture_interval: Duration,
+        maximum: Duration,
+        receiver_rescue: bool,
+    ) -> Result<(), Error> {
         self.members.lock().map_err(|_| Error::Poisoned)?.tick()?;
         // Path-following rate is enabled after this, into its controller.
         if self.served || self.adaptive.is_some() || self.path_rate.is_some() {
             return Err(Error::InvalidBudget);
         }
-        self.adaptive = Some(Box::new(CapturePacing::new(
-            capture_interval,
-            maximum,
-            self.source.configuration.fps,
-        )?));
+        let mut pacing =
+            CapturePacing::new(capture_interval, maximum, self.source.configuration.fps)?;
+        if receiver_rescue {
+            pacing.controller = Controller::for_receiver_overload(pacing.controller.policy())
+                .map_err(pacing_error)?;
+        }
+        self.adaptive = Some(Box::new(pacing));
         Ok(())
     }
     /// Enable native rate requests only for a worker implementing the complete
@@ -483,7 +534,11 @@ impl Publisher {
             adaptive.observe_receivers(&members)?;
             (
                 now,
-                members.peer_evidence(now, adaptive.controller.interval_us()),
+                members.peer_evidence(
+                    now,
+                    adaptive.controller.interval_us(),
+                    adaptive.controller.is_receiver_rescue(),
+                ),
             )
         };
         let interval = adaptive.sample(now, ready, peers)?;

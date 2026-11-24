@@ -211,9 +211,9 @@ impl Publisher {
                 if pacing.policy().minimum_interval_us != cadence.interval {
                     return Err(Error::InvalidBudget);
                 }
-                let cursor = cadence;
+                let cursor = (!pacing.is_receiver_rescue()).then_some(cadence);
                 cadence.change_interval(pacing.interval_us())?;
-                Some(cursor)
+                cursor
             } else {
                 None
             };
@@ -224,6 +224,23 @@ impl Publisher {
                     (members.last, members.media_deadline(), members.credit_epoch)
                 };
                 if let Some(interval) = publisher.capture_interval(now)? {
+                    if let Some(pacing) = publisher.pacing()
+                        && pacing.is_receiver_rescue()
+                    {
+                        if interval == pacing.policy().minimum_interval_us {
+                            // Dormant rescue keeps the original fixed-pacing
+                            // cursor/video ordering, including under long work.
+                            cursor_cadence = None;
+                        } else if cursor_cadence.is_none() {
+                            // Only a real slowdown creates independent cursor
+                            // work; no missed cursor slots are replayed.
+                            cursor_cadence = Some(Cadence::new(
+                                capture_interval,
+                                publisher.source.configuration.fps,
+                                now,
+                            )?);
+                        }
+                    }
                     cadence.change_interval(interval)?;
                 }
                 // Skipping captures while every path is queued is not enough

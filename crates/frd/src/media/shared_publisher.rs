@@ -576,7 +576,11 @@ impl Publisher {
         if let Some(adaptive) = adaptive {
             let mut members = members.lock().map_err(|_| Error::Poisoned)?;
             adaptive.observe_receivers(&members)?;
-            let peers = members.peer_evidence(members.last, adaptive.interval_us());
+            let peers = members.peer_evidence(
+                members.last,
+                adaptive.interval_us(),
+                adaptive.receiver_rescue(),
+            );
             adaptive.sample(members.last, false, peers)?;
             members.quality = adaptive.quality_point();
         } else if let Some(rate) = path_rate {

@@ -626,12 +626,24 @@ impl Driver {
                         .publisher
                         .enable_adaptive_capture(this.interval, maximum)
                         .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
+                } else {
                     desktop
                         .prepared
                         .publisher
-                        .enable_adaptive_bitrate()
+                        .enable_receiver_rescue(
+                            this.interval,
+                            this.interval.max(Duration::from_millis(200)),
+                        )
                         .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
                 }
+                // The same source-owned rate transaction continues to consume
+                // path evidence. Receiver-only rescue never adds local sender
+                // pressure to the default bitrate policy.
+                desktop
+                    .prepared
+                    .publisher
+                    .enable_adaptive_bitrate()
+                    .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
                 desktop
                     .prepared
                     .publisher

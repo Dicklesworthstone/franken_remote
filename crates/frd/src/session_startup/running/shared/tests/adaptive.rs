@@ -104,3 +104,35 @@ fn invalid_or_mismatched_shared_pacing_never_issues_a_native_capture() {
         cleanup(&mut group, &cleanup_cx).await;
     });
 }
+
+#[test]
+fn shared_receiver_rescue_preserves_a_fractional_slow_capture_baseline() {
+    let rt = support::runtime();
+    let cleanup_cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let mut group = Box::pin(group(&rt, 1)).await;
+        ready(&mut group).await;
+        let baseline = Duration::from_nanos(333_333_333);
+        group
+            .publisher
+            .enable_receiver_rescue(baseline, baseline)
+            .unwrap();
+        let pacing = group.publisher.pacing().unwrap();
+        assert!(pacing.is_receiver_rescue());
+        assert_eq!(pacing.policy().minimum_interval_us, 333_334);
+        assert_eq!(pacing.policy().maximum_interval_us, 333_334);
+        assert_eq!(pacing.interval_us(), 333_334);
+        assert!(
+            group
+                .publisher
+                .enable_receiver_rescue(baseline, baseline)
+                .is_err()
+        );
+        drop(
+            group
+                .publisher
+                .serve(baseline, |_| panic!("unpolled source")),
+        );
+        cleanup(&mut group, &cleanup_cx).await;
+    });
+}

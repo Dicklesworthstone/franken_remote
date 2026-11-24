@@ -1,6 +1,6 @@
 # Adaptive capture and encoder bitrate
 
-This implements opt-in capture pacing and bitrate-control transactions for the
+This implements default receiver-overload rescue, opt-in capture pacing, and bitrate-control transactions for the
 software encoder, macOS VideoToolbox and Windows Media Foundation, following plan
 section 13 and beads `fr-p1-adaptive-v0-qgi` and `fr-rc-media-wire-controller-qej`.
 They use the existing continuous host session, source and QUIC sender.
@@ -9,6 +9,53 @@ to measured send-admission pressure with bounded encoder targets. Offered-byte
 reductions have been measured for software HEVC; native macOS and Windows
 rate-change qualification remains pending. Resolution changes, end-to-end latency control
 and per-path aggregate-bandwidth estimation remain incomplete.
+
+## Default receiver-overload rescue
+
+Native host sessions preserve their configured capture cadence unless their
+original negotiated receiver reports sustained overload. The default host
+offers the existing optional decoder-load protocol only after its real input,
+audio, file, folder-job, and hardware-scaled-picture capabilities have been
+composed. A profile already using the 24-capability allowance keeps those
+features and omits this feedback. An older viewer can also omit it; neither
+case invents a receiver measurement or enables automatic capture slowdown.
+
+The source-owned rescue controller starts at the configured minimum interval,
+with the same fixed-cadence cursor scheduling. Source work, local send pressure,
+capture-credit pressure, idle observations, and unknown reports cannot activate
+it. Activation requires one second of accumulated positive measured receiver
+backlog or decoder-work evidence. Only intervals with two positive endpoints
+count; short unknown intervals pause the evidence, while known counterevidence,
+an unnegotiated receiver, changed receiver scope, or more than 100 ms since the
+last positive report resets it. One second is an evidence requirement, not a
+wall-clock response guarantee. Every report retains its original host-query
+expiry, including replies arriving on a delayed path.
+
+Once engaged, rescue uses the existing bounded cadence reductions and gradual
+headroom probes described below. Returning toward the configured cadence
+requires fresh measured receiver headroom as well as the original source and
+send evidence. Unknown or unnegotiated feedback cannot certify recovery. A
+probe reaching the original minimum makes rescue dormant again and clears any
+old idle-wake opportunity. Shared sources require pressure from every eligible
+viewer; a healthy sibling vetoes engagement. A healthy measured viewer also
+remains usable as recovery evidence when an earlier subscriber omitted metrics.
+
+Default path-following bitrate control remains separate: rescue does not add
+local send-pressure bitrate changes. Explicit `--adaptive-capture` retains its
+conservative startup, shorter pressure dwell, local-pressure handling, and idle
+policy. Both modes retain the same source, decoder configuration, authority
+deadlines, and finite reference-recovery allowance. A slow configured cadence
+at or beyond 200 ms remains fixed, with fractional microseconds rounded up
+consistently. Severe overload or missing timely feedback can still exhaust the
+existing recovery budget; this change does not qualify every `fr-7al9` field
+failure as resolved.
+
+The pure-policy regressions cover dormant behavior, measured dwell, bounded
+unknown gaps, receiver-scope resets, gradual recovery, and old idle wakes. Native
+source regressions additionally cover capability composition, shared receiver
+selection, original-session feedback, and slow fractional capture intervals.
+These are controller/protocol tests; they are not a hardware throughput or
+impaired-network qualification claim.
 
 ## Local host selection
 
@@ -20,7 +67,8 @@ frd run --encoder software --adaptive-capture
 # Add --input-agent /usr/libexec/fr-input-agent to offer control as well.
 ```
 
-The option is off by default. It is a local capture-policy choice, not a
+The full adaptive option is off by default; the receiver-only rescue above does
+not require it. It is a local capture-policy choice, not a
 negotiated peer capability. The existing observation approval and source
 permission checks still govern the share; control additionally requires its
 input permission, indicator and lease. Installed services preserve the choice
@@ -200,7 +248,7 @@ limits remain independent enforcement boundaries.
 
 ## Adjustment rules
 
-Startup uses twice the minimum interval, clamped to the maximum. A continuously
+Explicit adaptive startup uses twice the minimum interval, clamped to the maximum. A continuously
 observed local overload must persist for 100 ms before reducing offered raw work;
 each reduction doubles the interval within its bounds and is separated from the
 next by at least 250 ms. Source-work, send-admission, and capture-credit causes
