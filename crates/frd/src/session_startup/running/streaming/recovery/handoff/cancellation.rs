@@ -223,6 +223,7 @@ fn recovery_path_service(allowed: bool, expired: bool) {
             rtt_variation_us: 1,
             bytes_in_flight: 24_000,
             packets_acked: 0,
+            packets_lost: 0,
             busy_packets_acked: 0,
             busy_acked_at_us: None,
         };

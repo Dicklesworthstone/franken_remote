@@ -306,6 +306,9 @@ pub struct PathLoad {
     /// Tracked packets acknowledged so far on this path, including ACK-only
     /// packets. Count growth alone does not prove a new RTT or video delivery.
     pub packets_acked: u64,
+    /// Native cumulative loss declarations on the same path. A rise interrupts
+    /// bitrate probe dwell even when other packets were acknowledged.
+    pub packets_lost: u64,
     /// ACK counter at the last progress from a busy native flight or a
     /// validated video fragment flushed into a flight that fully drained with
     /// ACK progress and no packet loss. Unlike an idle ACK count, this covers
@@ -641,6 +644,7 @@ impl QuicRecords {
             rtt_variation_us: path.rttvar_micros?,
             bytes_in_flight: path.bytes_in_flight,
             packets_acked: path.packets_acked,
+            packets_lost: path.packets_lost,
             busy_packets_acked: busy.map_or(0, |(packets, _)| packets),
             busy_acked_at_us: busy.map(|(_, at)| at),
         })

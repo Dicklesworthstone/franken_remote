@@ -95,6 +95,10 @@ pub(crate) struct PathQueue {
     delivery: Option<(u64, Delivered, Delivered)>,
     /// Most recent acknowledged progress from a previously busy path.
     clear_at: Option<u64>,
+    /// Loss can occur and ACKs can resume between two reads of the path.
+    /// Retain the counter and the time we first saw its latest change.
+    loss_count: Option<u64>,
+    loss_observed_at: Option<u64>,
     /// Consume each native busy-flight progress witness once. Its original
     /// timestamp, rather than receipt here, bounds its use as headroom.
     busy_packets_acked: u64,
@@ -191,7 +195,23 @@ impl PathQueue {
         // Repeated, fully converged estimates remain usable for queue bounds
         // and delivery, but cannot certify a longer route by themselves.
         let base = self.adopt_route(drained && progressed, sampled_rtt, base, rtt, now);
-        if load.busy_packets_acked > self.busy_packets_acked
+        if self
+            .loss_count
+            .is_some_and(|last| load.packets_lost != last)
+        {
+            self.loss_observed_at = Some(now);
+        }
+        self.loss_count = Some(load.packets_lost);
+        // Even a later busy ACK cannot hide a loss between samples. Keep
+        // the veto observable across a shared publisher capture interval.
+        // It never suppresses measured queue pressure or fabricates a cut.
+        if load.packets_lost == u64::MAX
+            || self
+                .loss_observed_at
+                .is_some_and(|at| now - at <= HEADROOM_EVIDENCE_US)
+        {
+            self.clear_at = None;
+        } else if load.busy_packets_acked > self.busy_packets_acked
             && load.busy_packets_acked <= load.packets_acked
             && let Some(at) = load.busy_acked_at_us
             && now
@@ -335,6 +355,7 @@ mod tests {
             rtt_variation_us: latest_rtt_us / 2,
             bytes_in_flight,
             packets_acked,
+            packets_lost: 0,
             busy_packets_acked: 0,
             busy_acked_at_us: None,
         }
@@ -348,6 +369,31 @@ mod tests {
 
     fn current(path: &PathQueue) -> PathEvidence {
         path.evidence(path.last.map_or(0, |(at, _, _)| at))
+    }
+
+    #[test]
+    fn loss_veto_preserves_queue_evidence_and_needs_a_new_clean_witness() {
+        let mut path = PathQueue::default();
+        path.observe(Some(busy_progress(acked(5_000, FULL, 1), 0)), 0);
+        assert_eq!(current(&path), PathEvidence::Clear);
+        let mut load = busy_progress(acked(200_000, FULL, 2), 100);
+        load.packets_lost = 1;
+        path.observe(Some(load), 100);
+        assert!(matches!(current(&path), PathEvidence::Queued { .. }));
+        load.bytes_in_flight = 0;
+        path.observe(Some(load), 200);
+        assert_eq!(current(&path), PathEvidence::Idle);
+        path.observe(Some(load), 300_000);
+        assert_eq!(current(&path), PathEvidence::Idle, "old ACK cannot resume");
+        load.packets_acked += 1;
+        path.observe(Some(busy_progress(load, 300_001)), 300_001);
+        assert_eq!(current(&path), PathEvidence::Clear);
+        load.packets_lost = u64::MAX;
+        for at in [300_002, 600_000] {
+            load.packets_acked += 1;
+            path.observe(Some(busy_progress(load, at)), at);
+            assert_eq!(current(&path), PathEvidence::Idle);
+        }
     }
 
     fn rate_at(path: &mut PathQueue, now: u64) -> u64 {

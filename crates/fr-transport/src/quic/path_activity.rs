@@ -63,7 +63,11 @@ impl Activity {
         let video_delivered = self.video_flight.is_some_and(|(acked, lost)| {
             bytes_in_flight == 0 && packets_acked > acked && packets_lost == lost
         });
-        if (self.busy || video_delivered) && acknowledged {
+        if packets_lost != self.last_lost || packets_lost == u64::MAX {
+            // A mixed ACK/loss turn cannot certify spare capacity. A new
+            // path observer must not inherit an older pre-loss ACK either.
+            self.progress = None;
+        } else if (self.busy || video_delivered) && acknowledged {
             self.progress = Some((packets_acked, at));
         }
         if bytes_in_flight == 0
@@ -134,6 +138,20 @@ mod tests {
         activity.observe(0, 100, 0, 110); // declared lost, not acknowledged
         activity.observe(0, 101, 0, 120); // later idle ACK
         assert_eq!(activity.progress(), None);
+    }
+
+    #[test]
+    fn partial_busy_delivery_with_loss_retires_the_old_positive_witness() {
+        let mut activity = Activity::default();
+        activity.observe(12_000, 10, 0, 100);
+        activity.observe(12_000, 12, 0, 110);
+        assert_eq!(activity.progress(), Some((12, 110)));
+        activity.observe(12_000, 14, 1, 120);
+        assert_eq!(activity.progress(), None);
+        activity.observe(600, 15, 1, 130);
+        assert_eq!(activity.progress(), Some((15, 130)));
+        activity.observe(600, 15, 2, 140);
+        assert_eq!(activity.progress(), None, "loss without a new ACK");
     }
 
     #[test]

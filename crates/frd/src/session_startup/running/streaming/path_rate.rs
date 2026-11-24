@@ -60,6 +60,7 @@ mod tests {
             rtt_variation_us: 100,
             bytes_in_flight: bytes,
             packets_acked: packets,
+            packets_lost: 0,
             busy_packets_acked: 0,
             busy_acked_at_us: None,
         }
@@ -226,6 +227,47 @@ mod tests {
             busy_packets_acked: packets,
             busy_acked_at_us: Some(at),
             ..load(5_000, 12_000, packets)
+        }
+    }
+
+    #[test]
+    fn repeated_loss_between_busy_samples_requires_a_new_healthy_probe_interval() {
+        let mut path = PathQueue::default();
+        let mut bitrate = reduced();
+        let mut losses = 0;
+        for at in (200_000..=10_000_000).step_by(50_000) {
+            let pending_before_loss = at == 4_200_000;
+            // A later clean ACK can already be visible at poll time.
+            if at > 4_200_000 && at % 500_000 == 250_000 {
+                losses += 1;
+            }
+            let sample = PathLoad {
+                packets_lost: losses,
+                ..busy_ack(at)
+            };
+            View::Streaming
+                .observe(&mut path, Some(&mut bitrate), Some(sample), at)
+                .unwrap();
+            assert_eq!(
+                bitrate.pending().map(fr_media::bitrate::Change::reason),
+                pending_before_loss.then_some(Reason::Headroom),
+                "at {at}"
+            );
+        }
+        // Last loss at 9.75s, through 10s inclusive. Four seconds
+        // of uninterrupted fresh busy ACK evidence can probe again.
+        for at in (10_050_000..=14_050_000).step_by(50_000) {
+            let sample = PathLoad {
+                packets_lost: losses,
+                ..busy_ack(at)
+            };
+            View::Streaming
+                .observe(&mut path, Some(&mut bitrate), Some(sample), at)
+                .unwrap();
+            assert_eq!(
+                bitrate.pending().map(fr_media::bitrate::Change::reason),
+                (at == 14_050_000).then_some(Reason::Headroom)
+            );
         }
     }
 

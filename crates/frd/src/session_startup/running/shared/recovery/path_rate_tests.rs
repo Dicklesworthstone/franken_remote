@@ -24,6 +24,7 @@ fn sample(g: &mut Group, queued: &[bool]) {
         rtt_variation_us: 500,
         bytes_in_flight: 64 * 1024,
         packets_acked: 0,
+        packets_lost: 0,
         busy_packets_acked: 0,
         busy_acked_at_us: None,
     };
@@ -39,6 +40,7 @@ fn sample(g: &mut Group, queued: &[bool]) {
                     rtt_variation_us: rtt / 2,
                     bytes_in_flight: if *queued { 64 * 1024 } else { 0 },
                     packets_acked: 1,
+                    packets_lost: 0,
                     busy_packets_acked: 1,
                     busy_acked_at_us: Some(at),
                 },
