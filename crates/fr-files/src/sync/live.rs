@@ -26,6 +26,7 @@ const _: () = assert!(sender::batch::MAX_FILES == 32);
 /// A full initial scan must leave room for later source versions on this lane.
 pub const MAX_SESSION_TRANSFERS: u32 = 64;
 pub const MAX_SESSION_BYTES: u64 = 1024 * 1024 * 1024;
+pub(super) const ROUND_LIFETIME_US: u64 = 300_000_000;
 pub(super) const CONTROL_LIFETIME_US: u64 = 1_000_000;
 pub(super) const ACCEPT_LIFETIME_US: u64 = 5_000_000;
 
@@ -223,7 +224,7 @@ impl HostConfig {
             root,
             limits,
             interval_us: 5_000_000,
-            round_lifetime_us: 300_000_000,
+            round_lifetime_us: ROUND_LIFETIME_US,
         })
     }
     pub const fn job_id(&self) -> u64 {

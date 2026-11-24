@@ -57,7 +57,10 @@ limits before accepting its file offers. Each decoded ATP offer must also fit
 the remaining bytes of the round and the per-file ceiling before the receiver
 can queue a staging operation. Scanning uses one supervised worker and one bounded result. Each
 round has a five-minute deadline, and each retained state record keeps its
-original one-second delivery deadline. A round does not start while prior ATP,
+original one-second delivery deadline, capped by the active round. The
+controller starts its own monotonic round timer on the admitted scanning
+record. That deadline also fences its disk worker at publication and remains
+active until the settlement acknowledgment drains. A round does not start while prior ATP,
 publication proof, source cleanup or job-state custody remains outstanding.
 
 Only actual verified publication receipts advance the source-version ledger.

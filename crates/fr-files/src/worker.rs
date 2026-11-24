@@ -98,6 +98,47 @@ struct Inbox {
     next: u64,
     slot: Slot,
 }
+/// Absolute time in the original disk worker's local clock. Idle receivers
+/// have no round. Once either owner observes expiry the fence is terminal.
+pub(crate) struct RoundDeadline(AtomicU64);
+
+impl Default for RoundDeadline {
+    fn default() -> Self {
+        Self(AtomicU64::new(u64::MAX))
+    }
+}
+
+impl RoundDeadline {
+    pub(crate) fn until(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn start(&self, until: u64) -> bool {
+        self.0
+            .compare_exchange(u64::MAX, until, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(crate) fn elapsed(&self, now: u64) -> bool {
+        // A clock read begun in a settled round cannot revoke a later round.
+        self.0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |until| {
+                (now >= until).then_some(0)
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn finish(&self, now: u64) -> bool {
+        let until = self.until();
+        now < until
+            && until != u64::MAX
+            && self
+                .0
+                .compare_exchange(until, u64::MAX, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+}
+
 struct Shared {
     inbox: Mutex<Inbox>,
     permission: Permission,
@@ -105,6 +146,7 @@ struct Shared {
     clock: TimerDriverHandle,
     authority: session::Authority,
     last_sample: AtomicU64,
+    round: RoundDeadline,
     wake: OnceLock<Thread>,
 }
 impl Shared {
@@ -144,7 +186,10 @@ impl Shared {
             // Fence cancellation that arrived DURING that work before returning
             // a usable clock. This must be lock-free: a checkpoint here could
             // spend the final publication sample's lifetime waiting on Cx.
-            if self.cx.published_cancel_requested() {
+            if (self.round.until() != u64::MAX
+                && self.round.elapsed(self.clock.now().as_nanos() / 1000))
+                || self.cx.published_cancel_requested()
+            {
                 break Err(Refusal::Revoked);
             }
             match sample {
@@ -357,6 +402,9 @@ impl std::fmt::Debug for Task {
     }
 }
 impl Task {
+    pub(crate) fn round_deadline(&self) -> &RoundDeadline {
+        &self.shared.round
+    }
     pub fn stop(&self) {
         self.shared.stop();
     }
@@ -454,6 +502,7 @@ pub fn spawn_with_authority(
         clock,
         authority,
         last_sample: AtomicU64::new(now.as_micros()),
+        round: RoundDeadline::default(),
         wake: OnceLock::new(),
     });
     let running = shared.clone();

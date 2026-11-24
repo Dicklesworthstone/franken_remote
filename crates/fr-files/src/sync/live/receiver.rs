@@ -191,6 +191,9 @@ impl ControllerJob {
             return Err(LiveError::Expired);
         }
         self.observe(receiver.last_result())?;
+        if receiver.sync_round().elapsed(now) {
+            return Err(LiveError::Expired);
+        }
         self.finish_pending(receiver, q, now)?;
         let idle = receiver.sync_idle(q).map_err(LiveError::Receive)?;
         let admission = if self.phase == Phase::Files && self.completed < self.entries {
@@ -231,7 +234,7 @@ impl ControllerJob {
         }
         self.observe(receiver.last_result())?;
         if let Some(record) = incoming {
-            self.received(record, now)?;
+            self.received(record, now, receiver)?;
         }
         if receiver_state != State::Active {
             return Err(LiveError::Cancelled);
@@ -242,7 +245,12 @@ impl ControllerJob {
             }
             if !pending.admitted {
                 pending.admitted = receiver
-                    .send_sync(q, &pending.state, pending.deadline, authorize)
+                    .send_sync(
+                        q,
+                        &pending.state,
+                        pending.deadline.min(receiver.sync_round().until()),
+                        authorize,
+                    )
                     .map_err(LiveError::Receive)?;
             }
         }
@@ -266,6 +274,10 @@ impl ControllerJob {
         }
         self.pending = None;
         if self.phase == Phase::Acknowledging {
+            let now = receiver.sync_clock(q).map_err(LiveError::Receive)?;
+            if !receiver.sync_round().finish(now) {
+                return Err(LiveError::Expired);
+            }
             self.status.rounds_settled = self
                 .status
                 .rounds_settled
@@ -278,7 +290,12 @@ impl ControllerJob {
         Ok(())
     }
 
-    fn received(&mut self, record: SyncJobState, now: u64) -> Result<(), LiveError> {
+    fn received(
+        &mut self,
+        record: SyncJobState,
+        now: u64,
+        receiver: &Receiver,
+    ) -> Result<(), LiveError> {
         if record.job_id != self.status.state.job_id {
             return Err(LiveError::WrongJob);
         }
@@ -306,6 +323,12 @@ impl ControllerJob {
             Phase::Scan => {
                 let revision = self.revision.checked_add(1).ok_or(LiveError::Resource)?;
                 if record != state(record.job_id, SyncPhase::Scanning, revision) {
+                    return Err(LiveError::WrongPhase);
+                }
+                let until = now
+                    .checked_add(super::ROUND_LIFETIME_US)
+                    .ok_or(LiveError::Clock)?;
+                if !receiver.sync_round().start(until) {
                     return Err(LiveError::WrongPhase);
                 }
                 self.revision = revision;

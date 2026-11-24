@@ -91,6 +91,7 @@ impl Fixture {
             clock: timer,
             authority: session::Authority::from_input(&input),
             last_sample: AtomicU64::new(0),
+            round: RoundDeadline::default(),
             wake: OnceLock::new(),
         };
         Self {
@@ -265,4 +266,50 @@ fn cancellation_inside_each_completion_projection_blocks_file_and_tree_publicati
             );
         }
     }
+}
+
+#[test]
+fn round_expiry_inside_the_last_publication_projection_preserves_the_destination() {
+    let fixture = Fixture::new();
+    let mut receiver = fixture.staged(false);
+    let shared = &fixture.shared;
+    assert!(shared.round.start(1_000));
+    let mut clocks = 0;
+    let result = receiver.complete(receiver.binding(), 1, || {
+        shared.sample_with(true, |local| {
+            clocks += 1;
+            let sample = shared.authority.try_sample(local);
+            if clocks == 3 {
+                fixture.clock.advance_to(Time::from_millis(1));
+            }
+            sample
+        })
+    });
+    assert_eq!(result, Err(session::Error::Permission));
+    assert_eq!(clocks, 3);
+    assert!(!shared.round.finish(999));
+    assert!(!shared.round.start(2_000));
+    assert!(!fixture.path.join("item").exists());
+    receiver.close().unwrap();
+    assert_eq!(fs::read_dir(&fixture.path).unwrap().count(), 0);
+    assert!(
+        fixture
+            .input
+            .monitor()
+            .deadline(HostInstant::from_micros(1000))
+            .is_ok()
+    );
+}
+
+#[test]
+fn only_an_unexpired_round_can_release_its_deadline_for_the_next_round() {
+    let round = RoundDeadline::default();
+    assert!(round.start(100));
+    assert!(!round.start(200));
+    assert!(round.finish(99));
+    assert!(round.start(200));
+    assert!(!round.elapsed(100));
+    assert!(round.elapsed(200));
+    assert!(!round.finish(199));
+    assert!(!round.start(300));
 }

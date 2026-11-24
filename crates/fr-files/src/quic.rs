@@ -310,8 +310,10 @@ impl HostReceiver {
             match self.receiver.poll_reply(&mut self.reply) {
                 Ok(Some(n)) => {
                     self.reply_len = n;
-                    self.reply_deadline =
-                        now.checked_add(self.reply_lifetime).ok_or(Error::Clock)?;
+                    self.reply_deadline = now
+                        .checked_add(self.reply_lifetime)
+                        .ok_or(Error::Clock)?
+                        .min(self.task.round_deadline().until());
                 }
                 Ok(None) => {}
                 Err(error) if busy(error) => return Ok(()),
@@ -460,6 +462,10 @@ impl HostReceiver {
             return Err(Error::WrongRole);
         }
         Ok(self.clock.now().as_nanos() / 1000)
+    }
+
+    pub(crate) fn sync_round(&self) -> &worker::RoundDeadline {
+        self.task.round_deadline()
     }
 
     pub(crate) fn pending_offer_refusal(&self) -> Option<fr_wire::files::Reason> {
