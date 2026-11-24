@@ -1,6 +1,6 @@
 //! Original receive-owner evidence. Staging and cleanup never imply publication.
 use super::{Action, Frame, Publication, line};
-use fr_files::{session, wire::ResultReceipt, worker};
+use fr_files::{session, sync::JobStatus, wire::ResultReceipt, worker};
 use frd::native_files::{Absence, MAX_RECEIVE_RESULTS, ReceivePhase, ReceiveStatus};
 
 impl Frame {
@@ -70,7 +70,62 @@ impl Frame {
         ));
         frame.lines[6] = line(format_args!("Disk cleanup: {}", cleanup(status)));
         frame.lines[7] = line(format_args!("{}", end(status.absence)));
+        if let Some(job) = status.folder_job {
+            frame.folder_job(job, status, &outcomes, truncated);
+        }
         frame
+    }
+
+    fn folder_job(
+        &mut self,
+        job: JobStatus,
+        status: &ReceiveStatus,
+        outcomes: &Outcomes,
+        truncated: bool,
+    ) {
+        use fr_wire::sync_job_state::SyncPhase;
+        let state = job.state;
+        let phase = match state.phase {
+            SyncPhase::Advertised => "waiting for the host's advertisement",
+            SyncPhase::Accepted => "accepting the job",
+            SyncPhase::Scanning => "host scanning for changed files",
+            SyncPhase::Transferring => "receiving changes",
+            SyncPhase::Settled => "round delivered",
+            SyncPhase::ConflictRecorded => "round delivered with conflict copies",
+            SyncPhase::Cancelled => "cancelled",
+            SyncPhase::Failed => "failed",
+        };
+        self.lines[0] = line(format_args!("Folder job {}: {phase}", state.job_id));
+        self.lines[1] = line(format_args!(
+            "Round {} | Rounds settled: {}{}",
+            state.manifest_revision,
+            job.rounds_settled,
+            if status.cancel_requested {
+                " | Cancel requested"
+            } else {
+                ""
+            },
+        ));
+        if !truncated {
+            self.lines[3] = line(format_args!(
+                "This round: {} / {} files published, {} / {} bytes",
+                state.entries_completed,
+                state.entries_total,
+                state.bytes_completed,
+                state.bytes_total
+            ));
+        }
+        // The job counter survives truncation, and a late disk receipt can
+        // precede the job's final observation. Never add overlapping evidence.
+        let published = u64::from(job.confirmed_publications).max(outcomes.published as u64);
+        self.lines[4] = line(format_args!(
+            "Published locally: {published} | Conflict copies kept: {} | Retained durability unknown: {}",
+            job.confirmed_conflicts, outcomes.durability_unknown
+        ));
+        if let Some(error) = job.failure {
+            self.lines[7] = line(format_args!("Folder job ended: {}", error.code()));
+            self.actions = 0;
+        }
     }
 }
 

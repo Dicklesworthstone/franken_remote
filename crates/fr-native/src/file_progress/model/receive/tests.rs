@@ -224,3 +224,63 @@ fn missing_cleanup_uses_original_owner_evidence_even_when_the_lane_has_ended() {
         "Disk cleanup: pending / not yet reported"
     );
 }
+
+#[test]
+fn standing_folder_job_shows_round_progress_conflicts_and_terminal_failure() {
+    use fr_files::sync::{JobStatus, LiveError};
+    use fr_wire::sync_job_state::{ConflictPolicy, SyncDirection, SyncJobState, SyncPhase};
+
+    let mut s = status();
+    s.results = vec![published(1, 8, Publication::Durable)];
+    let mut job = JobStatus {
+        state: SyncJobState {
+            job_id: u64::MAX,
+            sync_direction: SyncDirection::HostToController,
+            conflict_policy: ConflictPolicy::KeepBoth,
+            phase: SyncPhase::Transferring,
+            reason: fr_wire::files::Reason::None,
+            entries_total: 2,
+            entries_completed: 1,
+            bytes_total: 16,
+            bytes_completed: 8,
+            conflicts_kept: 1,
+            manifest_revision: u64::MAX,
+        },
+        confirmed_publications: 1,
+        confirmed_conflicts: 1,
+        rounds_settled: u64::MAX - 1,
+        failure: None,
+        cleanup_complete: false,
+    };
+    s.folder_job = Some(job);
+    let active = Frame::snapshot(&Snapshot::Download(s.clone()));
+    assert!(active.permits(Action::Cancel));
+    assert_eq!(
+        text(&active.lines[0]),
+        format!("Folder job {}: receiving changes", u64::MAX)
+    );
+    assert!(text(&active.lines[1]).contains(&(u64::MAX - 1).to_string()));
+    assert_eq!(
+        text(&active.lines[3]),
+        "This round: 1 / 2 files published, 8 / 16 bytes"
+    );
+    assert!(text(&active.lines[4]).contains("Conflict copies kept: 1"));
+    assert_eq!(active.progress, -1);
+
+    job.state.phase = SyncPhase::Failed;
+    job.failure = Some(LiveError::Expired);
+    job.confirmed_publications = 3;
+    s.folder_job = Some(job);
+    s.cancel_requested = true;
+    s.results_truncated = true;
+    let ended = Frame::receive(&s);
+    assert_eq!(ended.actions, 0);
+    assert!(text(&ended.lines[1]).ends_with("Cancel requested"));
+    assert!(text(&ended.lines[3]).contains("missing results may have effects"));
+    assert!(text(&ended.lines[4]).starts_with("Published locally: 3 | Conflict copies kept: 1"));
+    assert_eq!(
+        text(&ended.lines[6]),
+        "Disk cleanup: pending / not yet reported"
+    );
+    assert_eq!(text(&ended.lines[7]), "Folder job ended: sync_expired");
+}
