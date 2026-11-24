@@ -29,19 +29,31 @@ mod host_audio_capture_policy;
 pub mod macos_audio;
 #[cfg(all(target_os = "macos", feature = "macos-host-audio"))]
 pub mod macos_audio_capture;
-#[cfg(any(test, all(target_os = "macos", feature = "macos-audio")))]
+#[cfg(any(
+    test,
+    all(target_os = "macos", feature = "macos-audio"),
+    all(windows, feature = "windows-audio-device")
+))]
 // Test-only builds (every platform) compile the policy without the native
 // Core Audio owner that constructs most of its errors.
 #[cfg_attr(
-    not(all(target_os = "macos", feature = "macos-audio")),
+    not(any(
+        all(target_os = "macos", feature = "macos-audio"),
+        all(windows, feature = "windows-audio-device")
+    )),
     allow(dead_code)
 )]
 mod macos_audio_policy;
+#[cfg(all(windows, feature = "windows-audio-device"))]
+pub mod windows_audio;
 #[cfg(all(windows, feature = "windows-audio-capture"))]
 pub mod windows_audio_capture;
 #[cfg(any(test, all(windows, feature = "windows-audio-capture")))]
 #[cfg_attr(not(all(windows, feature = "windows-audio-capture")), allow(dead_code))]
 mod windows_audio_capture_policy;
+#[cfg(any(test, all(windows, feature = "windows-audio-device")))]
+#[cfg_attr(not(all(windows, feature = "windows-audio-device")), allow(dead_code))]
+mod windows_audio_policy;
 // Both native devices use the same original Opus/ACK/playout owner.
 #[cfg(all(target_os = "macos", feature = "macos-audio"))]
 #[path = "pulse/playout.rs"]

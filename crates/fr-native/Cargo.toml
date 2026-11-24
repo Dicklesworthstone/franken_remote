@@ -27,24 +27,7 @@ rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"
 # Windows host capture (`windows-media`): Desktop Duplication, the D3D11 video
 # processor and Media Foundation hardware encoders. The version Cargo.lock
 # already carries for the Windows client; only the bindings named compile.
-windows = { version = "=0.62.2", optional = true, features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D11",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
-    "Win32_Graphics_Gdi",
-    "Win32_Media_Audio",
-    "Win32_Media_MediaFoundation",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_Ole",
-    "Win32_System_Performance",
-    "Win32_System_Threading",
-    "Win32_System_Variant",
-    "Win32_UI_HiDpi",
-    "Win32_UI_WindowsAndMessaging",
-] }
+windows = { version = "=0.62.2", optional = true, features = ["Win32_Foundation"] }
 
 [dev-dependencies]
 fr-transport.workspace = true
@@ -64,12 +47,38 @@ macos-media = ["media-worker"]
 # Windows host capture (fr-p0-media-windows-fbt, fr-p2-host-windows-rt1):
 # Desktop Duplication into a hardware Media Foundation HEVC encoder on the
 # same adapter. System DLLs only.
-windows-media = ["dep:windows"]
+windows-media = [
+    "dep:windows",
+    "windows/Win32_Foundation",
+    "windows/Win32_Graphics_Direct3D",
+    "windows/Win32_Graphics_Direct3D11",
+    "windows/Win32_Graphics_Dxgi",
+    "windows/Win32_Graphics_Dxgi_Common",
+    "windows/Win32_Graphics_Gdi",
+    "windows/Win32_Media_Audio",
+    "windows/Win32_Media_MediaFoundation",
+    "windows/Win32_System_Com",
+    "windows/Win32_System_Com_StructuredStorage",
+    "windows/Win32_System_Ole",
+    "windows/Win32_System_Performance",
+    "windows/Win32_System_Threading",
+    "windows/Win32_System_Variant",
+    "windows/Win32_UI_HiDpi",
+    "windows/Win32_UI_WindowsAndMessaging",
+]
 # fr-media-worker's Windows capture role around `windows-media`.
 windows-host-media = ["media-worker", "windows-media"]
 # Endpoint-wide Windows host playback, selected only by the local operator.
 # The capture boundary can be compiled independently of the trusted Opus SDK.
-windows-audio-capture = ["dep:windows"]
+windows-audio-api = [
+    "dep:windows", "windows/Win32_Media_Audio", "windows/Win32_System_Com",
+    "windows/Win32_System_Com_StructuredStorage", "windows/Win32_System_Variant",
+    "windows/Win32_System_Performance", "windows/Win32_System_Threading",
+    "windows/Win32_System_WindowsProgramming",
+]
+# Explicit Windows client renderer; no codec or client-shell integration yet.
+windows-audio-device = ["windows-audio-api", "dep:fr-client"]
+windows-audio-capture = ["windows-audio-api"]
 windows-host-audio = ["windows-host-media", "windows-audio-capture", "opus"]
 # Explicit host application/system playback capture. Reuses the separate
 # media-worker audio role and the existing statically linked Opus encoder.
