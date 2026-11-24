@@ -201,7 +201,11 @@ struct PictureMapper: Equatable {
     /// The picture pixel under a view point, or nil outside the picture
     /// (half-open: the right and bottom edges are outside). Never clamped.
     func toPicture(_ point: CGPoint) -> CGPoint? {
-        guard isReady else { return nil }
+        // A zoomed texture extends underneath the safe area and the keyboard.
+        // Metal clips there; a direct touch must use the same half-open area.
+        let clip = content
+        guard isReady, point.x >= clip.minX, point.x < clip.maxX,
+              point.y >= clip.minY, point.y < clip.maxY else { return nil }
         let p = toPictureUnbounded(point)
         guard containsPicture(p) else { return nil }
         return p

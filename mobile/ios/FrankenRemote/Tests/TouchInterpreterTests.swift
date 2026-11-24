@@ -291,6 +291,49 @@ final class TouchInterpreterTests: XCTestCase {
         XCTAssertEqual(sink.calls.count, before, "a fresh capability cannot retry the refused gesture")
     }
 
+    func testRotationReleasesTheOriginalDragAndRefusesDelayedTouchSamples() throws {
+        touch.mode = .direct
+        touch.controlling = true
+        _ = touch.began(1, at: middle, time: 0)
+        let moved = CGPoint(x: middle.x + 12, y: middle.y)
+        _ = touch.moved(1, to: moved, time: 0.1)
+        let oldPoint = try XCTUnwrap(touch.mapper.toPicture(moved))
+        let held = sink.calls
+        touch.updateViewport(at: 0.11) { _ in }
+        XCTAssertEqual(sink.calls, held, "repeat layout preserves a drag")
+
+        touch.updateViewport(at: 0.2) {
+            $0.setGeometry(viewSize: CGSize(width: 800, height: 384), insets: Insets(), deviceScale: 3)
+        }
+        XCTAssertEqual(sink.calls, held + [.button(.primary, false, oldPoint)])
+        sink.calls.removeAll()
+        _ = touch.began(2, at: moved, time: 0.15)
+        _ = touch.moved(1, to: moved, time: 0.21)
+        _ = touch.ended(1, at: moved, time: 0.22)
+        _ = touch.ended(2, at: moved, time: 0.23)
+        XCTAssertTrue(sink.calls.isEmpty)
+        let fresh = CGPoint(x: 400, y: 192)
+        _ = touch.began(3, at: fresh, time: 0.3)
+        _ = touch.ended(3, at: fresh, time: 0.31)
+        let newPoint = try XCTUnwrap(touch.mapper.toPicture(fresh))
+        XCTAssertEqual(sink.buttons, [.button(.primary, true, newPoint), .button(.primary, false, newPoint)])
+    }
+
+    func testToolbarZoomStopsScrollMomentumAndDiscardsItsAnchor() {
+        touch.controlling = true
+        sink.supportsPixelScroll = true
+        beginTwoFingerScroll()
+        moveAndLiftScroll()
+        XCTAssertTrue(touch.scroller.coasting)
+        touch.updateViewport(at: 0.07) { $0.setZoom(3, at: middle) }
+        XCTAssertEqual(sink.calls.last, .scrollEnded)
+        let calls = sink.calls
+        _ = touch.tick(time: 0.08)
+        _ = touch.tick(time: 0.09)
+        XCTAssertEqual(sink.calls, calls)
+        XCTAssertTrue(touch.isIdle)
+    }
+
     func testPresentationRetirementDiscardsPreciseMomentumBeforeAnIdenticalReplacement() {
         touch.controlling = true
         sink.supportsPixelScroll = true

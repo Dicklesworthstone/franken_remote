@@ -356,6 +356,24 @@ final class TouchInterpreter {
         state = touches.isEmpty ? .idle : .ignoring
     }
 
+    /// External layout and zoom commands replace the local touch transform.
+    /// Release any drag at its last original coordinate and discard the old
+    /// fingers, fractional scroll, inertia and pending tap before remapping.
+    /// The trackpad pointer itself remains in the same host pixel space.
+    func updateViewport(at time: Double, _ update: (inout PictureMapper) -> Void) {
+        var next = mapper
+        update(&next)
+        guard next != mapper else { return }
+        cancelAll()
+        touches.removeAll()
+        state = .idle
+        lastTick = nil
+        lastTap = nil
+        scrollAnchor = nil
+        presentationStartedAt = time
+        mapper = next
+    }
+
     /// Forget every touch and the trackpad pointer (a new session, or the
     /// view lost every touch, e.g. on backgrounding).
     func reset() {

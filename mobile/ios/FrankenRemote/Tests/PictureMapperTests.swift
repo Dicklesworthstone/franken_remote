@@ -38,6 +38,20 @@ final class PictureMapperTests: XCTestCase {
         XCTAssertEqual(m.toPicture(CGPoint(x: 0, y: rect.midY))?.x, 0)
     }
 
+    func testZoomedDirectInputStopsAtEveryVisibleContentEdge() {
+        var m = PictureMapper(viewSize: CGSize(width: 400, height: 600),
+                              insets: Insets(top: 20, left: 30, bottom: 200, right: 40),
+                              picture: CGSize(width: 1920, height: 1080))
+        m.setZoom(4, at: CGPoint(x: m.content.midX, y: m.content.midY))
+        for outside in [CGPoint(x: 29, y: 200), CGPoint(x: 360, y: 200),
+                        CGPoint(x: 200, y: 19), CGPoint(x: 200, y: 400)] {
+            XCTAssertTrue(m.containsPicture(m.toPictureUnbounded(outside)))
+            XCTAssertNil(m.toPicture(outside))
+        }
+        XCTAssertNotNil(m.toPicture(CGPoint(x: 30, y: 20)))
+        XCTAssertNotNil(m.toPicture(CGPoint(x: 359.5, y: 399.5)))
+    }
+
     func testPinchZoomKeepsThePointUnderTheFingers() {
         var m = portrait()
         let anchor = CGPoint(x: 300, y: 420)

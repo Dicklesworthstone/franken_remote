@@ -111,13 +111,10 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
         // one device pixel.
         let deviceScale = window?.screen.nativeScale ?? traitCollection.displayScale
         if metalView.contentScaleFactor != deviceScale { metalView.contentScaleFactor = deviceScale }
-        var mapper = interpreter.mapper
-        mapper.setGeometry(viewSize: bounds.size,
-                           insets: Insets(top: safeAreaInsets.top, left: safeAreaInsets.left,
-                                          bottom: max(safeAreaInsets.bottom, keyboardOverlap),
-                                          right: safeAreaInsets.right),
-                           deviceScale: deviceScale)
-        interpreter.mapper = mapper
+        let insets = Insets(top: safeAreaInsets.top, left: safeAreaInsets.left,
+                            bottom: max(safeAreaInsets.bottom, keyboardOverlap),
+                            right: safeAreaInsets.right)
+        updateViewport { $0.setGeometry(viewSize: bounds.size, insets: insets, deviceScale: deviceScale) }
         interpreter.screenScale = deviceScale
         // Match the display's refresh (120 Hz on ProMotion phones, with
         // CADisableMinimumFrameDurationOnPhone in the Info.plist).
@@ -252,19 +249,24 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
 
     // MARK: Zoom controls
 
+    private func updateViewport(_ update: (inout PictureMapper) -> Void) {
+        let time = CACurrentMediaTime()
+        if presentationFrame != nil, !presentationIsCurrent() { retirePresentation(at: time) }
+        interpreter.updateViewport(at: time, update)
+    }
+
     func zoomToFit() {
-        var mapper = interpreter.mapper
-        mapper.reset()
-        interpreter.mapper = mapper
+        updateViewport { $0.reset() }
     }
 
     /// One picture pixel per device pixel, centred on the view.
     func zoomToActualPixels() {
-        var mapper = interpreter.mapper
-        let content = mapper.content
-        mapper.setZoom(mapper.actualPixelsZoom(screenScale: interpreter.screenScale),
-                       at: CGPoint(x: content.midX, y: content.midY))
-        interpreter.mapper = mapper
+        let scale = interpreter.screenScale
+        updateViewport { mapper in
+            let content = mapper.content
+            mapper.setZoom(mapper.actualPixelsZoom(screenScale: scale),
+                           at: CGPoint(x: content.midX, y: content.midY))
+        }
     }
 
     // MARK: Keyboard
