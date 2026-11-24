@@ -59,7 +59,7 @@ function main() {
         "--experimental-vm-modules", "--test", "crates/fr-web/tests/wasm_adapter.test.cjs",
         "web/tests/wasm_transport.cjs", "web/tests/wasm_loader.cjs",
         "web/tests/hevc_configuration.test.cjs", "web/tests/wasm_media_configuration.cjs",
-        "web/tests/wasm_media.cjs",
+        "web/tests/wasm_media.cjs", "web/tests/wasm_playback_probe.cjs",
     ], { env: { ...process.env, FR_WEB_WASM_PACKAGE: output } });
     console.log(`Browser package: ${output}`);
     console.log("Set FR_WEB_ASSET_DIR to this directory when building frd to embed both generated assets.");

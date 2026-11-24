@@ -17,6 +17,63 @@
     const btnDisconnect = element("btn-disconnect");
     let connectionAttempt = null;
     let connecting = false;
+    const btnProbe = element("btn-probe");
+    const btnCancelProbe = element("btn-cancel-probe");
+    const probeStatus = element("probe-status");
+    const probe = global.FrankenHevcProbe
+        ? new global.FrankenHevcProbe.Probe(element("probe-canvas"), showProbe)
+        : null;
+
+    function showProbe(state) {
+        const stages = {
+            loading: "Loading the local Rust decoder owner…",
+            configuration: "Checking this HEVC configuration…",
+            single_idr: "Decoding and drawing the first picture…",
+            idle: "Checking that the decoder can remain idle…",
+            after_idle: "Decoding a continuation after idle…",
+            burst: "Checking the final picture of a burst…",
+            last_picture: "Checking a delayed final picture…",
+            reset_idr: "Checking a fresh decoder after reset…",
+            reset_continuation: "Checking continuation after reset…",
+        };
+        const failures = {
+            browser_https_required: "Open the host's HTTPS address to run the test.",
+            browser_client_unavailable: "Install the matching browser WASM package on this host.",
+            browser_client_version_mismatch: "Reload after installing the matching browser files.",
+            webcodecs_unavailable: "This browser has no WebCodecs video decoder.",
+            no_supported_hevc_decoder: "This browser rejected the sample's HEVC configuration.",
+            hevc_probe_failed: "This browser could not check the HEVC configuration.",
+            hevc_decoder_configuration_failed: "The browser could not initialize its HEVC decoder.",
+            browser_probe_hidden: "The test stopped when the page became hidden.",
+            browser_probe_cancelled: "The local test was cancelled.",
+            browser_probe_timeout: "The test exceeded its 12-second deadline.",
+            browser_probe_frame_timeout: "The decoder did not draw and release a picture within two seconds.",
+            browser_probe_canvas_unavailable: "The test canvas could not be drawn or read.",
+            browser_probe_blank_canvas: "The decoder did not produce the expected visible test pattern.",
+            browser_probe_pixels_unchanged: "The continuation did not update the test pattern.",
+            browser_probe_replay_mismatch: "Resetting the decoder did not reproduce the same test pictures.",
+            browser_probe_decode_failed: "The HEVC decode test failed.",
+            browser_probe_sample_invalid: "The Rust media owner refused the packaged test sample.",
+            browser_probe_cleanup_incomplete: "The browser has not confirmed decoder cleanup.",
+            browser_probe_clock_invalid: "The browser clock changed during the test.",
+        };
+        const message = state.status === "running" ? stages[state.stage]
+            : state.status === "passed"
+                ? `The HEVC test passed with ${state.presented} canvas presentations and ${state.released} released frames.`
+                : failures[state.code] || "The local video test could not complete.";
+        probeStatus.textContent = message + (state.status !== "running" && state.busy
+            ? " Decoder cleanup is pending; another test is blocked until it finishes." : "");
+        btnCancelProbe.disabled = !state.busy;
+        btnCancelProbe.textContent = state.status === "running" ? "Cancel test" : "Retry cleanup";
+        buttons();
+    }
+
+    btnProbe.addEventListener("click", () => {
+        if (connecting || !probe || probe.busy) return;
+        element("probe-panel").classList.remove("hidden");
+        probe.start();
+    });
+    btnCancelProbe.addEventListener("click", () => { if (probe) probe.cancel(); });
 
     function badge(el, text, style) {
         el.textContent = text;
@@ -25,6 +82,7 @@
 
     function buttons() {
         btnConnect.disabled = connecting;
+        btnProbe.disabled = connecting || !probe || probe.busy;
         btnDisconnect.disabled = !connecting;
         // This ABI has startup/refusal support only. The Rust session/media
         // bridge must supply actual observation and input operations first.
@@ -85,6 +143,7 @@
 
     btnConnect.addEventListener("click", async () => {
         if (connecting) return;
+        if (probe) probe.cancel();
         const attempt = {};
         connectionAttempt = attempt;
         connecting = true;
@@ -116,15 +175,18 @@
     }
     document.addEventListener("visibilitychange", () => {
         client.lifecycle(document.hidden ? "hidden" : "visible");
+        if (document.hidden && probe) probe.cancel();
     });
     global.addEventListener("blur", () => client.lifecycle("focus_lost"));
     global.addEventListener("focus", () => client.lifecycle("focus_gained"));
     global.addEventListener("pagehide", () => {
+        if (probe) probe.cancel();
         client.lifecycle("pagehide");
         closeConnection("pagehide");
     });
     global.addEventListener("pageshow", (event) => {
         if (!event.persisted) return;
+        if (probe) probe.cancel();
         client.lifecycle("bfcache_restore");
         closeConnection("bfcache_restore");
         client.lifecycle(document.hidden ? "hidden" : "visible");

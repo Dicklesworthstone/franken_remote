@@ -114,7 +114,8 @@ function fixture(options = {}) {
         },
         cancelAnimationFrame(handle) { pendingRaf.delete(handle); },
     };
-    vm.runInNewContext(source, { window, document: { hidden: false }, ArrayBuffer, Uint8Array });
+    const document = { hidden: false };
+    vm.runInNewContext(source, { window, document, ArrayBuffer, Uint8Array });
     const media = new bindings.BrowserMediaAdapter(options.maxFrames ?? 4, BigInt(options.maxBytes ?? 33554432));
     const player = new window.FrankenHevc.WebCodecsHevcPlayer(canvas, {
         onConfigured(info) { configured.push({ ...info }); if (options.onConfigured) options.onConfigured(info); },
@@ -134,7 +135,7 @@ function fixture(options = {}) {
         decoder.callbacks.output(frame);
         return frame;
     }
-    return { player, media, probes, decoders, configured, released, presented, first, errors,
+    return { window, document, player, media, probes, decoders, configured, released, presented, first, errors,
         raf, pendingRaf, canvas, canvasWrites, draws, submit, output, api: window.FrankenHevc };
 }
 
@@ -150,4 +151,6 @@ async function configure(f, generation = 0) {
     return f.player.decoder;
 }
 
-module.exports = { initialize, fixture, parameters, finishProbe, configure, HVCC, PICTURE };
+function mediaAdapter(frames, bytes) { return new bindings.BrowserMediaAdapter(frames, bytes); }
+
+module.exports = { initialize, mediaAdapter, fixture, parameters, finishProbe, configure, HVCC, PICTURE };

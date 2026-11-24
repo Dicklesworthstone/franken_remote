@@ -11,7 +11,10 @@ continues to report `desktop_available: false` until the authenticated browser
 connection is joined to a real desktop session. Receiving a WebSocket `open`
 event, a heartbeat, or arbitrary media bytes never enables observation or
 control. Browser desktop use, WebCodecs presentation through this adapter, and
-live tailnet interoperability remain unqualified.
+live tailnet interoperability remain unqualified. The separate **Test video
+decoding** action runs a bounded public HEVC sample through the production
+Rust media owner and native WebCodecs/canvas boundary. Its result describes
+only this local sample; see [scope and reproduction](browser-probe.md).
 
 ## Build the self-hosted package
 
@@ -29,7 +32,7 @@ FR_WEB_ASSET_DIR="$PWD/target/browser-wasm" cargo build -p frd --release --locke
 
 The first command builds the release WASM module, generates its matching web
 JavaScript, and runs the actual-WASM adapter, transport and media tests together
-with the loader and capability-probe boundary tests.
+with the loader and executable local playback-probe tests.
 It preserves existing output directories and refuses to overwrite one. Use the
 appropriate existing host feature flags when building a macOS or Windows host.
 The generated package and build artifacts stay outside version control.
@@ -158,7 +161,8 @@ node --test web/tests/*.test.cjs
 node --experimental-vm-modules --test web/tests/wasm_loader.cjs
 FR_WEB_WASM_PACKAGE="$PWD/target/browser-wasm" node --test \
   crates/fr-web/tests/wasm_adapter.test.cjs web/tests/wasm_transport.cjs \
-  web/tests/wasm_media_configuration.cjs web/tests/wasm_media.cjs
+  web/tests/wasm_media_configuration.cjs web/tests/wasm_media.cjs \
+  web/tests/wasm_playback_probe.cjs
 ```
 
 The remaining browser path must connect authenticated native HTTPS/WSS ingress

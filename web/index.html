@@ -19,6 +19,7 @@
             </div>
             <div class="controls-group">
                 <button id="btn-connect" type="button">Connect</button>
+                <button id="btn-probe" type="button">Test video decoding</button>
                 <button id="btn-request-control" type="button" disabled>Request Control</button>
                 <button id="btn-release-control" type="button" disabled>Release Control</button>
                 <button id="btn-fullscreen" type="button" disabled>Fullscreen</button>
@@ -29,6 +30,14 @@
         <div id="shortcut-notice" class="notice">
             Browser-reserved shortcuts (for example Ctrl/Cmd+W, Ctrl/Cmd+T, Cmd+Q, Alt+Tab) remain owned by your browser or OS and are not captured.
         </div>
+        <section id="probe-panel" class="probe hidden" aria-label="Local video decoding test">
+            <canvas id="probe-canvas" width="320" height="240" aria-label="Public HEVC test sequence"></canvas>
+            <div>
+                <p id="probe-status" role="status" aria-live="polite"></p>
+                <p>This local 320 × 240 HEVC Main sample checks decoding and canvas output. Hardware acceleration, remote connectivity and desktop control require separate qualification.</p>
+                <button id="btn-cancel-probe" type="button" disabled>Cancel test</button>
+            </div>
+        </section>
         <main id="viewport-wrap">
             <canvas id="viewport" tabindex="0" aria-label="Remote desktop viewport"></canvas>
             <div id="refusal-overlay" class="overlay hidden" role="alert">
@@ -40,6 +49,8 @@
     <script src="/hevc_probe.js"></script>
     <script src="/wasm_client.js"></script>
     <script src="/wss_client.js"></script>
+    <script src="/hevc_probe_sample.js"></script>
+    <script src="/hevc_qualification.js"></script>
     <script src="/app.js"></script>
 </body>
 </html>

@@ -143,6 +143,36 @@ button:disabled {
     color: #dce2ec;
 }
 
+.probe {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding: 12px;
+    border-bottom: 1px solid #303a4b;
+}
+
+.probe.hidden {
+    display: none;
+}
+
+.probe canvas {
+    width: 320px;
+    max-width: 100%;
+    height: auto;
+    background: #000;
+}
+
+.probe div {
+    flex: 1;
+    min-width: 240px;
+    max-width: 640px;
+}
+
+.probe p {
+    margin: 0 0 10px;
+    line-height: 1.45;
+}
+
 .hidden {
     display: none;
 }
