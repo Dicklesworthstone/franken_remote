@@ -144,18 +144,32 @@ scan retry.
 
 Live jobs keep a bounded manifest cache inside the original source owner.
 Every scan still enumerates the pinned directory, checks authority and resource
-limits, and opens each regular file without following links. An unchanged name
-set and matching device, inode, size, modification time and change time can
-reuse the preceding manifest. Any change causes a full content scan through the
-existing ATP hashing path. Empty files and timestamps without subsecond
-precision also require a full scan.
+limits, and opens each regular file without following links. Unchanged files
+with matching device, inode, size, modification time and change time can reuse
+their preceding digests even when another file changes. Changed, new, empty or
+coarse-timestamp files use the existing ATP byte/EOF hashing path. Two checked
+opens retain the first descriptor through the authority callbacks; uncertain
+identity takes the canonical read path. Repeated names from a changing directory
+refuse the snapshot instead of confusing its keyed manifest and digest list.
 
-A manifest can be reused for at most three consecutive scans. The following
-scan hashes all content again, including when no versions need delivery.
-Successful cache hits do not renew this verification age. The cache is
-discarded when the original job stops and never becomes publication evidence:
-the sender still independently verifies each selected file against its expected
-digest, and only confirmed publication and cleanup advance the version ledger.
+Each partial scan constructs a fresh ordered manifest from the current names
+and counts the full size of reused files against the current source limits.
+It retains ATP's exact per-entry digests, including content identifiers, so the
+combined Merkle calculation uses the same canonical inputs as a full scan.
+Deleted or renamed entries cannot accumulate in the cache.
+
+At most three consecutive scans may reuse any digest. The next scan hashes all
+content again, including when no versions need delivery or a small sibling
+changes on every scan. A partial edit never restarts this verification age.
+A scan that reads every file can reset the age because no old digest survives.
+Changing the pinned root or limits forces a full scan. Failure, cancellation
+or original-job closure discards the cache.
+
+The cache never becomes publication evidence: the sender independently verifies
+each selected file against its expected digest. Only confirmed publication and
+cleanup advance the version ledger. This reduces repeated source reads for
+mixed changed/unchanged directories; it does not make a filesystem snapshot
+atomic or establish a measured throughput improvement.
 
 Only actual verified publication receipts advance the source-version ledger.
 A file changed between scanning and source preparation is refused before its

@@ -1,5 +1,30 @@
 # Implementation status
 
+## Incremental content verification for active folder jobs (2026-11-25)
+
+Live source scans now retain unchanged entries' exact ATP digests when another
+file changes. One fresh bounded directory enumeration reconstructs the current
+manifest, while changed/new/empty/coarse-timestamp entries follow the canonical
+content and EOF checks. Reused file sizes still count against the same source
+budgets. Two descriptor-relative opens retain identity checks around authority
+callbacks; repeated names from a changing directory refuse the scan.
+
+Any retained digest advances a shared verification age. At most three partial
+scans can reuse content before a complete reread, even under continuous edits
+to another file. Root or limit changes force a full scan; failure and cancellation
+remove reuse eligibility. The sender's independent expected-version check and
+confirmed-publication ledger remain the authority for delivery.
+
+Four new filesystem regressions cover mixed-file reuse and forced rereads,
+canonical Merkle equivalence across changed names, aggregate byte limits and
+cancellation. A separate source test rejects repeated enumeration names.
+Existing cache regressions retain their canonical filesystem comparisons,
+replacement/refusal and original-authority checks. Two independent source/API
+reviews completed against the pinned ATP definitions. No Rust test, formatter,
+compiler or Clippy execution is claimed: no executor is attached, and hosted
+verification remains queued. No throughput or native/tailnet benchmark is
+inferred from reduced source reads. Tracking: `fr-sync-incremental-scan-8r4c`.
+
 ## Local folder publication durability (2026-11-25)
 
 The local reconciliation API now stops when atomic file publication has

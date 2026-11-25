@@ -142,7 +142,6 @@ fn same_size_edit_with_restored_mtime_is_detected_without_skipping_other_entries
             first.entries["a"].sha256_hex,
             changed.entries["a"].sha256_hex
         );
-        assert_eq!(reuses(&cache), 0);
     }
     // Some filesystems can preserve the entire metadata signature across an
     // edit. They must still discover it by the next mandatory full read.
@@ -159,7 +158,8 @@ fn same_size_edit_with_restored_mtime_is_detected_without_skipping_other_entries
     );
     assert_eq!(changed.entries.len(), 2);
     assert!(changed == directory.canonical(revision, limits));
-    assert_eq!(reuses(&cache), 0);
+    let expected_reuses = u8::from(revision == 2 && directory.precise_timestamps("b"));
+    assert_eq!(reuses(&cache), expected_reuses);
     // Cache probing and fallback enumeration must not share an exhausted offset.
     assert_eq!(
         changed.entries["b"].sha256_hex,
@@ -201,14 +201,14 @@ fn changed_names_replace_the_snapshot_instead_of_accumulating_old_entries() {
     fs::rename(directory.path.join("before"), directory.path.join("after")).unwrap();
     let renamed = directory.cached(&mut cache, 2, limits);
     assert!(renamed == directory.canonical(2, limits));
-    let snapshot = &cache.snapshot.as_ref().unwrap().manifest;
+    let snapshot = &cache.snapshot.as_ref().unwrap().scan.manifest;
     assert_eq!(snapshot.entries.len(), 1);
     assert!(!snapshot.entries.contains_key("before"));
     assert!(snapshot.entries.contains_key("after"));
     directory.write("added", b"another");
     let added = directory.cached(&mut cache, 3, limits);
     assert!(added == directory.canonical(3, limits));
-    assert_eq!(cache.snapshot.as_ref().unwrap().manifest.entries.len(), 2);
+    assert_eq!(cache.snapshot.as_ref().unwrap().scan.manifest.entries.len(), 2);
 }
 
 #[test]
@@ -391,4 +391,154 @@ fn an_unsafe_replacement_fails_the_canonical_scan_and_clears_old_custody() {
         Err(SyncError::SymlinkForbidden)
     ));
     assert!(cache.snapshot.is_none());
+}
+
+#[test]
+fn a_small_edit_reuses_large_siblings_without_refreshing_the_full_scan_deadline() {
+    let directory = Directory::new();
+    let limits = SyncLimits {
+        max_chunk_bytes: 512,
+        ..SyncLimits::default()
+    };
+    directory.write("large", &vec![0x5a; limits.max_chunk_bytes * 128]);
+    directory.write("small", b"first");
+    let mut cache = ScanCache::default();
+    let mut full_checks = 0;
+    let first = cache
+        .scan(directory.root.as_fd(), 1, limits, &mut || {
+            full_checks += 1;
+            Ok(())
+        })
+        .unwrap();
+    let eligible = directory.precise_timestamps("large");
+    for revision in 2..=u64::from(MAX_REUSES) + 2 {
+        directory.write("small", format!("revision-{revision}").as_bytes());
+        // Distinct precise timestamps prove each small edit without sleeps,
+        // including on filesystems whose ctime granularity is coarser.
+        File::open(directory.path.join("small"))
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(
+                UNIX_EPOCH + Duration::new(1_700_000_000 + revision, 123_456_789),
+            ))
+            .unwrap();
+        let mut checks = 0;
+        let current = cache
+            .scan(directory.root.as_fd(), revision, limits, &mut || {
+                checks += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert!(current == directory.canonical(revision, limits));
+        assert_eq!(
+            current.entries["large"].sha256_hex,
+            first.entries["large"].sha256_hex
+        );
+        assert_ne!(
+            current.entries["small"].sha256_hex,
+            first.entries["small"].sha256_hex
+        );
+        if eligible && revision <= u64::from(MAX_REUSES) + 1 {
+            assert_eq!(u64::from(reuses(&cache)), revision - 1);
+            assert!(full_checks > checks * 4);
+        } else {
+            assert_eq!(reuses(&cache), 0);
+            assert!(checks >= full_checks);
+        }
+    }
+}
+
+#[test]
+fn mixed_entry_eligibility_and_changed_names_preserve_the_canonical_merkle_root() {
+    let directory = Directory::new();
+    directory.write("large", &vec![0x3c; 64 * 1024]);
+    directory.write("coarse", b"old coarse");
+    directory.write("empty", b"");
+    directory.write("removed", b"old name");
+    File::open(directory.path.join("coarse"))
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000)))
+        .unwrap();
+    let limits = SyncLimits::default();
+    let mut cache = ScanCache::default();
+    let first = directory.cached(&mut cache, 1, limits);
+    fs::rename(
+        directory.path.join("removed"),
+        directory.path.join("renamed"),
+    )
+    .unwrap();
+    directory.write("added", b"new content");
+    directory.write("coarse", b"new coarse");
+    File::open(directory.path.join("coarse"))
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_001)))
+        .unwrap();
+    let current = directory.cached(&mut cache, 2, limits);
+    assert!(current == directory.canonical(2, limits));
+    assert_eq!(current.entries.len(), 5);
+    assert!(!current.entries.contains_key("removed"));
+    assert_eq!(
+        current.entries["large"].sha256_hex,
+        first.entries["large"].sha256_hex
+    );
+    assert_ne!(
+        current.entries["coarse"].sha256_hex,
+        first.entries["coarse"].sha256_hex
+    );
+    assert_eq!(current.entries["empty"].size, 0);
+    assert_eq!(reuses(&cache), u8::from(directory.precise_timestamps("large")));
+}
+
+#[test]
+fn reused_bytes_still_count_when_a_new_file_exceeds_the_source_budget() {
+    let directory = Directory::new();
+    directory.write("large", &[0x5a; 8]);
+    let limits = SyncLimits {
+        max_file_bytes: 8,
+        max_total_bytes: 12,
+        ..SyncLimits::default()
+    };
+    let mut cache = ScanCache::default();
+    directory.cached(&mut cache, 1, limits);
+    directory.write("new", b"five5");
+    assert!(matches!(
+        cache.scan(directory.root.as_fd(), 2, limits, &mut || Ok(())),
+        Err(SyncError::TotalBytesLimitExceeded)
+    ));
+    assert!(cache.snapshot.is_none());
+}
+
+#[test]
+fn cancelled_partial_scan_cannot_leave_reusable_large_file_evidence() {
+    let directory = Directory::new();
+    let limits = SyncLimits {
+        max_chunk_bytes: 512,
+        ..SyncLimits::default()
+    };
+    directory.write("a-large", &vec![0x5a; limits.max_chunk_bytes * 128]);
+    directory.write("z-small", b"initial");
+    let mut cache = ScanCache::default();
+    directory.cached(&mut cache, 1, limits);
+    directory.write("z-small", b"edited");
+    let mut checks = 0;
+    let result = cache.scan(directory.root.as_fd(), 2, limits, &mut || {
+        checks += 1;
+        if checks == 10 {
+            Err(SyncError::AuthorityRevoked)
+        } else {
+            Ok(())
+        }
+    });
+    assert!(matches!(result, Err(SyncError::AuthorityRevoked)));
+    assert!(cache.snapshot.is_none());
+    directory.write("z-small", b"modified");
+    let mut reread_checks = 0;
+    let current = cache
+        .scan(directory.root.as_fd(), 3, limits, &mut || {
+            reread_checks += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert!(current == directory.canonical(3, limits));
+    assert_eq!(reuses(&cache), 0);
+    assert!(reread_checks > 128);
 }
