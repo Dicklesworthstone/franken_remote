@@ -50,208 +50,192 @@ fr robot observe NODE_ID [observation options] [--json]
 fr robot input NODE_ID --connection-id ID [input options] [--json]
 fr send NODE_ID --connection-id ID [file command options] [--json]
 
-Detailed help (also COMMAND --help):
-  fr help connect         Discovery, privacy, connection and saved hosts.
-  fr help robot           Commands and explicit owner modes.
-  fr help robot session   Foreground lifetime, local identity and conditional close.
-  fr help robot observe   One-shot/retained observations and screenshots.
-  fr help robot input     Original-observation actions and staged receipts.
-  fr help send            Later selections, status, pause, resume and cancellation.
-Help reads no service/desktop and accepts no target or operational options.
+Topic help (also COMMAND --help):
+  fr help connect         Discovery/privacy/connections/saved hosts.
+  fr help robot           Commands/explicit owner modes.
+  fr help robot session   Foreground lifetime/local identity/conditional close.
+  fr help robot observe   One-shot/retained observations/screenshots.
+  fr help robot input     Original-observation actions/staged receipts.
+  fr help send            Later selections/status/pause/resume/cancel.
+Help accesses no service/desktop; no targets or operational options.
 
 Discovery and connection:
-hosts/peers read one local machine snapshot; peers never probes remote services.
-On macOS these commands read the installed Tailscale app, or without it the
-open-source tailscaled's /var/run/tailscaled.socket; --socket PATH selects one
-root tailscaled socket. Native connection/desktop commands need macos-desktop.
-Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
-Doctor --probe-native is a bounded local-only probe of one root-display picture
-and the selected HEVC encoder; --input-agent discovers capabilities without
-injection. No fallback or decoder/presenter/sustained-performance proof.
-An explicit X display and installed worker are required; worker/cookie paths and
-captured content are never printed.
-Exit 1: requested probe failed/blocked; others stay not_tested.
-Tailnet options cannot be combined.
+hosts/peers read one local snapshot; peers never probes remote services.
+Mac uses the installed Tailscale app, else /var/run/tailscaled.socket from
+open-source tailscaled. --socket PATH selects a root tailscaled socket.
+Native connection/desktop commands need macos-desktop.
+Doctor checks Tailscale status/port collisions/certificate lifecycle.
+--probe-native bounds one local root-display picture and selected HEVC encoder;
+--input-agent discovers capabilities without injection. Explicit X display and
+installed worker required; no fallback/decoder/presentation/performance proof.
+Never prints worker/cookie paths/content. Exit 1: failed/blocked; others
+not_tested. No tailnet options.
 Discovery/inspect uses installed Tailscale metadata. --by-name requires an exact
 canonical tailnet FQDN, never arbitrary DNS/a URL. --probe reads authenticated frd
-capabilities, opening no approval, observation or input; it grants no access.
-hosts --probe: up to 64 peers in stable-ID order (Linux: four; macOS: one), one 20-second
-discovery/probe budget, five seconds/probe.
-Refusals/unstarted peers/omissions stay visible; timeout cannot prove offline.
---trust-roots defaults to /etc/ssl/certs/ca-certificates.crt; --worker defaults
-to fr-media-worker beside fr. Each connection rechecks identity and strict TLS.
-Displays requires configured host approval. --display only refuses multiple
-displays; choose opens a chooser per approved connection. Linux --fit bounds
-physical window pixels and requests smaller video from scaling-capable hosts;
-CPU sampling preserves display/input coordinates. On macOS, it bounds AppKit
-content points with Metal aspect fitting. The remote desktop size is unchanged.
-Set local XAUTHORITY when required.
-Native transport/media remain unqualified. Close the window/Ctrl-C to stop.
+capabilities without approval, observation, input or access grants.
+hosts --probe: up to 64 stable-ID-ordered peers (Linux: four concurrent; Mac: one),
+20 seconds total, five/probe. Refusals/unstarted peers/omissions stay visible;
+timeout does not prove offline.
+--trust-roots defaults to /etc/ssl/certs/ca-certificates.crt; --worker to
+fr-media-worker beside fr. Connections recheck identity and strict TLS.
+Displays needs configured host approval. --display only refuses multiple
+displays; choose prompts per approved connection. Linux --fit bounds physical
+window pixels and requests smaller video from scaling-capable hosts; CPU
+sampling preserves display/input coordinates. Mac uses AppKit content points
+and Metal aspect fitting. Neither changes remote desktop size.
+Set XAUTHORITY if needed. Native transport/media remain unqualified.
+Close the window/Ctrl-C to stop.
 
 Native machine picker:
---choose-host immediately replaces NODE_ID after connect. The local X11 window
-lists up to 1024 installed-Tailscale peers by canonical name. Arrows move;
-Page Up/Down/wheel pages; Home/End jumps. Release Enter/left button to choose;
-Esc/window close/Ctrl-C cancels. Names/IDs/route hints promise no access.
-Choice expires after 120 seconds; cleanup precedes connection/file selection.
---choose-host excludes --saved/--hosts-file/--by-name and robot commands.
---json emits host_selected before connecting; use its ID for disconnect.
+--choose-host replaces NODE_ID after connect. X11 lists up to 1024 Tailscale
+peers by canonical name. Arrows move; Page Up/Down/wheel pages; Home/End jumps.
+Release Enter/left button to choose; Esc/close/Ctrl-C cancels. Names/IDs/routes
+grant no access. Expires at 120s; cleanup precedes connection/file selection.
+Excludes --saved/--hosts-file/--by-name/robot. --json emits host_selected before
+connecting; use its ID for disconnect.
 
 Desktop application:
-fr app --probe adds bounded authenticated capability hints to each picker;
-failed/unprobed rows stay selectable. Advertisements grant no desktop access.
-fr app connects using picker choices: View only / View and control, Share
-clipboard text, Ask which display to show (Linux: F2/F3/F4 or bottom-line click).
-Viewer close returns to the picker with the outcome; picker Cancel/Escape quits.
-Idle picker: fresh peers every two minutes; app quits after half an hour.
-macOS Receive files requires control and a fresh private-folder choice before
-connecting; unchecked each time. Explicit fr app --receive DIR supplies that
-exact destination once; Linux requires it. No receive path/consent is saved.
-macOS + macos-microphone: Show microphone controls starts unchecked, pins the
-current input once before connecting and opens this control session's muted
-panel. Choose Allow microphone, then a NEW Talk in the viewer; no consent/device
-is saved.
+fr app --probe adds bounded authenticated hints; failed/unprobed rows remain
+selectable. Advertisements grant no access. Choices: View only / View and
+control, Share clipboard text, Ask which display (Linux F2/F3/F4 or bottom-line
+click). Viewer close returns with outcome; Cancel/Escape quits. Idle peers
+refresh every 2 minutes; app quits after 30.
+Mac Receive files starts unchecked; needs control and a fresh private folder.
+fr app --receive DIR supplies it once; Linux can use its portal. No saved path/consent.
+With macos-microphone, Show microphone controls starts unchecked, pins current
+input before connecting and opens a muted control-session panel. Choose Allow
+microphone, then a NEW Talk; no saved consent/device.
 Choices are remembered in ~/Library/Application Support/FrankenRemote/
 settings.json (macOS) or $XDG_CONFIG_HOME/frankenremote/settings.json.
-fr app --install adds ~/Applications/FrankenRemote.app (macOS) or an
-applications-menu entry (Linux) that runs this fr with app; --uninstall
-removes only that launcher. The picker step is fr connect --choose-host
---pick-only [--app-notice TEXT]: it reports host_selected with the confirmed
-choices without opening a desktop.
+fr app --install adds ~/Applications/FrankenRemote.app (Mac) or a Linux menu
+entry running this fr with app; --uninstall removes only that launcher.
+fr connect --choose-host --pick-only [--app-notice TEXT] reports host_selected
+and confirmed choices without opening a desktop.
 
 Control and reconnect:
 Choose one role. --control requests input once after a fresh frame; host:
-frd run --input-agent. Keys/buttons/absolute pointer/line-wheel; no text/pixel-scroll.
-Refusal/revocation/expiry/local release end control. After transient failure or a
-checked host geometry change, --attempts can reconnect VIEWING ONLY after proven
-cleanup; control/clipboard/files never repeat. In a --control viewing window,
-press and release F8 for new control. Ctrl+Alt+Shift+F7 reopens the display picker;
-resize reopens viewing at its new size. Both end input/clipboard/file choices.
+frd run --input-agent. Keys/buttons/absolute pointer/line-wheel; Send Text needs
+host text support.
+Refusal/revocation/expiry/local release end control. After transient failure or
+checked geometry change, --attempts reconnects VIEWING ONLY after proven cleanup;
+control/clipboard/files never repeat. Press/release F8 in a --control viewing window
+to request new control. Ctrl+Alt+Shift+F7 reopens display selection; resize
+reopens viewing at the new size. Both end input/clipboard/file choices.
 --capture-system-shortcuts requires --control: X11 keyboard grab; Mac requires
 Accessibility. Mode is visible. Ctrl+Alt+Shift+Escape releases locally. Mac adds
 a 44-point Off strip, keeps Send Text local, and never re-enables capture on
 reconnect. Focus/input fences release capture; some OS shortcuts remain local.
 
 Clipboard:
---control defaults to UTF-8 sharing with linux-clipboard on Linux, or with
-macos-desktop on the Mac client:
-1 MiB/item, after control and visible privacy controls. --no-clipboard disables;
---clipboard selects the default. Use Turn Off in the Mac viewer toolbar or
-turn off/close either Linux Clipboard sharing window to end sharing. Missing
-permission/support is typed absence; desktop continues. Mac hosting does not
-offer a clipboard backend yet.
-An incomplete transfer unable to stop independently closes the connection.
-View-only never accesses clipboard.
+--control defaults to UTF-8 sharing (1 MiB/item) after control and visible privacy
+controls: linux-clipboard on Linux; macos-desktop on Mac clients. --no-clipboard
+disables; --clipboard selects the default. Mac toolbar Turn Off or turning
+off/closing either Linux Clipboard sharing window ends sharing.
+Missing permission/support is typed absence; desktop continues. Mac hosts
+can disable sharing with frd run --no-clipboard. An incomplete transfer unable to stop separately
+closes the connection. View-only never accesses clipboard.
 
 Files:
-On macOS/Linux, --choose-files opens a native picker before connecting: up to 8
-files (Mac also folders) for the original --control upload, instead of --send.
-Cancel/timeout opens no connection; reconnect never repeats the choice.
+Mac/Linux --choose-files picks up to 8 files (Mac also folders) before connecting
+for the original --control upload, instead of --send. Cancel/timeout opens no
+connection; reconnect never repeats choices.
 --send PATH needs --control and host frd run --files DIR: up to 8 regular files
-or portable directory roots, in order. Symlinks/special files/existing names
-refuse; empty items survive. The upload panel separates progress/receipts: Pause /
-Resume / Cancel. Closing hides it; accepted work continues. Pause cannot extend expiry.
-With viewer focus, physical Ctrl+Alt+Shift+F8/F9/F10 pause/resume/cancel only the
-original --send selection. Release each key; ambiguous keys disable shortcuts.
-An open panel accepts X11 file-manager Copy drops. --file-drop works without
---send: wait for Ready to send files. Local file URIs/Copy only; 8 selections/batch,
-8 retained batches, original cumulative limits. Complete one drop before the next;
-use panel buttons. Hiding stops drops; Cancel before the first ends sharing.
-Reconnect never restores drops/repeats selections. Missing controls:
-file_drop_unavailable.
-On macOS/Linux, --choose-receive-directory pins one existing private folder
-before connecting. It requires --control and uses actual receiver defaults
-with reject-conflict policy. It excludes --receive, receive-policy overrides and
---pick-only. Cancel/timeout starts no connection; each new viewer needs a fresh
-choice. Linux requires the installed FileChooser portal.
---receive DIR must be absolute, owned by you, not group/other writable, with no
-symlink components. Host: frd run --once --input-agent PATH --send PATH... .
-Items publish atomically, never open/run. Defaults: 256 MiB/selection, 1 GiB/session.
-Both --receive-max-* limits must be positive; session >= file. Directories count total content; cancelled admitted attempts
-spend budget. --receive-conflict reject is default; keep-both uses a bounded
-.fr-conflict- name. Neither overwrites, merges, retries or resumes.
-Download Cancel affects only downloads.
---sync-job ID accepts one explicitly configured host folder job on Linux/macOS.
-For host-to-controller delivery, use --control, --receive DIR and
---receive-conflict keep-both; the host selects --sync-source DIR --sync-job ID.
-For controller-to-host delivery, use --control --sync-source DIR --sync-job ID;
-the host selects --sync-destination DIR --sync-job ID --files-conflict keep-both.
-The reverse source cannot combine with --send, file pickers, drops, local file
-commands, or downloads. The source is pinned once and scans only after matching
-host advertisement and original control authority; peers never supply paths.
-The original connection scans up to 32 flat regular files and delivers new source
-versions within the existing cumulative byte/transfer/time limits. No deletion,
-overwrite, recursive tree, bidirectional job or reconnect replay is performed.
-Editing/deleting a received copy does not resend an already acknowledged source
-version. Closing or cancelling the corresponding file owner ends the original
-job. Terminal upload output includes upload_folder_job with cumulative confirmed
-publications, settled rounds, the original stop reason and cleanup status.
-Upload/download may coexist with clipboard/audio; legacy peers may admit one
-direction. Permissions/limits/cancellation remain separate under the original
-control lease. Receipts report index/size/durability/cleanup, never paths;
-progress does not prove publication.
+or portable directory roots, ordered. Symlinks/special files/existing names
+refuse; empty items survive. Upload progress/receipts are separate.
+Panel: Pause / Resume / Cancel; close hides it while accepted work continues.
+Pause never extends expiry. With viewer focus, physical Ctrl+Alt+Shift+F8/F9/F10
+pause/resume/cancel the original --send only; release each key. Ambiguous keys
+disable shortcuts.
+Open panels accept X11 file-manager Copy drops. --file-drop needs no --send;
+wait for Ready to send files. Local file URIs/Copy only; 8 selections/batch,
+8 retained batches, cumulative limits unchanged. Finish each drop before the
+next; use panel buttons. Hide stops drops; Cancel before the first ends sharing.
+Reconnect never restores drops/repeats choices. Missing: file_drop_unavailable.
+Mac/Linux --choose-receive-directory pins one existing private folder before
+connecting; needs --control, uses receiver defaults/reject-conflict, excludes
+--receive, receive-policy overrides and --pick-only. Cancel/timeout never connects;
+each new viewer needs a fresh choice. Linux needs the FileChooser portal.
+--receive DIR: absolute, owned by you, no group/other write or symlink components.
+Host: frd run --once --input-agent PATH --send PATH... . Atomic publication,
+never open/run. Defaults: 256 MiB/selection, 1 GiB/session. --receive-max-* must be
+positive, session >= file. Directories count total content; cancelled admitted
+attempts spend budget. --receive-conflict: reject (default) or keep-both with a
+bounded .fr-conflict- name. Neither overwrites/merges/retries/resumes.
+Download Cancel affects downloads only.
+--sync-job ID accepts one configured Linux/Mac host folder job.
+Host-to-controller: --control --receive DIR --receive-conflict keep-both;
+host: --sync-source DIR --sync-job ID.
+Controller-to-host: --control --sync-source DIR --sync-job ID;
+host: --sync-destination DIR --sync-job ID --files-conflict keep-both.
+The reverse source excludes --send, file pickers/drops/commands and downloads.
+Source is pinned once; scans require matching host advertisement and original
+control authority. Peers never supply paths. Scans admit up to 256 flat regular
+files, delivered in fair rounds of 32 within cumulative byte/transfer/time limits.
+No deletion/overwrite/recursion/bidirectional jobs/reconnect replay.
+Editing/deleting received copies never resends acknowledged versions. Closing/
+cancelling that file owner ends the job. upload_folder_job terminal output keeps
+confirmed publication totals, settled rounds, original stop reason and cleanup.
+Upload/download coexist with clipboard/audio; legacy peers may allow one
+direction. Permissions/limits/cancellation remain separate under original
+control. Receipts give index/size/durability/cleanup, never paths;
+progress never proves publication.
 
 Playback audio:
---audio requests playback in either role; host: frd run --audio; builds: linux-audio.
-Missing support is typed absence; video continues.
-Output uses --audio-server, else PULSE_SERVER, else $XDG_RUNTIME_DIR/pulse/native,
-and the default sink or --audio-sink. --audio-volume: local 0..100 (default 100);
---audio-muted starts muted. Remote audio offers Quieter/Louder/Mute / unmute.
-Settings survive recovery/reconnect/panel close. Changes affect new submissions;
-queued sound drains briefly. Host, microphone and system volume stay unchanged.
+--audio requests playback in either role; host: frd run --audio; build: linux-audio.
+Missing support is typed absence; video continues. Output: --audio-server, else
+PULSE_SERVER, else $XDG_RUNTIME_DIR/pulse/native; default sink or --audio-sink.
+--audio-volume: local 0..100 (default 100); --audio-muted starts muted.
+Panel: Quieter/Louder/Mute / unmute. Settings survive recovery/reconnect/close.
+Changes affect new submissions; queued sound drains briefly. Host/microphone/
+system volume stay unchanged.
 
 Microphone:
---microphone requires --control, explicit --microphone-source NAME and the host's
-independently enabled/approved native endpoint. Both ends need visible controls.
-The local panel starts muted; Talk authorizes the selected source. Mute stops
-that talk generation; wait for its capture child to exit before another Talk.
-Turn off/hide/close ends this choice. Connecting, playback, restoring permission
-and viewing reconnects/F8 never start recording.
-Linux build: linux-desktop,linux-microphone; fr-audio-worker beside fr. Talk waits
-for host configuration and actual PulseAudio RECORD access. The panel needs
-visible space outside the viewer; --fit can leave room.
-Server: --microphone-server, else PULSE_SERVER, else XDG_RUNTIME_DIR/pulse/native.
-Only a local Unix socket and named source are accepted: no default-source alias,
-source creation, implicit device change or downloaded worker.
-macOS build: macos-desktop,macos-microphone with matching signed fr-audio-worker.
---microphone-source default pins the current input once before connecting;
-an exact CoreAudio device UID selects that device. A changed default is never
-followed. --microphone-server is Linux-only.
-On Mac, choose Allow microphone for the same helper's macOS permission prompt,
-then a NEW Talk after access is granted. Allow never records. Capture also needs
-the host's positive setup reply and original control lease. Mute fences speech
-immediately; hiding, closing, lost visible controls, suspend, disconnect or
-reconnect never resumes recording.
-Installer --audio source builds include both Mac audio directions. Reports
-separate native capture from host application audibility; physical microphone/
-live-tailnet qualification remains separate. Missing host selection is typed
-absence. Unsafe pending output may end the original connection.
+--microphone needs --control, explicit --microphone-source NAME, independently
+enabled/approved host endpoint and visible controls at both ends.
+Starts muted; Talk authorizes that source. Mute stops that talk generation;
+wait for capture-child exit before another Talk. Off/hide/close ends the choice.
+Connection/playback/restored permission/viewing reconnect/F8 never records.
+Linux: linux-desktop,linux-microphone; fr-audio-worker beside fr. Talk waits for
+host configuration and PulseAudio RECORD access. Panel needs visible space
+outside the viewer; --fit can leave room. Server: --microphone-server, else
+PULSE_SERVER, else XDG_RUNTIME_DIR/pulse/native. Local Unix socket and named
+source only; no default-source alias/creation/implicit device change/downloaded worker.
+Mac: macos-desktop,macos-microphone and matching signed fr-audio-worker.
+--microphone-source default pins the current input before connecting; exact
+CoreAudio UID selects that device. Changed defaults are never followed.
+--microphone-server is Linux-only.
+Mac Allow microphone prompts for that helper's permission; a NEW Talk is needed
+after grant. Allow never records. Capture requires positive host setup and the
+original control lease. Mute immediately fences speech; hide/close/lost visible
+controls/suspend/disconnect/reconnect never resumes recording.
+Installer --audio includes both Mac directions. Reports distinguish capture/
+host-app audibility; physical microphone/live-tailnet qualification is separate.
+Missing host selection is typed absence; unsafe pending output may end connection.
 
 Local foreground sessions:
-disconnect TARGET / robot session close TARGET stop the exact target's
+disconnect TARGET / robot session close TARGET stop that target's
 kernel-authenticated same-user owner. Closure proves local cleanup, not remote
-release/rollback; host reports stay in connect results. session status contacts
-no Tailscale/host; remote state is unknown.
-connection_id is not a remote session or input lease.
-close --connection-id ID refuses replacement with local_session_changed.
-The ID survives viewing reconnects, not new invocations; omit it to stop the
-current owner. Lost replies stay unknown_external_effect; never retry another
-invocation.
+release/rollback; connect retains host reports. session status contacts no
+Tailscale/host; remote state is unknown.
+connection_id is not a remote session/input lease. close --connection-id ID
+refuses replacement with local_session_changed. IDs survive viewing reconnects,
+not new invocations; omit to stop the current owner. Lost replies remain
+unknown_external_effect; never retry another invocation.
 session open TARGET --foreground --role view|control uses native owner/options,
-TLS, approval and display selection. Requires a local desktop, runs until
-shutdown and reports completion, never an opened lease. Inspect/close from
-another process; no detached opens. Input requires --accept-input and original
+TLS, approval and display selection. It needs a local desktop, runs to shutdown
+and reports completion, never an opened lease. Inspect/close from another
+process; no detached opens. Input needs --accept-input and original
 connection/lease/observation handles.
-Linux desktop/macOS macos-desktop: --publish-observations publishes live view-only
-metadata. session status gives connection_id; then:
+Linux desktop/macOS macos-desktop: --publish-observations publishes live
+view-only metadata. Get connection_id from session status, then:
 robot observe TARGET --connection-id ID [--max-receipt-age-ms 1..60000] [--json].
-Reads authenticate the original owner, opening no connection. Receipt age is not
-host source freshness; decoder/compositor evidence is not visibility.
-Publication has one attempt and retires before native cleanup. Both platforms
-support --native-once, explicit screenshots and --accept-input; see
-fr help robot observe and fr help robot input for original-owner requirements.
-Mac display changes/resizes needing a new view end the publisher without another
-dial. --worker/--x-display are Linux-only and refuse on Mac.
+Reads authenticate that owner without a new connection. Receipt age is not
+source freshness; decoder/compositor evidence is not visibility.
+Publication has one attempt, retiring before native cleanup. Both support
+--native-once, explicit screenshots and --accept-input; original-owner details:
+fr help robot observe / fr help robot input.
+Mac display changes/resizes requiring a new view end publication without redial.
+--worker/--x-display are Linux-only and refuse on Mac.
 
 Saved local hosts:
 fr hosts save ALIAS NODE_ID [--port PORT] [--hosts-file PATH] [--socket PATH] [--json]
@@ -260,12 +244,11 @@ fr hosts forget ALIAS [--hosts-file PATH] [--json]
 fr connect ALIAS --saved [--hosts-file PATH] [connect options above]
 fr displays ALIAS --saved [--hosts-file PATH] --experimental-native [display options]
 fr inspect|disconnect ALIAS --saved [--hosts-file PATH] [their other options]
-ALIAS is 1..64 lowercase letters, digits, '.', '_' or '-', starting alphanumeric.
-Saving resolves/stores stable node ID and exact canonical TLS name/port via
-installed Tailscale, never addresses/permissions. Connections recheck identity;
-rename/reassignment refuses until resaved.
---saved cannot combine with --by-name or --port. Without it, targets remain node IDs.
+ALIAS: 1..64 lowercase letters/digits/./_/-; starts alphanumeric.
+Tailscale resolves saved stable node ID/canonical TLS name/port, never addresses/
+permissions. Connections recheck identity; rename/reassignment needs resaving.
+--saved excludes --by-name/--port; otherwise use node IDs.
 Profiles: $XDG_CONFIG_HOME/franken_remote/hosts.json, else
-$HOME/.config/franken_remote/hosts.json. Local list/forget needs no Tailscale.
-Private atomic storage: 100 entries/128 KiB; symlinks/duplicates/malformed profiles
-refuse. Saving never contacts frd or enables hosting.
+$HOME/.config/franken_remote/hosts.json. List/forget needs no Tailscale.
+Private atomic storage: 100 entries/128 KiB; symlinks/duplicates/malformed data
+refuse. Saving never contacts frd/enables hosting.

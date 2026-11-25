@@ -324,19 +324,23 @@ fn ordinary_download_does_not_consume_a_shared_folder_job_selection() {
     use crate::native_files::{Absence, HostSelection};
     use std::os::unix::fs::DirBuilderExt;
 
-    run(|c, h| async move {
-        let source = std::env::temp_dir().join(format!(
-            "fr-stream-folder-source-{}-{}",
-            std::process::id(),
-            crate::session_startup::tests::unique_nonce()
-        ));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&source)
-            .unwrap();
-        let selected = HostSelection::sync(&source, 41).unwrap();
-        let shared = selected.clone();
-        for sync in [false, true] {
+    let source = std::env::temp_dir().join(format!(
+        "fr-stream-folder-source-{}-{}",
+        std::process::id(),
+        crate::session_startup::tests::unique_nonce()
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&source)
+        .unwrap();
+    let selected = HostSelection::sync(&source, 41).unwrap();
+    let shared = selected.clone();
+    for sync in [false, true] {
+        // Closing a viewer cancels its original context. Keep the selected
+        // folder across attempts, but give each session fresh request contexts.
+        let selected = &selected;
+        let shared = &shared;
+        run(|c, h| async move {
             let mut caps = capabilities();
             for name in [
                 attachment::INPUT_CAPABILITY,
@@ -374,12 +378,12 @@ fn ordinary_download_does_not_consume_a_shared_folder_job_selection() {
             .await
             .stream;
             let mut host = host.into_streaming(stream).unwrap();
-            let result = host.configure_file_download(&shared);
+            let result = host.configure_file_download(shared);
             if sync {
                 assert_eq!(result, Ok(()));
                 assert!(!selected.is_available() && !shared.is_available());
                 assert_eq!(
-                    host.configure_file_download(&selected),
+                    host.configure_file_download(selected),
                     Err(Absence::Unavailable)
                 );
             } else {
@@ -392,8 +396,8 @@ fn ordinary_download_does_not_consume_a_shared_folder_job_selection() {
             host.reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
                 .await
                 .unwrap();
-        }
-    });
+        });
+    }
 }
 
 #[test]
