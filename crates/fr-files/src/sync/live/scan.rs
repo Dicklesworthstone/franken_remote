@@ -1,5 +1,5 @@
 //! One bounded source scan, kept outside the session/authority thread.
-use super::{HostConfig, LiveError};
+use super::{HostConfig, LiveError, paging};
 use crate::{
     sender::batch::Selection,
     session::{Authority, Permission},
@@ -32,6 +32,7 @@ pub(super) struct PreparedRound {
     pub(super) versions: Vec<Version>,
     pub(super) bytes: u64,
     pub(super) cache: ScanCache,
+    pub(super) continuation: paging::Continuation,
 }
 pub(super) struct Scan {
     thread: Option<JoinHandle<Result<PreparedRound, LiveError>>>,
@@ -49,6 +50,7 @@ impl Scan {
         config: &HostConfig,
         revision: u64,
         ledger: BTreeMap<String, String>,
+        after: Option<String>,
         cache: ScanCache,
         scope: ScanScope,
     ) -> Result<Self, LiveError> {
@@ -83,14 +85,24 @@ impl Scan {
                     let manifest = cache
                         .scan(root.root_fd(), revision, limits, &mut check)
                         .map_err(LiveError::Source)?;
+                    let page = paging::select(
+                        manifest
+                            .entries
+                            .iter()
+                            .map(|(name, file)| (name.as_str(), file.sha256_hex.as_str())),
+                        &ledger,
+                        after.as_deref(),
+                    );
+                    check().map_err(LiveError::Source)?;
                     let mut selection = Selection::new();
                     let mut versions = Vec::new();
                     let mut bytes = 0u64;
-                    for file in manifest.entries.values() {
+                    for name in page.names {
                         check().map_err(LiveError::Source)?;
-                        if ledger.get(&file.name) == Some(&file.sha256_hex) {
-                            continue;
-                        }
+                        let file = manifest
+                            .entries
+                            .get(name)
+                            .expect("page refers to the original manifest");
                         let selected = super::super::source::select(root.root_fd(), file)
                             .map_err(LiveError::Source)?;
                         selection
@@ -109,11 +121,12 @@ impl Scan {
                         versions,
                         bytes,
                         cache,
+                        continuation: page.continuation,
                     })
                 }
                 #[cfg(not(unix))]
                 {
-                    let _ = (root, revision, ledger, limits, cache, &mut check);
+                    let _ = (root, revision, ledger, after, limits, cache, &mut check);
                     Err(LiveError::Source(SyncError::UnsupportedPlatform))
                 }
             })

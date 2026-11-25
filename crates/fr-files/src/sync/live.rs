@@ -14,6 +14,7 @@ use fr_wire::{
 use std::{fmt, path::Path, time::Duration};
 
 mod host;
+mod paging;
 mod receiver;
 mod scan;
 pub use host::HostJob;
@@ -26,12 +27,15 @@ pub type SourceJob = HostJob;
 /// Publication accounting; use `for_host` for a host-advertised upload job.
 pub type ReceiverJob = ControllerJob;
 
+/// A source scan is bounded independently from one network delivery round.
+pub const MAX_SOURCE_ENTRIES: u32 = 256;
+/// Every advertised round still fits the sender's single bounded batch.
 pub const MAX_ENTRIES: u32 = 32;
-// A complete scan must fit the sender's single bounded batch.
-const _: () = assert!(sender::batch::MAX_FILES == 32);
-/// Standing work retains the native session's cumulative transfer budget.
-/// A full initial scan must leave room for later source versions on this lane.
-pub const MAX_SESSION_TRANSFERS: u32 = 64;
+const _: () = assert!(sender::batch::MAX_FILES == MAX_ENTRIES as usize);
+/// Cumulative attempted versions for an explicitly selected folder job. This
+/// permits a complete source plus updates without resetting any byte budget.
+/// Independent native receiving limits may be lower; refusal remains terminal.
+pub const MAX_SESSION_TRANSFERS: u32 = 512;
 pub const MAX_SESSION_BYTES: u64 = 1024 * 1024 * 1024;
 pub(super) const ROUND_LIFETIME_US: u64 = 300_000_000;
 pub(super) const CONTROL_LIFETIME_US: u64 = 1_000_000;
@@ -224,7 +228,7 @@ impl HostConfig {
             return Err(LiveError::InvalidConfig);
         }
         let limits = SyncLimits {
-            max_entries: MAX_ENTRIES,
+            max_entries: MAX_SOURCE_ENTRIES,
             ..SyncLimits::default()
         };
         let root = DropDirectory::open(
@@ -280,8 +284,12 @@ mod tests {
             budget.admit(4, limits.max_total_bytes).unwrap();
         }
         assert_eq!(budget.admit(1, 1), Err(LiveError::Resource));
-        budget.admit(32, 0).unwrap();
-        budget.admit(16, 0).unwrap();
+        for _ in 0..(MAX_SESSION_TRANSFERS - 16) / MAX_ENTRIES {
+            budget.admit(MAX_ENTRIES, 0).unwrap();
+        }
+        budget
+            .admit((MAX_SESSION_TRANSFERS - 16) % MAX_ENTRIES, 0)
+            .unwrap();
         assert_eq!(budget.admit(1, 0), Err(LiveError::Resource));
         budget.admit(0, 0).unwrap();
     }

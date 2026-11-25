@@ -1,7 +1,7 @@
 //! Original receive-owner evidence. Staging and cleanup never imply publication.
 use super::{Action, Frame, Publication, line};
 use fr_files::{session, sync::JobStatus, wire::ResultReceipt, worker};
-use frd::native_files::{Absence, MAX_RECEIVE_RESULTS, ReceivePhase, ReceiveStatus};
+use frd::native_files::{Absence, ReceivePhase, ReceiveStatus};
 
 impl Frame {
     pub(super) fn receive(status: &ReceiveStatus) -> Self {
@@ -46,14 +46,15 @@ impl Frame {
                 "Current selection size / staged bytes not yet available"
             )),
         };
-        let truncated = status.results_truncated || status.results.len() > MAX_RECEIVE_RESULTS;
+        let capacity = status.result_capacity();
+        let truncated = status.results_truncated || status.results.len() > capacity;
         let mut outcomes = Outcomes::default();
-        for receipt in status.results.iter().take(MAX_RECEIVE_RESULTS) {
+        for receipt in status.results.iter().take(capacity) {
             outcomes.observe(receipt);
         }
         frame.lines[3] = line(format_args!(
             "Results: {} retained | {}",
-            status.results.len().min(MAX_RECEIVE_RESULTS),
+            status.results.len().min(capacity),
             if truncated {
                 "Additional results omitted; missing results may have effects"
             } else {

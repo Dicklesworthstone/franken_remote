@@ -108,7 +108,11 @@ fn receiver_owner(
         Configuration {
             directory: client.directory(),
             permission: Permission::new(true),
-            policy: Policy::conservative(),
+            policy: Policy {
+                max_session_transfers: fr_files::sync::live::MAX_SESSION_TRANSFERS,
+                max_session_bytes: fr_files::sync::live::MAX_SESSION_BYTES,
+                ..Policy::conservative()
+            },
             reply_lifetime: Duration::from_secs(1),
         },
     )
@@ -257,9 +261,24 @@ impl Running {
                 self.client.status(),
                 self.sender.stage()
             );
-            let (host, client) = self.step(cx).await;
-            assert_eq!(host, Ok(()), "host status: {:?}", self.host.status());
+            // The source sees settlement before the receiver necessarily sees
+            // its QUIC acknowledgment drain. Keep the exact page boundary while
+            // driving that drain; an immediate successor scan must not race the
+            // caller's source edits or cancellation between settled pages.
+            let (source, destination) = if self.upload {
+                (&mut self.link.c, &mut self.link.h)
+            } else {
+                (&mut self.link.h, &mut self.link.c)
+            };
+            if self.host.status().rounds_settled < round {
+                let host = self.host.service(&mut self.sender, source, || true);
+                assert_eq!(host, Ok(()), "host status: {:?}", self.host.status());
+            }
+            let client = self
+                .client
+                .service(&mut self.receiver, destination, || true);
             assert_eq!(client, Ok(()), "client status: {:?}", self.client.status());
+            self.link.drive(cx).await;
         }
     }
     fn retire(&mut self) {
@@ -1187,6 +1206,161 @@ fn mutation_after_upload_scan_cannot_publish_a_different_source_version() {
         assert_eq!(running.host.status().confirmed_publications, 0);
         assert!(running.receiver.last_result().is_none());
         assert!(destination.files().is_empty());
+        running.retire();
+        running.input_live(&cx);
+    });
+}
+
+#[test]
+fn larger_download_jobs_page_fairly_without_replaying_confirmed_versions() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        paged_job(&cx, false, false).await;
+    });
+}
+
+#[test]
+fn larger_upload_jobs_use_bounded_pages_on_legacy_and_duplex_lanes() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        for duplex in [false, true] {
+            paged_job(&cx, true, duplex).await;
+        }
+    });
+}
+
+async fn paged_job(cx: &Cx, upload: bool, duplex: bool) {
+    let source = Directory::new();
+    let destination = Directory::new();
+    let page = fr_files::sync::live::MAX_ENTRIES;
+    let count = 2 * page + 5;
+    for index in 0..count {
+        fs::write(
+            source.0.join(format!("item-{index:03}")),
+            format!("original source version {index}"),
+        )
+        .unwrap();
+    }
+    let mut running = if upload {
+        Running::upload(cx, &source.0, &destination.0, 41, duplex, true).await
+    } else {
+        Running::new(cx, &source.0, &destination.0, 41).await
+    };
+    running.settled(cx, 1).await;
+    assert_eq!(running.host.status().state.entries_completed, page);
+    assert_eq!(destination.files().len(), page as usize);
+
+    // A newly changed early name must not displace the next page's original
+    // versions. Independent destination edits never authorize a replay.
+    fs::write(source.0.join("item-000"), b"updated early source").unwrap();
+    fs::write(
+        destination.0.join("item-001"),
+        b"independent destination edit",
+    )
+    .unwrap();
+    running.settled(cx, 2).await;
+    assert_eq!(running.host.status().state.entries_completed, page);
+    assert_eq!(running.host.status().confirmed_publications, 2 * page);
+    assert_eq!(destination.files().len(), (2 * page) as usize);
+    assert_eq!(
+        fs::read(destination.0.join("item-000")).unwrap(),
+        b"original source version 0"
+    );
+    for index in page..2 * page {
+        assert_eq!(
+            fs::read(destination.0.join(format!("item-{index:03}"))).unwrap(),
+            format!("original source version {index}").as_bytes()
+        );
+    }
+
+    running.settled(cx, 3).await;
+    let status = running.host.status();
+    assert_eq!(status.state.entries_total, 6);
+    assert_eq!(status.state.entries_completed, 6);
+    assert_eq!(status.confirmed_publications, count + 1);
+    assert_eq!(status.confirmed_conflicts, 1);
+    assert_eq!(running.client.status().confirmed_publications, count + 1);
+    for index in 2 * page..count {
+        assert_eq!(
+            fs::read(destination.0.join(format!("item-{index:03}"))).unwrap(),
+            format!("original source version {index}").as_bytes()
+        );
+    }
+    let delivered = destination.files();
+    assert_eq!(delivered.len(), (count + 1) as usize);
+    assert!(
+        delivered
+            .values()
+            .any(|bytes| bytes == b"updated early source")
+    );
+    assert_eq!(
+        fs::read(destination.0.join("item-001")).unwrap(),
+        b"independent destination edit"
+    );
+
+    running.settled(cx, 4).await;
+    assert_eq!(running.host.status().state.entries_total, 0);
+    assert_eq!(running.host.status().confirmed_publications, count + 1);
+    assert_eq!(destination.files(), delivered);
+    running.input_live(cx);
+    running.retire();
+    assert!(running.host.status().cleanup_complete);
+    assert!(running.client.status().cleanup_complete);
+    running.link.control_progress(cx).await;
+}
+
+#[test]
+fn cancelling_between_pages_preserves_the_original_completed_page_only() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let source = Directory::new();
+        let destination = Directory::new();
+        let page = fr_files::sync::live::MAX_ENTRIES;
+        for index in 0..page + 1 {
+            fs::write(source.0.join(format!("item-{index:03}")), b"selected").unwrap();
+        }
+        let mut running = Running::new(&cx, &source.0, &destination.0, 41).await;
+        running.settled(&cx, 1).await;
+        let committed = destination.files();
+        assert_eq!(committed.len(), page as usize);
+        running.retire();
+        assert_eq!(running.host.status().failure, Some(LiveError::Cancelled));
+        assert_eq!(running.host.status().confirmed_publications, page);
+        assert_eq!(running.client.status().confirmed_publications, page);
+        assert_eq!(running.host.status().rounds_settled, 1);
+        assert_eq!(destination.files(), committed);
+        assert!(!destination.0.join(format!("item-{page:03}")).exists());
+        running.input_live(&cx);
+        running.link.control_progress(&cx).await;
+    });
+}
+
+#[test]
+fn oversized_source_directory_refuses_before_any_page_is_offered() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let source = Directory::new();
+        let destination = Directory::new();
+        for index in 0..=fr_files::sync::live::MAX_SOURCE_ENTRIES {
+            fs::write(source.0.join(format!("item-{index:03}")), []).unwrap();
+        }
+        let mut running = Running::new(&cx, &source.0, &destination.0, 41).await;
+        let until = clock(&cx) + 2_000_000;
+        loop {
+            assert!(clock(&cx) < until, "oversized source was not refused");
+            let (host, _) = running.step(&cx).await;
+            if let Err(error) = host {
+                assert_eq!(
+                    error,
+                    LiveError::Source(fr_files::sync::SyncError::EntryLimitExceeded)
+                );
+                break;
+            }
+        }
+        assert_eq!(running.host.status().confirmed_publications, 0);
+        assert_eq!(running.host.status().rounds_settled, 0);
+        assert!(destination.files().is_empty());
+        assert!(running.receiver.last_result().is_none());
         running.retire();
         running.input_live(&cx);
     });

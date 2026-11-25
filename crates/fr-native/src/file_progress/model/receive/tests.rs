@@ -1,5 +1,6 @@
 use super::*;
 use crate::file_progress::{Snapshot, model::COLUMNS};
+use frd::native_files::MAX_RECEIVE_RESULTS;
 
 fn status() -> ReceiveStatus {
     ReceiveStatus {
@@ -283,4 +284,113 @@ fn standing_folder_job_shows_round_progress_conflicts_and_terminal_failure() {
         "Disk cleanup: pending / not yet reported"
     );
     assert_eq!(text(&ended.lines[7]), "Folder job ended: sync_expired");
+}
+
+fn folder_status() -> ReceiveStatus {
+    use fr_wire::sync_job_state::{ConflictPolicy, SyncDirection, SyncJobState, SyncPhase};
+
+    let mut status = status();
+    status.folder_job = Some(JobStatus {
+        state: SyncJobState {
+            job_id: 7,
+            sync_direction: SyncDirection::HostToController,
+            conflict_policy: ConflictPolicy::KeepBoth,
+            phase: SyncPhase::Transferring,
+            reason: fr_wire::files::Reason::None,
+            entries_total: 32,
+            entries_completed: 31,
+            bytes_total: 32,
+            bytes_completed: 31,
+            conflicts_kept: 0,
+            manifest_revision: 8,
+        },
+        confirmed_publications: 0,
+        confirmed_conflicts: 0,
+        rounds_settled: 7,
+        failure: None,
+        cleanup_complete: false,
+    });
+    status
+}
+
+#[test]
+fn standing_folder_job_reports_the_full_folder_and_a_late_durability_receipt() {
+    let mut s = folder_status();
+    let count = fr_files::sync::live::MAX_SOURCE_ENTRIES;
+    assert!(count as usize > MAX_RECEIVE_RESULTS);
+    s.results = (1..=u64::from(count))
+        .map(|id| {
+            published(
+                id,
+                1,
+                if id == u64::from(count) {
+                    Publication::DurabilityUnknown
+                } else {
+                    Publication::Durable
+                },
+            )
+        })
+        .collect();
+    // The final disk receipt can precede the controller job's observation.
+    s.folder_job.as_mut().unwrap().confirmed_publications = count - 1;
+    let original = s.clone();
+    let frame = Frame::receive(&s);
+    assert_eq!(
+        text(&frame.lines[3]),
+        "This round: 31 / 32 files published, 31 / 32 bytes"
+    );
+    assert_eq!(
+        text(&frame.lines[4]),
+        format!(
+            "Published locally: {count} | Conflict copies kept: 0 | Retained durability unknown: 1"
+        )
+    );
+    assert_eq!(
+        text(&frame.lines[5]),
+        "Refused: 0 | Cancelled: 0 | Publication unknown: 0"
+    );
+    assert_eq!(s, original);
+}
+
+#[test]
+fn standing_folder_job_bounds_receipts_and_preserves_omission_evidence() {
+    let mut s = folder_status();
+    let transfers = fr_files::sync::live::MAX_SESSION_TRANSFERS;
+    let capacity = transfers as usize + 1;
+    assert_eq!(s.result_capacity(), capacity);
+    s.results = (1..=u64::from(transfers))
+        .map(|id| published(id, 1, Publication::Durable))
+        .collect();
+    s.results.push(ResultReceipt {
+        id: u64::from(transfers) + 1,
+        outcome: Err(worker::Error::Session(session::Error::Storage(
+            fr_files::receive::Error::Conflict,
+        ))),
+    });
+    let frame = Frame::receive(&s);
+    assert!(!text(&frame.lines[3]).contains("omitted"));
+    assert!(text(&frame.lines[4]).starts_with(&format!("Published locally: {transfers} |")));
+    assert_eq!(
+        text(&frame.lines[5]),
+        "Refused: 1 | Cancelled: 0 | Publication unknown: 0"
+    );
+
+    // An oversized snapshot cannot expand the bounded rendering work or count
+    // evidence outside the original owner's retained-result capacity.
+    s.results.push(published(
+        u64::from(transfers) + 2,
+        1,
+        Publication::DurabilityUnknown,
+    ));
+    let overflow = Frame::receive(&s);
+    assert!(text(&overflow.lines[3]).contains(&format!("{capacity} retained")));
+    assert!(text(&overflow.lines[3]).contains("missing results may have effects"));
+    assert_eq!(text(&overflow.lines[4]), text(&frame.lines[4]));
+    assert_eq!(text(&overflow.lines[5]), text(&frame.lines[5]));
+
+    s.results.clear();
+    s.results_truncated = true;
+    let omitted = Frame::receive(&s);
+    assert!(text(&omitted.lines[3]).contains("missing results may have effects"));
+    assert!(text(&omitted.lines[4]).starts_with("Published locally: 0 |"));
 }

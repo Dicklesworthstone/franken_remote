@@ -1,6 +1,7 @@
 //! Source-version delivery on one original, explicitly accepted file lane.
 use super::{
     ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, HostConfig, JobBudget, JobStatus, LiveError,
+    paging::Cursor,
     scan::{PreparedRound, Scan, ScanCache, ScanScope, Version},
     state,
 };
@@ -105,6 +106,7 @@ pub struct HostJob {
     scan: Option<Scan>,
     scan_cache: ScanCache,
     scan_retry: ScanRetry,
+    cursor: Cursor,
     prepared: Option<PreparedRound>,
     versions: Vec<Version>,
     ledger: BTreeMap<String, String>,
@@ -197,6 +199,7 @@ impl HostJob {
             scan: None,
             scan_cache: ScanCache::default(),
             scan_retry: ScanRetry::default(),
+            cursor: Cursor::default(),
             prepared: None,
             versions: Vec::new(),
             ledger: BTreeMap::new(),
@@ -221,6 +224,7 @@ impl HostJob {
         self.permission.revoke();
         self.prepared = None;
         self.scan_cache = ScanCache::default();
+        self.cursor.stop();
         self.pending = None;
         self.step = Step::Stopped;
         if self.status.failure.is_none() {
@@ -393,6 +397,7 @@ impl HostJob {
                     &self.config,
                     self.status.state.manifest_revision,
                     self.ledger.clone(),
+                    self.cursor.after().map(str::to_owned),
                     std::mem::take(&mut self.scan_cache),
                     ScanScope {
                         cx: self.cx.clone(),
@@ -474,10 +479,18 @@ impl HostJob {
             .rounds_settled
             .checked_add(1)
             .ok_or(LiveError::Resource)?;
+        // Only this original peer settlement advances page fairness. A scan,
+        // partial publication or source join alone never moves the cursor.
+        let more = self.cursor.settle()?;
         self.versions.clear();
-        self.next_scan = now
-            .checked_add(self.config.interval_us)
-            .ok_or(LiveError::Clock)?;
+        self.next_scan = if more {
+            // Deferred names retain no source descriptors. The next bounded
+            // round revalidates the entire manifest under current authority.
+            now
+        } else {
+            now.checked_add(self.config.interval_us)
+                .ok_or(LiveError::Clock)?
+        };
         self.step = Step::Waiting;
         Ok(())
     }
@@ -508,6 +521,8 @@ impl HostJob {
         // Retain verified scan metadata even when this round has no new versions.
         // Publication evidence remains exclusively in the confirmed ledger.
         self.scan_cache = std::mem::take(&mut prepared.cache);
+        self.cursor
+            .stage(std::mem::take(&mut prepared.continuation))?;
         let mut announcement = state(
             self.config.job_id,
             self.direction,

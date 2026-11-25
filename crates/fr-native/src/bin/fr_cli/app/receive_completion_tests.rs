@@ -167,7 +167,7 @@ fn folder_job_metadata_is_bounded_sanitized_and_consistent_with_owner_cleanup() 
     for (field, invalid) in [
         ("id", json!(0)),
         ("rounds_settled", json!(4)),
-        ("confirmed_publications", json!(65)),
+        ("confirmed_publications", json!(513)),
         ("confirmed_conflicts", json!(2)),
         ("confirmed_conflicts", json!(-1)),
         ("phase", json!("/private/untrusted")),
@@ -204,6 +204,100 @@ fn folder_job_metadata_is_bounded_sanitized_and_consistent_with_owner_cleanup() 
     let failure = check_job(&active, Some(41)).unwrap_err();
     assert_eq!(failure.code, "app_receive_cleanup_unconfirmed");
     assert_eq!(retained(failure)["folder_job"], active["folder_job"]);
+}
+
+fn paged_folder_completion() -> Value {
+    let mut value = folder_completion(false);
+    value["files_received"] = Value::Array(
+        (0..MAX_FOLDER_PUBLICATIONS)
+            .map(|index| json!({"index":index,"bytes":1,"durable":true}))
+            .collect(),
+    );
+    value["folder_job"]["revision"] = json!(17);
+    value["folder_job"]["rounds_settled"] = json!(16);
+    value["folder_job"]["confirmed_publications"] = json!(MAX_FOLDER_PUBLICATIONS);
+    value["folder_job"]["confirmed_conflicts"] = json!(0);
+    value["files_receive_refused"] = json!([{"index":512,"reason":"receive_cancelled"}]);
+    value
+}
+
+#[test]
+fn folder_completion_retains_every_page_and_checks_the_original_job() {
+    let value = paged_folder_completion();
+    let notice = check_job(&value, Some(41)).unwrap();
+    assert!(notice.starts_with("Downloads: 512 published (512 bytes), 1 refused;"));
+    let inspection = inspect_job(&capture(&value), true, Some(41), None).unwrap();
+    let mut failure = Failure::new("session_failed", "The original viewer stopped.", 1);
+    inspection.preserve(&mut failure);
+    let report = retained(failure);
+    assert_eq!(report["files_received"], value["files_received"]);
+    assert_eq!(report["files_receive_refused"], value["files_receive_refused"]);
+    assert_eq!(report["folder_job"], value["folder_job"]);
+
+    for expected in [None, Some(42)] {
+        let failure = check_job(&value, expected).unwrap_err();
+        assert_eq!(failure.code, "app_receive_outcome_unknown");
+        assert_eq!(retained(failure)["files_received"], value["files_received"]);
+    }
+
+    let mut unknown = value;
+    unknown["files_receive_refused"][0]["reason"] = json!("publication_unknown");
+    let failure = check_job(&unknown, Some(41)).unwrap_err();
+    assert_eq!(failure.code, "app_receive_outcome_unknown");
+    let report = retained(failure);
+    assert_eq!(report["files_received"], unknown["files_received"]);
+    assert_eq!(report["files_receive_refused"], unknown["files_receive_refused"]);
+}
+
+#[test]
+fn incomplete_valid_folder_reports_preserve_all_bounded_publications() {
+    let mut value = paged_folder_completion();
+    value.as_object_mut().unwrap().remove("files_receive_cleanup");
+    let failure = check_job(&value, Some(41)).unwrap_err();
+    let report = retained(failure);
+    assert_eq!(report["app_receive_evidence_incomplete"], true);
+    assert_eq!(report["files_received"], value["files_received"]);
+    assert_eq!(report["files_receive_refused"], value["files_receive_refused"]);
+    assert_eq!(report["folder_job"], value["folder_job"]);
+
+    let mut oversized = paged_folder_completion();
+    oversized["files_receive_refused"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"index":513,"reason":"receive_limit"}));
+    let report = retained(check_job(&oversized, Some(41)).unwrap_err());
+    assert_eq!(report["app_receive_evidence_incomplete"], true);
+    let received = report["files_received"].as_array().unwrap();
+    let refused = report["files_receive_refused"].as_array().unwrap();
+    assert_eq!(received.len() + refused.len(), MAX_FOLDER_RESULTS);
+    assert_eq!(report["files_received"], oversized["files_received"]);
+}
+
+#[test]
+fn missing_or_malformed_job_metadata_never_broadens_receipt_retention() {
+    for (field, invalid) in [
+        ("id", json!(0)),
+        ("id", json!("41")),
+        ("confirmed_publications", json!(513)),
+        ("rounds_settled", json!(18)),
+        ("failure", json!("/private/untrusted")),
+    ] {
+        let mut value = paged_folder_completion();
+        value["folder_job"][field] = invalid;
+        let failure = check_job(&value, Some(41)).unwrap_err();
+        assert_eq!(failure.code, "app_receive_outcome_unknown");
+        let report = retained(failure);
+        assert_eq!(report["app_receive_evidence_incomplete"], true);
+        assert_eq!(report["files_received"].as_array().unwrap().len(), MAX_RESULTS);
+        assert!(report.get("folder_job").is_none());
+        assert!(!report.to_string().contains("/private/untrusted"));
+    }
+
+    let mut ordinary = paged_folder_completion();
+    ordinary.as_object_mut().unwrap().remove("folder_job");
+    let report = retained(check(&ordinary, true, true).unwrap_err());
+    assert_eq!(report["files_received"].as_array().unwrap().len(), MAX_RESULTS);
+    assert!(report.get("folder_job").is_none());
 }
 
 fn check(value: &Value, expected: bool, success: bool) -> Result<String, Failure> {

@@ -1,5 +1,35 @@
 # Implementation status
 
+## Bounded pages for larger native folder jobs (2026-11-24)
+
+Explicit one-way folder jobs now inspect up to 256 flat directory entries and
+deliver changed versions in rounds of at most 32 files. A settled page advances
+a fair name cursor; repeated edits to earlier files cannot continually displace
+later names. Deferred pages start promptly after the preceding settlement, with
+a fresh bounded scan under the original authority. Once the backlog clears,
+the configured scan interval resumes. Only the selected page retains source
+handles, and only verified publications plus original cleanup advance its ledger.
+
+The native receiver allows 512 attempted versions only for an explicitly
+configured folder job, within the unchanged 1 GiB cumulative byte ceiling.
+Ordinary file sessions retain their 64-attempt limit. Original folder receipts
+are retained and reported within a 513-result ceiling, including the first
+terminal refusal. Lower receiver limits still refuse explicitly. Keep-both
+publication, independent destination edits, original deadlines, cancellation
+and no replay after reconnect retain their existing semantics. This does not
+implement recursive or bidirectional remote synchronization.
+
+Added regressions cover all 256 entries in eight policy pages, hot early names,
+abandoned cursor state, real UDP/TLS delivery beyond 64 files in both directions,
+legacy and duplex upload lanes, cancellation between pages, oversized source
+refusal, native receive quotas and bounded receipt reporting. These tests are
+authored, not yet reported as passed. The exact pinned compiler and locked
+dependencies were installed, but the executor disconnected during the baseline
+workspace check before returning a result. GitHub verification is queued;
+formatting, compilation, Clippy, tests and native/live-tailnet qualification
+remain unverified for this change. See [folder synchronization](docs/folder-sync.md)
+and bead `fr-sync-paged-rounds-g9mf`.
+
 ## Receive authority and native clipboard recovery (2026-11-24)
 
 Inbound QUIC dispatch now rechecks the original connection lifetime, operation

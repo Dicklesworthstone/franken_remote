@@ -903,6 +903,43 @@ fn child_failed(error: child::Error) -> Failure {
     Failure::new(code, next, 1).uncertain()
 }
 
+// A picker retry starts a new local choice; it never reuses session consent.
+fn retry_picker(
+    report: Option<Report>,
+    notice: &mut Option<String>,
+    failures: &mut u8,
+    idle_expiries: &mut u8,
+) -> Result<bool, Failure> {
+    match report {
+        // Closing the picker quits.
+        Some(Report::Failed { code, .. }) if code == "host_choice_cancelled" => Ok(false),
+        // Refresh the expired machine snapshot, but quit after half an hour
+        // unused. Keep the existing notice and consecutive failure count.
+        Some(Report::Failed { code, .. }) if code == "host_choice_expired" => {
+            *idle_expiries += 1;
+            Ok(*idle_expiries < MAX_IDLE_EXPIRIES)
+        }
+        other => {
+            // A second failure in a row would only reopen a failing window.
+            *failures += 1;
+            let next = match other {
+                Some(Report::Failed { next, .. }) if !next.is_empty() => next,
+                _ => "The machine picker could not open.".to_owned(),
+            };
+            if *failures > 1 {
+                eprintln!("fr app: {next}");
+                return Err(Failure::new(
+                    "app_picker_unavailable",
+                    "The machine picker could not open. Run fr connect --choose-host --view-only --experimental-native --display only in a terminal from your desktop session to see why.",
+                    1,
+                ));
+            }
+            *notice = Some(notice_text(&next));
+            Ok(true)
+        }
+    }
+}
+
 fn application(
     port: u16,
     mut receiving: Option<Receiving>,
@@ -967,37 +1004,16 @@ fn application(
                         capture_system_shortcuts,
                     )
                 }
-                // Closing the picker quits.
-                Some(Report::Failed { code, .. }) if code == "host_choice_cancelled" => {
-                    return Ok(String::new());
-                }
-                // A choice expires after two minutes, with its machine snapshot.
-                // Reopen with a fresh one, as the Windows app refreshes in place,
-                // but quit once the picker has gone unused for half an hour.
-                Some(Report::Failed { code, .. }) if code == "host_choice_expired" => {
-                    idle_expiries += 1;
-                    if idle_expiries >= MAX_IDLE_EXPIRIES {
-                        return Ok(String::new());
-                    }
-                    continue;
-                }
                 other => {
-                    // A second failure in a row would only reopen a failing window.
-                    picker_failures += 1;
-                    let next = match other {
-                        Some(Report::Failed { next, .. }) if !next.is_empty() => next,
-                        _ => "The machine picker could not open.".to_owned(),
-                    };
-                    if picker_failures > 1 {
-                        eprintln!("fr app: {next}");
-                        return Err(Failure::new(
-                            "app_picker_unavailable",
-                            "The machine picker could not open. Run fr connect --choose-host --view-only --experimental-native --display only in a terminal from your desktop session to see why.",
-                            1,
-                        ));
+                    if retry_picker(
+                        other,
+                        &mut notice,
+                        &mut picker_failures,
+                        &mut idle_expiries,
+                    )? {
+                        continue;
                     }
-                    notice = Some(notice_text(&next));
-                    continue;
+                    return Ok(String::new());
                 }
             };
         picker_failures = 0;

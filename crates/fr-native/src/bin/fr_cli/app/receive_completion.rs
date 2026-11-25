@@ -8,10 +8,13 @@ use crate::FileReceiveReport;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt::Write as _};
 
-/// An independent UI parsing bound: the native producer retains at most 64
-/// terminal transfer receipts plus one refusal. Keep this boundary portable;
-/// default client builds do not expose the platform receive-owner module.
+/// Independent portable parsing bounds: ordinary receivers retain at most 64
+/// terminal receipts plus one refusal; explicitly selected folder jobs may
+/// retain 512 plus one refusal. Only validated job metadata selects that bound.
+/// Default client builds do not expose the platform receive-owner module.
 const MAX_RESULTS: usize = 65;
+const MAX_FOLDER_PUBLICATIONS: u64 = 512;
+const MAX_FOLDER_RESULTS: usize = 513;
 
 #[derive(Default)]
 pub(super) struct Inspection {
@@ -305,7 +308,7 @@ impl FolderJob {
             || job
                 .confirmed_conflicts
                 .is_some_and(|n| n > job.confirmed_publications)
-            || job.confirmed_publications > 64
+            || job.confirmed_publications > MAX_FOLDER_PUBLICATIONS
             || matches!(job.cleanup, Cleanup::NotStarted)
             || match job.phase {
                 "cancelled" => job.failure != Some("sync_cancelled"),
@@ -332,6 +335,17 @@ impl FolderJob {
             value["confirmed_conflicts"] = json!(count);
         }
         value
+    }
+}
+
+/// Parsing establishes the typed job identity and bounded counters first.
+/// This changes receipt retention only; the expected original job is still
+/// checked by `Record::consistent` before another connection can be offered.
+const fn result_capacity(job: Option<&FolderJob>) -> usize {
+    if job.is_some() {
+        MAX_FOLDER_RESULTS
+    } else {
+        MAX_RESULTS
     }
 }
 
@@ -376,6 +390,8 @@ struct Record {
 }
 impl Record {
     fn parse(value: &Value) -> Result<Self, ()> {
+        let folder_job = FolderJob::parse(value.get("folder_job"))?;
+        let capacity = result_capacity(folder_job.as_ref());
         let received = value
             .get("files_received")
             .and_then(Value::as_array)
@@ -384,7 +400,7 @@ impl Record {
             .get("files_receive_refused")
             .and_then(Value::as_array)
             .ok_or(())?;
-        if received.len().saturating_add(refused.len()) > MAX_RESULTS {
+        if received.len().saturating_add(refused.len()) > capacity {
             return Err(());
         }
         let received: Vec<_> = received
@@ -415,7 +431,7 @@ impl Record {
                 .get("files_receive_requested")
                 .and_then(Value::as_bool)
                 .ok_or(())?,
-            folder_job: FolderJob::parse(value.get("folder_job"))?,
+            folder_job,
             received,
             refused,
             bytes,
@@ -566,12 +582,14 @@ fn evidence(value: &Value, text: &str) -> FileReceiveReport {
 /// Malformed metadata cannot erase earlier well-typed receipt fragments.
 /// This is an explicitly incomplete projection, never fabricated zero effect.
 fn incomplete(value: &Value) -> FileReceiveReport {
+    let folder_job = FolderJob::parse(value.get("folder_job")).ok().flatten();
+    let capacity = result_capacity(folder_job.as_ref());
     let received: Vec<_> = value
         .get("files_received")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .take(MAX_RESULTS)
+        .take(capacity)
         .filter_map(Published::parse)
         .map(|receipt| receipt.json())
         .collect();
@@ -580,7 +598,7 @@ fn incomplete(value: &Value) -> FileReceiveReport {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .take(MAX_RESULTS.saturating_sub(received.len()))
+        .take(capacity.saturating_sub(received.len()))
         .filter_map(Refused::parse)
         .map(|receipt| receipt.json())
         .collect();
@@ -589,7 +607,7 @@ fn incomplete(value: &Value) -> FileReceiveReport {
         "files_received": received,
         "files_receive_refused": refused,
     });
-    if let Ok(Some(job)) = FolderJob::parse(value.get("folder_job")) {
+    if let Some(job) = folder_job {
         retained["folder_job"] = job.json();
     }
     evidence(

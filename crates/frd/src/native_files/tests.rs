@@ -406,3 +406,74 @@ fn files_and_directories_share_duplicate_name_and_symlink_refusals() {
         }
     );
 }
+
+#[test]
+fn explicit_folder_consent_expands_only_the_original_transfer_count_budget() {
+    let scratch = Scratch::new(0o700);
+    let ordinary = Directory::open(&scratch.0, limits(1024, 4096))
+        .unwrap()
+        .with_conflict_policy(ConflictPolicy::KeepBoth);
+    let host_job = ordinary.clone().with_sync_job(41).unwrap();
+    let ordinary_request = ReceiveRequest::new(&host_job);
+    assert_eq!(
+        ordinary_request.configuration.policy.max_session_transfers,
+        MAX_SESSION_FILES
+    );
+    assert_eq!(ordinary_request.sync_job_id(), None);
+    let client_job = ReceiveRequest::new(&ordinary).with_sync_job(41).unwrap();
+    assert_eq!(
+        ordinary.configuration().policy.max_session_transfers,
+        MAX_SESSION_FILES
+    );
+    for configuration in [host_job.configuration(), client_job.configuration] {
+        assert_eq!(
+            configuration.policy.max_session_transfers,
+            fr_files::sync::live::MAX_SESSION_TRANSFERS
+        );
+        assert_eq!(configuration.policy.max_session_bytes, 4096);
+    }
+    // Consumption cannot turn a standing choice into ordinary receive consent.
+    let clone = host_job.clone();
+    assert_eq!(host_job.take_sync_job().unwrap(), Some(41));
+    assert!(clone.take_sync_job().is_err());
+    assert!(clone.requires_sync_job());
+    assert_eq!(
+        ordinary.configuration().policy.max_session_transfers,
+        MAX_SESSION_FILES
+    );
+}
+
+#[test]
+fn folder_receiver_can_publish_after_the_ordinary_session_limit() {
+    for sync in [false, true] {
+        let scratch = Scratch::new(0o700);
+        let directory = Directory::open(&scratch.0, Limits::default())
+            .unwrap()
+            .with_conflict_policy(ConflictPolicy::KeepBoth);
+        let directory = if sync {
+            directory.with_sync_job(41).unwrap()
+        } else {
+            directory
+        };
+        let input = controller();
+        let mut session = receiver(&directory, &input);
+        for id in 1..=u64::from(MAX_SESSION_FILES) + 1 {
+            let name = format!("entry-{id:03}");
+            let result = session.begin(offer(&session, id, &name, b""), || at(id * 10));
+            if !sync && id > u64::from(MAX_SESSION_FILES) {
+                assert_eq!(result, Err(SessionError::Quota));
+                assert!(!scratch.0.join(name).exists());
+            } else {
+                result.unwrap();
+                session
+                    .complete(session.binding(), id, || at(id * 10 + 1))
+                    .unwrap();
+                assert_eq!(fs::read(scratch.0.join(name)).unwrap(), b"");
+            }
+        }
+        assert_eq!(
+            scratch.entries().len(),
+            MAX_SESSION_FILES as usize + usize::from(sync)
+        );
+    }
+}

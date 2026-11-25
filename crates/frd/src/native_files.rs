@@ -250,7 +250,11 @@ impl Directory {
     fn policy(&self) -> SessionPolicy {
         SessionPolicy {
             max_session_bytes: self.limits.max_session_bytes,
-            max_session_transfers: MAX_SESSION_FILES,
+            max_session_transfers: if self.requires_sync_job() {
+                fr_files::sync::live::MAX_SESSION_TRANSFERS
+            } else {
+                MAX_SESSION_FILES
+            },
             ..SessionPolicy::conservative()
         }
     }

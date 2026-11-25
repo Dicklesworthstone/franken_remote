@@ -225,3 +225,59 @@ fn cleanup_evidence_distinguishes_pre_start_absence_from_an_unjoined_owner() {
     control.cleaned(Ok(()));
     assert!(control.status().may_have_started());
 }
+
+#[test]
+fn folder_receipts_keep_the_full_job_budget_without_expanding_ordinary_receives() {
+    let control = ReceiveControl::new();
+    let job = fr_files::sync::JobStatus {
+        state: fr_wire::sync_job_state::SyncJobState {
+            job_id: 41,
+            sync_direction: fr_wire::sync_job_state::SyncDirection::HostToController,
+            conflict_policy: fr_wire::sync_job_state::ConflictPolicy::KeepBoth,
+            phase: fr_wire::sync_job_state::SyncPhase::Advertised,
+            reason: fr_wire::files::Reason::None,
+            entries_total: 0,
+            entries_completed: 0,
+            conflicts_kept: 0,
+            bytes_total: 0,
+            bytes_completed: 0,
+            manifest_revision: 0,
+        },
+        failure: None,
+        confirmed_publications: 0,
+        confirmed_conflicts: 0,
+        rounds_settled: 0,
+        cleanup_complete: false,
+    };
+    control.record_folder_job(job);
+    for id in 0..MAX_FOLDER_RECEIVE_RESULTS - 1 {
+        control.observe(published(u64::try_from(id).unwrap()));
+    }
+    let status = control.status();
+    assert_eq!(status.results.len(), MAX_FOLDER_RECEIVE_RESULTS - 1);
+    assert!(!status.cancel_requested && !status.results_truncated);
+    assert_eq!(status.folder_job, Some(job));
+    let final_id = u64::try_from(MAX_FOLDER_RECEIVE_RESULTS - 1).unwrap();
+    let refusal = ResultReceipt {
+        id: final_id,
+        outcome: Err(worker::Error::Session(fr_files::session::Error::Quota)),
+    };
+    control.observe(refusal);
+    assert!(control.cancel_requested());
+    assert!(!control.status().results_truncated);
+    // Late proof can strengthen the final result even after the bound stops work.
+    control.observe(published(final_id));
+    assert_eq!(control.status().results.last(), Some(&published(final_id)));
+    control.observe(published(final_id + 1));
+    let stopped = control.status();
+    assert!(stopped.results_truncated);
+    assert_eq!(stopped.results.len(), MAX_FOLDER_RECEIVE_RESULTS);
+    assert_eq!(stopped.results.first(), Some(&published(0)));
+
+    let ordinary = ReceiveControl::new();
+    for id in 0..MAX_RECEIVE_RESULTS {
+        ordinary.observe(published(u64::try_from(id).unwrap()));
+    }
+    assert!(ordinary.cancel_requested());
+    assert_eq!(ordinary.status().results.len(), MAX_RECEIVE_RESULTS);
+}

@@ -10,9 +10,6 @@ use fr_files::{
 use frd::native_files::{Absence, ReceivePhase, ReceiveStatus};
 use std::fmt::Write as _;
 
-/// The original disk owner retains at most 64 terminal receipts and one refusal.
-const MAX_RESULTS: usize = 65;
-
 #[derive(Debug)]
 pub(crate) struct Summary {
     requested: bool,
@@ -58,6 +55,7 @@ impl Summary {
         // the first result may still have started an owner, so missing join
         // evidence stays pending even without a progress sample or receipt.
         let started = status.may_have_started();
+        let capacity = status.result_capacity();
         let mut summary = Self {
             requested: true,
             folder_job: status.folder_job,
@@ -92,11 +90,11 @@ impl Summary {
                     .checked_sub(1)
                     .map(|index| (index, progress.staged_bytes, progress.total_bytes))
             }),
-            truncated: status.results_truncated || status.results.len() > MAX_RESULTS,
+            truncated: status.results_truncated || status.results.len() > capacity,
             cancelled: status.cancel_requested,
             ..Self::not_requested()
         };
-        for receipt in status.results.iter().take(MAX_RESULTS) {
+        for receipt in status.results.iter().take(capacity) {
             summary.receipt(*receipt);
         }
         summary
@@ -248,7 +246,8 @@ impl Summary {
     pub(crate) fn preserve(&self, failure: &mut Failure) {
         if self.requested && failure.files_receive.is_none() {
             // One terminal report in this short-lived CLI process, bounded by
-            // MAX_RESULTS and static reason codes. Keep Failure small and Copy,
+            // the original owner's result capacity and static reason codes.
+            // Keep Failure small and Copy,
             // like the existing one-time indexed selection refusal.
             failure.files_receive = Some(Box::leak(Box::new(FileReceiveReport {
                 json: self.json(),
@@ -546,7 +545,7 @@ mod tests {
         let report = json(&Summary::from_status(&state));
         assert_eq!(
             report["files_received"].as_array().unwrap().len(),
-            MAX_RESULTS
+            state.result_capacity()
         );
         assert_eq!(report["files_receive_results_truncated"], true);
         assert!(
@@ -554,6 +553,59 @@ mod tests {
                 .text()
                 .contains("do not infer no effect")
         );
+    }
+
+    #[test]
+    fn folder_reports_preserve_all_pages_and_the_original_terminal_refusal() {
+        use fr_files::sync::{JobStatus, LiveError};
+        use fr_wire::sync_job_state::{ConflictPolicy, SyncDirection, SyncJobState, SyncPhase};
+
+        let mut state = status(
+            (1..=512)
+                .map(|id| published(id, 1, Publication::Durable))
+                .collect(),
+        );
+        state.folder_job = Some(JobStatus {
+            state: SyncJobState {
+                job_id: 41,
+                sync_direction: SyncDirection::HostToController,
+                conflict_policy: ConflictPolicy::KeepBoth,
+                phase: SyncPhase::Failed,
+                reason: fr_wire::files::Reason::Resource,
+                entries_total: 0,
+                entries_completed: 0,
+                conflicts_kept: 0,
+                bytes_total: 0,
+                bytes_completed: 0,
+                manifest_revision: 17,
+            },
+            failure: Some(LiveError::Resource),
+            confirmed_publications: 512,
+            confirmed_conflicts: 0,
+            rounds_settled: 16,
+            cleanup_complete: true,
+        });
+        state.results.push(ResultReceipt {
+            id: 513,
+            outcome: Err(WorkerError::Session(session::Error::Quota)),
+        });
+        let report = json(&Summary::from_status(&state));
+        assert_eq!(state.result_capacity(), 513);
+        assert_eq!(report["files_received"].as_array().unwrap().len(), 512);
+        assert_eq!(report["files_receive_refused"].as_array().unwrap().len(), 1);
+        assert_eq!(report["files_receive_refused"][0]["index"], 512);
+        assert_eq!(report["files_receive_refused"][0]["reason"], "receive_limit");
+        assert_eq!(report["files_receive_results_truncated"], false);
+        assert_eq!(report["folder_job"]["confirmed_publications"], 512);
+
+        state.results.push(ResultReceipt {
+            id: 514,
+            outcome: Err(WorkerError::UnknownEffect),
+        });
+        let oversized = json(&Summary::from_status(&state));
+        assert_eq!(oversized["files_received"], report["files_received"]);
+        assert_eq!(oversized["files_receive_refused"], report["files_receive_refused"]);
+        assert_eq!(oversized["files_receive_results_truncated"], true);
     }
 
     #[test]

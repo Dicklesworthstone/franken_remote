@@ -100,13 +100,28 @@ This does not yet implement a bidirectional reconciliation job.
 
 ### Bounds and delivery semantics
 
-The live job scans at five-second intervals after the preceding round has
-settled. Each scan allows at most 32 flat regular files, 64 MiB per file and
-256 MiB of source content. Subdirectories, symlinks and special files refuse the
-job. Across all rounds, the live job allows 64 attempted file versions and
-1 GiB of attempted content; the receiver's independently selected lower limits
-still apply. The receiver charges each announced round against those job
-limits before accepting its file offers. Each decoded ATP offer must also fit
+The live job scans at five-second intervals once all currently observed changes
+have been delivered. Deferred pages start another bounded round immediately
+after the preceding page settles, and recheck the source under current authority.
+Each scan allows at most 256 flat directory entries (including private
+staging entries), 64 MiB per file and 256 MiB of source content. Subdirectories,
+symlinks and special files refuse the job. A delivery round selects at most
+32 changed files, so a larger directory progresses through bounded pages without
+retaining a larger batch of open sources. Selection continues after the last
+name in the preceding settled page and wraps once; frequently edited early names
+cannot continually displace later files. The cursor advances only after the
+original page's publication and cleanup are confirmed and its settlement arrives.
+
+Across all rounds, an explicitly accepted native folder job allows 512 attempted
+file versions and 1 GiB of attempted content. This leaves room to deliver the full
+256-entry source and subsequent changes. Neither paging nor an empty round resets
+these cumulative budgets. Ordinary native file transfers retain their 64-attempt
+limit. Folder receivers retain at most 513 content-free results, including the
+first terminal refusal; ordinary receivers retain their existing 65-result bound.
+The receiver's independently selected lower limits still apply, including those
+of older peers; exceeding them is a typed resource refusal, never a quota reset.
+The receiver charges each announced round against those job limits before
+accepting its file offers. Each decoded ATP offer must also fit
 the remaining bytes of the round and the per-file ceiling before the receiver
 can queue a staging operation. Scanning uses one supervised worker and one bounded result. Each
 round has a five-minute deadline, and each retained state record keeps its
@@ -231,7 +246,10 @@ current source names. Callers retain a baseline per configured job.
 `cargo test -p fr-files --test remote_folder_sync --locked` drives the real
 native UDP/TLS file attachment and independent source/destination disk owners.
 The target includes repeated changes, a full 32-file first round followed by
-another version, keep-both preservation, local edit/delete without replay,
+another version, larger sources delivered across bounded pages in both directions,
+fair progress past newly edited early names, cancellation between pages, refusal
+of oversized sources before any offer, keep-both preservation, local edit/delete
+without replay,
 wrong job IDs, replacement connections, cancellation cleanup and source mutation
 between scan and preparation. Production daemon/viewer regressions additionally
 exercise repeated jobs while input continues and refuse ordinary download

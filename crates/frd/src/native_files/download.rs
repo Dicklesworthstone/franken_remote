@@ -89,8 +89,11 @@ pub struct ReceiveRequest {
 }
 impl ReceiveRequest {
     pub fn new(directory: &Directory) -> Self {
+        let mut configuration = directory.configuration();
+        // A host-side folder choice does not opt this receiving role into a job.
+        configuration.policy.max_session_transfers = MAX_SESSION_FILES;
         Self {
-            configuration: directory.configuration(),
+            configuration,
             sync_job: None,
         }
     }
@@ -104,6 +107,8 @@ impl ReceiveRequest {
             return Err(fr_files::sync::LiveError::KeepBothRequired);
         }
         self.sync_job = Some(job_id);
+        self.configuration.policy.max_session_transfers =
+            fr_files::sync::live::MAX_SESSION_TRANSFERS;
         Ok(self)
     }
     pub const fn sync_job_id(&self) -> Option<u64> {
@@ -127,6 +132,9 @@ pub enum ReceivePhase {
 /// At most the session's admitted transfers plus its first terminal refusal.
 /// Hitting this bound requests file-only cancellation without erasing receipts.
 pub const MAX_RECEIVE_RESULTS: usize = MAX_SESSION_FILES as usize + 1;
+// An explicitly accepted folder owner records its job before its first disk
+// result. Keep every bounded publication from that owner, plus one refusal.
+const MAX_FOLDER_RECEIVE_RESULTS: usize = fr_files::sync::live::MAX_SESSION_TRANSFERS as usize + 1;
 
 /// One coherent snapshot from the original disk owner. Progress and cleanup
 /// never establish publication; only a retained Published result does that.
@@ -143,6 +151,17 @@ pub struct ReceiveStatus {
     pub cleanup: Option<Result<(), worker::Error>>,
 }
 impl ReceiveStatus {
+    /// Bound for this original receiver's retained terminal results.
+    /// Only an explicitly accepted folder owner records a folder job; ordinary
+    /// downloads keep their smaller transfer and reporting limits.
+    pub const fn result_capacity(&self) -> usize {
+        if self.folder_job.is_some() {
+            MAX_FOLDER_RECEIVE_RESULTS
+        } else {
+            MAX_RECEIVE_RESULTS
+        }
+    }
+
     /// Whether this evidence requires treating a disk owner as possibly started.
     /// An ended receive failure can precede its first result; missing progress
     /// or receipts cannot prove that cleanup is unnecessary. A pre-start absence
@@ -239,13 +258,14 @@ impl ReceiveControl {
             }
             return;
         }
-        if state.results.len() == MAX_RECEIVE_RESULTS {
+        let capacity = state.result_capacity();
+        if state.results.len() == capacity {
             state.results_truncated = true;
             state.cancel_requested = true;
             return;
         }
         state.results.push(result);
-        if state.results.len() == MAX_RECEIVE_RESULTS {
+        if state.results.len() == capacity {
             state.cancel_requested = true;
         }
     }
