@@ -112,6 +112,19 @@ struct Root {
     /// root still retains one cleanup witness across every clone and round.
     #[cfg(unix)]
     sync_cleanup: OnceLock<CleanupStatus>,
+    // A private per-root fault at the real post-rename durability boundary.
+    // No process-global state, publication bypass or production override.
+    #[cfg(test)]
+    fail_publication_sync: AtomicBool,
+}
+impl Root {
+    fn sync_publication(&self) -> bool {
+        #[cfg(test)]
+        if self.fail_publication_sync.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        fs::fsync(&self.fd).is_ok()
+    }
 }
 
 #[cfg(unix)]
@@ -209,6 +222,8 @@ impl DropDirectory {
                 reserved: Mutex::new(Reserved::default()),
                 #[cfg(unix)]
                 sync_cleanup: OnceLock::new(),
+                #[cfg(test)]
+                fail_publication_sync: AtomicBool::new(false),
             }),
             ConflictPolicy::Reject,
             None,
@@ -584,7 +599,7 @@ impl PendingFile {
         // if the directory sync fails. Publication uncertainty is not rollback.
         self.state = State::Published;
         self.reservation.published_conflict(attempt != 0);
-        let publication = if fs::fsync(&self.reservation.root.fd).is_ok() {
+        let publication = if self.reservation.root.sync_publication() {
             Publication::Durable
         } else {
             Publication::DurabilityUnknown

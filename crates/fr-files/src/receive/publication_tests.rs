@@ -1,5 +1,7 @@
 //! Conflict exhaustion does not depend on visible staging names.
 #![cfg(target_os = "linux")]
+mod sync_durability;
+
 use super::{DropDirectory, Error, Limits, Publication};
 use asupersync::atp::object::ContentId;
 use std::{

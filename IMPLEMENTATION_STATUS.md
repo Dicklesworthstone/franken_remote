@@ -1,5 +1,25 @@
 # Implementation status
 
+## Local folder publication durability (2026-11-25)
+
+The local reconciliation API now stops when atomic file publication has
+committed but its directory durability cannot be confirmed. It returns
+`SyncError::DurabilityUnknown`, a failed/unknown-effect wire state, the exact
+committed receipt, the durable prefix and the advanced baseline. A directional
+no-replay receipt preserves that source version even after a local edit or
+deletion of its published destination; an explicitly authorized later round
+can still deliver the untouched successor or a new source version.
+
+This corrects the local engine's previous false-settlement behavior and aligns
+it with the native receiver's existing durability refusal. New real-filesystem
+regressions inject only the final directory-sync failure, after normal hashing,
+staging and rename. They cover both directions, conflict and ordinary names,
+authority refusal, retained counters and no replay. Independent source review
+is complete. Rust formatting, compilation, Clippy and test execution remain
+pending: no executor is attached and hosted verification has not started.
+This is source evidence, not storage-device or native/tailnet qualification.
+Tracking: `fr-sync-durability-2q8m`.
+
 ## Bounded pages for larger native folder jobs (2026-11-24)
 
 Explicit one-way folder jobs now inspect up to 256 flat directory entries and

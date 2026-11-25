@@ -117,6 +117,9 @@ pub enum SyncError {
     FileSizeLimitExceeded,
     TotalBytesLimitExceeded,
     AuthorityRevoked,
+    /// Publication committed, but its directory durability was not confirmed.
+    /// The returned receipt and baseline forbid replay of that source version.
+    DurabilityUnknown,
     KeepBothRequired,
     Receive(ReceiveError),
     Wire(WireError),
@@ -148,7 +151,9 @@ impl SyncError {
             | Self::Receive(
                 ReceiveError::InvalidName | ReceiveError::InvalidRoot | ReceiveError::UnsafeRoot,
             ) => WireReason::Invalid,
-            Self::Wire(_) | Self::Receive(_) | Self::Io(_) => WireReason::UnknownEffect,
+            Self::DurabilityUnknown | Self::Wire(_) | Self::Receive(_) | Self::Io(_) => {
+                WireReason::UnknownEffect
+            }
         }
     }
 }
@@ -268,8 +273,9 @@ impl fmt::Debug for FolderManifest {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct SyncBaseline {
     entries: BTreeMap<String, String>,
-    /// Versions already published under keep-both names. Receipt custody is
-    /// separate from equal-name hashes: the originals deliberately still differ.
+    /// Versions with no-replay publication receipts. Conflict copies and
+    /// publications with unconfirmed durability remain delivered even when
+    /// the local destination is subsequently edited or removed.
     kept: Vec<KeptVersion>,
 }
 
@@ -321,8 +327,9 @@ impl SyncBaseline {
 
     #[cfg(unix)]
     fn record_kept(&mut self, transfer: &PlannedTransfer, published_name: &str) {
-        // A conflict copy is a known local-only name. It must not bounce back
-        // to its source as a new file on the next bidirectional round.
+        // Keep the actual published name in the baseline so a conflict copy
+        // cannot bounce back as a new file. The directional receipt separately
+        // prevents replay even if that destination is later edited or removed.
         self.record(published_name.to_owned(), transfer.file.sha256_hex.clone());
         self.kept
             .retain(|kept| kept.leg != transfer.leg || kept.original_name != transfer.file.name);
@@ -436,7 +443,9 @@ pub struct EmittedWireState {
     pub frame: [u8; RECORD_BYTES],
 }
 
-/// Outcome of one bounded folder-synchronization round.
+/// Outcome of one bounded folder-synchronization round. Every listed
+/// publication has confirmed directory durability. Unconfirmed durability
+/// instead returns a failure retaining the committed receipt and baseline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncRoundOutcome {
     pub manifest_revision: u64,
@@ -1039,7 +1048,7 @@ where
         let conflict_copy = pub_file.was_renamed();
         // Advance custody at the commit, not only at a successful round's end.
         // A later cancellation or wire error must return this exact baseline.
-        if conflict_copy {
+        if conflict_copy || pub_file.publication() == Publication::DurabilityUnknown {
             next_baseline.record_kept(transfer, pub_file.name());
         } else {
             next_baseline.record(transfer.file.name.clone(), transfer.file.sha256_hex.clone());
@@ -1058,6 +1067,24 @@ where
             publication: pub_file.publication(),
             conflict_copy,
         });
+
+        // The rename already committed. Preserve its exact receipt and
+        // no-replay version before refusing further publications; uncertain
+        // directory durability cannot be reported as a settled round.
+        if pub_file.publication() == Publication::DurabilityUnknown {
+            return Err(fail_with(
+                SyncError::DurabilityUnknown,
+                entries_total,
+                entries_completed,
+                conflicts_kept,
+                bytes_total,
+                bytes_completed,
+                manifest_revision,
+                published,
+                next_baseline,
+                &mut wire_states,
+            ));
+        }
 
         // Publication is already committed even if its final reservation
         // accounting failed. Retain it, then report failed cleanup separately.

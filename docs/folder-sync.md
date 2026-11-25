@@ -225,6 +225,16 @@ The failure also returns the baseline advanced by those publications, so a
 newly authorized retry can finish the remaining work without duplicating a
 conflict copy committed before cancellation.
 
+A completed rename with an unconfirmed directory sync returns
+`SyncError::DurabilityUnknown` and a terminal `Failed` / `UnknownEffect` state.
+The failure retains that file's exact `Publication::DurabilityUnknown` receipt,
+the durable prefix and their completed-byte counts. Later files in the same
+round are not published. The returned baseline also retains a directional
+no-replay receipt for this version, even when its name did not change. A later
+explicitly authorized round can deliver remaining files, but editing or removing
+the uncertain destination does not resend the original source version.
+A genuinely changed source version remains eligible.
+
 `SyncRoundFailure.cleanup_failed` separately preserves failed staging cleanup
 or reservation accounting. Such a result retains the original stop cause and
 committed receipts but emits `Failed` / `UnknownEffect`, never a clean cancelled
@@ -233,7 +243,8 @@ callers share a witness retained by the original directory owner, so creating
 another round or clone does not replace a known failed witness. Retained quota
 is not released by reporting cancellation.
 
-The returned baseline records each version delivered under a keep-both name.
+The returned baseline records each version delivered under a keep-both name
+or with unconfirmed publication durability.
 The next round neither generates another random copy of the same version nor
 echoes the conflict copy back to its original source. A new source revision
 still transfers once, and deleting or editing a received copy does not replay
@@ -268,6 +279,12 @@ remaining remote runtime and platform acceptance gates.
 boundary convergence. The receive library test also plants an actual poisoned
 reservation during cancellation, checks retained publication receipts and
 cleanup evidence, and refuses a new round under that failed original owner.
+The `receive::publication_tests::sync_durability` library tests exercise both
+transfer directions and conflict modes with a per-root, test-only fault at the
+post-rename directory-sync boundary. They retain the actual filesystem
+publication and validate partial results, authority refusal and no replay after
+local edits or deletion. This injected fault is not failing-storage hardware
+qualification; execution status is recorded separately.
 
 ### Reading the native CLI receive report
 
