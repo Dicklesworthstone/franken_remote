@@ -109,7 +109,10 @@ fn v1_v2_and_unknown_peers_never_silently_downgrade_a_recursive_job() {
                 host.check_host(&intersection).unwrap();
                 peer.check_host(&intersection).unwrap();
                 let selection = intersection.select().unwrap();
-                for mode in [sync_job_state::JobMode::Flat, sync_job_state::JobMode::Recursive] {
+                for mode in [
+                    sync_job_state::JobMode::Flat,
+                    sync_job_state::JobMode::Recursive,
+                ] {
                     let exact = if upload {
                         mode.upload_selected(&selection)
                     } else {
@@ -119,7 +122,10 @@ fn v1_v2_and_unknown_peers_never_silently_downgrade_a_recursive_job() {
                         sync_job_state::JobMode::Flat => 1,
                         sync_job_state::JobMode::Recursive => RECURSIVE_VERSION,
                     };
-                    assert_eq!(exact, host_version == expected_version && peer_version == expected_version);
+                    assert_eq!(
+                        exact,
+                        host_version == expected_version && peer_version == expected_version
+                    );
                 }
                 assert_eq!(
                     selected(&selection, upload),

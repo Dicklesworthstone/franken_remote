@@ -1,6 +1,6 @@
 //! Explicit local source consent for one reverse folder job; never saved or replayed.
-use fr_wire::sync_job_state::JobMode;
 use super::Failure;
+use fr_wire::sync_job_state::JobMode;
 use std::path::{Component, PathBuf};
 
 pub struct FolderSource {
@@ -87,19 +87,27 @@ mod tests {
     fn recursive_scope_is_explicit_in_both_native_directions() {
         use super::JobMode;
         let Command::Connect(upload) =
-            command("--control --sync-source /private/source --sync-tree-job 41").unwrap().command
+            command("--control --sync-source /private/source --sync-tree-job 41")
+                .unwrap()
+                .command
         else {
             panic!("connection");
         };
         let source = upload.upload.sync_source.unwrap();
         assert_eq!((source.job_id, source.mode), (41, JobMode::Recursive));
 
-        let Command::Connect(download) =
-            command("--control --receive /private/drop --receive-conflict keep-both --sync-tree-job 41").unwrap().command
+        let Command::Connect(download) = command(
+            "--control --receive /private/drop --receive-conflict keep-both --sync-tree-job 41",
+        )
+        .unwrap()
+        .command
         else {
             panic!("connection");
         };
-        assert_eq!(download.receive.unwrap().sync_job, Some((41, JobMode::Recursive)));
+        assert_eq!(
+            download.receive.unwrap().sync_job,
+            Some((41, JobMode::Recursive))
+        );
         for invalid in [
             "--control --sync-tree-job 41",
             "--control --sync-source /private/source --sync-job 41 --sync-tree-job 41",

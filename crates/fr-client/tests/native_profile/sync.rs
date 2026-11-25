@@ -277,3 +277,38 @@ fn both_explicit_job_directions_survive_complete_duplex_negotiation() {
         assert!(!sync_job_state::upload_selected(&legacy));
     }
 }
+
+#[test]
+fn native_flat_and_recursive_jobs_select_only_the_configured_direction_and_scope() {
+    use sync_job_state::JobMode;
+    for (mode, other) in [
+        (JobMode::Flat, JobMode::Recursive),
+        (JobMode::Recursive, JobMode::Flat),
+    ] {
+        for audio in [false, true] {
+            for clipboard in [false, true] {
+                let original = native::control_offer_with_download(clipboard, audio);
+                let download = native::with_folder_sync_mode(original.clone(), mode).unwrap();
+                let selection = download.select().unwrap();
+                assert!(mode.download_selected(&selection));
+                assert!(!other.download_selected(&selection));
+                assert!(!mode.upload_selected(&selection));
+                let peer = native::with_folder_sync_mode(original, other).unwrap();
+                let mixed = download.intersect(&peer).unwrap().select().unwrap();
+                assert!(!sync_job_state::selected(&mixed));
+
+                let original = native::control_offer_with_duplex(clipboard, audio);
+                let upload = native::with_folder_sync_upload_mode(original.clone(), mode).unwrap();
+                let selection = upload.select().unwrap();
+                assert!(mode.upload_selected(&selection));
+                assert!(!other.upload_selected(&selection));
+                assert!(!mode.download_selected(&selection));
+                let peer = native::with_folder_sync_upload_mode(original, other).unwrap();
+                let mixed = upload.intersect(&peer).unwrap().select().unwrap();
+                assert!(!sync_job_state::upload_selected(&mixed));
+            }
+        }
+        assert!(native::with_folder_sync_mode(native::observation_offer(), mode).is_err());
+        assert!(native::with_folder_sync_upload_mode(native::observation_offer(), mode).is_err());
+    }
+}

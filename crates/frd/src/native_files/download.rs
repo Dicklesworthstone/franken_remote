@@ -1,11 +1,11 @@
 //! Explicit local download selection and bounded, content-free receive status.
-use fr_wire::sync_job_state::JobMode;
 use super::{
     Absence, Directory, HostSendIntake, MAX_SESSION_FILES, SelectRefusal, Selection, SendIntake,
     SendRequest,
 };
 use asupersync::cx::Cx;
 use fr_files::{session::Progress, wire::ResultReceipt, worker};
+use fr_wire::sync_job_state::JobMode;
 use std::{
     fmt,
     path::{Path, PathBuf},

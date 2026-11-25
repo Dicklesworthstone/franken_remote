@@ -14,7 +14,6 @@
 //! no automatic reconnect replay or remote browsing. Native copy drops can submit
 //! fresh selections on an ordinary upload intake. Status retains actual publication
 //! separately from progress, refusal and cleanup, without names or contents.
-use fr_wire::sync_job_state::JobMode;
 #[cfg(not(windows))]
 use crate::sys::rustix;
 #[cfg(not(windows))]
@@ -26,6 +25,7 @@ use fr_files::{
     sender::{self, batch},
     session::{Permission, Policy as SessionPolicy},
 };
+use fr_wire::sync_job_state::JobMode;
 use std::{
     fmt,
     fs::File,
@@ -250,7 +250,8 @@ impl Directory {
         if self.directory.conflict_policy() != ConflictPolicy::KeepBoth {
             return Err(Absence::Unavailable);
         }
-        job.id.lock()
+        job.id
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
             .map(|id| Some((id, job.mode)))

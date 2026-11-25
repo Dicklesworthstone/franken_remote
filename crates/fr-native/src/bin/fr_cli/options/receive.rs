@@ -1,7 +1,7 @@
 //! Local receive policy, fixed before any connection or disk worker starts.
 //! The host's manifest can never choose these limits or collision behavior.
-use fr_wire::sync_job_state::JobMode;
 use super::{Failure, PathBuf, usage};
+use fr_wire::sync_job_state::JobMode;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceiveOptions {

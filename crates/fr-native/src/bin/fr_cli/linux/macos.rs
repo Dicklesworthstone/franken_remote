@@ -541,7 +541,11 @@ fn connect_selected(
             )
         })?;
         let offer = microphone::offer(offer, connection.microphone.is_some())?;
-        let offer = if let Some((_, mode)) = connection.receive.as_ref().and_then(|receive| receive.sync_job) {
+        let offer = if let Some((_, mode)) = connection
+            .receive
+            .as_ref()
+            .and_then(|receive| receive.sync_job)
+        {
             fr_client::native::with_folder_sync_mode(offer, mode).map_err(|_| {
                 Failure::new(
                     "files_sync_capability_limit",

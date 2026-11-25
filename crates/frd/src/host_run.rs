@@ -692,11 +692,13 @@ fn finish_runtime_offer(
             .map_err(|_| serial::Error::Configuration)?;
     }
     if let Some(mode) = folder_sync {
-        offer = mode.download_offer(offer)
+        offer = mode
+            .download_offer(offer)
             .map_err(|_| serial::Error::Configuration)?;
     }
     if let Some(mode) = folder_sync_upload {
-        offer = mode.upload_offer(offer)
+        offer = mode
+            .upload_offer(offer)
             .map_err(|_| serial::Error::Configuration)?;
     }
     // Default rescue is optional. Real input, audio, file jobs and hardware
@@ -2560,8 +2562,13 @@ mod tests {
                             }
                             Ok::<_, fr_wire::negotiation::Error>(previous)
                         })();
-                        let actual =
-                            finish_runtime_offer(current.clone(), false, scales, folder.then_some(JobMode::Flat), None);
+                        let actual = finish_runtime_offer(
+                            current.clone(),
+                            false,
+                            scales,
+                            folder.then_some(JobMode::Flat),
+                            None,
+                        );
                         if let Ok(previous) = previous {
                             let actual =
                                 actual.expect("existing hardware/file profile stays available");

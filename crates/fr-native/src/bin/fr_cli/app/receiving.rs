@@ -4,9 +4,9 @@
 //! This shell retains only its validated local arguments. The original viewer
 //! opens and pins the destination before any remote connection, and its own
 //! session owner fences receiving on control loss or replacement.
-use fr_wire::sync_job_state::JobMode;
 use super::{Failure, notice_text};
 use crate::options::{self, Command};
+use fr_wire::sync_job_state::JobMode;
 use std::fmt;
 
 /// Deliberately neither `Copy` nor `Clone`: one app launch may authorize receiving

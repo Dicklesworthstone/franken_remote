@@ -382,7 +382,13 @@ fn tree_jobs_require_a_single_explicit_host_scope_in_either_direction() {
         ("--sync-source", &[][..]),
         ("--sync-destination", &["--files-conflict", "keep-both"][..]),
     ] {
-        let mut args = vec!["--once", "--input-agent", "/local/agent", direction, "/local/folder"];
+        let mut args = vec![
+            "--once",
+            "--input-agent",
+            "/local/agent",
+            direction,
+            "/local/folder",
+        ];
         args.extend_from_slice(extra);
         args.extend(["--sync-tree-job", "41"]);
         let selected = parse(&args).unwrap();

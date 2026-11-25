@@ -112,7 +112,10 @@ impl ControlledHost {
         request: ChannelRequest,
         source: fr_files::sync::HostConfig,
     ) -> Result<(), Error> {
-        if !source.mode().download_selected(&self.session.opened.selected) {
+        if !source
+            .mode()
+            .download_selected(&self.session.opened.selected)
+        {
             return Err(Error::NotNegotiated);
         }
         crate::session_startup::native_control::file_download_lane(&self.session.opened.selected)

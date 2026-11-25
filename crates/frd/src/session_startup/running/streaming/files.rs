@@ -9,7 +9,6 @@
 //! not expecting it (an unexpected attachment record would fail its session).
 //! The disk worker, byte limits and lease checks are `fr_files`' own; revoke
 //! or expiry fences the lane and a staged file is removed, never published.
-use fr_wire::sync_job_state::JobMode;
 use super::ControlledHost;
 use crate::{
     native_files::{Directory, HostDownload, SETUP_TIMEOUT, SendControl, SendRequest},
@@ -21,6 +20,7 @@ use fr_files::{
     session::Permission,
 };
 use fr_transport::quic::ChannelRequest;
+use fr_wire::sync_job_state::JobMode;
 use fr_wire::{attachment::Ticket, decoder::Binding, negotiation::ControlBinding};
 
 /// The streaming loop's between-turn hook: only a controlled session (after

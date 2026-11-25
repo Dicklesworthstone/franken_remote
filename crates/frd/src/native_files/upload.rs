@@ -1,10 +1,10 @@
 //! One original controller-side source for a host-configured upload job.
-use fr_wire::sync_job_state::JobMode;
 use super::Absence;
 use fr_files::{
     sender,
     sync::{LiveError, SourceConfig},
 };
+use fr_wire::sync_job_state::JobMode;
 use std::{
     fmt,
     path::Path,

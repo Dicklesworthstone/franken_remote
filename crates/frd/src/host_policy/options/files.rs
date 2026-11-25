@@ -56,7 +56,8 @@ impl RunOptions {
             usize::from(self.sync_source.is_some()) + usize::from(self.sync_destination.is_some());
         if directions > 1
             || (directions == 1) != self.sync_job.is_some()
-            || (directions == 0 && self.sync_job_mode == fr_wire::sync_job_state::JobMode::Recursive)
+            || (directions == 0
+                && self.sync_job_mode == fr_wire::sync_job_state::JobMode::Recursive)
         {
             return Err(Error::InvalidArgument);
         }

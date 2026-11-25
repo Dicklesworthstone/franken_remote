@@ -1,7 +1,6 @@
 //! A client destination belongs to the original decoder-backed controller.
 //! Each actual terminal disk receipt is retained before a later turn can replace
 //! the receiver's last-result slot. Cleanup never guesses publication or replay.
-use fr_wire::sync_job_state::JobMode;
 use super::{ControlledViewer, Error};
 use crate::native_files::{Absence, ReceiveControl, ReceivePhase, ReceiveStatus};
 use asupersync::cx::Cx;
@@ -12,6 +11,7 @@ use fr_files::{
     worker,
 };
 use fr_transport::quic::QuicRecords;
+use fr_wire::sync_job_state::JobMode;
 use std::time::Duration;
 
 pub(super) fn send_error(error: quic::Error) -> Error {

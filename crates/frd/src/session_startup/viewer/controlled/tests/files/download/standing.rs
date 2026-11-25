@@ -218,8 +218,15 @@ fn recursive_download_refuses_flat_consent_then_publishes_the_selected_subtree()
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
         let mut state = Box::pin(fixture_with_clipboard(
-            &c, &h, caps(), false, false, false, ClipboardMode::RecursiveFolderSync,
-        )).await;
+            &c,
+            &h,
+            caps(),
+            false,
+            false,
+            false,
+            ClipboardMode::RecursiveFolderSync,
+        ))
+        .await;
         let source = Disk::new();
         let destination = Disk::new();
         let tree = source.0.join("project");
@@ -227,38 +234,66 @@ fn recursive_download_refuses_flat_consent_then_publishes_the_selected_subtree()
         fs::write(tree.join("notes"), b"nested contents").unwrap();
         let target = || {
             let mut config = destination.config();
-            config.directory = config.directory.with_conflict_policy(ConflictPolicy::KeepBoth);
+            config.directory = config
+                .directory
+                .with_conflict_policy(ConflictPolicy::KeepBoth);
             config
         };
         let timeout = Duration::from_secs(2);
         assert_eq!(
             state.viewer.expect_file_download_with_sync(
-                target(), ReceiveControl::new(), Some((41, JobMode::Flat)), timeout,
+                target(),
+                ReceiveControl::new(),
+                Some((41, JobMode::Flat)),
+                timeout,
             ),
             Err(SendError::WrongRole)
         );
         assert_eq!(
-            state.host.offer_folder_sync(request(&state), HostConfig::open(&source.0, 41).unwrap()),
+            state
+                .host
+                .offer_folder_sync(request(&state), HostConfig::open(&source.0, 41).unwrap()),
             Err(crate::session_startup::FileReceiveError::NotNegotiated)
         );
-        state.viewer.expect_file_download_with_sync(
-            target(), ReceiveControl::new(), Some((41, JobMode::Recursive)), timeout,
-        ).unwrap();
-        state.host.offer_folder_sync(
-            request(&state), HostConfig::open(&source.0, 41).unwrap().with_recursive(),
-        ).unwrap();
+        state
+            .viewer
+            .expect_file_download_with_sync(
+                target(),
+                ReceiveControl::new(),
+                Some((41, JobMode::Recursive)),
+                timeout,
+            )
+            .unwrap();
+        state
+            .host
+            .offer_folder_sync(
+                request(&state),
+                HostConfig::open(&source.0, 41).unwrap().with_recursive(),
+            )
+            .unwrap();
         let driver = state.driver.take().unwrap();
         let ((), done) = Box::pin(support::both(
             async {
                 let (mut n, mut t) = (80_000, 90_000);
                 wait_for_round(&mut state, &c, &h, 1, &mut n, &mut t).await;
-                assert_eq!(state.viewer.file_sync_status().unwrap().confirmed_publications, 1);
-                assert_eq!(fs::read(destination.0.join("project/notes")).unwrap(), b"nested contents");
+                assert_eq!(
+                    state
+                        .viewer
+                        .file_sync_status()
+                        .unwrap()
+                        .confirmed_publications,
+                    1
+                );
+                assert_eq!(
+                    fs::read(destination.0.join("project/notes")).unwrap(),
+                    b"nested contents"
+                );
                 assert!(destination.0.join("project/empty").is_dir());
                 retire(&mut state, &cleanup).await;
             },
             driver,
-        )).await;
+        ))
+        .await;
         assert!(done.handoff_safe());
     });
 }

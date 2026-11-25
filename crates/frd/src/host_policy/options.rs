@@ -1,10 +1,10 @@
 //! Strict local command parsing and startup resolution. No filesystem mutation.
-use fr_wire::sync_job_state::JobMode;
 use super::{Approval, Change, Error, Policy, Sharing, Store, default_path};
 use crate::{
     host_run::{Encoder, EncoderSelection, video},
     native_files::ConflictPolicy,
 };
+use fr_wire::sync_job_state::JobMode;
 mod files;
 use std::path::PathBuf;
 

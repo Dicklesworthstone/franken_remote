@@ -1,11 +1,11 @@
 //! A host-selected destination advertises one reverse folder job.
-use fr_wire::sync_job_state::JobMode;
 use super::{Configuration, ControlledHost, Error, negotiation::Target};
 use fr_files::{
     quic,
     sync::{JobStatus, LiveError, ReceiverJob},
 };
 use fr_transport::quic::ChannelRequest;
+use fr_wire::sync_job_state::JobMode;
 
 pub(super) fn receive_error(error: LiveError) -> quic::Error {
     match error {

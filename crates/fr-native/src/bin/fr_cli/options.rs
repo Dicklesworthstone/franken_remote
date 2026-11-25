@@ -1,5 +1,5 @@
-use fr_wire::sync_job_state::JobMode;
 use super::Failure;
+use fr_wire::sync_job_state::JobMode;
 use std::{collections::BTreeSet, path::PathBuf};
 
 #[path = "options/sync_source.rs"]

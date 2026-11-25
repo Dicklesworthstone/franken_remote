@@ -70,7 +70,12 @@ impl JobMode {
     }
 
     pub fn download_selected(self, selection: &crate::negotiation::Selection) -> bool {
-        job_selected(selection, &DOWNLOAD_REQUIREMENTS, CAPABILITY, self.version())
+        job_selected(
+            selection,
+            &DOWNLOAD_REQUIREMENTS,
+            CAPABILITY,
+            self.version(),
+        )
     }
 
     pub fn upload_selected(self, selection: &crate::negotiation::Selection) -> bool {

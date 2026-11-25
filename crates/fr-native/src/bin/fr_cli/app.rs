@@ -191,7 +191,8 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
             | "--receive-max-file-bytes"
             | "--receive-max-session-bytes"
             | "--receive-conflict"
-            | "--sync-job" | "--sync-tree-job" => {
+            | "--sync-job"
+            | "--sync-tree-job" => {
                 receive_args.push(arg.clone());
                 receive_args.push(rest.next().ok_or_else(invalid)?.clone());
             }
@@ -1006,12 +1007,7 @@ fn application(
                     )
                 }
                 other => {
-                    if retry_picker(
-                        other,
-                        &mut notice,
-                        &mut picker_failures,
-                        &mut idle_expiries,
-                    )? {
+                    if retry_picker(other, &mut notice, &mut picker_failures, &mut idle_expiries)? {
                         continue;
                     }
                     return Ok(String::new());

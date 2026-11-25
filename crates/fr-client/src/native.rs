@@ -3,8 +3,8 @@
 //! This is application capability negotiation, not a codec/transport probe or
 //! authority. The caller still performs installed-tailnet/TLS admission and
 //! explicitly opts into the currently unqualified native transport.
-use fr_wire::sync_job_state::JobMode;
 use fr_core::limits::ProtocolLimits;
+use fr_wire::sync_job_state::JobMode;
 use fr_wire::{
     attachment, clock, control, cursor, decoder, display,
     negotiation::{Capability, Offer, Role},
