@@ -57,7 +57,7 @@ impl Drop for Display {
         let _ = self.child.wait();
     }
 }
-fn window(display: &str) -> (asupersync::runtime::Runtime, Viewer, ViewerWindow) {
+fn viewer() -> (asupersync::runtime::Runtime, Viewer) {
     let rt = support::runtime();
     let cx = rt.request_cx_with_budget(Budget::INFINITE);
     let (client, server) = rt.block_on(support::native_pair(&cx, "localhost", ALPN));
@@ -77,6 +77,10 @@ fn window(display: &str) -> (asupersync::runtime::Runtime, Viewer, ViewerWindow)
     )
     .unwrap();
     drop(server.unwrap());
+    (rt, viewer)
+}
+fn window(display: &str) -> (asupersync::runtime::Runtime, Viewer, ViewerWindow) {
+    let (rt, viewer) = viewer();
     let mut window = ViewerWindow::start(display, 320, 240, viewer.control()).unwrap();
     rt.block_on(window.ready()).unwrap();
     (rt, viewer, window)
@@ -325,4 +329,146 @@ fn published_display_choice_cancels_resize_without_confusing_offered_capability(
     wait(|| window.finish().is_some());
     assert!(viewer.control().is_stopped());
     assert_eq!(control.resize_requested(), None);
+}
+
+// Native boundary fixture: the test owns the actual connection on this thread,
+// so queued close/hide events cannot race a different thread's destruction.
+// Only the input-side request and mapped publication are policy fixtures.
+fn original_window_control(session: StreamingViewerControl) -> WindowControl {
+    WindowControl(Arc::new(Shared {
+        session,
+        state: AtomicU8::new(0),
+        first_stop: AtomicU8::new(0),
+        orderly_close: AtomicU8::new(CLOSE_DISARMED),
+        control_choice: choice::Choice::default(),
+        display_switch: display_switch::Intent::default(),
+        grab_title: AtomicBool::new(false),
+        resize: resize::Intent::default(),
+        automation_focus: focus::Gate::default(),
+        focus_loss_recovery: focus_recovery::Gate::default(),
+        automation_focus_stop: AtomicU8::new(0),
+        file_drops: file_drop::Inbox::default(),
+        target: OnceLock::new(),
+        width: 320,
+        height: 240,
+        clipboard_space: false,
+        waiter: Mutex::new(None),
+    }))
+}
+fn mapped_native<'a>(display: &Display, control: &'a WindowControl) -> Native<'a> {
+    let display = CString::new(display.name.as_str()).unwrap();
+    let native = open_native(&control.0, &display).unwrap();
+    // Exercise the same event-mask replacements as the running desktop.
+    // Both local command modes must retain the visibility subscription.
+    // SAFETY: all calls use this fixture's exclusively owned native handle.
+    unsafe {
+        assert_eq!(fr_viewer_window_control_offer(native.handle.as_ptr(), 0), 1);
+        assert_eq!(fr_viewer_window_drop_offer(native.handle.as_ptr(), 1), 1);
+        assert_eq!(fr_viewer_window_drop_offer(native.handle.as_ptr(), 0), 1);
+    }
+    let mut mapped = false;
+    wait(|| {
+        for _ in 0..TURN_EVENTS {
+            let mut kind = 0;
+            // SAFETY: this fixture exclusively owns the native connection.
+            match unsafe { fr_viewer_window_next(native.handle.as_ptr(), &raw mut kind) } {
+                0 => return mapped,
+                1 if kind == 1 => mapped = true,
+                1 if matches!(kind, 0 | 13 | 19) => {}
+                _ => panic!("native mapping failed"),
+            }
+        }
+        false
+    });
+    control.0.state.store(1, Ordering::Release);
+    native
+}
+
+#[test]
+fn focus_only_native_receipt_survives_retirement_but_not_an_explicit_stop() {
+    let display = Display::new();
+    let (_rt, viewer) = viewer();
+    let control = original_window_control(viewer.control());
+    let native = mapped_native(&display, &control);
+    control.enable_focus_loss_recovery().unwrap();
+    let id = control.target().unwrap().window();
+    display.event(id, "focus_loss");
+    assert!(control.request_focus_loss_recovery());
+    assert!(!control.focus_loss_recovered());
+    viewer.control().stop();
+    control.retire();
+    verify_focus_loss(&native);
+    assert!(control.focus_loss_recovered());
+    drop(native);
+    assert!(control.focus_loss_recovered());
+    assert!(!control.request_focus_loss_recovery());
+    control.stop();
+    assert!(!control.focus_loss_recovered());
+}
+
+#[test]
+fn queued_negative_native_lifecycle_cannot_masquerade_as_focus_only_cleanup() {
+    let display = Display::new();
+    for event in [
+        "unmap",
+        "destroy",
+        "close",
+        "resize",
+        "move",
+        "obscure",
+        "synthetic_resize",
+        "focus_in_synthetic",
+        "focus_flood",
+    ] {
+        let (_rt, viewer) = viewer();
+        let control = original_window_control(viewer.control());
+        let native = mapped_native(&display, &control);
+        control.enable_focus_loss_recovery().unwrap();
+        let id = control.target().unwrap().window();
+        // The independent Xlib peer flushes this sequence before the input
+        // policy fixture requests verification. No native window event was
+        // consumed yet: this is the cancellation-before-drain regression.
+        display.event(id, event);
+        assert!(control.request_focus_loss_recovery(), "{event}");
+        viewer.control().stop();
+        control.retire();
+        verify_focus_loss(&native);
+        assert!(!control.focus_loss_recovered(), "{event}");
+        if event == "close" {
+            assert!(control.close_requested());
+        }
+    }
+}
+
+#[test]
+fn ordinary_window_owner_verifies_after_fence_and_keeps_receipt_after_join() {
+    let display = Display::new();
+    let (_rt, viewer, mut window) = window(&display.name);
+    let control = window.control();
+    control.enable_focus_loss_recovery().unwrap();
+    assert!(control.request_focus_loss_recovery());
+    viewer.control().stop();
+    wait(|| window.finish().is_some());
+    assert_eq!(window.finish(), Some(StopReason::SessionEnded));
+    assert!(control.focus_loss_recovered());
+    drop(window);
+    assert!(control.focus_loss_recovered());
+    control.cancel_focus_loss_recovery();
+    assert!(!control.focus_loss_recovered());
+}
+
+#[test]
+fn later_local_stop_vetoes_pending_focus_receipt_without_changing_first_cause() {
+    let display = Display::new();
+    let (_rt, viewer) = viewer();
+    let control = original_window_control(viewer.control());
+    let native = mapped_native(&display, &control);
+    control.enable_focus_loss_recovery().unwrap();
+    assert!(control.request_focus_loss_recovery());
+    viewer.control().stop();
+    control.retire();
+    control.stop();
+    verify_focus_loss(&native);
+    assert!(!control.focus_loss_recovered());
+    assert_eq!(control.status(), Status::Stopped(StopReason::SessionEnded));
 }

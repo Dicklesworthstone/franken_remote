@@ -4,6 +4,8 @@ use std::path::Path;
 
 #[path = "tests/display_change.rs"]
 mod display_change;
+#[path = "tests/focus_loss.rs"]
+mod focus_loss;
 #[path = "tests/geometry.rs"]
 mod geometry;
 #[path = "tests/resize.rs"]

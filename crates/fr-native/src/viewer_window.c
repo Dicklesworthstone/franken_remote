@@ -32,10 +32,13 @@ struct fr_viewer_window {
     uint32_t switch_sequence, switch_baseline, switch_press_at, switch_release_at, switch_age;
     uint32_t focus_query;
     uint8_t focus_changed;
+    uint32_t recovery_attributes, recovery_geometry;
+    uint8_t recovery_started, recovery_ready, recovery_visible;
 };
 enum { IGNORE, MAPPED, HIDDEN, LOST, RESIZED, STOP, CONTROL_CHOSEN,
        CONTROL_RESET, CONTROL_REMAP, CONTROL_CLOCK, FOCUS_LEFT = 13,
-       SWITCH_CHOSEN, SWITCH_RESET, SWITCH_REMAP, SWITCH_CLOCK, UNVERIFIED_RESIZE };
+       SWITCH_CHOSEN, SWITCH_RESET, SWITCH_REMAP, SWITCH_CLOCK, UNVERIFIED_RESIZE,
+       RECOVERY_UNCERTAIN };
 static int checked(struct fr_viewer_window *h, xcb_void_cookie_t cookie) {
     xcb_generic_error_t *e = xcb_request_check(h->c, cookie);
     int ok = !e && !xcb_connection_has_error(h->c);
@@ -284,6 +287,92 @@ int fr_viewer_window_resize_next(struct fr_viewer_window *h, uint32_t *kind) {
     free(e);
     return 1;
 }
+/* Post-fence evidence uses this original connection and drawable only.
+ * Two asynchronous fixed-size reads; Rust bounds total age and event work.
+ * It never raises/maps the window or restores input/focus authority. */
+int fr_viewer_window_recovery_begin(struct fr_viewer_window *h) {
+    if (!h || !h->c || h->recovery_started || xcb_connection_has_error(h->c)) return -1;
+    h->recovery_started = 1;
+    h->recovery_attributes = xcb_get_window_attributes(h->c, h->window).sequence;
+    h->recovery_geometry = xcb_get_geometry(h->c, h->window).sequence;
+    return h->recovery_attributes && h->recovery_geometry && xcb_flush(h->c) > 0 ? 1 : -1;
+}
+/* 0 pending; 1 mapped, unchanged and last observed unobscured; -1 refusal.
+ * The caller must drain lifecycle events again after these replies, since
+ * xcb_poll_for_reply can buffer events on the connection while reading. */
+int fr_viewer_window_recovery_poll(struct fr_viewer_window *h) {
+    if (!h || !h->c || !h->recovery_started || xcb_connection_has_error(h->c)) return -1;
+    if (!(h->recovery_ready & 1)) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (xcb_poll_for_reply(h->c, h->recovery_attributes, &raw, &error)) {
+            xcb_get_window_attributes_reply_t *r = raw;
+            int valid = r && !error && r->response_type == 1 && r->length == 3 &&
+                r->map_state == XCB_MAP_STATE_VIEWABLE;
+            free(raw); free(error);
+            if (!valid) return -1;
+            h->recovery_ready |= 1;
+        }
+    }
+    if (!(h->recovery_ready & 2)) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (xcb_poll_for_reply(h->c, h->recovery_geometry, &raw, &error)) {
+            xcb_get_geometry_reply_t *r = raw;
+            int valid = r && !error && r->response_type == 1 && !r->length &&
+                r->width == h->width && r->height == h->height;
+            free(raw); free(error);
+            if (!valid) return -1;
+            h->recovery_ready |= 2;
+        }
+    }
+    if (xcb_connection_has_error(h->c)) return -1;
+    if (h->recovery_ready != 3) return 0;
+    return h->recovery_visible ? 1 : -1;
+}
+/* A retirement-only drain. Positive shortcuts, drag/drop negotiation, key
+ * queries and native mutations are deliberately unavailable here. Every
+ * event counts toward Rust's fixed budget. Unknown/synthetic events refuse. */
+int fr_viewer_window_recovery_next(struct fr_viewer_window *h, uint32_t *kind) {
+    if (!h || !kind || !h->c || xcb_connection_has_error(h->c)) return -1;
+    xcb_generic_event_t *e = xcb_poll_for_event(h->c);
+    if (!e) return xcb_connection_has_error(h->c) ? -1 : 0;
+    *kind = RECOVERY_UNCERTAIN;
+    uint8_t type = e->response_type & 0x7f;
+    int synthetic = (e->response_type & 0x80) != 0;
+    if (!type) { free(e); return -1; }
+    switch (type) {
+    case XCB_FOCUS_IN: case XCB_FOCUS_OUT:
+        if (!synthetic && ((xcb_focus_in_event_t *)e)->event == h->window)
+            *kind = type == XCB_FOCUS_OUT ? FOCUS_LEFT : IGNORE;
+        break;
+    case XCB_VISIBILITY_NOTIFY: {
+        xcb_visibility_notify_event_t *v = (void *)e;
+        if (v->window == h->window) {
+            h->recovery_visible = !synthetic && v->state == XCB_VISIBILITY_UNOBSCURED;
+            *kind = h->recovery_visible ? IGNORE : HIDDEN;
+        }
+        break;
+    }
+    case XCB_PROPERTY_NOTIFY:
+        if (!synthetic && ((xcb_property_notify_event_t *)e)->window == h->window)
+            *kind = IGNORE;
+        break;
+    case XCB_UNMAP_NOTIFY:
+        if (((xcb_unmap_notify_event_t *)e)->window == h->window) *kind = HIDDEN;
+        break;
+    case XCB_DESTROY_NOTIFY:
+        if (((xcb_destroy_notify_event_t *)e)->window == h->window) *kind = LOST;
+        break;
+    case XCB_CLIENT_MESSAGE: {
+        xcb_client_message_event_t *v = (void *)e;
+        if (v->window == h->window && v->type == h->protocols &&
+            v->format == 32 && v->data.data32[0] == h->close) *kind = STOP;
+        break;
+    }
+    default: break;
+    }
+    free(e);
+    return 1;
+}
 /* A server timestamp barrier, following the existing viewer input boundary.
  * Its exact request sequence excludes another local client's property write. */
 static int control_barrier(struct fr_viewer_window *h, uint8_t kind) {
@@ -457,16 +546,28 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
         break;
     case XCB_CONFIGURE_NOTIFY: {
         xcb_configure_notify_event_t *v = (xcb_configure_notify_event_t *)e;
-        if (v->window == h->window &&
-            (v->width != h->width || v->height != h->height || h->resize_width)) {
-            if (synthetic) *kind = UNVERIFIED_RESIZE;
-            else {
-                h->resize_width = v->width; h->resize_height = v->height;
-                *kind = RESIZED;
-            }
+        if (v->window == h->window) {
+            if (v->width != h->width || v->height != h->height || h->resize_width) {
+                if (synthetic) *kind = UNVERIFIED_RESIZE;
+                else {
+                    h->resize_width = v->width; h->resize_height = v->height;
+                    *kind = RESIZED;
+                }
+            } else *kind = RECOVERY_UNCERTAIN;
         }
         break;
     }
+    case XCB_VISIBILITY_NOTIFY: {
+        xcb_visibility_notify_event_t *v = (void *)e;
+        if (v->window == h->window) {
+            h->recovery_visible = !synthetic && v->state == XCB_VISIBILITY_UNOBSCURED;
+            if (!h->recovery_visible) *kind = RECOVERY_UNCERTAIN;
+        }
+        break;
+    }
+    case XCB_REPARENT_NOTIFY: case XCB_GRAVITY_NOTIFY:
+        *kind = RECOVERY_UNCERTAIN;
+        break;
     case XCB_PROPERTY_NOTIFY: {
         xcb_property_notify_event_t *v = (xcb_property_notify_event_t *)e;
         if (!synthetic && h->control_key && v->window == h->window &&
@@ -535,6 +636,8 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
     }
     if (switch_kind != IGNORE && (*kind == IGNORE || *kind == CONTROL_RESET))
         *kind = switch_kind;
+    if (synthetic && *kind == IGNORE)
+        *kind = RECOVERY_UNCERTAIN;
     /* Synthetic requests can only close/refuse. They cannot prove mapping or
      * visibility, raise the window, grant input, or select a replacement target.
      * Each consumed event is returned, even ignored ones: Rust bounds work. */

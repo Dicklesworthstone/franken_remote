@@ -71,6 +71,14 @@ impl CleanupSummary {
                 .is_some_and(|reason| !matches!(reason, StopReason::Local | StopReason::Closed))
             || self.retry_failure().is_some()
     }
+    /// Diagnostic eligibility only. Native recovery additionally requires the
+    /// original window's positive post-fence lifecycle receipt and completed
+    /// cleanup of every native owner. No host report is exempt here.
+    pub fn focus_loss_only(self) -> bool {
+        self.failure.is_none()
+            && self.input_stop == Some(crate::viewer_input::StopReason::FocusLost)
+            && retained_failure(self, true).is_none()
+    }
 }
 
 /// Bounded synchronous callbacks on the session thread. No callback may block
@@ -109,6 +117,18 @@ pub trait Ui {
     /// can retain original terminal reports and veto a later Reconnecting
     /// notification when a genuine input stop raced with transport failure.
     fn cleanup_finished(&mut self, _attempt: u8, _summary: CleanupSummary) {}
+    /// The original native window verified focus-only loss after input was
+    /// fenced and every native owner was reaped. Accept only if this attempt
+    /// actually held control and its next attempt will start viewing without
+    /// reusing the initial request or auxiliary selections. Default refusal
+    /// keeps existing callers' local-stop semantics unchanged.
+    fn focus_loss_recovery(
+        &mut self,
+        _attempt: u8,
+        _summary: CleanupSummary,
+    ) -> Result<(), CallbackError> {
+        Err(CallbackError)
+    }
     fn status(&mut self, _status: Status) -> Result<(), CallbackError> {
         Ok(())
     }
@@ -141,11 +161,14 @@ pub struct Session<U> {
     one_shot: bool,
     display_switching: bool,
     window_resizing: bool,
+    focus_loss_recovery: bool,
     select_fresh_display: bool,
     /// Original native intent only; this handle cannot create another owner.
     display_switch_window: Option<crate::viewer_window::WindowControl>,
     /// Set only after first-frame startup and a successful ready callback.
     resize_window: Option<crate::viewer_window::WindowControl>,
+    /// Exact original local window; its post-fence receipt grants no authority.
+    focus_loss_window: Option<crate::viewer_window::WindowControl>,
     initial: Option<Observation>,
     initial_snapshot: Option<fr_media::worker::presentation_snapshot::Snapshot>,
     desktop: Option<Desktop>,
@@ -183,9 +206,11 @@ impl<U> Session<U> {
             one_shot: false,
             display_switching: false,
             window_resizing: false,
+            focus_loss_recovery: false,
             select_fresh_display: false,
             display_switch_window: None,
             resize_window: None,
+            focus_loss_window: None,
             initial: None,
             initial_snapshot: None,
             desktop: None,
@@ -251,6 +276,16 @@ impl<U> Session<U> {
     #[must_use]
     pub fn with_window_resizing(mut self) -> Self {
         self.window_resizing = true;
+        self
+    }
+    /// Recover fresh viewing after verified local focus loss, within the
+    /// supervisor's original automatic retry budget. Input fences immediately;
+    /// hide/close/resize and uncertain cleanup never authorize this transition.
+    /// The UI must separately accept the transition without another automatic
+    /// control request. Only a new local gesture may request a new lease.
+    #[must_use]
+    pub fn with_focus_loss_recovery(mut self) -> Self {
+        self.focus_loss_recovery = true;
         self
     }
     pub fn desktop(&self) -> Option<&Desktop> {
@@ -333,6 +368,7 @@ impl<U> Session<U> {
         self.input_stop = None;
         self.display_switch_window = None;
         self.resize_window = None;
+        self.focus_loss_window = None;
         // Store before ANY await or callback so interrupted work stays owned.
         self.desktop = Some(Desktop::new(configuration));
         Ok(())
@@ -415,6 +451,8 @@ impl<U: Ui> Application for Session<U> {
         let one_shot = self.one_shot;
         let display_switching = self.display_switching && !one_shot;
         let window_resizing = self.window_resizing && !one_shot;
+        let focus_loss_recovery =
+            self.focus_loss_recovery && !one_shot && matches!(self.mode, Mode::ControlCapable(_));
         let outcome = async {
             desktop
                 .open(
@@ -449,6 +487,11 @@ impl<U: Ui> Application for Session<U> {
             }
             callback(&stop, || ui.borrow_mut().ready(attempt, desktop))
                 .map_err(|_| Error::Observer(ObserverError::Application))?;
+            if focus_loss_recovery {
+                let window = desktop.window().ok_or(Error::NotViewing)?;
+                window.enable_focus_loss_recovery().map_err(Error::Window)?;
+                self.focus_loss_window = Some(window);
+            }
             if window_resizing {
                 desktop.enable_window_resizing()?;
                 self.resize_window = desktop.window();
@@ -642,6 +685,85 @@ impl<U: Ui> Application for Session<U> {
             !self.service_succeeded,
         )
     }
+    fn retry_viewing_after_local_stop(&mut self, failure: Failure) -> Result<bool, CallbackError> {
+        let Some(window) = &self.focus_loss_window else {
+            return Ok(false);
+        };
+        let summary = CleanupSummary {
+            disconnect: self.disconnect,
+            control_disconnect: self.control_disconnect,
+            input_stop: self.input_stop,
+            failure: self.cleanup_failure,
+        };
+        if !self.focus_loss_recovery
+            || self.one_shot
+            || !matches!(self.mode, Mode::ControlCapable(_))
+            || self.current_attempt != self.last_attempt
+            || self.service_succeeded
+            || self.desktop.is_some()
+            || !frd::native_connection::reconnect::local_stop_interrupted(failure)
+            || !focus_loss_local_error(self.error)
+            || !window.focus_loss_recovered()
+            || window.close_requested()
+            || window.resize_requested().is_some()
+            || window.display_switch_requested()
+            || !focus_loss_cleanup_allows_retry(summary, self.cleanup.as_ref())
+        {
+            window.cancel_focus_loss_recovery();
+            return Ok(false);
+        }
+        self.ui.focus_loss_recovery(self.last_attempt, summary)?;
+        // Local explicit stop can race a UI callback. Consume only this exact
+        // old window, after checking its final negative-authority receipt again.
+        if !window.focus_loss_recovered() || window.close_requested() {
+            return Ok(false);
+        }
+        self.focus_loss_window = None;
+        Ok(true)
+    }
+}
+
+fn focus_loss_local_error(error: Option<Error>) -> bool {
+    match error {
+        // A stopped original window can refuse display-mode refresh or target
+        // access before the cancelled service turn returns. These adapter
+        // wrappers still require the separate positive native focus receipt.
+        None
+        | Some(
+            Error::NotViewing
+            | Error::Window(
+                crate::viewer_window::Error::NotReady
+                | crate::viewer_window::Error::SessionEnded
+                | crate::viewer_window::Error::NativeStopped(
+                    crate::viewer_window::StopReason::SessionEnded,
+                ),
+            ),
+        ) => true,
+        Some(Error::InputCapture(
+            frd::session_startup::viewer_events::CaptureStartError::Native(
+                crate::viewer_input::Error::Stopped(crate::viewer_input::StopReason::FocusLost),
+            ),
+        )) => true,
+        // An arbitrary UI refusal cannot be reinterpreted as native focus loss.
+        Some(Error::Observer(ObserverError::Application)) => false,
+        Some(Error::Observer(error)) => {
+            frd::native_connection::reconnect::local_stop_interrupted(Failure::Observation(error))
+        }
+        _ => false,
+    }
+}
+
+fn focus_loss_cleanup_allows_retry(summary: CleanupSummary, cleanup: Option<&Cleanup>) -> bool {
+    summary.focus_loss_only()
+        && cleanup.is_some_and(|report| {
+            report.input == CaptureCleanup::Complete
+                && matches!(
+                    report.window,
+                    WindowCleanup::Complete(crate::viewer_window::StopReason::SessionEnded)
+                )
+                && matches!(report.media, Ok(Some(_)))
+                && cleaned(report) == Ok(true)
+        })
 }
 
 fn resize_local_error(error: Option<Error>) -> bool {

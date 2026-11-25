@@ -83,7 +83,10 @@ fn server(request: &AudioRequest) -> Result<PathBuf, Failure> {
     all(target_os = "macos", feature = "macos-audio")
 ))]
 pub(super) use fr_native::audio_output::Output;
-#[cfg(all(target_os = "macos", feature = "macos-audio"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-audio"),
+    all(target_os = "macos", feature = "macos-audio")
+))]
 pub(super) use fr_native::audio_output::Retirement;
 
 /// Build the output for one attempt; `None` when this build has no audio.
@@ -93,13 +96,10 @@ pub(super) fn output(
     request: &AudioRequest,
     report: &std::rc::Rc<std::cell::RefCell<Report>>,
     volume: fr_client::audio::AudioVolumeControl,
-) -> Box<dyn frd::session_startup::ViewerAudioOutput> {
-    Box::new(Output::new(
-        server,
-        request.sink.clone(),
-        report.clone(),
-        volume,
-    ))
+) -> (Box<dyn frd::session_startup::ViewerAudioOutput>, Retirement) {
+    let output = Output::new(server, request.sink.clone(), report.clone(), volume);
+    let retirement = output.retirement();
+    (Box::new(output), retirement)
 }
 
 /// The same bounded proxy and decoder ownership, selecting only the Mac's

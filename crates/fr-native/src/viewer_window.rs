@@ -10,6 +10,7 @@ mod choice;
 pub(crate) use crate::file_drop;
 pub(crate) use crate::file_selection as file_send;
 mod focus;
+mod focus_recovery;
 mod resize;
 use crate::viewer_input::display_switch;
 pub use crate::viewer_input::display_switch::Mode as DisplaySwitchMode;
@@ -95,6 +96,9 @@ unsafe extern "C" {
     fn fr_viewer_window_display_switch_reset(handle: *mut c_void);
     fn fr_viewer_window_focus_begin(handle: *mut c_void) -> c_int;
     fn fr_viewer_window_focus_poll(handle: *mut c_void) -> c_int;
+    fn fr_viewer_window_recovery_begin(handle: *mut c_void) -> c_int;
+    fn fr_viewer_window_recovery_poll(handle: *mut c_void) -> c_int;
+    fn fr_viewer_window_recovery_next(handle: *mut c_void, kind: *mut u32) -> c_int;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -164,6 +168,7 @@ struct Shared {
     grab_title: AtomicBool,
     resize: resize::Intent,
     automation_focus: focus::Gate,
+    focus_loss_recovery: focus_recovery::Gate,
     automation_focus_stop: AtomicU8,
     file_drops: file_drop::Inbox,
     target: OnceLock<X11Target>,
@@ -219,6 +224,9 @@ impl Shared {
         }
         // No native lock, codec call, network round trip, or replacement grant.
         // Fence first; publishing Stopped never claims cleanup has completed.
+        if !matches!(reason, StopReason::SessionEnded | StopReason::OwnerDropped) {
+            self.focus_loss_recovery.cancel();
+        }
         self.session.stop();
         self.automation_focus.stop();
         self.file_drops.close();
@@ -246,6 +254,7 @@ impl Shared {
 pub struct WindowControl(Arc<Shared>);
 impl WindowControl {
     pub fn stop(&self) {
+        self.0.focus_loss_recovery.cancel();
         self.0.resize.cancel();
         self.0.stop(StopReason::User);
     }
@@ -274,6 +283,43 @@ impl WindowControl {
     }
     pub(crate) fn cancel_resize(&self) {
         self.0.resize.cancel();
+    }
+    /// Opt in only after this original desktop has presented its first frame.
+    /// This does not grant input or authorize a replacement observation.
+    /// A move, reconfiguration or obscuring after arming conservatively ends
+    /// eligibility, even when the window later becomes visible again.
+    pub(crate) fn enable_focus_loss_recovery(&self) -> Result<(), Error> {
+        if self.status() != Status::Mapped || !self.0.focus_loss_recovery.enable() {
+            return Err(Error::NotReady);
+        }
+        if self.status() != Status::Mapped {
+            self.0.focus_loss_recovery.cancel();
+            return Err(Error::NotReady);
+        }
+        Ok(())
+    }
+    pub(crate) fn focus_loss_recovery_enabled(&self) -> bool {
+        self.0.focus_loss_recovery.enabled()
+    }
+    /// The running input owner calls this BEFORE its first focus-loss fence.
+    /// The native window owner still has to prove a focus-only retirement.
+    pub(crate) fn request_focus_loss_recovery(&self) -> bool {
+        self.0.state.load(Ordering::Acquire) == 1
+            && self.0.first_stop.load(Ordering::Acquire) == 0
+            && !self.0.session.is_stopped()
+            && !self.close_requested()
+            && self.0.display_switch.requested().is_none()
+            && !self.0.resize.pending()
+            && self.0.focus_loss_recovery.request(Instant::now())
+    }
+    pub(crate) fn cancel_focus_loss_recovery(&self) {
+        self.0.focus_loss_recovery.cancel();
+    }
+    /// Retained evidence from the exact original window's native thread.
+    /// This is neither proof of cleanup nor permission to reconnect. The
+    /// enclosing attempt consumes its owner once and rechecks explicit stops.
+    pub fn focus_loss_recovered(&self) -> bool {
+        self.0.focus_loss_recovery.verified()
     }
     /// Only native window/input event owners call this after a real server
     /// `ConfigureNotify`. The first cause is reserved before cancellation wakes
@@ -382,6 +428,7 @@ impl WindowControl {
         // A published choice wins even if the separate window reader reserved
         // a resize concurrently. Cancellation is sticky through native cleanup.
         self.0.resize.cancel();
+        self.0.focus_loss_recovery.cancel();
         self.0.notify();
         self.display_switch_requested()
     }
@@ -499,6 +546,7 @@ impl ViewerWindow {
             grab_title: AtomicBool::new(false),
             resize: resize::Intent::default(),
             automation_focus: focus::Gate::default(),
+            focus_loss_recovery: focus_recovery::Gate::default(),
             automation_focus_stop: AtomicU8::new(0),
             file_drops: file_drop::Inbox::default(),
             target: OnceLock::new(),
@@ -606,6 +654,9 @@ impl fmt::Debug for ViewerWindow {
 }
 impl Drop for ViewerWindow {
     fn drop(&mut self) {
+        if self.task.is_some() {
+            self.control.cancel_focus_loss_recovery();
+        }
         self.control.0.stop(StopReason::OwnerDropped);
     }
 }
@@ -990,6 +1041,7 @@ fn lifecycle_event(
         3 => Some(StopReason::WindowLost),
         4 => Some(StopReason::GeometryChanged),
         5 if *mapped && shared.orderly_close.load(Ordering::Acquire) != CLOSE_DISARMED => {
+            shared.focus_loss_recovery.cancel();
             shared.display_switch.cancel();
             shared.resize.cancel();
             // The first WM request fixes the local deadline. Repeated
@@ -1006,6 +1058,7 @@ fn lifecycle_event(
             None
         }
         5 => {
+            shared.focus_loss_recovery.cancel();
             shared.display_switch.cancel();
             shared.resize.cancel();
             // Publish native WM intent before stop cancels the session:
@@ -1020,6 +1073,7 @@ fn lifecycle_event(
     }
 }
 fn record_resize(shared: &Shared, width: u32, height: u32, native: bool) -> bool {
+    shared.focus_loss_recovery.invalidate();
     if shared.orderly_close.load(Ordering::Acquire) == CLOSE_REQUESTED
         || shared.display_switch.requested().is_some()
         || !shared.resize.begin(width, height, || {
@@ -1143,6 +1197,10 @@ fn drain_events(
         }
         let reason = match kind {
             4 if native_resize(native) => return None,
+            19 => {
+                shared.focus_loss_recovery.invalidate();
+                None
+            }
             18 => {
                 shared.resize.cancel();
                 Some(StopReason::GeometryChanged)
@@ -1219,6 +1277,68 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
     if shared.resize.pending() {
         drain_resize_events(&native);
     }
+    if shared.focus_loss_recovery.pending(Instant::now()) {
+        verify_focus_loss(&native);
+    }
+}
+/// The original input session is already fenced. Query only this same native
+/// window's map state and geometry, then drain its lifecycle metadata. The
+/// deadline includes the time since input first requested verification; no
+/// gestures, file drops, key queries, grabs or new input are serviced here.
+fn verify_focus_loss(native: &Native<'_>) {
+    let shared = native.shared;
+    let gate = &shared.focus_loss_recovery;
+    if !gate.pending(Instant::now())
+        // SAFETY: the original thread exclusively owns this live handle.
+        || unsafe { fr_viewer_window_recovery_begin(native.handle.as_ptr()) } != 1
+    {
+        gate.cancel();
+        return;
+    }
+    let mut confirmed = false;
+    let mut quiet = Instant::now() + TURN * 2;
+    let mut events = 0;
+    while gate.pending(Instant::now()) && events < TURN_EVENTS {
+        let mut kind = 0;
+        // SAFETY: original owner and one writable scalar; no callbacks.
+        match unsafe { fr_viewer_window_recovery_next(native.handle.as_ptr(), &raw mut kind) } {
+            0 => {
+                if confirmed && Instant::now() >= quiet {
+                    let _ = gate.seal(Instant::now());
+                    return;
+                }
+                if !confirmed {
+                    // SAFETY: fixed-size replies for this owner's two requests.
+                    match unsafe { fr_viewer_window_recovery_poll(native.handle.as_ptr()) } {
+                        0 => {}
+                        1 => {
+                            confirmed = true;
+                            quiet = Instant::now() + TURN * 2;
+                            // Polling replies may buffer additional events.
+                            // Drain those before accepting a quiet interval.
+                            continue;
+                        }
+                        _ => break,
+                    }
+                }
+                thread::sleep(TURN);
+            }
+            1 if matches!(kind, 0 | 13) => {
+                events += 1;
+                quiet = Instant::now() + TURN * 2;
+            }
+            1 => {
+                if kind == 5 {
+                    shared
+                        .orderly_close
+                        .store(CLOSE_REQUESTED, Ordering::Release);
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    gate.cancel();
 }
 fn run_window(native: &Native<'_>, started: Instant) {
     let shared = native.shared;

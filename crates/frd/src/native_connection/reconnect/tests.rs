@@ -72,6 +72,9 @@ impl Application for App {
     ) -> Result<Option<LocalLayoutChange>, CallbackError> {
         panic!("a failed-discovery attempt cannot claim native resize intent")
     }
+    fn retry_viewing_after_local_stop(&mut self, _: Failure) -> Result<bool, CallbackError> {
+        panic!("a failed-discovery attempt cannot claim original native focus evidence")
+    }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
         self.events.push(status);
         if (self.fail_terminal_status && matches!(status, Status::Stopped { .. }))

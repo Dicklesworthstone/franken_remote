@@ -160,6 +160,18 @@ impl Shared {
     fn stop(&self, reason: StopReason) {
         #[cfg(feature = "linux-viewer-window")]
         if self.state.first_stop().is_none()
+            && let Some(window) = self.display_switch.get()
+        {
+            if reason == StopReason::FocusLost && self.state.load() == 1 {
+                // Reserve before the fence wakes the window/session owners.
+                // Opening without ever acquiring focus cannot request recovery.
+                let _ = window.request_focus_loss_recovery();
+            } else if !matches!(reason, StopReason::Local | StopReason::Closed) {
+                window.cancel_focus_loss_recovery();
+            }
+        }
+        #[cfg(feature = "linux-viewer-window")]
+        if self.state.first_stop().is_none()
             && !matches!(
                 reason,
                 StopReason::Local | StopReason::Closed | StopReason::WindowResized
@@ -183,6 +195,7 @@ impl CaptureControl {
         #[cfg(feature = "linux-viewer-window")]
         if let Some(window) = self.0.display_switch.get() {
             window.cancel_resize();
+            window.cancel_focus_loss_recovery();
         }
         self.retire();
     }
@@ -534,6 +547,7 @@ impl X11InputCapture {
             #[cfg(feature = "linux-viewer-window")]
             if let Some(window) = self.control.0.display_switch.get() {
                 window.cancel_resize();
+                window.cancel_focus_loss_recovery();
             }
             self.control.0.stop(StopReason::NativeFailure);
         }
@@ -550,6 +564,12 @@ impl fmt::Debug for X11InputCapture {
 }
 impl Drop for X11InputCapture {
     fn drop(&mut self) {
+        #[cfg(feature = "linux-viewer-window")]
+        if self.task.is_some()
+            && let Some(window) = self.control.0.display_switch.get()
+        {
+            window.cancel_focus_loss_recovery();
+        }
         self.control.retire();
         if let Some(cursor) = &self.cursor {
             cursor.stop();

@@ -1066,7 +1066,9 @@ impl Desktop {
                                     layout,
                                     capture_system_shortcuts,
                                     file_controls.as_ref(),
-                                    window.resize_enabled().then_some(&window),
+                                    (window.resize_enabled()
+                                        || window.focus_loss_recovery_enabled())
+                                    .then_some(&window),
                                 )?);
                                 Ok(())
                             })(),
@@ -1183,8 +1185,10 @@ impl Desktop {
                                     layout,
                                     capture_system_shortcuts,
                                     file_controls.as_ref(),
-                                    (display_switching || window.resize_enabled())
-                                        .then_some(&window),
+                                    (display_switching
+                                        || window.resize_enabled()
+                                        || window.focus_loss_recovery_enabled())
+                                    .then_some(&window),
                                 )?);
                                 Ok(())
                             })(),
@@ -1527,7 +1531,7 @@ impl<F> Drop for Operation<'_, F> {
     }
 }
 
-/// Bind local display-switch/resize intent before the native capture thread can export
+/// Bind original-window lifecycle intent before the native capture thread can export
 /// events. File controls retain their original attachment path; all shortcuts
 /// still belong to the original viewer and confirmed layout.
 fn attach_input(

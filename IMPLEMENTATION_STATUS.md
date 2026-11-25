@@ -1,5 +1,55 @@
 # Implementation status
 
+## Verified Linux focus-loss recovery (2026-11-25)
+
+The ordinary interactive Linux `fr connect --control` path now enables bounded
+recovery into fresh viewing after verified focus-only loss. The original input
+owner fences immediately. The original window must then prove that the same
+drawable remains mapped, unobscured and unchanged, using bounded asynchronous
+native queries and lifecycle-event draining. Verification allows at most 64
+events, 100 ms from the original request and two quiet 10 ms turns. Explicit
+stop, hidden/unmapped/destroyed/closed windows, geometry changes, obscuration,
+synthetic or uncertain events and expired verification permanently refuse the
+transition. Control and drag/drop event-mask changes now retain visibility
+notifications needed by that original owner.
+
+Recovery requires complete original input, window, picker, media, clipboard
+and file cleanup, plus retirement of the separate playback and microphone
+owners. The supervisor preserves original terminal reports and its existing
+attempt/backoff limits; cancellation alone remains non-retryable. Only the
+original attempt that actually held control can consume its one-shot receipt.
+The next attempt passes through fresh admission/TLS/approval and starts viewing
+without replaying input, clipboard, file or microphone choices. A new physical
+F8 gesture is required to request control. Automation and one-attempt invocations
+retain their existing terminal behavior. This is conservative focus-only
+recovery: moving or obscuring the window vetoes it even if visibility returns.
+
+Evidence: the exact production receipt Gate source passed two tests under the
+pinned compiler with warnings denied. The production C window translation unit,
+including switch/drop code and the original X11 connection code, compiled and
+linked with `-Wall -Wextra -Werror`. Thirty production C boundary cases passed
+against an owned, authenticated loopback-TCP Xvfb fixture, covering initial,
+control and drop event masks across focus, unmap, destruction, close, resize,
+move, transient obscuration, synthetic events and floods. This is C
+lifecycle/query evidence, not the full Rust verifier or a production UNIX-display
+qualification. Independent source reviews completed; pinned Rust formatting
+and whitespace checks passed before the final narrow native-wrapper correction
+and its regression additions.
+
+Supervisor, Session, CLI and original-window Rust regressions are authored but
+have not run through Cargo. Full workspace compilation, Clippy, integration,
+physical desktop and live-tailnet qualification remain unverified after repeated
+executor resource failures and disconnection. No performance result is claimed.
+Tracking: `fr-linux-focus-recovery-c3pr`; see
+[NATIVE_RECOVERY_RECONNECT.md](NATIVE_RECOVERY_RECONNECT.md).
+
+The recursive-upload integration regression in commit `9cb6e331` also adds
+local flat-consent refusal and two successful complete subtree versions under
+one original control lease, preserving conflicting receiver versions and input
+continuity. It builds on the concurrently landed recursive command integration
+in `2a266453`. Formatting and source review passed; that Rust integration test
+has not executed. Tracking: `fr-sync-recursive-trees-m4n2`.
+
 ## Recursive atomic folder-job delivery (2026-11-25)
 
 Explicit one-way jobs can now select recursive source and receiver owners.

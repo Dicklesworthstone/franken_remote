@@ -523,6 +523,39 @@ mod tests {
     }
 
     #[test]
+    fn focus_recovery_requires_the_original_microphone_to_finish_retirement() {
+        use crate::linux::{Progress, control};
+        use fr_native::{desktop::reconnect::CleanupSummary, viewer_input::StopReason};
+        let microphone = Rc::new(RefCell::new(local()));
+        let mut progress = Progress {
+            control: Some(control::Counters::default()),
+            microphone: Some(microphone.clone()),
+            ..Progress::default()
+        };
+        progress.begin(1);
+        let counters = progress.control.as_mut().unwrap();
+        counters.spend_request();
+        counters.granted = true;
+        let summary = CleanupSummary {
+            disconnect: None,
+            control_disconnect: None,
+            input_stop: Some(StopReason::FocusLost),
+            failure: None,
+        };
+        progress.retain_cleanup(1, summary);
+        // Native focus proof cannot replace this distinct owner's retirement.
+        assert_eq!(
+            progress.request_focus_retry(1, summary, true),
+            Err(CallbackError)
+        );
+        assert_eq!(progress.focus_retry, None);
+        microphone.borrow_mut().stop();
+        assert!(microphone.borrow_mut().cleanup_complete());
+        progress.request_focus_retry(1, summary, true).unwrap();
+        assert!(!microphone.borrow().may_offer());
+    }
+
+    #[test]
     fn explicit_source_resolution_cannot_fall_back_to_network_or_parent_paths() {
         for path in [
             "relative",

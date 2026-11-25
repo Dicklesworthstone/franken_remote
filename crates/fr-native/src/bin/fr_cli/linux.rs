@@ -609,7 +609,10 @@ fn connect(
     // A controller's window close runs the closing exchange, as a viewer's does.
     .with_cleanup_runtime(runtime.handle());
     if !automation {
-        application = application.with_display_switching().with_window_resizing();
+        application = application
+            .with_display_switching()
+            .with_window_resizing()
+            .with_focus_loss_recovery();
     }
     let selector = selected.selector();
     let cfg = Configuration {
@@ -687,7 +690,11 @@ fn connect(
                 2,
             )
         }).map_err(before_start)?;
-        let offer = if let Some((_, mode)) = connection.receive.as_ref().and_then(|receive| receive.sync_job) {
+        let offer = if let Some((_, mode)) = connection
+            .receive
+            .as_ref()
+            .and_then(|receive| receive.sync_job)
+        {
             fr_client::native::with_folder_sync_mode(offer, mode)
                 .map_err(|_| {
                     Failure::new(
@@ -1125,10 +1132,17 @@ struct Progress {
     window: Option<WindowControl>,
     /// Current-attempt evidence, even when no control request was made.
     cleanup: Option<fr_native::desktop::reconnect::CleanupSummary>,
+    /// One approved focus-only transition for the original, already reaped
+    /// attempt. It does not grant a retry or a new control decision by itself.
+    focus_retry: Option<u8>,
     /// Some only for `--control`: content-free request/grant/result tallies.
     control: Option<control::Counters>,
     /// Some only for `--audio`: content-free playback outcome.
     audio: Option<Rc<RefCell<audio::Report>>>,
+    /// Original output-worker witnesses, bounded by the supervisor's attempt
+    /// namespace. A later attempt must not overwrite an unfinished retirement.
+    #[cfg(all(target_os = "linux", feature = "linux-audio"))]
+    audio_retirements: [Option<audio::Retirement>; 32],
     /// Original explicit microphone choice; no replacement attempt inherits it.
     microphone: Option<Rc<RefCell<microphone::Local>>>,
     microphone_cleanup: bool,
@@ -1154,6 +1168,7 @@ impl Progress {
         self.window = None;
         self.automation_focus_stop = None;
         self.cleanup = None;
+        self.focus_retry = None;
         if let Some(control) = &mut self.control {
             control.begin_attempt(attempt);
         }
@@ -1191,11 +1206,70 @@ impl Progress {
         );
         if self.user_closed || self.automation_focus_stop.is_some() {
             // Cleaning notification failure stops retries AFTER mandatory
-            // cleanup. Neither user close nor lost focus can open a new owner.
+            // cleanup. Neither user close nor automation focus loss opens a new owner.
             Err(CallbackError)
         } else {
             Ok(())
         }
+    }
+    fn request_focus_retry(
+        &mut self,
+        attempt: u8,
+        summary: fr_native::desktop::reconnect::CleanupSummary,
+        native_confirmed: bool,
+    ) -> Result<(), CallbackError> {
+        if !native_confirmed
+            || attempt == 0
+            || attempt != self.attempts
+            || self.focus_retry.is_some()
+            || self.user_closed
+            || self.automation.is_some()
+            || self.automation_focus_stop.is_some()
+            || self
+                .microphone
+                .as_ref()
+                .is_some_and(|microphone| !microphone.borrow_mut().cleanup_complete())
+            || self.cleanup != Some(summary)
+            || !summary.focus_loss_only()
+            || !self.control.as_ref().is_some_and(|control| {
+                control.current_attempt == attempt
+                    && control.current_granted()
+                    && control.current_cleanup() == Some(summary)
+                    && !control.initial_decision_available()
+            })
+        {
+            return Err(CallbackError);
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-audio"))]
+        if self
+            .audio_retirements
+            .iter()
+            .flatten()
+            .any(|retirement| !retirement.is_complete())
+        {
+            return Err(CallbackError);
+        }
+        self.focus_retry = Some(attempt);
+        Ok(())
+    }
+    fn take_focus_retry(
+        &mut self,
+        next: u8,
+        failure: reconnect::Failure,
+        native_confirmed: bool,
+    ) -> bool {
+        self.focus_retry.take().is_some_and(|previous| {
+            native_confirmed
+                && previous == self.attempts
+                && previous.checked_add(1) == Some(next)
+                && reconnect::local_stop_interrupted(failure)
+                && self
+                    .cleanup
+                    .is_some_and(|summary| summary.focus_loss_only())
+                && self.control.as_ref().is_some_and(|control| {
+                    control.current_granted() && control.current_cleanup() == self.cleanup
+                })
+        })
     }
 }
 #[cfg(feature = "linux-desktop")]
@@ -1314,8 +1388,8 @@ impl Ui for Interface {
             }
             self.attempt = Some(attempt);
         }
-        if let (Some((server, request)), Some(report)) = (&self.audio, &p.audio) {
-            install_audio(desktop, server, request, report);
+        if let Some((server, request)) = &self.audio {
+            install_audio(desktop, server, request, &mut p);
         }
         Ok(())
     }
@@ -1375,6 +1449,18 @@ impl Ui for Interface {
         progress.after_cleanup(close_requested);
         progress.retain_cleanup(attempt, summary);
     }
+    fn focus_loss_recovery(
+        &mut self,
+        attempt: u8,
+        summary: fr_native::desktop::reconnect::CleanupSummary,
+    ) -> Result<(), CallbackError> {
+        let mut progress = self.progress.borrow_mut();
+        let confirmed = progress
+            .window
+            .as_ref()
+            .is_some_and(|window| window.focus_loss_recovered() && !window.close_requested());
+        progress.request_focus_retry(attempt, summary, confirmed)
+    }
     fn frame(&mut self, _: u8, frame: Option<Presentation>) -> Result<(), CallbackError> {
         if frame.is_some() {
             let mut p = self.progress.borrow_mut();
@@ -1428,13 +1514,20 @@ impl Ui for Interface {
                 }
                 return closed;
             }
-            Status::Reconnecting { .. } => {
+            Status::Reconnecting {
+                attempt, failure, ..
+            } => {
+                let confirmed = progress.window.as_ref().is_some_and(|window| {
+                    window.focus_loss_recovered() && !window.close_requested()
+                });
+                let focus_retry = progress.take_focus_retry(attempt, failure, confirmed);
                 if progress.user_closed
                     || progress.automation_focus_stop.is_some()
-                    || progress.cleanup.and_then(control_retry_stop).is_some()
-                    || progress
-                        .control
-                        .is_some_and(|control| control.retry_stopped())
+                    || (!focus_retry
+                        && (progress.cleanup.and_then(control_retry_stop).is_some()
+                            || progress
+                                .control
+                                .is_some_and(|control| control.retry_stopped())))
                 {
                     return Err(CallbackError);
                 }
@@ -1472,12 +1565,26 @@ fn install_audio(
     desktop: &mut Desktop,
     server: &Path,
     request: &super::options::AudioRequest,
-    report: &Rc<RefCell<audio::Report>>,
+    progress: &mut Progress,
 ) {
+    let Some(report) = &progress.audio else {
+        return;
+    };
     let volume = report.borrow_mut().begin_attempt();
-    #[cfg(feature = "linux-audio")]
+    #[cfg(all(target_os = "linux", feature = "linux-audio"))]
     {
-        let output = audio::output(server.to_path_buf(), request, report, volume.clone());
+        let Some(retirement_slot) = progress
+            .attempts
+            .checked_sub(1)
+            .and_then(|attempt| progress.audio_retirements.get_mut(usize::from(attempt)))
+            .filter(|slot| slot.is_none())
+        else {
+            report.borrow_mut().absent("audio_setup_refused");
+            return;
+        };
+        let (output, retirement) =
+            audio::output(server.to_path_buf(), request, report, volume.clone());
+        *retirement_slot = Some(retirement);
         match desktop.configure_audio_with_controls(output, volume) {
             Ok(()) => report.borrow_mut().controls = desktop.audio_controls(),
             Err(fr_native::desktop::Error::Audio(
@@ -1486,7 +1593,7 @@ fn install_audio(
             Err(_) => report.borrow_mut().absent("audio_setup_refused"),
         }
     }
-    #[cfg(not(feature = "linux-audio"))]
+    #[cfg(not(all(target_os = "linux", feature = "linux-audio")))]
     {
         let _ = (desktop, server, request, volume);
         report.borrow_mut().absent("audio_unavailable_in_build");

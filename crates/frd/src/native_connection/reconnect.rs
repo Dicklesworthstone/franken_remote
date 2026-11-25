@@ -1,7 +1,9 @@
 //! Bounded observation reconnection on the canonical installed-tailnet client.
 //! No input owner, old action, decoder reference, approval or lease crosses attempts.
+mod local_stop;
 mod native;
 mod offer;
+pub use local_stop::interrupted as local_stop_interrupted;
 pub use native::{native_control_view, native_control_view_with_setup, native_view};
 
 use super::{Client, Configuration, Destination, Error as ConnectionError, Route};
@@ -204,6 +206,18 @@ pub trait Application {
         _failure: Failure,
     ) -> Result<Option<LocalLayoutChange>, CallbackError> {
         Ok(None)
+    }
+    /// An established control-capable application may recover viewing after
+    /// an independently verified local focus loss. This runs only after the
+    /// original owners have completed cleanup, with no retained terminal
+    /// report and remaining automatic retries. A cancellation alone is never
+    /// evidence: consume one original native focus/lifecycle receipt and
+    /// reject explicit stop, hidden/destroyed windows and uncertain cleanup.
+    /// The next attempt must start viewing, without another automatic control
+    /// request, queued input or reused auxiliary consent. Existing retry
+    /// budgets, backoff, identity/TLS admission and terminal checks still apply.
+    fn retry_viewing_after_local_stop(&mut self, _failure: Failure) -> Result<bool, CallbackError> {
+        Ok(false)
     }
     /// Bounded terminal evidence retained by this attempt's original owner.
     /// Return only an error or validated peer/session report retained by the
@@ -571,11 +585,46 @@ impl Client {
                             clock.live(&cx)?;
                             return Ok(value);
                         }
-                        Err(error)
-                            if retryable(error)
-                                && retries < policy.max_attempts - 1
-                                && attempt < 32 =>
-                        {
+                        Err(error) => {
+                            let room = retries < policy.max_attempts - 1 && attempt < 32;
+                            let local = if room {
+                                let local = local_stop::requested(
+                                    application,
+                                    expected_role,
+                                    application_started,
+                                    error,
+                                );
+                                // The callback cannot revive a cancelled
+                                // invocation or conceal an original peer report.
+                                clock.live(&cx)?;
+                                if local.is_some() {
+                                    if let Some(terminal) = application.terminal_failure() {
+                                        let failure = Failure::Observation(terminal);
+                                        let _ = notify(
+                                            application,
+                                            Status::Stopped { attempt, failure },
+                                        );
+                                        return Err(failure);
+                                    }
+                                    clock.live(&cx)?;
+                                }
+                                local
+                                    .transpose()
+                                    .map_err(|_| Failure::Notification)?
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+                            if !room || !(retryable(error) || local) {
+                                notify(
+                                    application,
+                                    Status::Stopped {
+                                        attempt,
+                                        failure: error,
+                                    },
+                                )?;
+                                return Err(error);
+                            }
                             retries += 1;
                             let delay = policy.delay(retries);
                             // Notification time counts against this fixed wait.
@@ -597,16 +646,6 @@ impl Client {
                                 let _ = notify(application, Status::Stopped { attempt, failure });
                                 return Err(failure);
                             }
-                        }
-                        Err(error) => {
-                            notify(
-                                application,
-                                Status::Stopped {
-                                    attempt,
-                                    failure: error,
-                                },
-                            )?;
-                            return Err(error);
                         }
                     }
                 }

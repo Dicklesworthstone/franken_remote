@@ -190,9 +190,11 @@ request whose admission or reply is uncertain. An established transient
 transport/media failure can then recover a fresh **viewing-only** desktop after
 confirmed native cleanup. The retry classifier includes the streamed native
 worker deadline described above and the existing observation-session expiration
-and renewal timeouts. All operation and cleanup deadlines remain unchanged. Explicit control-authority revocation/refusal, input expiry, user close,
-local escape, focus or native capture failure, protocol refusal and TLS/identity
-failure do not authorize another attempt.
+and renewal timeouts. All operation and cleanup deadlines remain unchanged.
+Explicit control-authority revocation/refusal, input expiry, user close,
+local escape, native capture failure, protocol refusal and TLS/identity
+failure do not authorize another attempt. Focus loss has only the separately
+verified recovery path described below.
 
 Every retry creates fresh viewing state, mapping, decoder and window, performs
 fresh admission/approval, and keeps the original installed node identity pinned.
@@ -246,6 +248,41 @@ survives terminal errors and human-readable output. New `explicit_control_reques
 entries retain each fresh local request's own attempt, granted capabilities,
 input effects, end and cleanup reports. The fixed history covers the existing
 32-attempt maximum; it cannot replace or extend the original report.
+
+### Focus loss after input capture has started
+
+The ordinary interactive Linux control client opts into a conservative
+focus-loss recovery path. The original running input owner fences its session
+immediately when focus is lost. Before any new connection, that same window's
+native thread must verify its map state and unchanged geometry, retain a real
+unobscured visibility observation, and drain queued lifecycle events. The check
+has a 100 ms total age bound and a 64-event limit. A diagnostic `FocusLost` alone
+cannot establish eligibility: a queued unmap, destroy, close, resize, obscuration,
+synthetic event or uncertain native reply refuses recovery. A later explicit
+window/input stop also invalidates the receipt, even when the original diagnostic
+remains focus loss.
+
+The canonical supervisor asks for this transition only after the old attempt
+has completed cleanup, with a live supervisor and room in its original finite
+retry budget. The desktop checks its original input, window, picker, media,
+clipboard and file cleanup receipts; the CLI also requires retirement of the
+original playback workers, microphone and microphone controls. Authenticated host closure/revocation
+reports, failed cleanup, competing display/resize intent and other local errors
+remain terminal. Remote cleanup or outstanding input effects are never inferred
+from the local receipt.
+
+An accepted transition opens a fresh **viewing-only** attempt through the normal
+identity, TLS, approval and display checks. It retains the old attempt's actual
+focus-stop and input-effect history. No old lease, input event, held key,
+clipboard consent, file selection or microphone choice is restored. A new
+physical **F8** gesture is required to ask for a new input grant. Losing focus
+before input capture ever ran, `--attempts 1`, foreground automation and local
+stop requests keep their terminal behavior.
+
+Regression fixtures cover the native receipt and stop races, cleanup failures,
+host reports, current-attempt grants and spent auxiliary choices. Execution
+evidence is recorded separately in `IMPLEMENTATION_STATUS.md`; this addition
+does not establish physical-desktop or two-machine qualification.
 
 ## Change the selected display from the running viewer
 

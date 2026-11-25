@@ -80,7 +80,10 @@ static int switch_surface(struct fr_viewer_window *h, int control_offered) {
             "FrankenRemote - View only - F8 requests control" :
             "FrankenRemote - View only - F8 unavailable";
     }
-    uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE;
+    /* Lifecycle visibility remains selected through every local command mode;
+     * the original owner needs it even after input has already been fenced. */
+    uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE |
+        XCB_EVENT_MASK_VISIBILITY_CHANGE;
     if (h->control_key || (h->switch_mode == 1 && h->switch_keys[6]))
         mask |= XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_PROPERTY_CHANGE;
     if (h->files) mask |= XCB_EVENT_MASK_PROPERTY_CHANGE;

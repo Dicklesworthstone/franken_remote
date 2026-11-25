@@ -196,6 +196,14 @@ disables automatic retries. Completion distinguishes the final
 `last_attempt_mode` and `viewing_reconnects` from the original control and transfer
 outcomes; see [native recovery and reconnect](NATIVE_RECOVERY_RECONNECT.md).
 
+The interactive Linux control client can also reopen viewing after losing focus
+once input capture has started. It first fences input, verifies that the original
+window stayed mapped, unobscured and unchanged, and confirms native cleanup.
+Hidden, closed or uncertain windows and incomplete cleanup remain terminal.
+This uses the same remaining attempt budget and requires a fresh **F8** gesture
+to request input again; it does not repeat clipboard, file or microphone consent.
+The new focus-recovery path has no physical-desktop qualification yet.
+
 To change the selected host display from a running native viewer, press and
 release **Ctrl+Alt+Shift+F7** with the viewer focused. The current session closes
 and completes native cleanup, then a fresh authenticated session shows the

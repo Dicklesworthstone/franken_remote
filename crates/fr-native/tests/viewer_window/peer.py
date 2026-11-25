@@ -15,6 +15,8 @@ sig("XQueryTree", c.c_int, D, W, c.POINTER(W), c.POINTER(W), c.POINTER(c.POINTER
 sig("XFree", c.c_int, D)
 sig("XSync", c.c_int, D, c.c_int)
 sig("XMoveWindow", c.c_int, D, W, c.c_int, c.c_int)
+sig("XCreateSimpleWindow", W, D, W, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_uint, W, W)
+sig("XMapWindow", c.c_int, D, W)
 sig("XResizeWindow", c.c_int, D, W, c.c_uint, c.c_uint)
 sig("XUnmapWindow", c.c_int, D, W)
 sig("XDestroyWindow", c.c_int, D, W)
@@ -67,6 +69,13 @@ try:
         finally:
             if children: x.XFree(children)
     elif op == "move": x.XMoveWindow(d, w, 30, 40)
+    elif op == "obscure":
+        cover = x.XCreateSimpleWindow(d, x.XDefaultRootWindow(d), 0, 0, 320, 240, 0, 0, 0)
+        assert cover
+        x.XMapWindow(d, cover)
+        # XCloseDisplay removes the peer's cover after this actual obscuring
+        # event. The original window must refuse even a queued hide/unhide.
+        x.XSync(d, 0)
     elif op == "resize": x.XResizeWindow(d, w, 322, 240)
     elif op == "resize_burst":
         x.XResizeWindow(d, w, 322, 240)
@@ -98,6 +107,13 @@ try:
     elif op == "focus_bounce":
         x.XSetInputFocus(d, 1, 0, 0)
         x.XSetInputFocus(d, w, 2, 0)
+    elif op == "focus_loss":
+        x.XSetInputFocus(d, w, 2, 0)
+        x.XSetInputFocus(d, 1, 0, 0)
+    elif op == "focus_flood":
+        for _ in range(40):
+            x.XSetInputFocus(d, w, 2, 0)
+            x.XSetInputFocus(d, 1, 0, 0)
     elif op == "focus_in_synthetic":
         e = Event()
         e.focus.type = 9

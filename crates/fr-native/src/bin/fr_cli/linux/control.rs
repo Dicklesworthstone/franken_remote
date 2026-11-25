@@ -344,6 +344,18 @@ impl Counters {
         self.current_cleanup()
             .is_some_and(CleanupSummary::prevents_viewing_retry)
     }
+    /// Current-attempt evidence only; historical grants never authorize a
+    /// focus-loss recovery after an unrequested or refused newer session.
+    pub(super) fn current_granted(&self) -> bool {
+        if self.request_attempt == Some(self.current_attempt) {
+            self.granted
+        } else {
+            self.fresh
+                .iter()
+                .flatten()
+                .any(|fresh| fresh.attempt == self.current_attempt && fresh.granted)
+        }
+    }
     /// Count host-reported results by stage only. Duplicates are not new work.
     pub(super) fn result(&mut self, event: &ResultEvent) {
         if let Some(fresh) = self.current_fresh() {

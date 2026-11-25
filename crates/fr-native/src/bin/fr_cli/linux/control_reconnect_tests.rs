@@ -60,6 +60,122 @@ fn requested() -> Interface {
     ui
 }
 
+fn granted_focus_loss() -> Progress {
+    let mut progress = Progress {
+        control: Some(control::Counters::default()),
+        ..Progress::default()
+    };
+    progress.begin(1);
+    let counters = progress.control.as_mut().unwrap();
+    counters.spend_request();
+    counters.granted = true;
+    counters.results = 3;
+    counters.submitted = 2;
+    counters.cleaning(Some(reconnect::Failure::Cancelled));
+    progress.retain_cleanup(
+        1,
+        CleanupSummary {
+            input_stop: Some(InputStop::FocusLost),
+            ..summary()
+        },
+    );
+    progress
+}
+
+#[test]
+fn confirmed_focus_loss_reopens_only_viewing_and_keeps_the_original_input_receipts() {
+    // These booleans model the original native receipt; viewer_window tests
+    // exercise its lifecycle query. The real Interface reads that exact owner.
+    let mut progress = granted_focus_loss();
+    let original = progress.cleanup.unwrap();
+    progress.request_focus_retry(1, original, true).unwrap();
+    assert!(progress.take_focus_retry(2, reconnect::Failure::Cancelled, true));
+    assert!(!progress.take_focus_retry(2, reconnect::Failure::Cancelled, true));
+    progress.begin(2);
+    let counters = progress.control.as_mut().unwrap();
+    assert_eq!(counters.opened(), control::AttemptMode::ViewingOnly);
+    assert!(!counters.current_granted());
+    assert!(!counters.initial_decision_available());
+    assert_eq!(counters.cleanup, Some(original));
+    assert_eq!(counters.ended, Some(Err(reconnect::Failure::Cancelled)));
+    assert_eq!((counters.results, counters.submitted), (3, 2));
+    assert!(counters.fresh.iter().all(Option::is_none));
+    // This is the distinct existing F8 request path, not recovery itself.
+    counters.spend_fresh_request().unwrap();
+    assert!(!counters.current_granted());
+    assert_eq!(counters.spend_fresh_request(), Err(CallbackError));
+}
+
+#[test]
+fn focus_recovery_never_adopts_old_grants_missing_native_evidence_or_local_stop() {
+    for case in 0..6 {
+        let mut progress = granted_focus_loss();
+        let original = progress.cleanup.unwrap();
+        let mut native = true;
+        match case {
+            0 => native = false,
+            1 => progress.user_closed = true,
+            2 => progress.control.as_mut().unwrap().granted = false,
+            3 => progress.begin(2),
+            4 => progress.automation_focus_stop = Some(StopReason::FocusLost),
+            _ => progress.cleanup = None,
+        }
+        assert_eq!(
+            progress.request_focus_retry(1, original, native),
+            Err(CallbackError),
+            "case {case}"
+        );
+        assert_eq!(progress.focus_retry, None);
+    }
+    for (next, failure, confirmed) in [
+        (2, reconnect::Failure::Cancelled, false),
+        (3, reconnect::Failure::Cancelled, true),
+        (2, transient(), true),
+    ] {
+        let mut progress = granted_focus_loss();
+        progress
+            .request_focus_retry(1, progress.cleanup.unwrap(), true)
+            .unwrap();
+        assert!(!progress.take_focus_retry(next, failure, confirmed));
+        assert_eq!(
+            progress.focus_retry, None,
+            "a refused transition is not reusable"
+        );
+    }
+}
+
+#[test]
+fn focus_recovery_does_not_restore_initial_file_or_microphone_choices() {
+    let mut progress = granted_focus_loss();
+    progress.files = files::select(&[], true, false).unwrap();
+    progress
+        .request_focus_retry(1, progress.cleanup.unwrap(), true)
+        .unwrap();
+    assert!(progress.take_focus_retry(2, reconnect::Failure::Cancelled, true));
+    progress.begin(2);
+    let mut ui = interface();
+    ui.progress = Rc::new(RefCell::new(progress));
+    let original = fr_wire::audio_up::with_microphone(
+        fr_client::native::control_offer_with_duplex(true, true),
+    )
+    .unwrap();
+    let mut expected = original.clone();
+    files::retain_offer(&mut expected, false, false);
+    expected.capabilities.retain(|capability| {
+        capability.name != fr_wire::sync_job_state::CAPABILITY
+            && capability.name != fr_wire::audio_up::CAPABILITY
+    });
+    assert_eq!(ui.offer(2, &original).unwrap(), expected);
+    assert!(
+        !ui.progress
+            .borrow()
+            .control
+            .unwrap()
+            .initial_decision_available()
+    );
+    assert!(ui.attempt.is_none());
+}
+
 #[test]
 fn a_native_stop_published_during_cleanup_still_vetoes_viewing_reconnect() {
     for (reason, code) in [
