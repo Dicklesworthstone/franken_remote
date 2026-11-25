@@ -164,9 +164,13 @@ pixels (`scaled-picture`, PROTOCOL_NEGOTIATION.md): a 5120x2880 desktop
 arrives as 2350x1320 on a 2868x1320 iPhone. A Linux host still sends its
 native pixels.
 
-The app's Metal view runs at the display's refresh rate (120 Hz on ProMotion
-iPhones: the app's Info.plist sets `CADisableMinimumFrameDurationOnPhone`)
-and draws only when a new picture, the geometry or the cursor changed. It
+The app's Metal view requests the display's maximum refresh rate under nominal
+conditions (up to 120 Hz on ProMotion iPhones). Low Power Mode limits the
+request to 30 Hz. At fair, serious and critical thermal states, it requests
+at most 60, 30 and 15 Hz respectively. When conditions improve, the view
+updates its request automatically. These are local presentation targets;
+actual cadence depends on iOS and the display. The view draws only when a
+new picture, the geometry or the cursor changed. It
 draws at the panel's own density (`UIScreen.nativeScale`), with the picture's
 origin on the device pixel grid. Colour is BT.709 with the stream's range. To
 stay crisp:

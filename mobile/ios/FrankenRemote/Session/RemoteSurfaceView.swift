@@ -73,6 +73,12 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
                            name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         center.addObserver(self, selector: #selector(keyboardWillHide(_:)),
                            name: UIResponder.keyboardWillHideNotification, object: nil)
+        for name in [ProcessInfo.thermalStateDidChangeNotification,
+                     Notification.Name.NSProcessInfoPowerStateDidChange] {
+            center.addObserver(self, selector: #selector(refreshConditionsChanged(_:)),
+                               name: name, object: nil)
+        }
+        updateRefreshRate()
     }
 
     private func installMetalView() {
@@ -85,7 +91,43 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
         metalView.autoResizeDrawable = true
         addSubview(metalView)
         metalView.delegate = renderer
+        updateRefreshRate()
         setNeedsLayout()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updateRefreshRate()
+    }
+
+    // Power notifications can arrive off the UI thread. Read the *current*
+    // conditions on delivery, including after a layer or window replacement.
+    @objc private nonisolated func refreshConditionsChanged(_ notification: Notification) {
+        Task { @MainActor [weak self] in self?.updateRefreshRate() }
+    }
+
+    private func updateRefreshRate() {
+        let info = ProcessInfo.processInfo
+        let rate = Self.preferredRefreshRate(maximum: window?.screen.maximumFramesPerSecond ?? 60,
+                                             thermal: info.thermalState,
+                                             lowPower: info.isLowPowerModeEnabled)
+        if metalView.preferredFramesPerSecond != rate {
+            metalView.preferredFramesPerSecond = rate
+        }
+    }
+
+    /// Requested local Metal cadence. The OS chooses the supported rate.
+    static func preferredRefreshRate(maximum: Int, thermal: ProcessInfo.ThermalState,
+                                     lowPower: Bool) -> Int {
+        let ceiling = max(1, maximum)
+        let powerLimit = lowPower ? min(ceiling, 30) : ceiling
+        switch thermal {
+        case .nominal: return powerLimit
+        case .fair: return min(powerLimit, 60)
+        case .serious: return min(powerLimit, 30)
+        case .critical: return min(powerLimit, 15)
+        @unknown default: return min(powerLimit, 30)
+        }
     }
 
     @objc private func keyboardFrameChanged(_ note: Notification) {
@@ -122,9 +164,6 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
                             right: safeAreaInsets.right)
         updateViewport { $0.setGeometry(viewSize: bounds.size, insets: insets, deviceScale: deviceScale) }
         interpreter.screenScale = deviceScale
-        // Match the display's refresh (120 Hz on ProMotion phones, with
-        // CADisableMinimumFrameDurationOnPhone in the Info.plist).
-        metalView.preferredFramesPerSecond = window?.screen.maximumFramesPerSecond ?? 60
     }
 
     override func safeAreaInsetsDidChange() {
