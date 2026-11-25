@@ -1,4 +1,4 @@
-//! Explicit CPU nearest-neighbour sampling for an immutable local viewport.
+//! Explicit CPU sampling for an immutable local viewport.
 //! No codec reconfiguration, GPU/zero-copy claim, or visibility witness. This
 //! owner holds exactly one extra bounded BGRA frame and never queues pictures.
 #![forbid(unsafe_code)]
@@ -138,6 +138,7 @@ impl FittedFrame {
             usize::try_from(fit.width).map_err(|_| NativeError::InvalidConfiguration)?;
         let source_pixels = source.bytes.as_chunks::<4>().0;
         let output_pixels = self.output.bytes.as_chunks_mut::<4>().0;
+        let half_size = (source.width, source.height) == (2 * fit.width, 2 * fit.height);
         for y in 0..fit.height {
             let sy = u64::from(y) * u64::from(source.height) / u64::from(fit.height);
             let src = usize::try_from(sy * u64::from(source.width))
@@ -146,10 +147,14 @@ impl FittedFrame {
                 u64::from(y + fit.y) * u64::from(self.output.width) + u64::from(fit.x),
             )
             .map_err(|_| NativeError::InvalidConfiguration)?;
-            rows::scale_row(
-                &source_pixels[src..src + source_width],
-                &mut output_pixels[dst..dst + fit_width],
-            );
+            let target = &mut output_pixels[dst..dst + fit_width];
+            let upper = &source_pixels[src..src + source_width];
+            if half_size {
+                let lower = &source_pixels[src + source_width..src + 2 * source_width];
+                rows::halve_row(upper, lower, target);
+            } else {
+                rows::scale_row(upper, target);
+            }
         }
         Ok(&self.output)
     }

@@ -87,15 +87,14 @@ fn borrowed_window_contains_the_exact_fitted_image_and_opaque_bars() {
                     let expected = if (placement.x..placement.x + placement.width).contains(&x)
                         && (placement.y..placement.y + placement.height).contains(&y)
                     {
+                        let half_size = (source_width, source_height)
+                            == (2 * placement.width, 2 * placement.height);
+                        let round = u32::from(half_size);
+                        let sx = (x - placement.x) * source_width / placement.width;
+                        let sy = (y - placement.y) * source_height / placement.height;
                         [
-                            u8::try_from(
-                                ((x - placement.x) * source_width / placement.width) % 256,
-                            )
-                            .unwrap(),
-                            u8::try_from(
-                                ((y - placement.y) * source_height / placement.height) % 256,
-                            )
-                            .unwrap(),
+                            u8::try_from((sx + round) % 256).unwrap(),
+                            u8::try_from((sy + round) % 256).unwrap(),
                             frame,
                             255,
                         ]

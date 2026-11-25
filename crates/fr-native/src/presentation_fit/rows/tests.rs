@@ -89,3 +89,20 @@ fn shared_picture_upscales_match_independent_division_without_touching_guards() 
         compare(source, target);
     }
 }
+
+#[test]
+fn half_size_preserves_each_single_pixel_stroke_and_rounds_once_per_channel() {
+    let black = [0, 0, 0, 255];
+    let ink = [255, 2, 1, 255];
+    for index in 0..4 {
+        let mut block = [black; 4];
+        block[index] = ink;
+        let mut target = [[77; 4]; 3];
+        halve_row(&block[..2], &block[2..], &mut target[1..2]);
+        assert_eq!(target, [[77; 4], [64, 1, 0, 255], [77; 4]]);
+    }
+    let upper = [black, ink, [255; 4], [255; 4]];
+    let mut target = [[0; 4]; 2];
+    halve_row(&upper, &upper, &mut target);
+    assert_eq!(target, [[128, 1, 1, 255], [255; 4]]);
+}

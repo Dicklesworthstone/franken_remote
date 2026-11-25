@@ -14,7 +14,7 @@ pub(super) fn pattern(w: u32, h: u32, offset: u8) -> BgraFrame {
     BgraFrame::new(w, h, pixels, &ProtocolLimits::ABSOLUTE).unwrap()
 }
 #[test]
-fn fit_uses_one_allocation_and_preserves_exact_integer_mapping() {
+fn half_size_fit_uses_one_allocation_and_averages_each_source_block() {
     let mut fitted = FittedFrame::new(
         64,
         32,
@@ -48,8 +48,8 @@ fn fit_uses_one_allocation_and_preserves_exact_integer_mapping() {
                     assert_eq!(
                         pixel,
                         &[
-                            u8::try_from(x * 2).unwrap(),
-                            u8::try_from((y - 8) * 2).unwrap(),
+                            u8::try_from(x * 2 + 1).unwrap(),
+                            u8::try_from((y - 8) * 2 + 1).unwrap(),
                             offset,
                             255
                         ]

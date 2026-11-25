@@ -33,7 +33,11 @@ HEVC picture is 1582x888. Treating the encoded crop as the input rectangle would
 shift clicks and the remote cursor. A 1000x750 window can likewise contain its
 1000x562 picture with black bars, without treating those bars as a geometry error.
 
-The worker uses integer nearest-neighbour CPU sampling and opaque black bars.
+For exact half-size presentation (for example, a 3840×2160 picture on a
+1920×1080 window), the worker averages each 2×2 group of decoded BGRA pixels.
+This retains coverage of one-pixel text strokes and rules in either row or column.
+Other ratios use integer nearest-neighbour CPU sampling. Letterbox bars are
+opaque black.
 An existing shared source may supply a larger or smaller canonical picture;
 sampling in either direction remains bounded by the original target and display.
 Stating a picture box selects this mapped path even when the local window is
@@ -54,7 +58,7 @@ A checked runtime resize fences the original session and requires completed
 window, decoder and input cleanup before a fresh attempt advertises the new fit
 box. Old input, control consent and auxiliary selections are not replayed. Hidden
 or lost windows and adverse cleanup retain their existing refusal behavior.
-Zoom/pan and high-quality resampling are not implemented by this option.
+This option does not add zoom or pan.
 
 For control-capable library applications, `check_fitted_layout` requires the full
 original remote desktop bounds and exactly the renderer's integer fitted

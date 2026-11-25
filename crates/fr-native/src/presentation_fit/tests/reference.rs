@@ -1,4 +1,4 @@
-//! Test-only pre-optimization oracle, including the original per-pixel division.
+//! Independent sampling oracle and CPU-stage timing comparison.
 use super::*;
 use std::{hint::black_box, time::Instant};
 
@@ -17,7 +17,7 @@ fn empty(target: X11Target) -> BgraFrame {
     )
     .unwrap()
 }
-fn legacy(source: &BgraFrame, output: &mut BgraFrame, fit: Fit) {
+fn reference(source: &BgraFrame, output: &mut BgraFrame, fit: Fit) {
     for y in 0..fit.height {
         let sy = u64::from(y) * u64::from(source.height) / u64::from(fit.height);
         let src = usize::try_from(sy * u64::from(source.width) * 4).unwrap();
@@ -30,14 +30,26 @@ fn legacy(source: &BgraFrame, output: &mut BgraFrame, fit: Fit) {
                 usize::try_from(u64::from(x) * u64::from(source.width) / u64::from(fit.width) * 4)
                     .unwrap();
             let dx = usize::try_from(x).unwrap() * 4;
-            output.bytes[dst + dx..dst + dx + 4]
-                .copy_from_slice(&source.bytes[src + sx..src + sx + 4]);
+            if (source.width, source.height) == (2 * fit.width, 2 * fit.height) {
+                let stride = usize::try_from(source.width).unwrap() * 4;
+                for channel in 0..4 {
+                    let start = src + sx + channel;
+                    let sum: u32 = [0, 4, stride, stride + 4]
+                        .map(|offset| u32::from(source.bytes[start + offset]))
+                        .iter()
+                        .sum();
+                    output.bytes[dst + dx + channel] = u8::try_from((sum + 2) / 4).unwrap();
+                }
+            } else {
+                output.bytes[dst + dx..dst + dx + 4]
+                    .copy_from_slice(&source.bytes[src + sx..src + sx + 4]);
+            }
         }
     }
 }
 
 #[test]
-fn full_frames_match_legacy_pixels_and_bars_across_viewport_shapes() {
+fn full_frames_match_reference_pixels_and_bars_across_viewport_shapes() {
     for (w, h) in [
         (64, 32),
         (32, 64),
@@ -66,7 +78,7 @@ fn full_frames_match_legacy_pixels_and_bars_across_viewport_shapes() {
             let mut fitted = FittedFrame::new(w, h, target, ProtocolLimits::ABSOLUTE).unwrap();
             let placement = fitted.placement();
             let mut expected = empty(target);
-            legacy(&source, &mut expected, placement);
+            reference(&source, &mut expected, placement);
             let retained = fitted.retained_bytes();
             let pointer = fitted.render(&source).unwrap().pixels().as_ptr();
             assert_eq!(fitted.render(&source).unwrap().pixels(), expected.pixels());
@@ -92,7 +104,7 @@ fn compare_fitted_render_cost() {
         let mut fitted = FittedFrame::new(w, h, target, ProtocolLimits::ABSOLUTE).unwrap();
         let placement = fitted.placement();
         let mut old_output = empty(target);
-        legacy(&source, &mut old_output, placement);
+        reference(&source, &mut old_output, placement);
         assert_eq!(
             fitted.render(&source).unwrap().pixels(),
             old_output.pixels()
@@ -107,7 +119,7 @@ fn compare_fitted_render_cost() {
                 let start = Instant::now();
                 for _ in 0..24 {
                     if original {
-                        legacy(
+                        reference(
                             black_box(&source),
                             black_box(&mut old_output),
                             black_box(placement),
@@ -133,7 +145,7 @@ fn compare_fitted_render_cost() {
         old.sort_unstable();
         new.sort_unstable();
         println!(
-            "fitted_cpu {w}x{h}->{tw}x{th} legacy_ns={} optimized_ns={}",
+            "fitted_cpu {w}x{h}->{tw}x{th} reference_ns={} optimized_ns={}",
             old[old.len() / 2],
             new[new.len() / 2]
         );
