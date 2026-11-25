@@ -1,5 +1,6 @@
 //! Local receive policy, fixed before any connection or disk worker starts.
 //! The host's manifest can never choose these limits or collision behavior.
+use fr_wire::sync_job_state::JobMode;
 use super::{Failure, PathBuf, usage};
 
 #[derive(Clone, PartialEq, Eq)]
@@ -9,7 +10,7 @@ pub struct ReceiveOptions {
     pub max_session_bytes: Option<u64>,
     pub keep_both: bool,
     /// One explicitly accepted host-configured folder job on this connection.
-    pub sync_job: Option<u64>,
+    pub sync_job: Option<(u64, JobMode)>,
 }
 
 impl std::fmt::Debug for ReceiveOptions {
@@ -64,14 +65,14 @@ pub(super) fn job_id(value: &str) -> Result<u64, Failure> {
 fn invalid_job() -> Failure {
     Failure::new(
         "files_sync_job_invalid",
-        "--sync-job requires a positive host-configured job ID. No connection was made.",
+        "Folder job IDs must be positive integers. No connection was made.",
         2,
     )
 }
 
 pub(super) fn accept_job(
     receive: Option<ReceiveOptions>,
-    job: Option<u64>,
+    job: Option<(u64, JobMode)>,
 ) -> Result<Option<ReceiveOptions>, Failure> {
     let Some(job) = job else {
         return Ok(receive);
@@ -79,11 +80,11 @@ pub(super) fn accept_job(
     let Some(mut receive) = receive else {
         return Err(Failure::new(
             "files_sync_directory_required",
-            "--sync-job requires an explicit --receive directory and --receive-conflict keep-both.",
+            "Receiving a folder job requires an explicit --receive directory and --receive-conflict keep-both.",
             2,
         ));
     };
-    if job == 0 {
+    if job.0 == 0 {
         return Err(invalid_job());
     }
     if !receive.keep_both {
@@ -198,7 +199,7 @@ impl ReceiveOptions {
     ) -> Result<frd::native_files::ReceiveRequest, Failure> {
         let request = frd::native_files::ReceiveRequest::new(directory);
         match self.sync_job {
-            Some(job) => request.with_sync_job(job).map_err(|_| {
+            Some((job, mode)) => request.with_sync_job_mode(job, mode).map_err(|_| {
                 Failure::new(
                     "files_sync_selection_invalid",
                     "The selected folder job requires an explicit keep-both destination on this original connection. No receiver started.",
@@ -409,7 +410,7 @@ mod tests {
         .unwrap();
         assert!(!configured.clipboard);
         let receive = configured.receive.unwrap();
-        assert_eq!(receive.sync_job, Some(41));
+        assert_eq!(receive.sync_job, Some((41, JobMode::Flat)));
         assert!(receive.keep_both);
         assert!(
             connection("--receive /private/destination --receive-conflict keep-both")

@@ -1,4 +1,5 @@
 //! Explicit local download selection and bounded, content-free receive status.
+use fr_wire::sync_job_state::JobMode;
 use super::{
     Absence, Directory, HostSendIntake, MAX_SESSION_FILES, SelectRefusal, Selection, SendIntake,
     SendRequest,
@@ -31,12 +32,27 @@ impl HostSelection {
     /// scans it nor authorizes a receiver; the original client must separately
     /// accept this exact job ID and the negotiated one-way sync capability.
     pub fn sync(source: &Path, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
-        let selected = SelectionKind::Sync(fr_files::sync::HostConfig::open(source, job_id)?);
+        Self::sync_mode(source, job_id, JobMode::Flat)
+    }
+
+    pub fn sync_mode(
+        source: &Path,
+        job_id: u64,
+        mode: JobMode,
+    ) -> Result<Self, fr_files::sync::LiveError> {
+        let config = fr_files::sync::HostConfig::open(source, job_id)?.with_mode(mode);
+        let selected = SelectionKind::Sync(config);
         Ok(Self(Arc::new(Mutex::new(Some(selected)))))
     }
     pub fn sync_job_id(&self) -> Option<u64> {
         match self.lock().as_ref() {
             Some(SelectionKind::Sync(config)) => Some(config.job_id()),
+            _ => None,
+        }
+    }
+    pub fn sync_job_mode(&self) -> Option<JobMode> {
+        match self.lock().as_ref() {
+            Some(SelectionKind::Sync(config)) => Some(config.mode()),
             _ => None,
         }
     }
@@ -85,7 +101,7 @@ impl fmt::Debug for HostSelection {
 /// control authority; the original live controller supplies that at attachment.
 pub struct ReceiveRequest {
     pub(crate) configuration: fr_files::quic::Configuration,
-    pub(crate) sync_job: Option<u64>,
+    pub(crate) sync_job: Option<(u64, JobMode)>,
 }
 impl ReceiveRequest {
     pub fn new(directory: &Directory) -> Self {
@@ -99,20 +115,31 @@ impl ReceiveRequest {
     }
     /// Explicitly accept one host-configured job, independently of ordinary
     /// file consent. The existing destination must already select `KeepBoth`.
-    pub fn with_sync_job(mut self, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
+    pub fn with_sync_job(self, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
+        self.with_sync_job_mode(job_id, JobMode::Flat)
+    }
+
+    pub fn with_sync_job_mode(
+        mut self,
+        job_id: u64,
+        mode: JobMode,
+    ) -> Result<Self, fr_files::sync::LiveError> {
         if job_id == 0 || self.sync_job.is_some() {
             return Err(fr_files::sync::LiveError::InvalidConfig);
         }
         if self.configuration.directory.conflict_policy() != super::ConflictPolicy::KeepBoth {
             return Err(fr_files::sync::LiveError::KeepBothRequired);
         }
-        self.sync_job = Some(job_id);
+        self.sync_job = Some((job_id, mode));
         self.configuration.policy.max_session_transfers =
             fr_files::sync::live::MAX_SESSION_TRANSFERS;
         Ok(self)
     }
     pub const fn sync_job_id(&self) -> Option<u64> {
-        self.sync_job
+        match self.sync_job {
+            Some((id, _)) => Some(id),
+            None => None,
+        }
     }
 }
 impl fmt::Debug for ReceiveRequest {

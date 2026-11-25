@@ -25,6 +25,59 @@ pub const UPLOAD_VERSION: u16 = 1;
 /// the existing ATP profiles 2 and 3. Each offer still needs a matching accept;
 /// negotiation never substitutes for local recursive consent or file authority.
 pub const RECURSIVE_VERSION: u16 = 2;
+/// The job scope selected locally by each original endpoint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JobMode {
+    #[default]
+    Flat,
+    Recursive,
+}
+
+impl JobMode {
+    pub const fn from_recursive(recursive: bool) -> Self {
+        if recursive {
+            Self::Recursive
+        } else {
+            Self::Flat
+        }
+    }
+
+    const fn version(self) -> u16 {
+        match self {
+            Self::Flat => VERSION,
+            Self::Recursive => RECURSIVE_VERSION,
+        }
+    }
+
+    pub fn download_offer(
+        self,
+        offer: crate::negotiation::Offer,
+    ) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+        match self {
+            Self::Flat => prepare_offer(offer),
+            Self::Recursive => prepare_recursive_offer(offer),
+        }
+    }
+
+    pub fn upload_offer(
+        self,
+        offer: crate::negotiation::Offer,
+    ) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+        match self {
+            Self::Flat => prepare_upload_offer(offer),
+            Self::Recursive => prepare_recursive_upload_offer(offer),
+        }
+    }
+
+    pub fn download_selected(self, selection: &crate::negotiation::Selection) -> bool {
+        job_selected(selection, &DOWNLOAD_REQUIREMENTS, CAPABILITY, self.version())
+    }
+
+    pub fn upload_selected(self, selection: &crate::negotiation::Selection) -> bool {
+        upload_job_selected(selection, self.version())
+    }
+}
+
 /// Fixed wire size including the 24-byte `FRD0` header:
 /// 24 + 16 (`session`) + 16 (`lease`) + 16 (`handle`) + 8 (`job_id`) +
 /// 1 (`sync_direction`) + 1 (`conflict_policy`) + 1 (`phase`) + 2 (`reason`) +

@@ -135,6 +135,8 @@ OPTIONS:
                     job into this private flat directory. The controller selects
                     --sync-source DIR --sync-job ID. Cannot combine with --files,
                     --send, --send-control or --sync-source. No reconnect replay.
+    --sync-tree-job ID  Accept entire subdirectories as atomic versions. Both endpoints must
+                    explicitly choose this mode with the same job ID.
     --sync-job ID   Nonzero local job identifier paired with --sync-source or
                     --sync-destination. The controller explicitly accepts this ID.
     --files-conflict reject|keep-both  Taken destination names are refused by
@@ -1074,7 +1076,7 @@ fn send(
                 2,
             )
         })?;
-        return frd::native_files::HostSelection::sync(source, job)
+        return frd::native_files::HostSelection::sync_mode(source, job, options.sync_job_mode)
             .map(Some)
             .map_err(|_| run_refusal(
                 json,

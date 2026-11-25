@@ -162,7 +162,8 @@ positive, session >= file. Directories count total content; cancelled admitted
 attempts spend budget. --receive-conflict: reject (default) or keep-both with a
 bounded .fr-conflict- name. Neither overwrites/merges/retries/resumes.
 Download Cancel affects downloads only.
---sync-job ID accepts one configured Linux/Mac host folder job.
+--sync-tree-job ID includes nested directories as atomic versions. Both endpoints
+must use that flag for the same job. --sync-job ID accepts one configured Linux/Mac host folder job.
 Host-to-controller: --control --receive DIR --receive-conflict keep-both;
 host: --sync-source DIR --sync-job ID.
 Controller-to-host: --control --sync-source DIR --sync-job ID;

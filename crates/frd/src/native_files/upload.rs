@@ -1,4 +1,5 @@
 //! One original controller-side source for a host-configured upload job.
+use fr_wire::sync_job_state::JobMode;
 use super::Absence;
 use fr_files::{
     sender,
@@ -16,11 +17,18 @@ use std::{
 pub struct UploadSelection(Arc<Mutex<Option<SourceConfig>>>);
 impl UploadSelection {
     pub fn folder_job(source: &Path, job_id: u64) -> Result<Self, LiveError> {
-        let config = SourceConfig::open(source, job_id)?;
+        Self::folder_job_mode(source, job_id, JobMode::Flat)
+    }
+
+    pub fn folder_job_mode(source: &Path, job_id: u64, mode: JobMode) -> Result<Self, LiveError> {
+        let config = SourceConfig::open(source, job_id)?.with_mode(mode);
         Ok(Self(Arc::new(Mutex::new(Some(config)))))
     }
     pub fn sync_job_id(&self) -> Option<u64> {
         self.lock().as_ref().map(SourceConfig::job_id)
+    }
+    pub fn sync_job_mode(&self) -> Option<JobMode> {
+        self.lock().as_ref().map(SourceConfig::mode)
     }
     pub fn is_available(&self) -> bool {
         self.lock().is_some()

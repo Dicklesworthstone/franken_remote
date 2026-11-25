@@ -568,7 +568,8 @@ impl StreamingViewer {
         let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::files_lane(&session.opened.selection)?;
-        if !fr_wire::sync_job_state::upload_selected(&session.opened.selection) {
+        let mode = selection.sync_job_mode().ok_or(Absence::Unavailable)?;
+        if !mode.upload_selected(&session.opened.selection) {
             return Err(Absence::NotNegotiated);
         }
         let source = selection.take()?;
@@ -683,8 +684,9 @@ impl StreamingViewer {
         let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::file_download_lane(&session.opened.selection)?;
-        if request.sync_job_id().is_some()
-            && !fr_wire::sync_job_state::selected(&session.opened.selection)
+        if request
+            .sync_job
+            .is_some_and(|(_, mode)| !mode.download_selected(&session.opened.selection))
         {
             return Err(Absence::NotNegotiated);
         }

@@ -541,12 +541,8 @@ fn connect_selected(
             )
         })?;
         let offer = microphone::offer(offer, connection.microphone.is_some())?;
-        let offer = if connection
-            .receive
-            .as_ref()
-            .is_some_and(|receive| receive.sync_job.is_some())
-        {
-            fr_client::native::with_folder_sync(offer).map_err(|_| {
+        let offer = if let Some((_, mode)) = connection.receive.as_ref().and_then(|receive| receive.sync_job) {
+            fr_client::native::with_folder_sync_mode(offer, mode).map_err(|_| {
                 Failure::new(
                     "files_sync_capability_limit",
                     "The selected folder job cannot fit the native capability offer. Reduce the optional file or audio features before connecting.",
@@ -556,8 +552,8 @@ fn connect_selected(
         } else {
             offer
         };
-        let offer = if connection.upload.sync_source.is_some() {
-            fr_client::native::with_folder_sync_upload(offer).map_err(|_| {
+        let offer = if let Some(source) = &connection.upload.sync_source {
+            fr_client::native::with_folder_sync_upload_mode(offer, source.mode).map_err(|_| {
                 Failure::new(
                     "files_sync_capability_limit",
                     "The selected upload job cannot fit the native capability offer.",

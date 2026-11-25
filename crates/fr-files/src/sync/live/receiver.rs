@@ -11,7 +11,7 @@ use crate::{
 use fr_transport::quic::{ConnectionBinding, Disposition, QuicRecords};
 use fr_wire::{
     files::Reason,
-    sync_job_state::{SyncDirection, SyncJobState, SyncPhase},
+    sync_job_state::{JobMode, SyncDirection, SyncJobState, SyncPhase},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,8 +109,14 @@ impl ControllerJob {
     /// Explicitly accept atomic top-level subtree versions on this original
     /// job. The original attachment must independently select recursive sync;
     /// flat or unselected peers cannot cause directory staging.
-    pub fn with_recursive(mut self) -> Self {
-        self.recursive = true;
+    pub fn with_recursive(self) -> Self {
+        self.with_mode(JobMode::Recursive)
+    }
+
+    /// Carry the locally chosen command scope to the original file attachment.
+    #[must_use]
+    pub fn with_mode(mut self, mode: JobMode) -> Self {
+        self.recursive = mode == JobMode::Recursive;
         self
     }
 

@@ -1,15 +1,17 @@
 //! Explicit local source consent for one reverse folder job; never saved or replayed.
+use fr_wire::sync_job_state::JobMode;
 use super::Failure;
 use std::path::{Component, PathBuf};
 
 pub struct FolderSource {
     pub path: PathBuf,
     pub job_id: u64,
+    pub mode: JobMode,
 }
 
 pub(super) fn accept(
     path: Option<PathBuf>,
-    job_id: Option<u64>,
+    job_id: Option<(u64, JobMode)>,
     control: bool,
     conflicting_selection: bool,
 ) -> Result<Option<FolderSource>, Failure> {
@@ -40,14 +42,14 @@ pub(super) fn accept(
             2,
         ));
     }
-    let job_id = job_id.filter(|id| *id != 0).ok_or_else(|| {
+    let (job_id, mode) = job_id.filter(|(id, _)| *id != 0).ok_or_else(|| {
         Failure::new(
             "files_sync_job_required",
-            "--sync-source requires the nonzero --sync-job ID advertised by the host.",
+            "--sync-source requires the host job ID with --sync-job or --sync-tree-job.",
             2,
         )
     })?;
-    Ok(Some(FolderSource { path, job_id }))
+    Ok(Some(FolderSource { path, job_id, mode }))
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -79,6 +81,34 @@ mod tests {
         assert_eq!(source.job_id, 41);
         assert!(connection.upload.paths.is_empty() && connection.receive.is_none());
         assert!(!connection.upload.file_drop && !connection.upload.file_commands);
+    }
+
+    #[test]
+    fn recursive_scope_is_explicit_in_both_native_directions() {
+        use super::JobMode;
+        let Command::Connect(upload) =
+            command("--control --sync-source /private/source --sync-tree-job 41").unwrap().command
+        else {
+            panic!("connection");
+        };
+        let source = upload.upload.sync_source.unwrap();
+        assert_eq!((source.job_id, source.mode), (41, JobMode::Recursive));
+
+        let Command::Connect(download) =
+            command("--control --receive /private/drop --receive-conflict keep-both --sync-tree-job 41").unwrap().command
+        else {
+            panic!("connection");
+        };
+        assert_eq!(download.receive.unwrap().sync_job, Some((41, JobMode::Recursive)));
+        for invalid in [
+            "--control --sync-tree-job 41",
+            "--control --sync-source /private/source --sync-job 41 --sync-tree-job 41",
+            "--control --sync-source /private/source --sync-tree-job 41 --sync-job 41",
+            "--control --receive /private/drop --sync-tree-job 41",
+            "--view-only --sync-source /private/source --sync-tree-job 41",
+        ] {
+            assert!(command(invalid).is_err());
+        }
     }
 
     #[test]

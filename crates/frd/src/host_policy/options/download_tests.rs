@@ -373,3 +373,22 @@ fn reverse_folder_options_reject_missing_id_and_unsafe_source_scope() {
         assert!(parse(&args).is_err(), "{args:?}");
     }
 }
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn tree_jobs_require_a_single_explicit_host_scope_in_either_direction() {
+    use fr_wire::sync_job_state::JobMode;
+    for (direction, extra) in [
+        ("--sync-source", &[][..]),
+        ("--sync-destination", &["--files-conflict", "keep-both"][..]),
+    ] {
+        let mut args = vec!["--once", "--input-agent", "/local/agent", direction, "/local/folder"];
+        args.extend_from_slice(extra);
+        args.extend(["--sync-tree-job", "41"]);
+        let selected = parse(&args).unwrap();
+        assert_eq!(selected.sync_job, Some(41));
+        assert_eq!(selected.sync_job_mode, JobMode::Recursive);
+        args.extend(["--sync-job", "41"]);
+        assert!(parse(&args).is_err());
+    }
+}

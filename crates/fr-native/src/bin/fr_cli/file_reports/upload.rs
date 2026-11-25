@@ -30,7 +30,7 @@ pub(crate) fn select(paths: &[PathBuf]) -> Result<Option<Selection>, Failure> {
 pub(crate) fn folder_source(
     source: &crate::options::FolderSource,
 ) -> Result<frd::native_files::UploadSelection, Failure> {
-    frd::native_files::UploadSelection::folder_job(&source.path, source.job_id).map_err(|_| {
+    frd::native_files::UploadSelection::folder_job_mode(&source.path, source.job_id, source.mode).map_err(|_| {
         Failure::new(
             "files_sync_source_invalid",
             "Choose an existing private source directory and the host's nonzero job ID. No folder scan or connection was started.",

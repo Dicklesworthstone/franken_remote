@@ -54,7 +54,10 @@ impl RunOptions {
     fn validate_folder_sync(&self) -> Result<(), Error> {
         let directions =
             usize::from(self.sync_source.is_some()) + usize::from(self.sync_destination.is_some());
-        if directions > 1 || (directions == 1) != self.sync_job.is_some() {
+        if directions > 1
+            || (directions == 1) != self.sync_job.is_some()
+            || (directions == 0 && self.sync_job_mode == fr_wire::sync_job_state::JobMode::Recursive)
+        {
             return Err(Error::InvalidArgument);
         }
         let Some(source) = self.sync_source.as_ref().or(self.sync_destination.as_ref()) else {
@@ -120,7 +123,7 @@ impl RunOptions {
         if self.sync_destination.is_some() {
             let job_id = self.sync_job.ok_or(DirectoryRefusal::Limits)?;
             directory
-                .with_sync_job(job_id)
+                .with_sync_job_mode(job_id, self.sync_job_mode)
                 .map(Some)
                 .map_err(|_| DirectoryRefusal::Limits)
         } else {

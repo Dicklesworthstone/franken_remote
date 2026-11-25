@@ -269,6 +269,23 @@ fn receive_consent_cannot_be_installed_or_combined_with_other_app_actions() {
 }
 
 #[test]
+fn app_shows_the_recursive_scope_and_preserves_it_for_the_original_connection() {
+    use fr_wire::sync_job_state::JobMode;
+    let mut receiving = pending(&[
+        "app", "--receive", "/private/drop", "--receive-conflict", "keep-both", "--sync-tree-job", "41",
+    ]);
+    let notice = receiving::notice(receiving.as_ref(), None).unwrap();
+    assert!(notice.contains("including nested directories"));
+    let args = receiving::take_for_app_choice(
+        &mut receiving,
+        session_args("nORIGINAL", &Settings::default(), 9443, false),
+        true,
+    ).unwrap();
+    assert_eq!(connection(&args).receive.unwrap().sync_job, Some((41, JobMode::Recursive)));
+    assert!(receiving.is_none());
+}
+
+#[test]
 fn explicit_folder_job_reaches_only_the_accepted_original_app_connection() {
     for consent in [false, true] {
         let mut receiving = pending(&[
@@ -304,7 +321,7 @@ fn explicit_folder_job_reaches_only_the_accepted_original_app_connection() {
         assert!(!viewer.choose_receive_directory);
         if consent {
             let selected = viewer.receive.unwrap();
-            assert_eq!(selected.sync_job, Some(41));
+            assert_eq!(selected.sync_job, Some((41, fr_wire::sync_job_state::JobMode::Flat)));
             assert!(selected.keep_both);
             assert_eq!(
                 selected.directory,

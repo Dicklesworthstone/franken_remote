@@ -1,4 +1,5 @@
 //! A host-selected destination advertises one reverse folder job.
+use fr_wire::sync_job_state::JobMode;
 use super::{Configuration, ControlledHost, Error, negotiation::Target};
 use fr_files::{
     quic,
@@ -25,17 +26,28 @@ impl ControlledHost {
     pub fn offer_folder_upload(
         &mut self,
         request: ChannelRequest,
-        mut configuration: Configuration,
+        configuration: Configuration,
         job_id: u64,
     ) -> Result<(), Error> {
-        if !fr_wire::sync_job_state::upload_selected(&self.session.opened.selected) {
+        self.offer_folder_upload_mode(request, configuration, job_id, JobMode::Flat)
+    }
+
+    pub(in crate::session_startup) fn offer_folder_upload_mode(
+        &mut self,
+        request: ChannelRequest,
+        mut configuration: Configuration,
+        job_id: u64,
+        mode: JobMode,
+    ) -> Result<(), Error> {
+        if !mode.upload_selected(&self.session.opened.selected) {
             return Err(Error::NotNegotiated);
         }
         if self.files.download.used {
             return Err(Error::AlreadyAttached);
         }
         let job = ReceiverJob::for_host(job_id, configuration.directory.clone())
-            .map_err(|error| Error::Receiver(receive_error(error)))?;
+            .map_err(|error| Error::Receiver(receive_error(error)))?
+            .with_mode(mode);
         // The exact tracked directory supplies conflict/publication evidence.
         configuration.directory = job.directory();
         let handle = u128::from(request.binding.parent.id);

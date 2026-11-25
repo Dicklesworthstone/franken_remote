@@ -3,6 +3,7 @@
 //! This is application capability negotiation, not a codec/transport probe or
 //! authority. The caller still performs installed-tailnet/TLS admission and
 //! explicitly opts into the currently unqualified native transport.
+use fr_wire::sync_job_state::JobMode;
 use fr_core::limits::ProtocolLimits;
 use fr_wire::{
     attachment, clock, control, cursor, decoder, display,
@@ -256,20 +257,34 @@ pub fn control_offer_with_download(clipboard: bool, audio: bool) -> Offer {
 /// original receive request still supplies its one-use job and directory consent.
 /// Call after other optional extensions to preserve the 24-capability ceiling.
 pub fn with_folder_sync(offer: Offer) -> Result<Offer, fr_wire::negotiation::Error> {
+    with_folder_sync_mode(offer, JobMode::Flat)
+}
+
+pub fn with_folder_sync_mode(
+    offer: Offer,
+    mode: JobMode,
+) -> Result<Offer, fr_wire::negotiation::Error> {
     if offer.role != Role::RequestControl {
         return Err(fr_wire::negotiation::Error::RequiredCapability);
     }
-    fr_wire::sync_job_state::prepare_offer(offer)
+    mode.download_offer(offer)
 }
 
 /// Explicit acceptance of a host-configured upload job with a separately
 /// selected local source. This adds protocol understanding only; a one-use
 /// source request still supplies the actual job ID and scanning permission.
 pub fn with_folder_sync_upload(offer: Offer) -> Result<Offer, fr_wire::negotiation::Error> {
+    with_folder_sync_upload_mode(offer, JobMode::Flat)
+}
+
+pub fn with_folder_sync_upload_mode(
+    offer: Offer,
+    mode: JobMode,
+) -> Result<Offer, fr_wire::negotiation::Error> {
     if offer.role != Role::RequestControl {
         return Err(fr_wire::negotiation::Error::RequiredCapability);
     }
-    fr_wire::sync_job_state::prepare_upload_offer(offer)
+    mode.upload_offer(offer)
 }
 
 /// Explicit independent upload and download selections. The two directions

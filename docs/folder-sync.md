@@ -83,8 +83,8 @@ fr connect NODE_ID --control --experimental-native --display only \
 
 The host advertises its destination job; the controller accepts it before
 scanning. The controller never advertises a host job or sends a host path.
-Both peers must select the independent `file-folder-sync-upload` v1 capability
-on the original upload attachment. The older download-only capability cannot
+Both peers must select the independent `file-folder-sync-upload` capability
+on the original upload attachment. Flat jobs use v1 and tree jobs use v2. The older download-only capability cannot
 enable this direction, and an unselected peer receives no ordinary-file
 fallback. The same bounded source owner, cache, ATP sender and tracked KeepBoth
 receiver handle both directions.
@@ -97,6 +97,29 @@ The host destination excludes `--files`, `--send`, `--send-control`, and
 do not silently discard a selection. Directory clones share one-use job consent,
 and a consumed job cannot fall back to ordinary receiving on another session.
 This does not yet implement a bidirectional reconciliation job.
+
+### Receive nested directories
+
+On both endpoints, replace `--sync-job 41` with `--sync-tree-job 41` to include
+subdirectories. For example, choose the following folder options on the host:
+
+```sh
+--sync-source /private/source --sync-tree-job 41
+```
+
+On the controlling viewer, select a destination for the same job:
+
+```sh
+--receive /private/destination --receive-conflict keep-both --sync-tree-job 41
+```
+
+The same option works for controller-to-host jobs and for receiving through
+`fr app`. A tree job requires version 2 of the capability for its direction.
+A flat selection, a different job ID, or a peer without a matching capability
+cannot start tree transfer. A changed top-level directory, including an empty
+directory, is delivered as a complete version. KeepBoth preserves an existing
+destination under the normal conflict policy. Each inspected descendant
+counts toward the source entry limit. Flat jobs keep their original scope.
 
 ### Bounds and delivery semantics
 

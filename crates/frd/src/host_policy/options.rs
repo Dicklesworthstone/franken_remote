@@ -1,4 +1,5 @@
 //! Strict local command parsing and startup resolution. No filesystem mutation.
+use fr_wire::sync_job_state::JobMode;
 use super::{Approval, Change, Error, Policy, Sharing, Store, default_path};
 use crate::{
     host_run::{Encoder, EncoderSelection, video},
@@ -100,6 +101,7 @@ pub struct RunOptions {
     pub sync_destination: Option<PathBuf>,
     /// Nonzero host-configured job identifier that the controller must accept.
     pub sync_job: Option<u64>,
+    pub sync_job_mode: JobMode,
     /// Local collision handling for both files and whole trees. Absent: reject.
     pub files_conflict: Option<ConflictPolicy>,
     /// Per-file byte limit for `--files` (default in `native_files`).
@@ -249,7 +251,10 @@ impl RunOptions {
                 "--sync-destination" => {
                     set(&mut options.sync_destination, PathBuf::from(value))?;
                 }
-                "--sync-job" => set(&mut options.sync_job, bytes(value)?)?,
+                "--sync-job" | "--sync-tree-job" => {
+                    set(&mut options.sync_job, bytes(value)?)?;
+                    options.sync_job_mode = JobMode::from_recursive(flag == "--sync-tree-job");
+                }
                 "--files-conflict" => {
                     set(&mut options.files_conflict, files::parse_conflict(value)?)?;
                 }

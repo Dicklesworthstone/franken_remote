@@ -1,3 +1,4 @@
+use fr_wire::sync_job_state::JobMode;
 use super::Failure;
 use std::{collections::BTreeSet, path::PathBuf};
 
@@ -959,8 +960,9 @@ fn parse_command(
             "--file-commands" if connect => file_commands = true,
             "--receive" if connect => receive = Some(next_path(args, &mut index)?),
             "--sync-source" if connect => sync_source = Some(next_path(args, &mut index)?),
-            "--sync-job" if connect => {
-                sync_job = Some(receive::job_id(next_arg(args, &mut index)?)?);
+            "--sync-job" | "--sync-tree-job" if connect && sync_job.is_none() => {
+                let id = receive::job_id(next_arg(args, &mut index)?)?;
+                sync_job = Some((id, JobMode::from_recursive(flag == "--sync-tree-job")));
             }
             "--choose-receive-directory" if connect => choose_receive_directory = true,
             "--receive-max-file-bytes" if connect => {

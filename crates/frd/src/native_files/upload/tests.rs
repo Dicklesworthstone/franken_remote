@@ -84,7 +84,7 @@ fn host_destination_requires_keep_both_and_spent_clones_never_fall_back() {
         selected.clone().with_sync_job(42).unwrap_err(),
         LiveError::InvalidConfig
     );
-    assert_eq!(selected.take_sync_job(), Ok(Some(41)));
+    assert_eq!(selected.take_sync_job(), Ok(Some((41, JobMode::Flat))));
     assert!(clone.requires_sync_job());
     assert_eq!(clone.sync_job_id(), None);
     assert_eq!(clone.take_sync_job(), Err(Absence::Unavailable));

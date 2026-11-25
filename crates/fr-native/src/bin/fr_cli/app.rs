@@ -82,6 +82,7 @@ hour unused, fr app quits.\n\n\
 --receive-max-file-bytes N     optional positive per-file receive limit.\n\
 --receive-max-session-bytes N  optional positive total receive limit.\n\
 --receive-conflict POLICY      reject (default) or keep-both; never overwrite.\n\
+--sync-tree-job ID  accept nested directories as atomic versions for this job.\n\
 --sync-job ID  accept this host-configured folder job on the next controlling\n\
                connection only. Requires --receive DIR and --receive-conflict\n\
                keep-both. Choose Receive files to accept new source versions\n\
@@ -190,7 +191,7 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
             | "--receive-max-file-bytes"
             | "--receive-max-session-bytes"
             | "--receive-conflict"
-            | "--sync-job" => {
+            | "--sync-job" | "--sync-tree-job" => {
                 receive_args.push(arg.clone());
                 receive_args.push(rest.next().ok_or_else(invalid)?.clone());
             }

@@ -23,10 +23,8 @@ impl ControlledViewer {
         control: crate::native_files::SendControl,
         timeout: Duration,
     ) -> Result<(), Error> {
-        if source.is_none() {
-            return Err(Error::Limits);
-        }
-        if !fr_wire::sync_job_state::upload_selected(&self.session.opened.selection) {
+        let mode = source.as_ref().ok_or(Error::Limits)?.mode();
+        if !mode.upload_selected(&self.session.opened.selection) {
             return Err(Error::WrongRole);
         }
         // One controller grant currently has one file-authority projection.

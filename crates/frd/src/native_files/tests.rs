@@ -434,7 +434,7 @@ fn explicit_folder_consent_expands_only_the_original_transfer_count_budget() {
     }
     // Consumption cannot turn a standing choice into ordinary receive consent.
     let clone = host_job.clone();
-    assert_eq!(host_job.take_sync_job().unwrap(), Some(41));
+    assert_eq!(host_job.take_sync_job().unwrap(), Some((41, JobMode::Flat)));
     assert!(clone.take_sync_job().is_err());
     assert!(clone.requires_sync_job());
     assert_eq!(

@@ -687,12 +687,8 @@ fn connect(
                 2,
             )
         }).map_err(before_start)?;
-        let offer = if connection
-            .receive
-            .as_ref()
-            .is_some_and(|receive| receive.sync_job.is_some())
-        {
-            fr_client::native::with_folder_sync(offer)
+        let offer = if let Some((_, mode)) = connection.receive.as_ref().and_then(|receive| receive.sync_job) {
+            fr_client::native::with_folder_sync_mode(offer, mode)
                 .map_err(|_| {
                     Failure::new(
                         "files_sync_capability_limit",
@@ -704,8 +700,8 @@ fn connect(
         } else {
             offer
         };
-        let offer = if connection.upload.sync_source.is_some() {
-            fr_client::native::with_folder_sync_upload(offer)
+        let offer = if let Some(source) = &connection.upload.sync_source {
+            fr_client::native::with_folder_sync_upload_mode(offer, source.mode)
                 .map_err(|_| {
                     Failure::new(
                         "files_sync_capability_limit",

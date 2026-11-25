@@ -98,6 +98,26 @@ fn controller_source_delivers_two_rounds_preserving_host_files_and_original_inpu
         let dest = Disk::new();
         fs::write(source.0.join("document.txt"), b"controller first version").unwrap();
         fs::write(dest.0.join("document.txt"), b"host original").unwrap();
+        // A caller cannot expand an original flat grant to cover subdirectories.
+        let mut tree = Some(SourceConfig::open(&source.0, 41).unwrap().with_recursive());
+        assert_eq!(
+            state.viewer.expect_folder_upload_source(
+                &mut tree,
+                SendControl::new(),
+                Duration::from_secs(2),
+            ),
+            Err(SendError::WrongRole)
+        );
+        assert!(tree.is_some());
+        assert_eq!(
+            state.host.offer_folder_upload_mode(
+                request(&state),
+                destination(&dest),
+                41,
+                fr_wire::sync_job_state::JobMode::Recursive,
+            ),
+            Err(crate::session_startup::FileReceiveError::NotNegotiated)
+        );
         state
             .viewer
             .expect_folder_upload(

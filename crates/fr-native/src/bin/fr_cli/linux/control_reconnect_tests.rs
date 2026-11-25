@@ -450,7 +450,7 @@ fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() 
                                     .capabilities
                                     .iter()
                                     .any(|cap| cap.name == fr_wire::sync_job_state::CAPABILITY)
-                                    .then_some(41),
+                                    .then_some((41, fr_wire::sync_job_state::JobMode::Flat)),
                             }))
                             .unwrap();
                     }

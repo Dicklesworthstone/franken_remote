@@ -192,6 +192,7 @@ enum ClipboardMode {
     FileDrop,
     FileDownload,
     FolderSync,
+    RecursiveFolderSync,
     FolderSyncUpload,
     FolderSyncUploadDuplex,
     FileDuplex,
@@ -289,6 +290,7 @@ async fn fixture_with_recovery(
             | ClipboardMode::FileDrop
             | ClipboardMode::FileDownload
             | ClipboardMode::FolderSync
+            | ClipboardMode::RecursiveFolderSync
             | ClipboardMode::FolderSyncUpload
             | ClipboardMode::FolderSyncUploadDuplex
             | ClipboardMode::FileDuplex
@@ -323,6 +325,7 @@ async fn fixture_with_recovery(
         ClipboardMode::FileDownload
             | ClipboardMode::FileDuplex
             | ClipboardMode::FolderSync
+            | ClipboardMode::RecursiveFolderSync
             | ClipboardMode::FolderSyncUploadDuplex
     ) {
         wire_capabilities.push(WireCapability {
@@ -351,10 +354,14 @@ async fn fixture_with_recovery(
             required: false,
         });
     }
-    if clipboard == ClipboardMode::FolderSync {
+    if matches!(clipboard, ClipboardMode::FolderSync | ClipboardMode::RecursiveFolderSync) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::sync_job_state::CAPABILITY.into(),
-            version: fr_wire::sync_job_state::VERSION,
+            version: if clipboard == ClipboardMode::RecursiveFolderSync {
+                fr_wire::sync_job_state::RECURSIVE_VERSION
+            } else {
+                fr_wire::sync_job_state::VERSION
+            },
             required: false,
         });
     }

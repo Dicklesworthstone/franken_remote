@@ -10,7 +10,7 @@ use crate::{quic, receive::DropDirectory, sender};
 use fr_wire::{
     WireError,
     files::Reason,
-    sync_job_state::{ConflictPolicy, SyncDirection, SyncJobState, SyncPhase},
+    sync_job_state::{ConflictPolicy, JobMode, SyncDirection, SyncJobState, SyncPhase},
 };
 use std::{fmt, path::Path, time::Duration};
 
@@ -255,9 +255,18 @@ impl HostConfig {
     /// Explicitly select atomic subtree versions as well as regular files.
     /// Both original endpoints must negotiate the recursive job version before
     /// scanning; this never upgrades an ordinary or flat file attachment.
-    pub fn with_recursive(mut self) -> Self {
-        self.recursive = true;
+    pub fn with_recursive(self) -> Self {
+        self.with_mode(JobMode::Recursive)
+    }
+
+    /// Carry the locally chosen command scope to the original file attachment.
+    #[must_use]
+    pub fn with_mode(mut self, mode: JobMode) -> Self {
+        self.recursive = mode == JobMode::Recursive;
         self
+    }
+    pub const fn mode(&self) -> JobMode {
+        JobMode::from_recursive(self.recursive)
     }
     pub const fn is_recursive(&self) -> bool {
         self.recursive

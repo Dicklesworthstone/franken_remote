@@ -9,6 +9,7 @@
 //! not expecting it (an unexpected attachment record would fail its session).
 //! The disk worker, byte limits and lease checks are `fr_files`' own; revoke
 //! or expiry fences the lane and a staged file is removed, never published.
+use fr_wire::sync_job_state::JobMode;
 use super::ControlledHost;
 use crate::{
     native_files::{Directory, HostDownload, SETUP_TIMEOUT, SendControl, SendRequest},
@@ -38,7 +39,7 @@ pub(super) fn between_turns(
 #[derive(Default)]
 pub(in crate::session_startup) struct Lane {
     /// Taken by each direction's one offer attempt; never retried after outcome.
-    configuration: Option<(Configuration, Option<u64>)>,
+    configuration: Option<(Configuration, Option<(u64, JobMode)>)>,
     selection: Option<SendRequest>,
     interactive: Option<Box<Sending>>,
     sync: Option<fr_files::sync::HostConfig>,
@@ -106,8 +107,8 @@ impl Lane {
         if let Some((configuration, job)) = self.configuration.take()
             && let Some(request) = request(host, view, nonce)
         {
-            if let Some(job_id) = job {
-                let _ = host.offer_folder_upload(request, configuration, job_id);
+            if let Some((job_id, mode)) = job {
+                let _ = host.offer_folder_upload_mode(request, configuration, job_id, mode);
             } else {
                 let _ = host.offer_file_drop(request, configuration);
             }

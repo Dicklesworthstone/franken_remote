@@ -14,6 +14,7 @@
 //! no automatic reconnect replay or remote browsing. Native copy drops can submit
 //! fresh selections on an ordinary upload intake. Status retains actual publication
 //! separately from progress, refusal and cleanup, without names or contents.
+use fr_wire::sync_job_state::JobMode;
 #[cfg(not(windows))]
 use crate::sys::rustix;
 #[cfg(not(windows))]
@@ -109,7 +110,11 @@ pub struct Directory {
     directory: DropDirectory,
     limits: Limits,
     /// Shared one-use acceptance across every startup-profile clone.
-    sync_job: Option<Arc<Mutex<Option<u64>>>>,
+    sync_job: Option<Arc<StandingJob>>,
+}
+struct StandingJob {
+    id: Mutex<Option<u64>>,
+    mode: JobMode,
 }
 impl fmt::Debug for Directory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -199,14 +204,25 @@ impl Directory {
     }
     /// Configure one locally selected upload job. Reconnecting cannot reuse
     /// this choice; all directory clones share its one-use consumption.
-    pub fn with_sync_job(mut self, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
+    pub fn with_sync_job(self, job_id: u64) -> Result<Self, fr_files::sync::LiveError> {
+        self.with_sync_job_mode(job_id, JobMode::Flat)
+    }
+
+    pub fn with_sync_job_mode(
+        mut self,
+        job_id: u64,
+        mode: JobMode,
+    ) -> Result<Self, fr_files::sync::LiveError> {
         if job_id == 0 || self.sync_job.is_some() {
             return Err(fr_files::sync::LiveError::InvalidConfig);
         }
         if self.directory.conflict_policy() != ConflictPolicy::KeepBoth {
             return Err(fr_files::sync::LiveError::KeepBothRequired);
         }
-        self.sync_job = Some(Arc::new(Mutex::new(Some(job_id))));
+        self.sync_job = Some(Arc::new(StandingJob {
+            id: Mutex::new(Some(job_id)),
+            mode,
+        }));
         Ok(self)
     }
     /// A spent standing choice never becomes ordinary receive consent.
@@ -214,22 +230,30 @@ impl Directory {
         self.sync_job.is_some()
     }
     pub fn sync_job_id(&self) -> Option<u64> {
+        self.sync_choice().map(|(id, _)| id)
+    }
+    pub fn sync_job_mode(&self) -> Option<JobMode> {
+        self.sync_choice().map(|(_, mode)| mode)
+    }
+    fn sync_choice(&self) -> Option<(u64, JobMode)> {
         self.sync_job.as_ref().and_then(|job| {
-            *job.lock()
+            job.id
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .map(|id| (id, job.mode))
         })
     }
-    pub(crate) fn take_sync_job(&self) -> Result<Option<u64>, Absence> {
+    pub(crate) fn take_sync_job(&self) -> Result<Option<(u64, JobMode)>, Absence> {
         let Some(job) = &self.sync_job else {
             return Ok(None);
         };
         if self.directory.conflict_policy() != ConflictPolicy::KeepBoth {
             return Err(Absence::Unavailable);
         }
-        job.lock()
+        job.id.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
-            .map(Some)
+            .map(|id| Some((id, job.mode)))
             .ok_or(Absence::Unavailable)
     }
     pub const fn limits(&self) -> Limits {

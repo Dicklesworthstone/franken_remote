@@ -4,6 +4,7 @@
 //! This shell retains only its validated local arguments. The original viewer
 //! opens and pins the destination before any remote connection, and its own
 //! session owner fences receiving on control loss or replacement.
+use fr_wire::sync_job_state::JobMode;
 use super::{Failure, notice_text};
 use crate::options::{self, Command};
 use std::fmt;
@@ -13,7 +14,7 @@ use std::fmt;
 #[derive(PartialEq, Eq)]
 pub(super) struct Receiving {
     arguments: Vec<String>,
-    sync_job: Option<u64>,
+    sync_job: Option<(u64, JobMode)>,
 }
 
 impl fmt::Debug for Receiving {
@@ -61,8 +62,8 @@ impl Receiving {
         }))
     }
 
-    pub(super) const fn sync_job(&self) -> Option<u64> {
-        self.sync_job
+    pub(super) fn sync_job(&self) -> Option<u64> {
+        self.sync_job.map(|(id, _)| id)
     }
 
     fn into_session_args(self, mut arguments: Vec<String>) -> Result<Vec<String>, Failure> {
@@ -122,9 +123,16 @@ pub(super) fn notice(pending: Option<&Receiving>, previous: Option<&str>) -> Opt
     pending.map(|receiving| {
         let scope = receiving.sync_job.map_or_else(
             || "Receive host files once: choose View and control, then Receive files. The destination applies only to the next connection.".to_owned(),
-            |job| format!(
-                "Accept host folder job {job}: choose View and control, then Receive files. New source versions are received throughout this connection, keeping both on conflicts. This job and destination apply only to the next connection."
-            ),
+            |(job, mode)| {
+                let scope = if mode == JobMode::Recursive {
+                    " including nested directories"
+                } else {
+                    ""
+                };
+                format!(
+                    "Accept host folder job {job}{scope}: choose View and control, then Receive files. New source versions are received throughout this connection, keeping both on conflicts. This job and destination apply only to the next connection."
+                )
+            },
         );
         notice_text(&format!("{scope} {}", previous.unwrap_or_default()))
     })

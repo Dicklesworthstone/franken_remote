@@ -16,6 +16,7 @@
 //! with `--no-clipboard` and a separate local privacy switch at either end.
 //! So is the controller's drop directory (`files`, requires the input agent):
 //! explicit viewer-to-host file sends land there only under the live lease.
+use fr_wire::sync_job_state::JobMode;
 pub mod approval;
 pub mod audio;
 pub mod encoder;
@@ -683,19 +684,19 @@ fn finish_runtime_offer(
     mut offer: Offer,
     adaptive_capture: bool,
     scales: bool,
-    folder_sync: bool,
-    folder_sync_upload: bool,
+    folder_sync: Option<JobMode>,
+    folder_sync_upload: Option<JobMode>,
 ) -> Result<Offer, serial::Error> {
     if scales {
         offer = fr_wire::display::picture::with_capability(offer)
             .map_err(|_| serial::Error::Configuration)?;
     }
-    if folder_sync {
-        offer = crate::session_startup::with_folder_sync(offer)
+    if let Some(mode) = folder_sync {
+        offer = mode.download_offer(offer)
             .map_err(|_| serial::Error::Configuration)?;
     }
-    if folder_sync_upload {
-        offer = crate::session_startup::with_folder_sync_upload(offer)
+    if let Some(mode) = folder_sync_upload {
+        offer = mode.upload_offer(offer)
             .map_err(|_| serial::Error::Configuration)?;
     }
     // Default rescue is optional. Real input, audio, file jobs and hardware
@@ -1084,12 +1085,12 @@ fn run_inner(
     let folder_sync = options
         .file_send
         .as_ref()
-        .is_some_and(|selection| selection.is_available() && selection.sync_job_id().is_some());
+        .and_then(|selection| selection.sync_job_mode());
     let folder_sync_upload = options
         .files
         .as_ref()
-        .is_some_and(|directory| directory.sync_job_id().is_some());
-    if options.microphone.is_some() || folder_sync || folder_sync_upload {
+        .and_then(|directory| directory.sync_job_mode());
+    if options.microphone.is_some() || folder_sync.is_some() || folder_sync_upload.is_some() {
         let offer = selected_offer(
             (
                 control,
@@ -1888,15 +1889,16 @@ impl Share<'_> {
         );
         let audio = self.options.audio.is_some();
         let adaptive_capture = self.options.adaptive_capture;
-        let folder_sync =
-            self.options.file_send.as_ref().is_some_and(|selection| {
-                selection.is_available() && selection.sync_job_id().is_some()
-            });
+        let folder_sync = self
+            .options
+            .file_send
+            .as_ref()
+            .and_then(|selection| selection.sync_job_mode());
         let folder_sync_upload = self
             .options
             .files
             .as_ref()
-            .is_some_and(|directory| directory.sync_job_id().is_some());
+            .and_then(|directory| directory.sync_job_mode());
         // ScreenCaptureKit scales in hardware, so a VideoToolbox host can send
         // a viewer pictures sized for its screen. Other captures stay native.
         let scales = scales_pictures(encoder);
@@ -2462,7 +2464,7 @@ mod tests {
                 )
                 .unwrap();
                 let offer =
-                    finish_runtime_offer(request.session.offer, adaptive, false, false, false)
+                    finish_runtime_offer(request.session.offer, adaptive, false, None, None)
                         .unwrap();
                 offer.validate().unwrap();
                 assert_eq!(offer.limits, ProtocolLimits::ABSOLUTE);
@@ -2559,7 +2561,7 @@ mod tests {
                             Ok::<_, fr_wire::negotiation::Error>(previous)
                         })();
                         let actual =
-                            finish_runtime_offer(current.clone(), false, scales, folder, false);
+                            finish_runtime_offer(current.clone(), false, scales, folder.then_some(JobMode::Flat), None);
                         if let Ok(previous) = previous {
                             let actual =
                                 actual.expect("existing hardware/file profile stays available");

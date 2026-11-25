@@ -1,6 +1,7 @@
 //! A client destination belongs to the original decoder-backed controller.
 //! Each actual terminal disk receipt is retained before a later turn can replace
 //! the receiver's last-result slot. Cleanup never guesses publication or replay.
+use fr_wire::sync_job_state::JobMode;
 use super::{ControlledViewer, Error};
 use crate::native_files::{Absence, ReceiveControl, ReceivePhase, ReceiveStatus};
 use asupersync::cx::Cx;
@@ -185,17 +186,18 @@ impl ControlledViewer {
         &mut self,
         mut configuration: Configuration,
         control: ReceiveControl,
-        sync_job: Option<u64>,
+        sync_job: Option<(u64, JobMode)>,
         timeout: Duration,
     ) -> Result<(), Error> {
         crate::session_startup::native_control::file_download_lane(&self.session.opened.selection)
             .map_err(|_| Error::WrongRole)?;
-        let sync = if let Some(job_id) = sync_job {
-            if !fr_wire::sync_job_state::selected(&self.session.opened.selection) {
+        let sync = if let Some((job_id, mode)) = sync_job {
+            if !mode.download_selected(&self.session.opened.selection) {
                 return Err(Error::WrongRole);
             }
             let job = ControllerJob::new(job_id, configuration.directory.clone())
-                .map_err(|error| send_error(receive_sync_error(error)))?;
+                .map_err(|error| send_error(receive_sync_error(error)))?
+                .with_mode(mode);
             configuration.directory = job.directory();
             Some(Box::new(job))
         } else {
