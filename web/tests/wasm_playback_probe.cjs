@@ -21,10 +21,18 @@ function probeFixture(options = {}) {
     f.media.free();
     const timers = new Map(), states = [], media = [];
     let now = 1000, serial = 0, drawn = null;
+    let drawStage = null, drawsInStage = 0;
     f.canvas.isConnected = true;
     f.canvas.getBoundingClientRect = () => ({ width: 320, height: 240 });
     f.canvas.getContext = () => ({
-        drawImage(frame) { drawn = frame; },
+        drawImage(frame) {
+            const stage = states.at(-1)?.stage;
+            if (drawStage !== stage) { drawStage = stage; drawsInStage = 0; }
+            drawsInStage++;
+            if (stage !== options.freezeAtStage || drawsInStage < (options.freezeFromDraw ?? 1)) {
+                drawn = frame;
+            }
+        },
         getImageData() {
             if (options.readThrows) throw new Error("private native error");
             const bytes = new Uint8Array(320 * 240 * 4);
@@ -94,6 +102,7 @@ function probeFixture(options = {}) {
                     close() { assert.equal(this.closed, false); this.closed = true; },
                 };
                 decoder.callbacks.output(frame);
+                if (options.presentEach) while (f.raf.length) f.raf.shift()();
             }
             while (f.raf.length) f.raf.shift()();
             await nextTurn();
@@ -152,6 +161,30 @@ test("the fixed sample passes real Rust admission through idle, burst, reset and
     }
     assert.equal(f.timers.size, 0);
 });
+
+for (const options of [
+    { freezeAtStage: "burst" },
+    { freezeAtStage: "burst", presentEach: true, freezeFromDraw: 3 },
+    { freezeAtStage: "last_picture" },
+]) {
+    test(`frozen canvas at ${options.freezeAtStage} draw ${options.freezeFromDraw ?? 1} fails despite native receipts`, async () => {
+        const f = probeFixture(options);
+        const { completion } = await untilFirstPicture(f);
+        await f.draw();
+        await f.advance(1000);
+        await f.draw(); // The first continuation does update the canvas.
+        await f.draw();
+        if (options.freezeAtStage === "last_picture") {
+            await f.advance(250);
+            await f.draw();
+        }
+        const result = await completion;
+        assert.equal(result.code, "browser_probe_pixels_unchanged");
+        assert.equal(f.probe.busy, false);
+        assert.ok(f.states.every((state) => state.status !== "passed"));
+        assert.ok(f.media[0].freed());
+    });
+}
 
 test("positive configuration without native output times out and releases its original decoder", async () => {
     const f = probeFixture();

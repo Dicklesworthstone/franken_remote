@@ -25,8 +25,9 @@ Open the installed host's HTTPS page and choose **Test video decoding**:
    the IDR and first P picture. Their canvas hashes must match the original run.
 7. Confirm zero charged access units/bytes and positive native cleanup.
 
-Canvas readback must contain opaque, nonblank pixels, and the first P picture
-must change them. Hashes remain local and are never logged. A passing result
+Canvas readback must contain opaque, nonblank pixels. Every presented picture
+within one decoder generation must change the preceding draw of this moving
+sample. This includes the last picture of a burst and the delayed final P picture. Hashes remain local and are never logged. A passing result
 reports the actual presentation and release counts; eight pictures are
 submitted, with at least six canvas presentations and eight releases.
 

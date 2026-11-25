@@ -43,7 +43,7 @@
                 deadline: started + MAX_DURATION_MS, timer: null, wait: null,
                 media: null, player: null, workDone: false, ending: false,
                 result: null, generation: 0, submitted: 0, presented: 0, released: 0,
-                frames: new Map(), stage: "loading",
+                frames: new Map(), lastDrawnHash: null, stage: "loading",
             };
             this.run = run;
             const completion = new Promise((resolve) => { run.complete = resolve; });
@@ -110,7 +110,6 @@
             const first = await this._pictures(run, [0], "single_idr");
             await this._idle(run, 1000);
             const continuation = await this._pictures(run, [1], "after_idle");
-            if (continuation === first) throw failure("browser_probe_pixels_unchanged");
             await this._pictures(run, [2, 3, 4], "burst");
             await this._idle(run, 250);
             await this._pictures(run, [5], "last_picture");
@@ -131,6 +130,7 @@
         async _configure(run) {
             this._check(run);
             run.generation += 1;
+            run.lastDrawnHash = null;
             run.stage = "configuration";
             this._notify(run);
             const result = await run.player.configure(
@@ -204,6 +204,11 @@
                 if (high - low < 32) throw failure("browser_probe_blank_canvas");
                 this._check(run);
                 frame.hash = hash >>> 0;
+                // Every picture of this fixed moving sample differs. Even when
+                // RAF coalesces a burst, a receipt for a new picture must not
+                // qualify pixels left behind by the previous canvas draw.
+                if (frame.hash === run.lastDrawnHash) throw failure("browser_probe_pixels_unchanged");
+                run.lastDrawnHash = frame.hash;
                 frame.presented = true;
                 run.presented += 1;
                 this._settlePicture(run);

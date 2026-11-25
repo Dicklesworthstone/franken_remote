@@ -50,7 +50,7 @@
             browser_probe_frame_timeout: "The decoder did not draw and release a picture within two seconds.",
             browser_probe_canvas_unavailable: "The test canvas could not be drawn or read.",
             browser_probe_blank_canvas: "The decoder did not produce the expected visible test pattern.",
-            browser_probe_pixels_unchanged: "The continuation did not update the test pattern.",
+            browser_probe_pixels_unchanged: "The decoded picture did not update the test pattern.",
             browser_probe_replay_mismatch: "Resetting the decoder did not reproduce the same test pictures.",
             browser_probe_decode_failed: "The HEVC decode test failed.",
             browser_probe_sample_invalid: "The Rust media owner refused the packaged test sample.",
