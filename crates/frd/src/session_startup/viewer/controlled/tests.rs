@@ -194,6 +194,7 @@ enum ClipboardMode {
     FolderSync,
     RecursiveFolderSync,
     FolderSyncUpload,
+    RecursiveFolderSyncUpload,
     FolderSyncUploadDuplex,
     FileDuplex,
     Combined,
@@ -292,6 +293,7 @@ async fn fixture_with_recovery(
             | ClipboardMode::FolderSync
             | ClipboardMode::RecursiveFolderSync
             | ClipboardMode::FolderSyncUpload
+            | ClipboardMode::RecursiveFolderSyncUpload
             | ClipboardMode::FolderSyncUploadDuplex
             | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
@@ -309,6 +311,7 @@ async fn fixture_with_recovery(
         clipboard,
         ClipboardMode::FileDrop
             | ClipboardMode::FolderSyncUpload
+            | ClipboardMode::RecursiveFolderSyncUpload
             | ClipboardMode::FolderSyncUploadDuplex
             | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
@@ -346,15 +349,24 @@ async fn fixture_with_recovery(
     }
     if matches!(
         clipboard,
-        ClipboardMode::FolderSyncUpload | ClipboardMode::FolderSyncUploadDuplex
+        ClipboardMode::FolderSyncUpload
+            | ClipboardMode::RecursiveFolderSyncUpload
+            | ClipboardMode::FolderSyncUploadDuplex
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::sync_job_state::UPLOAD_CAPABILITY.into(),
-            version: fr_wire::sync_job_state::UPLOAD_VERSION,
+            version: if clipboard == ClipboardMode::RecursiveFolderSyncUpload {
+                fr_wire::sync_job_state::RECURSIVE_VERSION
+            } else {
+                fr_wire::sync_job_state::UPLOAD_VERSION
+            },
             required: false,
         });
     }
-    if matches!(clipboard, ClipboardMode::FolderSync | ClipboardMode::RecursiveFolderSync) {
+    if matches!(
+        clipboard,
+        ClipboardMode::FolderSync | ClipboardMode::RecursiveFolderSync
+    ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::sync_job_state::CAPABILITY.into(),
             version: if clipboard == ClipboardMode::RecursiveFolderSync {

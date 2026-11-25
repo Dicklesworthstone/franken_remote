@@ -215,6 +215,137 @@ fn controller_source_delivers_two_rounds_preserving_host_files_and_original_inpu
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn recursive_upload_preserves_complete_versions_and_original_control_across_rounds() {
+    use fr_wire::sync_job_state::JobMode;
+
+    run(|c, h| async move {
+        let cleanup = Cx::current().unwrap();
+        let mut state = Box::pin(setup_upload(
+            &c,
+            &h,
+            ClipboardMode::RecursiveFolderSyncUpload,
+        ))
+        .await;
+        let source = Disk::new();
+        let dest = Disk::new();
+        fs::create_dir_all(source.0.join("tree/nested")).unwrap();
+        fs::create_dir(source.0.join("tree/empty-dir")).unwrap();
+        fs::write(source.0.join("tree/empty-file"), []).unwrap();
+        fs::write(source.0.join("tree/nested/payload"), b"first tree version").unwrap();
+        fs::create_dir(dest.0.join("tree")).unwrap();
+        fs::write(dest.0.join("tree/local"), b"host tree").unwrap();
+
+        // Wire version 2 cannot expand either endpoint's local flat choice.
+        let mut flat = Some(SourceConfig::open(&source.0, 41).unwrap());
+        assert_eq!(
+            state.viewer.expect_folder_upload_source(
+                &mut flat,
+                SendControl::new(),
+                Duration::from_secs(2),
+            ),
+            Err(SendError::WrongRole)
+        );
+        assert!(flat.is_some());
+        assert_eq!(
+            state
+                .host
+                .offer_folder_upload(request(&state), destination(&dest), 41),
+            Err(crate::session_startup::FileReceiveError::NotNegotiated)
+        );
+        assert!(!state.viewer.file_send_negotiating());
+        assert!(!state.host.file_receive_negotiating());
+        assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 1);
+
+        state
+            .viewer
+            .expect_folder_upload(
+                SourceConfig::open(&source.0, 41)
+                    .unwrap()
+                    .with_recursive()
+                    .with_scan_interval(Duration::from_millis(100))
+                    .unwrap(),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        state
+            .host
+            .offer_folder_upload_mode(request(&state), destination(&dest), 41, JobMode::Recursive)
+            .unwrap();
+        let lease = state.viewer.input.binding().lease;
+        let driver = state.driver.take().unwrap();
+        let ((), done) = Box::pin(support::both(
+            async {
+                let (mut n, mut t) = (80_000, 90_000);
+                let _ = state.viewer.action(key(true)).unwrap();
+                wait_for_round(&mut state, &c, &h, 1, &mut n, &mut t).await;
+                fs::write(source.0.join("tree/nested/payload"), b"second tree version").unwrap();
+                fs::write(
+                    source.0.join("tree/nested/added"),
+                    b"only in the second version",
+                )
+                .unwrap();
+                let _ = state.viewer.action(key(false)).unwrap();
+                wait_for_round(&mut state, &c, &h, 2, &mut n, &mut t).await;
+
+                assert_eq!(fs::read(dest.0.join("tree/local")).unwrap(), b"host tree");
+                assert!(!dest.0.join("tree/nested").exists());
+                assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 3);
+                let mut versions = Vec::new();
+                for entry in fs::read_dir(&dest.0).unwrap() {
+                    let root = entry.unwrap().path();
+                    if root.join("nested/payload").exists() {
+                        let payload = fs::read(root.join("nested/payload")).unwrap();
+                        if payload == b"first tree version" {
+                            assert!(!root.join("nested/added").exists());
+                        } else {
+                            assert_eq!(
+                                fs::read(root.join("nested/added")).unwrap(),
+                                b"only in the second version"
+                            );
+                        }
+                        versions.push(payload);
+                        assert!(root.join("empty-dir").is_dir());
+                        assert_eq!(fs::metadata(root.join("empty-file")).unwrap().len(), 0);
+                        assert!(!root.join("local").exists());
+                    }
+                }
+                versions.sort();
+                assert_eq!(
+                    versions,
+                    [
+                        b"first tree version".to_vec(),
+                        b"second tree version".to_vec()
+                    ]
+                );
+                assert_eq!(state.viewer.input.binding().lease, lease);
+                assert_eq!(state.effects.lock().unwrap().keys, [true, false]);
+                assert!(!state.viewer.is_closed() && !state.host.control().is_stopped());
+                super::download::retire(&mut state, &cleanup).await;
+                for status in [
+                    state.host.file_upload_sync_status().unwrap(),
+                    state.viewer.file_upload_sync_status().unwrap(),
+                ] {
+                    assert_eq!(status.confirmed_publications, 2);
+                    assert_eq!(status.confirmed_conflicts, 2);
+                    assert_eq!(status.rounds_settled, 2);
+                    assert!(status.cleanup_complete);
+                }
+                assert!(state.viewer.file_cleanup_finished());
+                assert_eq!(
+                    state.host.file_receive_cleanup(),
+                    crate::session_startup::FileReceiveCleanup::Finished(Ok(()))
+                );
+            },
+            driver,
+        ))
+        .await;
+        assert!(done.handoff_safe());
+        assert!(!state.seat.is_occupied());
+    });
+}
+
+#[test]
 fn ordinary_upload_capability_cannot_enable_a_standing_job() {
     run(|c, h| async move {
         let mut state = Box::pin(setup_upload(&c, &h, ClipboardMode::FileDrop)).await;
