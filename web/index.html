@@ -20,6 +20,7 @@
             <div class="controls-group">
                 <button id="btn-connect" type="button">Connect</button>
                 <button id="btn-probe" type="button">Test video decoding</button>
+                <button id="btn-audio-probe" type="button">Play test tone</button>
                 <button id="btn-request-control" type="button" disabled>Request Control</button>
                 <button id="btn-release-control" type="button" disabled>Release Control</button>
                 <button id="btn-fullscreen" type="button" disabled>Fullscreen</button>
@@ -38,6 +39,7 @@
                 <button id="btn-cancel-probe" type="button" disabled>Cancel test</button>
             </div>
         </section>
+        <p id="audio-probe-status" class="notice hidden" role="status" aria-live="polite"></p>
         <main id="viewport-wrap">
             <canvas id="viewport" tabindex="0" aria-label="Remote desktop viewport"></canvas>
             <div id="refusal-overlay" class="overlay hidden" role="alert">
@@ -51,6 +53,7 @@
     <script src="/wss_client.js"></script>
     <script src="/hevc_probe_sample.js"></script>
     <script src="/hevc_qualification.js"></script>
+    <script src="/opus_probe.js"></script>
     <script src="/app.js"></script>
 </body>
 </html>

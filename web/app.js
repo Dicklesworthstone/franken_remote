@@ -24,6 +24,32 @@
         ? new global.FrankenHevcProbe.Probe(element("probe-canvas"), showProbe)
         : null;
 
+    const btnAudioProbe = element("btn-audio-probe");
+    const audioStatus = element("audio-probe-status");
+    const audioProbe = global.FrankenOpusProbe ? new global.FrankenOpusProbe((result) => {
+        audioStatus.classList.remove("hidden");
+        audioStatus.textContent = {
+            running: "Testing local Opus decoding and playback…",
+            closing: "Closing the local audio test…",
+            passed: "Decoded six Opus packets and played the 120 ms tone through the browser audio graph.",
+            unavailable: "This test requires a secure context, WebCodecs audio decoding and Web Audio.",
+            failed: "The browser could not decode or play the test tone.",
+            invalid_output: "The decoder returned unexpected audio for the test tone.",
+            timeout: "The audio test exceeded its three-second deadline.",
+            cancelled: "The local audio test was cancelled.",
+            cleanup_failed: "The browser could not confirm audio cleanup.",
+        }[result];
+        btnAudioProbe.textContent = result === "cleanup_failed" ? "Retry audio cleanup"
+            : result === "running" ? "Cancel audio test" : "Play test tone";
+        buttons();
+        if (result === "closing") btnAudioProbe.disabled = true;
+    }) : null;
+    btnAudioProbe.addEventListener("click", () => {
+        if (!audioProbe || connecting || document.hidden || probe?.busy) return;
+        if (audioProbe.busy) audioProbe.cancel();
+        else audioProbe.start();
+    });
+
     function showProbe(state) {
         const stages = {
             loading: "Loading the local Rust decoder owner…",
@@ -69,7 +95,7 @@
     }
 
     btnProbe.addEventListener("click", () => {
-        if (connecting || !probe || probe.busy) return;
+        if (connecting || !probe || probe.busy || audioProbe?.busy) return;
         element("probe-panel").classList.remove("hidden");
         probe.start();
     });
@@ -82,7 +108,8 @@
 
     function buttons() {
         btnConnect.disabled = connecting;
-        btnProbe.disabled = connecting || !probe || probe.busy;
+        btnProbe.disabled = connecting || !probe || probe.busy || !!audioProbe?.busy;
+        btnAudioProbe.disabled = connecting || !audioProbe || !!probe?.busy;
         btnDisconnect.disabled = !connecting;
         // This ABI has startup/refusal support only. The Rust session/media
         // bridge must supply actual observation and input operations first.
@@ -144,6 +171,7 @@
     btnConnect.addEventListener("click", async () => {
         if (connecting) return;
         if (probe) probe.cancel();
+        audioProbe?.cancel();
         const attempt = {};
         connectionAttempt = attempt;
         connecting = true;
@@ -176,17 +204,20 @@
     document.addEventListener("visibilitychange", () => {
         client.lifecycle(document.hidden ? "hidden" : "visible");
         if (document.hidden && probe) probe.cancel();
+        if (document.hidden) audioProbe?.cancel();
     });
     global.addEventListener("blur", () => client.lifecycle("focus_lost"));
     global.addEventListener("focus", () => client.lifecycle("focus_gained"));
     global.addEventListener("pagehide", () => {
         if (probe) probe.cancel();
+        audioProbe?.cancel();
         client.lifecycle("pagehide");
         closeConnection("pagehide");
     });
     global.addEventListener("pageshow", (event) => {
         if (!event.persisted) return;
         if (probe) probe.cancel();
+        audioProbe?.cancel();
         client.lifecycle("bfcache_restore");
         closeConnection("bfcache_restore");
         client.lifecycle(document.hidden ? "hidden" : "visible");

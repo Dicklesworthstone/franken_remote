@@ -90,6 +90,11 @@ impl BrowserAssets {
                 "application/javascript; charset=utf-8",
                 APP_JS.as_bytes(),
             ),
+            "/opus_probe.js" => (
+                200,
+                "application/javascript; charset=utf-8",
+                OPUS_PROBE_JS.as_bytes(),
+            ),
             "/hevc_probe.js" => (
                 200,
                 "application/javascript; charset=utf-8",
@@ -148,6 +153,7 @@ impl BrowserAssets {
 
 const INDEX_HTML: &str = include_str!("../../../../web/index.html");
 const STYLES_CSS: &str = include_str!("../../../../web/styles.css");
+const OPUS_PROBE_JS: &str = include_str!("../../../../web/opus_probe.js");
 const HEVC_PROBE_JS: &str = include_str!("../../../../web/hevc_probe.js");
 const HEVC_PROBE_SAMPLE_JS: &str = include_str!("../../../../web/hevc_probe_sample.js");
 const HEVC_QUALIFICATION_JS: &str = include_str!("../../../../web/hevc_qualification.js");
@@ -189,6 +195,7 @@ mod tests {
         for (path, expected_ct) in [
             ("/fr.js", "application/javascript; charset=utf-8"),
             ("/app.js", "application/javascript; charset=utf-8"),
+            ("/opus_probe.js", "application/javascript; charset=utf-8"),
             ("/hevc_probe.js", "application/javascript; charset=utf-8"),
             (
                 "/hevc_probe_sample.js",
@@ -219,6 +226,7 @@ mod tests {
         }
         let html = String::from_utf8(BrowserAssets::serve("/").unwrap().body).unwrap();
         assert!(!html.contains("http://") && !html.contains("https://"));
+        assert!(html.contains("/opus_probe.js"));
         assert!(html.contains("/hevc_probe.js"));
         assert!(html.contains("/hevc_probe_sample.js"));
         assert!(html.contains("/hevc_qualification.js"));
