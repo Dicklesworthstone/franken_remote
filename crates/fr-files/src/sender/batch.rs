@@ -54,6 +54,8 @@ impl Selection {
     pub fn push_directory(&mut self, directory: File, name: &str) -> Result<(), Error> {
         self.push_selected(directory, name, true)
     }
+    // Expected versions come from the qualified Unix folder scanner only.
+    #[cfg(unix)]
     pub(crate) fn push_expected(
         &mut self,
         file: File,

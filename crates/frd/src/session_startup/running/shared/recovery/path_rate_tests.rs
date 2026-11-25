@@ -3,7 +3,7 @@
 //! these tests do not measure a WAN or qualify a native encoder.
 use super::*;
 use crate::media::shared_publisher::Error as PublisherError;
-use fr_media::bitrate::Reason;
+use fr_media::{bitrate::Reason, pacing::Controller};
 use fr_transport::quic::PathLoad;
 
 fn enable(g: &mut Group, adaptive: bool) {
@@ -75,7 +75,7 @@ async fn hold(g: &mut Group, queued: &[bool]) {
                     assert!(report.unchanged);
                     observations += 1;
                     observed = true;
-                    let interval = g.publisher.pacing().map_or(50_000, |p| p.interval_us());
+                    let interval = g.publisher.pacing().map_or(50_000, Controller::interval_us);
                     next_capture = (at + interval).max(now(&g.peers[0].h).unwrap());
                 }
                 Err(PublisherError::Media(crate::media::Error::Backpressure)) => {}

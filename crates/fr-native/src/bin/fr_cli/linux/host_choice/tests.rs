@@ -130,6 +130,7 @@ fn picker_request_reports_the_confirmed_choices_with_the_identity() {
         receive_available: false,
         receive_files: false,
         microphone_controls: false,
+        capture_system_shortcuts: false,
     };
     let report: serde_json::Value =
         serde_json::from_str(&selected_report(&choice, 8443, true, Some(choices))).unwrap();
@@ -139,6 +140,7 @@ fn picker_request_reports_the_confirmed_choices_with_the_identity() {
     assert_eq!(report["choose_display"], true);
     assert_eq!(report["playback_audio"], true);
     assert_eq!(report["send_files"], false);
+    assert_eq!(report["capture_system_shortcuts"], false);
     assert_eq!(report["input_requested"], false);
     let text = selected_report(&choice, 8443, false, Some(choices));
     assert!(text.contains("view only") && text.contains("clipboard not shared"));
