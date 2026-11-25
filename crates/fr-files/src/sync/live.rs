@@ -1,4 +1,5 @@
 //! One-way, locally selected folder jobs on an existing controlled file lane.
+//! Recursive jobs publish each top-level directory as one atomic ATP tree version.
 //!
 //! A settled round confirms delivery of its selected source versions. It does
 //! not assert that the two directories are identical: independent client edits
@@ -208,6 +209,7 @@ pub struct HostConfig {
     pub(super) job_id: u64,
     pub(super) root: DropDirectory,
     pub(super) limits: SyncLimits,
+    pub(super) recursive: bool,
     pub(super) interval_us: u64,
     pub(super) round_lifetime_us: u64,
 }
@@ -216,6 +218,7 @@ impl fmt::Debug for HostConfig {
         f.debug_struct("FolderSyncSource")
             .field("job_id", &self.job_id)
             .field("limits", &self.limits)
+            .field("recursive", &self.recursive)
             .finish_non_exhaustive()
     }
 }
@@ -244,9 +247,20 @@ impl HostConfig {
             job_id,
             root,
             limits,
+            recursive: false,
             interval_us: 5_000_000,
             round_lifetime_us: ROUND_LIFETIME_US,
         })
+    }
+    /// Explicitly select atomic subtree versions as well as regular files.
+    /// Both original endpoints must negotiate the recursive job version before
+    /// scanning; this never upgrades an ordinary or flat file attachment.
+    pub fn with_recursive(mut self) -> Self {
+        self.recursive = true;
+        self
+    }
+    pub const fn is_recursive(&self) -> bool {
+        self.recursive
     }
     pub const fn job_id(&self) -> u64 {
         self.job_id

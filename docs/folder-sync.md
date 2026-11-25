@@ -103,9 +103,9 @@ This does not yet implement a bidirectional reconciliation job.
 The live job scans at five-second intervals once all currently observed changes
 have been delivered. Deferred pages start another bounded round immediately
 after the preceding page settles, and recheck the source under current authority.
-Each scan allows at most 256 flat directory entries (including private
-staging entries), 64 MiB per file and 256 MiB of source content. Subdirectories,
-symlinks and special files refuse the job. A delivery round selects at most
+Each scan allows at most 256 directory entries (including private staging
+entries), 64 MiB per selected item and 256 MiB of source content. Flat jobs
+refuse subdirectories; all jobs refuse symlinks and special files. A delivery round selects at most
 32 changed files, so a larger directory progresses through bounded pages without
 retaining a larger batch of open sources. Selection continues after the last
 name in the preceding settled page and wraps once; frequently edited early names
@@ -142,7 +142,7 @@ Once the transfer manifest has been announced, a changed source remains a
 terminal refusal; uncertain or published transfers are never replayed by this
 scan retry.
 
-Live jobs keep a bounded manifest cache inside the original source owner.
+Flat live jobs keep a bounded manifest cache inside the original source owner.
 Every scan still enumerates the pinned directory, checks authority and resource
 limits, and opens each regular file without following links. Unchanged files
 with matching device, inode, size, modification time and change time can reuse
@@ -187,11 +187,48 @@ never turn a failed cleanup or uncertain durability result into success.
 Neither the job, its accepted destination nor its ledger is replayed by a
 reconnecting viewer. Start a new explicit job to authorize another session.
 
-Native jobs select one direction for delivery of flat regular files.
-Bidirectional remote reconciliation, recursive jobs, persistent jobs across
-reconnects and native desktop/live-tailnet qualification remain separate work
-under the parent bead. The existing local two-way engine is not evidence that
-those remote features are complete.
+Native jobs select one direction for delivery. Bidirectional remote
+reconciliation, persistent jobs across reconnects and native desktop/live-tailnet
+qualification remain separate work under the parent bead. The existing local
+two-way engine is not evidence that those remote features are complete.
+
+### Recursive atomic directory versions
+
+The live source and destination APIs expose explicit `with_recursive()`
+selection. Both owners must make that choice and positively negotiate version
+2 of their direction's existing sync capability; a flat selection never gains
+recursive authority from its peer. Version 1 retains the existing flat behavior.
+Version 2 uses the existing ATP directory profiles without another capability
+slot or any change to the job-state record.
+
+Each top-level directory becomes one versioned item. Its complete contents,
+including empty files and empty directories, travel through the ordinary ATP
+tree sender and publish atomically. For example, an initial `project/` and a
+later changed `project/` produce two complete trees under the existing KeepBoth
+conflict naming policy. The second delivery does not overwrite or merge the
+first, and source deletions do not delete destination data. Top-level regular
+files can coexist with these trees in the same bounded delivery page.
+
+The 64 MiB item ceiling applies to the whole selected subtree, and the 256 MiB
+scan ceiling includes every subtree's content. The 256-entry scan bound counts
+top-level names (including skipped private staging names) and all admitted
+subtree descendants. Each individual tree also retains ATP's existing limits
+of 64 manifest leaves (files or empty directories), 128 descendant nodes and
+depth 8; reserved staging names inside a tree are refused. A page still contains at most 32
+top-level items; the original session still allows at most 512 attempted
+versions and 1 GiB. A subtree is refused before content beyond its remaining
+byte or node budget is read.
+
+Recursive scans hash the actual descendants on every scan; a parent directory's
+timestamps do not establish that its child content is unchanged. The version
+includes file/tree kind, content size, canonical ATP Merkle root and structural
+metadata commitment. This detects an empty file becoming an empty directory
+as well as ordinary content changes. Sender preparation independently verifies
+that exact version before sending an offer and retains the scanned size as its
+read ceiling, so a changed source cannot expand a previously admitted budget.
+Only confirmed atomic publication and cleanup advance the version ledger.
+Cancellation preserves already published items and removes unfinished private
+staging under the original job's owner and deadline.
 
 ## Local reconciliation engine
 

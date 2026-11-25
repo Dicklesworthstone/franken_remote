@@ -180,6 +180,9 @@ pub struct MediaChannel {
     /// Fixed for this exact file direction by its independent bilateral job
     /// selection. A sibling direction or later offer cannot enable job records.
     files_sync: bool,
+    /// Recursive consent is exact v2 on this original directional attachment;
+    /// later local selection mutation cannot upgrade a flat or sibling lane.
+    pub(super) files_sync_recursive: bool,
     /// Sibling dispatch cannot defer a microphone offer absent from this
     /// original connection's positive selection.
     audio_up: bool,
@@ -836,6 +839,14 @@ impl MediaChannel {
             FileDirection::ToController => fr_wire::sync_job_state::selected(scope.selection),
             FileDirection::ToHost => fr_wire::sync_job_state::upload_selected(scope.selection),
         };
+        let files_sync_recursive = match files_direction {
+            FileDirection::ToController => {
+                fr_wire::sync_job_state::recursive_selected(scope.selection)
+            }
+            FileDirection::ToHost => {
+                fr_wire::sync_job_state::recursive_upload_selected(scope.selection)
+            }
+        };
         Self {
             connection,
             state,
@@ -858,6 +869,7 @@ impl MediaChannel {
             credit: attachment::credit::selected(scope.selection),
             files_duplex,
             files_sync,
+            files_sync_recursive,
             audio_up: fr_wire::audio_up::uplink_selected(scope.selection),
             files_direction,
         }

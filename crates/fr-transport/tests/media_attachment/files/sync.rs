@@ -491,7 +491,7 @@ fn upload_job_selection_cannot_enable_the_sibling_download_or_change_record_dire
 #[test]
 fn absent_or_unknown_upload_job_marker_keeps_the_original_plain_file_family() {
     run_test!(cx, {
-        for version in [None, Some(sync_job_state::UPLOAD_VERSION + 1)] {
+        for version in [None, Some(sync_job_state::RECURSIVE_VERSION + 1)] {
             let mut link = Link::new(&cx).await;
             enable_upload_sync(&mut link, false);
             if let Some(version) = version {
@@ -527,6 +527,202 @@ fn absent_or_unknown_upload_job_marker_keeps_the_original_plain_file_family() {
                 Err(Error::WrongRoute)
             );
             assert_eq!(link.h.usage(), before);
+        }
+    });
+}
+
+#[test]
+fn recursive_jobs_retain_original_v2_selection_on_uploads_and_downloads() {
+    run_test!(cx, {
+        for upload in [false, true] {
+            for duplex in [false, true] {
+                let mut link = Link::new(&cx).await;
+                let capability = if upload {
+                    enable_upload_sync(&mut link, duplex);
+                    sync_job_state::UPLOAD_CAPABILITY
+                } else {
+                    enable_sync(&mut link, duplex);
+                    sync_job_state::CAPABILITY
+                };
+                link.selection
+                    .capabilities
+                    .iter_mut()
+                    .find(|cap| cap.name == capability)
+                    .unwrap()
+                    .version = sync_job_state::RECURSIVE_VERSION;
+                let _input = attach(&mut link, &cx, 8, MediaRole::Input).await;
+                let role = if !upload && duplex {
+                    MediaRole::FilesDownload
+                } else {
+                    MediaRole::Files
+                };
+                let (host, viewer, hr, vr) = attach(&mut link, &cx, 9, role).await;
+                assert_eq!(hr.outbound.messages, Messages::FilesSync);
+                assert_eq!(vr.outbound.messages, Messages::FilesSync);
+                // The completed attachment keeps its original exact v2 even
+                // when later local negotiation state reverts to flat v1.
+                link.selection
+                    .capabilities
+                    .iter_mut()
+                    .find(|cap| cap.name == capability)
+                    .unwrap()
+                    .version = sync_job_state::VERSION;
+                let host =
+                    FilesChannel::new(&link.h, host, InputLeaseId::from_raw(123), 9).unwrap();
+                let viewer =
+                    FilesChannel::new(&link.c, viewer, InputLeaseId::from_raw(123), 9).unwrap();
+                assert!(host.sync_selected() && viewer.sync_selected());
+                assert!(host.sync_recursive_selected() && viewer.sync_recursive_selected());
+                let state = if upload {
+                    upload_advertised()
+                } else {
+                    advertised()
+                };
+                transfer_state(&mut link, &cx, &host, &viewer, state).await;
+                transfer_state(
+                    &mut link,
+                    &cx,
+                    &viewer,
+                    &host,
+                    SyncJobState {
+                        phase: SyncPhase::Accepted,
+                        ..state
+                    },
+                )
+                .await;
+                let (source, receiver) = if upload {
+                    (&viewer, &host)
+                } else {
+                    (&host, &viewer)
+                };
+                for profile in [
+                    wire::ATP_PORTABLE_DIRECTORY_FULL,
+                    wire::ATP_PORTABLE_DIRECTORY_ENTRIES,
+                ] {
+                    transfer_directory_offer(&mut link, &cx, source, receiver, profile).await;
+                }
+            }
+        }
+    });
+}
+
+/// Route the existing directory-profile offer envelopes, including profile 3.
+/// ATP content validation and local path consent belong to the file owner.
+async fn transfer_directory_offer(
+    link: &mut Link,
+    cx: &Cx,
+    source: &FilesChannel,
+    receiver: &FilesChannel,
+    profile: u16,
+) {
+    let host = source.outgoing().sender == wire::Role::Host;
+    let mut bytes = vec![0; source.limits().record_bytes()];
+    let n = wire::encode(
+        FileMessage {
+            id: 1,
+            body: Body::Offer {
+                profile,
+                atp: b"directory-routing-fixture",
+            },
+        },
+        source.outgoing(),
+        source.limits(),
+        &mut bytes,
+    )
+    .unwrap();
+    bytes.truncate(n);
+    let until = clock(cx) + 1_000_000;
+    source
+        .send(
+            if host { &mut link.h } else { &mut link.c },
+            cx,
+            &bytes,
+            until,
+            || true,
+        )
+        .unwrap();
+    let mut received = false;
+    while !received
+        || !source
+            .send_drained(if host { &link.h } else { &link.c })
+            .unwrap()
+    {
+        assert!(clock(cx) < until, "directory offer did not drain");
+        link.drive(cx).await;
+        receiver
+            .dispatch(
+                if host { &mut link.c } else { &mut link.h },
+                cx,
+                || true,
+                |record| {
+                    assert!(!received);
+                    assert_eq!(record, bytes);
+                    assert!(wire::decode(record, receiver.incoming(), receiver.limits()).is_ok());
+                    received = true;
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn recursive_selection_never_upgrades_a_flat_sibling_or_changes_after_attachment() {
+    run_test!(cx, {
+        for recursive_upload in [false, true] {
+            let mut link = Link::new(&cx).await;
+            enable_sync(&mut link, true);
+            link.selection.capabilities.push(Capability {
+                name: sync_job_state::UPLOAD_CAPABILITY.into(),
+                version: if recursive_upload {
+                    sync_job_state::RECURSIVE_VERSION
+                } else {
+                    sync_job_state::UPLOAD_VERSION
+                },
+                required: false,
+            });
+            if !recursive_upload {
+                link.selection
+                    .capabilities
+                    .iter_mut()
+                    .find(|cap| cap.name == sync_job_state::CAPABILITY)
+                    .unwrap()
+                    .version = sync_job_state::RECURSIVE_VERSION;
+            }
+            link.selection
+                .capabilities
+                .sort_by(|a, b| a.name.cmp(&b.name));
+            let _input = attach(&mut link, &cx, 8, MediaRole::Input).await;
+            let (upload_h, upload_c, _, _) = attach(&mut link, &cx, 9, MediaRole::Files).await;
+            let (download_h, download_c, _, _) =
+                attach(&mut link, &cx, 10, MediaRole::FilesDownload).await;
+            for cap in &mut link.selection.capabilities {
+                if cap.name == sync_job_state::CAPABILITY
+                    || cap.name == sync_job_state::UPLOAD_CAPABILITY
+                {
+                    cap.version = if cap.version == sync_job_state::RECURSIVE_VERSION {
+                        sync_job_state::VERSION
+                    } else {
+                        sync_job_state::RECURSIVE_VERSION
+                    };
+                }
+            }
+            let upload_h =
+                FilesChannel::new(&link.h, upload_h, InputLeaseId::from_raw(123), 9).unwrap();
+            let upload_c =
+                FilesChannel::new(&link.c, upload_c, InputLeaseId::from_raw(123), 9).unwrap();
+            let download_h =
+                FilesChannel::new(&link.h, download_h, InputLeaseId::from_raw(123), 10).unwrap();
+            let download_c =
+                FilesChannel::new(&link.c, download_c, InputLeaseId::from_raw(123), 10).unwrap();
+            assert!(upload_h.sync_selected() && upload_c.sync_selected());
+            assert!(download_h.sync_selected() && download_c.sync_selected());
+            assert_eq!(upload_h.sync_recursive_selected(), recursive_upload);
+            assert_eq!(upload_c.sync_recursive_selected(), recursive_upload);
+            assert_eq!(download_h.sync_recursive_selected(), !recursive_upload);
+            assert_eq!(download_c.sync_recursive_selected(), !recursive_upload);
+            transfer_state(&mut link, &cx, &upload_h, &upload_c, upload_advertised()).await;
+            transfer_state(&mut link, &cx, &download_h, &download_c, advertised()).await;
         }
     });
 }

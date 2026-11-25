@@ -1,5 +1,6 @@
 //! Conflict exhaustion does not depend on visible staging names.
 #![cfg(target_os = "linux")]
+#[path = "publication_tests/sync_durability.rs"]
 mod sync_durability;
 
 use super::{DropDirectory, Error, Limits, Publication};

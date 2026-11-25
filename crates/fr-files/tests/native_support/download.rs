@@ -29,6 +29,22 @@ impl Link {
         InputClient,
         Authority,
     ) {
+        self.upload_sync_version(cx, sync.then_some(sync_job_state::UPLOAD_VERSION), duplex)
+            .await
+    }
+
+    pub async fn upload_sync_version(
+        &mut self,
+        cx: &Cx,
+        version: Option<u16>,
+        duplex: bool,
+    ) -> (
+        FilesChannel,
+        FilesChannel,
+        InputSession,
+        InputClient,
+        Authority,
+    ) {
         self.selection.role = Role::RequestControl;
         for name in [
             attachment::INPUT_CAPABILITY,
@@ -51,10 +67,10 @@ impl Link {
                 });
             }
         }
-        if sync {
+        if let Some(version) = version {
             self.selection.capabilities.push(Capability {
                 name: sync_job_state::UPLOAD_CAPABILITY.into(),
-                version: sync_job_state::UPLOAD_VERSION,
+                version,
                 required: false,
             });
         }
@@ -82,6 +98,21 @@ impl Link {
         InputClient,
         Authority,
     ) {
+        self.download_sync_version(cx, sync.then_some(sync_job_state::VERSION))
+            .await
+    }
+
+    pub async fn download_sync_version(
+        &mut self,
+        cx: &Cx,
+        version: Option<u16>,
+    ) -> (
+        FilesChannel,
+        FilesChannel,
+        InputSession,
+        InputClient,
+        Authority,
+    ) {
         self.selection.role = Role::RequestControl;
         for name in [
             attachment::INPUT_CAPABILITY,
@@ -95,10 +126,10 @@ impl Link {
                 required: true,
             });
         }
-        if sync {
+        if let Some(version) = version {
             self.selection.capabilities.push(Capability {
                 name: sync_job_state::CAPABILITY.into(),
-                version: sync_job_state::VERSION,
+                version,
                 required: false,
             });
         }

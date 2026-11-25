@@ -24,7 +24,7 @@ impl Drop for Scratch {
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn fixture(test: impl FnOnce(&Path, &Cx)) {
+pub(super) fn fixture(test: impl FnOnce(&Path, &Cx)) {
     RuntimeBuilder::new()
         .worker_threads(2)
         .enable_platform_reactor(true)
@@ -36,7 +36,7 @@ fn fixture(test: impl FnOnce(&Path, &Cx)) {
             test(&scratch.0, &cx);
         });
 }
-fn selected(path: &Path, cx: &Cx) -> Source {
+pub(super) fn selected(path: &Path, cx: &Cx) -> Source {
     Source::spawn_directory(
         cx.clone(),
         File::open(path).unwrap(),
@@ -46,7 +46,7 @@ fn selected(path: &Path, cx: &Cx) -> Source {
     )
     .unwrap()
 }
-fn event(source: &mut Source) -> Result<Event, Error> {
+pub(super) fn event(source: &mut Source) -> Result<Event, Error> {
     let until = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(event) = source.poll()? {
@@ -56,13 +56,13 @@ fn event(source: &mut Source) -> Result<Event, Error> {
         thread::yield_now();
     }
 }
-fn prepared(source: &mut Source) -> TransferManifest {
+pub(super) fn prepared(source: &mut Source) -> TransferManifest {
     let Event::Prepared(manifest) = event(source).unwrap() else {
         panic!("source did not prepare its original selection");
     };
     *manifest
 }
-fn reap(source: &mut Source) {
+pub(super) fn reap(source: &mut Source) {
     let until = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(result) = source.reap() {
@@ -243,11 +243,13 @@ fn empty_leaf_mutation_after_selection_is_refused_before_manifest() {
             deadline: clock.now().as_nanos() / 1000 + 2_000_000,
             clock,
         };
+        let mut check = || gate.check();
         let mut tree =
-            tree::Selection::new(File::open(path).unwrap(), "selected", true, 100, &gate).unwrap();
+            tree::Selection::new(File::open(path).unwrap(), "selected", true, 100, &mut check)
+                .unwrap();
         fs::write(path.join("nested/empty/added"), b"late").unwrap();
         assert!(matches!(
-            prepare(&mut tree, "selected".into(), true, &gate),
+            prepare(&mut tree, "selected".into(), true, &mut check),
             Err(Error::SourceChanged)
         ));
     });

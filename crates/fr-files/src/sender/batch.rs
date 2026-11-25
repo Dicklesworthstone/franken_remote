@@ -1,5 +1,7 @@
 //! Explicit local file/tree multi-selection on the original sender, never a sync job.
 //! One source thread and one transfer at a time; no new wire profile or channel.
+#[cfg(unix)]
+use super::ExpectedSource;
 use super::{Error, Outcome, Receipt, Sender, Stage, micros};
 use crate::receive::Publication;
 use asupersync::atp::safety::validate_portable_path_component;
@@ -15,7 +17,8 @@ struct Selected {
     file: File,
     name: String,
     directory: bool,
-    expected_source: Option<(u64, String)>,
+    #[cfg(unix)]
+    expected_source: Option<ExpectedSource>,
 }
 /// Only already selected local descriptors can enter a batch. Construction does
 /// not inspect, hash or read them. Names are destination basenames, never paths.
@@ -63,14 +66,30 @@ impl Selection {
         size: u64,
         sha256: &str,
     ) -> Result<(), Error> {
-        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(Error::Source);
-        }
-        self.push_selected(file, name, false)?;
+        self.push_version(
+            file,
+            name,
+            ExpectedSource::File {
+                size,
+                sha256: sha256.to_owned(),
+            },
+        )
+    }
+    /// Revalidate this exact scanned kind, content and structural metadata in
+    /// the independent source worker before any offer enters the file lane.
+    #[cfg(unix)]
+    pub(crate) fn push_version(
+        &mut self,
+        file: File,
+        name: &str,
+        expected: ExpectedSource,
+    ) -> Result<(), Error> {
+        expected.validate()?;
+        self.push_selected(file, name, expected.directory())?;
         self.files
             .back_mut()
             .expect("selection just inserted")
-            .expected_source = Some((size, sha256.to_owned()));
+            .expected_source = Some(expected);
         Ok(())
     }
     fn push_selected(&mut self, file: File, name: &str, directory: bool) -> Result<(), Error> {
@@ -94,6 +113,7 @@ impl Selection {
             file,
             name: owned,
             directory,
+            #[cfg(unix)]
             expected_source: None,
         });
         Ok(())
@@ -289,22 +309,30 @@ impl Sender<'_> {
         let Some(selected) = batch.selection.files.pop_front() else {
             return Ok(());
         };
+        #[cfg(unix)]
+        let expected_bytes = selected.expected_source.as_ref().map(ExpectedSource::size);
+        #[cfg(not(unix))]
+        let expected_bytes = None;
         if let Err(error) = self.begin_selected(
             q,
             selected.file,
             &selected.name,
             Some(deadline),
             selected.directory,
+            expected_bytes,
         ) {
             self.fail(error);
             let _ = self.retire(q);
             self.settle_batch();
             return Err(error);
         }
-        self.transfer
-            .as_mut()
-            .expect("selected transfer just started")
-            .expected_source = selected.expected_source;
+        #[cfg(unix)]
+        {
+            self.transfer
+                .as_mut()
+                .expect("selected transfer just started")
+                .expected_source = selected.expected_source;
+        }
         let batch = self.batch.as_mut().expect("original batch retained");
         batch.report.started += 1;
         batch.recorded_current = false;

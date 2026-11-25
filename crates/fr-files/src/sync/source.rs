@@ -21,7 +21,7 @@ use std::{
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Identity(u64, u64, u64, i64, i64, i64, i64);
 
-fn identity(meta: &Metadata) -> Identity {
+pub(super) fn identity(meta: &Metadata) -> Identity {
     Identity(
         meta.dev(),
         meta.ino(),
@@ -33,7 +33,7 @@ fn identity(meta: &Metadata) -> Identity {
     )
 }
 
-fn unchanged(file: &File, original: &Identity) -> Result<(), SyncError> {
+pub(super) fn unchanged(file: &File, original: &Identity) -> Result<(), SyncError> {
     if identity(&file.metadata()?) != *original {
         return Err(SyncError::SourceChanged);
     }
@@ -166,12 +166,12 @@ where
     })
 }
 
-struct Names {
-    values: Vec<String>,
-    inspected: u32,
+pub(super) struct Names {
+    pub(super) values: Vec<String>,
+    pub(super) inspected: u32,
 }
 
-fn entry_names<F>(
+pub(super) fn entry_names<F>(
     root: BorrowedFd<'_>,
     limits: SyncLimits,
     check: &mut F,

@@ -208,7 +208,10 @@ fn changed_names_replace_the_snapshot_instead_of_accumulating_old_entries() {
     directory.write("added", b"another");
     let added = directory.cached(&mut cache, 3, limits);
     assert!(added == directory.canonical(3, limits));
-    assert_eq!(cache.snapshot.as_ref().unwrap().scan.manifest.entries.len(), 2);
+    assert_eq!(
+        cache.snapshot.as_ref().unwrap().scan.manifest.entries.len(),
+        2
+    );
 }
 
 #[test]
@@ -417,9 +420,11 @@ fn a_small_edit_reuses_large_siblings_without_refreshing_the_full_scan_deadline(
         // including on filesystems whose ctime granularity is coarser.
         File::open(directory.path.join("small"))
             .unwrap()
-            .set_times(FileTimes::new().set_modified(
-                UNIX_EPOCH + Duration::new(1_700_000_000 + revision, 123_456_789),
-            ))
+            .set_times(
+                FileTimes::new().set_modified(
+                    UNIX_EPOCH + Duration::new(1_700_000_000 + revision, 123_456_789),
+                ),
+            )
             .unwrap();
         let mut checks = 0;
         let current = cache
@@ -485,7 +490,10 @@ fn mixed_entry_eligibility_and_changed_names_preserve_the_canonical_merkle_root(
         first.entries["coarse"].sha256_hex
     );
     assert_eq!(current.entries["empty"].size, 0);
-    assert_eq!(reuses(&cache), u8::from(directory.precise_timestamps("large")));
+    assert_eq!(
+        reuses(&cache),
+        u8::from(directory.precise_timestamps("large"))
+    );
 }
 
 #[test]

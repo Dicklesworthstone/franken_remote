@@ -84,6 +84,27 @@ fn receiver_owner(
     authority: Authority,
     upload: bool,
 ) -> (ReceiverJob, Receiver) {
+    receiver_owner_mode(
+        cx,
+        path,
+        (job_id, false),
+        connection,
+        lane,
+        authority,
+        upload,
+    )
+}
+
+fn receiver_owner_mode(
+    cx: &Cx,
+    path: &Path,
+    job: (u64, bool),
+    connection: &mut fr_transport::quic::QuicRecords,
+    lane: fr_transport::quic::files::FilesChannel,
+    authority: Authority,
+    upload: bool,
+) -> (ReceiverJob, Receiver) {
+    let (job_id, recursive) = job;
     let directory = DropDirectory::open(
         path,
         Limits {
@@ -100,6 +121,11 @@ fn receiver_owner(
         ReceiverJob::new(job_id, directory)
     }
     .unwrap();
+    let client = if recursive {
+        client.with_recursive()
+    } else {
+        client
+    };
     let receiver = Receiver::spawn_with_authority(
         cx.clone(),
         connection,
@@ -166,16 +192,48 @@ impl Running {
         duplex: bool,
         negotiated: bool,
     ) -> Self {
+        Self::configured_mode(
+            cx,
+            source,
+            destination,
+            (accepted_id, false),
+            upload,
+            duplex,
+            negotiated,
+        )
+        .await
+    }
+
+    async fn configured_mode(
+        cx: &Cx,
+        source: &Path,
+        destination: &Path,
+        job: (u64, bool),
+        upload: bool,
+        duplex: bool,
+        negotiated: bool,
+    ) -> Self {
+        let (accepted_id, recursive) = job;
         let mut link = Link::new(cx).await;
-        let (host_lane, client_lane, input, client_input, authority) = if upload {
-            link.upload_sync(cx, negotiated, duplex).await
+        let version = negotiated.then_some(if recursive {
+            fr_wire::sync_job_state::RECURSIVE_VERSION
         } else {
-            link.download(cx, negotiated).await
+            fr_wire::sync_job_state::VERSION
+        });
+        let (host_lane, client_lane, input, client_input, authority) = if upload {
+            link.upload_sync_version(cx, version, duplex).await
+        } else {
+            link.download_sync_version(cx, version).await
         };
         let source = HostConfig::open(source, if upload { accepted_id } else { 41 })
             .unwrap()
             .with_scan_interval(Duration::from_millis(100))
             .unwrap();
+        let source = if recursive {
+            source.with_recursive()
+        } else {
+            source
+        };
         let input_authority = Authority::from_input(&input);
         let (source_authority, receiver_authority) = if upload {
             (authority, input_authority)
@@ -215,10 +273,10 @@ impl Running {
             SendPolicy::default(),
         )
         .unwrap();
-        let (client, receiver) = receiver_owner(
+        let (client, receiver) = receiver_owner_mode(
             cx,
             destination,
-            if upload { 41 } else { accepted_id },
+            (if upload { 41 } else { accepted_id }, recursive),
             destination_connection,
             destination_lane,
             receiver_authority,
@@ -1365,3 +1423,6 @@ fn oversized_source_directory_refuses_before_any_page_is_offered() {
         running.input_live(&cx);
     });
 }
+
+#[path = "remote_folder_sync/recursive.rs"]
+mod recursive;

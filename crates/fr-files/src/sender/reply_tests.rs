@@ -140,3 +140,76 @@ fn expired_reply_keeps_original_identity_direction_and_durability() {
         }
     });
 }
+
+#[test]
+fn expected_tree_version_fences_kind_size_content_and_metadata_before_offer() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut fixture = Running::new(&cx).await;
+        let path = fixture.path.join("selected-tree");
+        fs::create_dir_all(path.join("nested/empty")).unwrap();
+        fs::write(path.join("nested/data"), b"original").unwrap();
+        let expected = snapshot_selected(
+            File::open(&path).unwrap(),
+            "selected",
+            true,
+            100,
+            8,
+            &mut || Ok(()),
+        )
+        .unwrap()
+        .version;
+        let mut sender = Sender::new(
+            cx.clone(),
+            &fixture.link.c,
+            &mut fixture.client,
+            Policy::default(),
+        )
+        .unwrap();
+        sender
+            .begin_directory(&fixture.link.c, File::open(&path).unwrap(), "selected")
+            .unwrap();
+        let transfer = sender.transfer.as_mut().unwrap();
+        transfer.expected_source = Some(expected);
+        let until = Instant::now() + Duration::from_secs(2);
+        let manifest = loop {
+            if let Some(source::Event::Prepared(manifest)) = transfer.source.poll().unwrap() {
+                break manifest;
+            }
+            assert!(Instant::now() < until, "original tree did not prepare");
+            std::thread::yield_now();
+        };
+        for change in 0..5 {
+            let mut changed = (*manifest).clone();
+            match change {
+                0 => changed.is_directory = false,
+                1 => changed.total_bytes += 1,
+                2 => changed.merkle_root_hex = "0".repeat(64),
+                3 => changed.metadata_root_hex = None,
+                4 => changed.metadata_root_hex = Some("0".repeat(64)),
+                _ => unreachable!(),
+            }
+            assert_eq!(transfer.prepared(&changed), Err(Error::SourceChanged));
+            assert_eq!(transfer.stage, Stage::Preparing);
+            assert!(transfer.total.is_none());
+            assert!(
+                transfer.packet.is_none(),
+                "a refused version built an offer"
+            );
+        }
+        transfer.prepared(&manifest).unwrap();
+        assert_eq!(transfer.total, Some(8));
+        assert_eq!(transfer.profile, files::ATP_PORTABLE_DIRECTORY_ENTRIES);
+        assert_eq!(transfer.root, manifest.merkle_root_hex);
+        sender.cancel(&mut fixture.link.c).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(result) = sender.try_finish_cleanup() {
+                result.unwrap();
+                break;
+            }
+            assert!(Instant::now() < until, "original tree source did not stop");
+            std::thread::yield_now();
+        }
+    });
+}

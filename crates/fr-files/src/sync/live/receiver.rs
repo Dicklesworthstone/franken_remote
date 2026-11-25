@@ -40,6 +40,7 @@ struct Pending {
 pub struct ControllerJob {
     directory: DropDirectory,
     direction: SyncDirection,
+    recursive: bool,
     status: JobStatus,
     phase: Phase,
     budget: JobBudget,
@@ -82,6 +83,7 @@ impl ControllerJob {
         Ok(Self {
             directory: directory.with_conflict_tracking(),
             direction,
+            recursive: false,
             status: JobStatus::new(job_id, direction),
             phase: if direction == SyncDirection::HostToController {
                 Phase::Advertisement
@@ -102,6 +104,14 @@ impl ControllerJob {
             last_published: 0,
             active: None,
         })
+    }
+
+    /// Explicitly accept atomic top-level subtree versions on this original
+    /// job. The original attachment must independently select recursive sync;
+    /// flat or unselected peers cannot cause directory staging.
+    pub fn with_recursive(mut self) -> Self {
+        self.recursive = true;
+        self
     }
 
     /// Install this exact tracked clone in the receiver BEFORE spawning its disk
@@ -207,6 +217,7 @@ impl ControllerJob {
                 .ok_or(LiveError::Resource)?;
             FileAdmission::JobFiles {
                 max_offer_bytes: remaining.min(SyncLimits::default().max_file_bytes),
+                recursive: self.recursive,
             }
         } else {
             FileAdmission::WaitingForJob
@@ -272,6 +283,9 @@ impl ControllerJob {
             return Err(LiveError::WrongConnection);
         }
         let now = receiver.sync_clock(q).map_err(LiveError::Receive)?;
+        if receiver.sync_recursive_selected() != self.recursive {
+            return Err(LiveError::NotNegotiated);
+        }
         let context = receiver.sync_context();
         let (direction, role) = match self.direction {
             SyncDirection::HostToController => (

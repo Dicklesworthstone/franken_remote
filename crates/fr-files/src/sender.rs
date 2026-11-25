@@ -4,6 +4,12 @@
 //! from the peer is opened. Each transfer is offered once, and a lost publication
 //! proof is unknown, never an invitation to retry. Service before/after network I/O.
 pub mod batch;
+#[cfg(unix)]
+mod expected;
+#[cfg(unix)]
+pub(crate) use expected::ExpectedSource;
+#[cfg(unix)]
+pub(crate) use source::{SourceSnapshot, snapshot_selected};
 mod flight;
 mod flow;
 #[cfg(all(test, target_os = "linux"))]
@@ -171,7 +177,8 @@ struct Transfer {
     cleanup: Option<Result<(), Error>>,
     /// A sync scan selects a particular source version. Re-hashing may never
     /// silently substitute a later version before recording its publication.
-    expected_source: Option<(u64, String)>,
+    #[cfg(unix)]
+    expected_source: Option<ExpectedSource>,
 }
 
 /// Exclusive borrow prevents independent senders from recreating the channel's
@@ -369,7 +376,7 @@ impl<'a> Sender<'a> {
         if self.batch.is_some() {
             return Err(Error::Busy);
         }
-        self.begin_selected(q, directory, name, None, true)
+        self.begin_selected(q, directory, name, None, true, None)
     }
     fn begin_until(
         &mut self,
@@ -378,7 +385,7 @@ impl<'a> Sender<'a> {
         name: &str,
         until: Option<u64>,
     ) -> Result<u64, Error> {
-        self.begin_selected(q, file, name, until, false)
+        self.begin_selected(q, file, name, until, false, None)
     }
     fn begin_selected(
         &mut self,
@@ -387,6 +394,7 @@ impl<'a> Sender<'a> {
         name: &str,
         until: Option<u64>,
         directory: bool,
+        expected_bytes: Option<u64>,
     ) -> Result<u64, Error> {
         self.identity(q)?;
         if self.closed {
@@ -412,7 +420,17 @@ impl<'a> Sender<'a> {
             return Err(Error::Expired);
         }
         let next = self.next.checked_add(1).ok_or(Error::Limits)?;
-        let source = if directory {
+        let source = if expected_bytes.is_some() {
+            Source::spawn_selected(
+                self.cx.clone(),
+                file,
+                name.into(),
+                self.policy,
+                deadline,
+                directory,
+                expected_bytes,
+            )?
+        } else if directory {
             Source::spawn_directory(self.cx.clone(), file, name.into(), self.policy, deadline)?
         } else {
             Source::spawn(self.cx.clone(), file, name.into(), self.policy, deadline)?
@@ -442,6 +460,7 @@ impl<'a> Sender<'a> {
             completion_admitted: false,
             result: None,
             cleanup: None,
+            #[cfg(unix)]
             expected_source: None,
         });
         Ok(id)
@@ -746,11 +765,9 @@ fn packet(
 }
 impl Transfer {
     fn prepared(&mut self, manifest: &TransferManifest) -> Result<(), Error> {
-        if let Some((size, hash)) = &self.expected_source
-            && (manifest.is_directory
-                || manifest.entries.len() != 1
-                || manifest.total_bytes != *size
-                || manifest.entries[0].sha256_hex != *hash)
+        #[cfg(unix)]
+        if let Some(expected) = &self.expected_source
+            && !expected.matches(manifest)
         {
             return Err(Error::SourceChanged);
         }

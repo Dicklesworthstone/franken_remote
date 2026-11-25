@@ -48,7 +48,10 @@ pub enum State {
 pub(crate) enum FileAdmission {
     Ordinary,
     WaitingForJob,
-    JobFiles { max_offer_bytes: u64 },
+    JobFiles {
+        max_offer_bytes: u64,
+        recursive: bool,
+    },
 }
 
 /// One receive operation in the original disk slot, one retained reply buffer,
@@ -369,6 +372,7 @@ impl HostReceiver {
         let limits = self.lane.limits();
         let receiver = &mut self.receiver;
         let sync_selected = self.lane.sync_selected();
+        let recursive_selected = self.lane.sync_recursive_selected();
         let mut refusal = None;
         self.lane
             .dispatch(q, &self.cx, &mut *authorize, |bytes| {
@@ -406,13 +410,25 @@ impl HostReceiver {
                     refusal = Some(wire::Error::Wire(fr_wire::WireError::InvalidValue));
                     return Ok(Disposition::Consumed);
                 }
+                let recursive = recursive_selected
+                    && matches!(
+                        admission,
+                        FileAdmission::JobFiles {
+                            recursive: true,
+                            ..
+                        }
+                    );
                 if !matches!(admission, FileAdmission::Ordinary)
                     && matches!(message, Ok(fr_wire::files::Message {
                         body: fr_wire::files::Body::Offer { profile, .. }, ..
-                    }) if profile != fr_wire::files::ATP_PORTABLE_FULL)
+                    }) if profile != fr_wire::files::ATP_PORTABLE_FULL
+                        && !(recursive && matches!(profile,
+                            fr_wire::files::ATP_PORTABLE_DIRECTORY_FULL
+                                | fr_wire::files::ATP_PORTABLE_DIRECTORY_ENTRIES)))
                 {
-                    // This standing job transfers bounded regular files from
-                    // one directory level. It never silently admits a tree.
+                    // Recursive trees require BOTH explicit local job consent
+                    // and v2 on this original directional attachment. Flat jobs
+                    // preserve their pre-staging refusal.
                     refusal = Some(wire::Error::Wire(fr_wire::WireError::UnsupportedVersion));
                     return Ok(Disposition::Consumed);
                 }
@@ -420,7 +436,9 @@ impl HostReceiver {
                     return Ok(Disposition::Blocked);
                 }
                 let limit = match admission {
-                    FileAdmission::JobFiles { max_offer_bytes } => max_offer_bytes,
+                    FileAdmission::JobFiles {
+                        max_offer_bytes, ..
+                    } => max_offer_bytes,
                     FileAdmission::Ordinary | FileAdmission::WaitingForJob => u64::MAX,
                 };
                 match receiver.receive_bounded(bytes, limit) {
@@ -462,6 +480,10 @@ impl HostReceiver {
             return Err(Error::WrongRole);
         }
         Ok(self.clock.now().as_nanos() / 1000)
+    }
+
+    pub(crate) fn sync_recursive_selected(&self) -> bool {
+        self.lane.sync_recursive_selected()
     }
 
     pub(crate) fn sync_context(&self) -> fr_wire::files::Context {

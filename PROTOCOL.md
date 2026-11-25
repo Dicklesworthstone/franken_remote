@@ -594,14 +594,14 @@ local choices and authority; no transfer is silently resumed. See
 [PROTOCOL_FILES.md](PROTOCOL_FILES.md) and
 [PROTOCOL_ATTACHMENT.md](PROTOCOL_ATTACHMENT.md).
 
-The optional `file-folder-sync` v1 capability permits `SyncJobState` on the
+The optional `file-folder-sync` v1 or v2 capability permits `SyncJobState` on the
 original host-to-controller file pair, including the distinct duplex download
 role. Both endpoints must also select `native-media-attachment`,
 `native-input-attachment`, `native-file-receive`, `file-atp-full` and
 `file-download`, all version 1, under a controlling role. This download
 capability never permits job state on an upload pair.
 
-The independent optional `file-folder-sync-upload` v1 capability permits
+The independent optional `file-folder-sync-upload` v1 or v2 capability permits
 `SyncJobState` on the original controller-to-host file pair. Both endpoints
 must also select `native-media-attachment`, `native-input-attachment`,
 `native-file-receive`, `file-atp-full` and `file-channel-scope`, all version 1,
@@ -614,6 +614,27 @@ records naming the opposite or bidirectional sync direction. The existing
 121-byte record and ATP file records retain the same connection, session,
 lease, handle and channel binding; job records consume ordinary file queue
 counts and bytes.
+
+Version 1 admits flat regular-file jobs. Version 2 adds atomic top-level
+directory versions through the existing ATP portable directory profiles 2 and
+3, including explicit empty directories. Each endpoint must explicitly select
+recursive operation locally and positively negotiate the same version on the
+original direction. A v1/v2 mismatch does not downgrade or authorize a job.
+The version replaces the existing direction's marker without consuming another
+capability slot; the prerequisite capabilities remain version 1. An attachment
+freezes recursive support along with its message family, and each job owner
+checks that it exactly matches its local selection before scanning or accepting
+state. A v2 attachment cannot broaden a flat destination's consent. Individual
+ATP offers still require the existing profile, quota and publication admission.
+The `SyncJobState` record remains 121 bytes; no peer-supplied path or new
+reconciliation instruction is added.
+
+Recursive sources verify kind, byte size, canonical ATP content root and
+structural metadata commitment before any offer. Descendants, including empty
+files and directories, consume the bounded scan and per-tree limits. Each
+changed top-level tree is one atomic keep-both publication; a later version
+does not merge into, replace or delete an earlier destination tree. Version
+ledgers advance only on the original confirmed publication and cleanup.
 
 A one-way job requires an explicit host-configured local directory/ID and
 explicit client acceptance with its separately selected complementary local

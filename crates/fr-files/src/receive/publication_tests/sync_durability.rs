@@ -175,7 +175,10 @@ fn check_uncertain_round(direction: SyncDirection, conflict: bool) {
     assert_eq!(destination.entries(), if conflict { 3 } else { 2 });
     assert!(!destination.0.join("c-after").exists());
     if conflict {
-        assert_eq!(fs::read(destination.0.join("b-uncertain")).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(destination.0.join("b-uncertain")).unwrap(),
+            b"keep"
+        );
     }
 
     let terminal = &failure.wire_states.last().unwrap().state;
@@ -257,7 +260,10 @@ fn deliver_new_source_version(round: &Round, baseline: &SyncBaseline, conflict: 
     );
     assert_eq!(destination.entries(), if conflict { 4 } else { 3 });
     if conflict {
-        assert_eq!(fs::read(destination.0.join("b-uncertain")).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(destination.0.join("b-uncertain")).unwrap(),
+            b"keep"
+        );
     }
 
     // The receipt suppresses only the old hash, not future source edits;

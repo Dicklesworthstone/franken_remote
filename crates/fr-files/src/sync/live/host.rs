@@ -272,7 +272,9 @@ impl HostJob {
         {
             return Err(LiveError::Cancelled);
         }
-        if !sender.sync_lane().sync_selected() {
+        if !sender.sync_lane().sync_selected()
+            || sender.sync_lane().sync_recursive_selected() != self.config.recursive
+        {
             return Err(LiveError::NotNegotiated);
         }
         let context = sender.sync_lane().outgoing();

@@ -2,9 +2,13 @@
 // Exercises a Linux drop directory end to end (see receive::directory).
 #[cfg(all(test, target_os = "linux"))]
 mod cleanup_tests;
+#[cfg(all(test, unix))]
+mod snapshot_tests;
 #[cfg(test)]
 mod tests;
 mod tree;
+#[cfg(unix)]
+use super::ExpectedSource;
 use super::{Error, Policy};
 use crate::receive::MAX_CHUNK_BYTES;
 use crate::rx::MetadataExt;
@@ -74,7 +78,7 @@ impl Source {
         policy: Policy,
         deadline: u64,
     ) -> Result<Self, Error> {
-        Self::spawn_selected(cx, file, name, policy, deadline, false)
+        Self::spawn_selected(cx, file, name, policy, deadline, false, None)
     }
     pub(super) fn spawn_directory(
         cx: Cx,
@@ -83,16 +87,20 @@ impl Source {
         policy: Policy,
         deadline: u64,
     ) -> Result<Self, Error> {
-        Self::spawn_selected(cx, file, name, policy, deadline, true)
+        Self::spawn_selected(cx, file, name, policy, deadline, true, None)
     }
-    fn spawn_selected(
+    pub(super) fn spawn_selected(
         cx: Cx,
         file: File,
         name: String,
         policy: Policy,
         deadline: u64,
         directory: bool,
+        expected_bytes: Option<u64>,
     ) -> Result<Self, Error> {
+        if expected_bytes.is_some_and(|size| size > policy.max_file_bytes) {
+            return Err(Error::Limits);
+        }
         let clock = cx.timer_driver().ok_or(Error::Clock)?;
         let (send, command) = mpsc::sync_channel(1);
         let (reply, result) = mpsc::sync_channel(1);
@@ -106,7 +114,13 @@ impl Source {
         let thread = thread::Builder::new()
             .name("fr-file-source".into())
             .spawn(move || {
-                if let Err(error) = run(file, name, policy, directory, &gate, &command, &reply) {
+                let selected = SelectedSource {
+                    file,
+                    name,
+                    directory,
+                    expected_bytes,
+                };
+                if let Err(error) = run(selected, policy, &gate, &command, &reply) {
                     // There cannot be a second unread result: request admission is
                     // exclusive until the previous result is taken. Never block on
                     // the abandoned network owner, including during cancellation.
@@ -197,17 +211,42 @@ fn eof(file: &mut File) -> Result<(), Error> {
     }
     Ok(())
 }
-fn run(
+struct SelectedSource {
     file: File,
     name: String,
-    policy: Policy,
     directory: bool,
+    expected_bytes: Option<u64>,
+}
+
+fn run(
+    selected: SelectedSource,
+    policy: Policy,
     gate: &Gate,
     command: &Receiver<usize>,
     reply: &SyncSender<Result<Event, Error>>,
 ) -> Result<(), Error> {
-    let mut selected = tree::Selection::new(file, &name, directory, policy.max_file_bytes, gate)?;
-    let (manifest, expected) = prepare(&mut selected, name, directory, gate)?;
+    let SelectedSource {
+        file,
+        name,
+        directory,
+        expected_bytes,
+    } = selected;
+    let maximum = expected_bytes.map_or(policy.max_file_bytes, |expected| {
+        expected.min(policy.max_file_bytes)
+    });
+    let mut check = || gate.check();
+    // A scanned selection cannot grow into the ordinary sender's larger byte
+    // allowance while being independently rehashed. Empty versions keep a
+    // zero-byte ceiling. Kind/shape or size changes refuse before content reads.
+    let mut selected =
+        tree::Selection::new(file, &name, directory, maximum, &mut check).map_err(|error| {
+            if expected_bytes.is_some() && matches!(error, Error::Source | Error::Limits) {
+                Error::SourceChanged
+            } else {
+                error
+            }
+        })?;
+    let (manifest, expected) = prepare(&mut selected, name, directory, &mut check)?;
     reply
         .try_send(Ok(Event::Prepared(Box::new(manifest))))
         .map_err(|_| Error::Worker)?;
@@ -221,7 +260,7 @@ fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
         };
-        selected.check(gate)?;
+        selected.check(&mut check)?;
         // Finish zero-byte entries too, without manufacturing empty data frames.
         while let Some(entry) = selected.entries.get_mut(index) {
             if offset != entry.size() {
@@ -240,7 +279,7 @@ fn run(
             offset = 0;
         }
         if index == selected.entries.len() {
-            selected.check(gate)?;
+            selected.check(&mut check)?;
             reply.try_send(Ok(Event::End)).map_err(|_| Error::Worker)?;
             return Ok(());
         }
@@ -270,7 +309,7 @@ fn prepare(
     selected: &mut tree::Selection,
     name: String,
     directory: bool,
-    gate: &Gate,
+    check: &mut impl FnMut() -> Result<(), Error>,
 ) -> Result<(TransferManifest, Vec<[u8; 32]>), Error> {
     let mut digests = Vec::with_capacity(selected.entries.len());
     let mut entries = Vec::with_capacity(selected.entries.len());
@@ -283,7 +322,7 @@ fn prepare(
                 file.rewind()?;
                 let mut offset = 0;
                 while offset < size {
-                    gate.check()?;
+                    check()?;
                     let n = usize::try_from((size - offset).min(MAX_CHUNK_BYTES as u64))
                         .map_err(|_| Error::Limits)?;
                     file.read_exact(&mut buffer[..n])?;
@@ -301,7 +340,7 @@ fn prepare(
                 ..EntryMetadata::default()
             }),
         };
-        gate.check()?;
+        check()?;
         let (digest, _, _) = hash.finalize(entry.path.clone());
         entries.push(ManifestEntry {
             index: u32::try_from(index).map_err(|_| Error::Limits)?,
@@ -313,7 +352,7 @@ fn prepare(
         });
         digests.push(digest);
     }
-    selected.check(gate)?;
+    selected.check(check)?;
     let root = flat_merkle_root_from_digests(&digests);
     // The pinned ATP commitment includes every entry, using bare Regular
     // metadata for files. Omitting those files would commit a different graph.
@@ -363,4 +402,50 @@ fn prepare(
         manifest,
         digests.iter().map(|digest| digest.content_sha256).collect(),
     ))
+}
+
+/// A bounded version fingerprint produced by the same walker and canonical ATP
+/// manifest builder used by the actual sender. It conveys no file authority.
+#[cfg(unix)]
+pub(crate) struct SourceSnapshot {
+    pub(crate) version: ExpectedSource,
+    /// Descendants only. The enclosing folder scanner charges the selected
+    /// root entry once; a regular selected file contributes no descendants.
+    pub(crate) inspected_entries: usize,
+}
+
+/// Inspect one already pinned selection under the original scanner's callback.
+/// All traversal descriptors close before returning. A later sender must still
+/// independently prepare and match this exact version before offering any bytes.
+#[cfg(unix)]
+pub(crate) fn snapshot_selected(
+    file: File,
+    name: &str,
+    directory: bool,
+    maximum_bytes: u64,
+    maximum_nodes: usize,
+    check: &mut impl FnMut() -> Result<(), Error>,
+) -> Result<SourceSnapshot, Error> {
+    check()?;
+    if name.len() > 255
+        || name.starts_with(".fr-part-")
+        || asupersync::atp::safety::validate_portable_path_component(name).is_err()
+    {
+        return Err(Error::Name);
+    }
+    let mut selected = tree::Selection::with_node_limit(
+        file,
+        name,
+        directory,
+        maximum_bytes,
+        maximum_nodes,
+        check,
+    )?;
+    let (manifest, _) = prepare(&mut selected, name.to_owned(), directory, check)?;
+    let version = ExpectedSource::from_manifest(&manifest)?;
+    check()?;
+    Ok(SourceSnapshot {
+        version,
+        inspected_entries: selected.inspected_entries(),
+    })
 }

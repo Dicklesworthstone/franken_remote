@@ -120,6 +120,12 @@ impl FilesChannel {
     pub fn sync_selected(&self) -> bool {
         self.routes.outbound.messages == Messages::FilesSync
     }
+    /// Exact v2 on this original directional attachment permits recursive job
+    /// records. Local recursive configuration and matching ATP profile acceptance
+    /// remain mandatory; a later offer cannot upgrade or downgrade this lane.
+    pub fn sync_recursive_selected(&self) -> bool {
+        self.sync_selected() && self.attachment.files_sync_recursive
+    }
     pub fn owns_inbound(&self, route: Route) -> bool {
         route == Route::Stream(self.routes.inbound)
     }

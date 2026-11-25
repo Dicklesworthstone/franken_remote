@@ -20,6 +20,11 @@ pub const VERSION: u16 = 1;
 /// never reinterpret their original file pair as an upload job.
 pub const UPLOAD_CAPABILITY: &str = "file-folder-sync-upload";
 pub const UPLOAD_VERSION: u16 = 1;
+/// Explicit recursive jobs on either existing sync capability name. Version 2
+/// adds atomic top-level directory subtrees, including empty directories, using
+/// the existing ATP profiles 2 and 3. Each offer still needs a matching accept;
+/// negotiation never substitutes for local recursive consent or file authority.
+pub const RECURSIVE_VERSION: u16 = 2;
 /// Fixed wire size including the 24-byte `FRD0` header:
 /// 24 + 16 (`session`) + 16 (`lease`) + 16 (`handle`) + 8 (`job_id`) +
 /// 1 (`sync_direction`) + 1 (`conflict_policy`) + 1 (`phase`) + 2 (`reason`) +
@@ -76,11 +81,37 @@ pub fn prepare_offer(
     prepare_job_offer(offer, &DOWNLOAD_REQUIREMENTS, CAPABILITY, VERSION)
 }
 
+/// Explicitly select recursive download jobs, upgrading an optional v1 marker
+/// in place when present. The capability promises both existing ATP directory
+/// profiles, including empty directories, without allocating another slot.
+/// A v1-only peer cannot silently downgrade this offer into a flat job.
+pub fn prepare_recursive_offer(
+    offer: crate::negotiation::Offer,
+) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+    prepare_job_offer(offer, &DOWNLOAD_REQUIREMENTS, CAPABILITY, RECURSIVE_VERSION)
+}
+
 /// Add explicit upload-job understanding to an already configured host drop
 /// profile. A simultaneous download needs the complete duplex profile; neither
 /// this marker nor the host's descriptive role grants a path or file authority.
 pub fn prepare_upload_offer(
     offer: crate::negotiation::Offer,
+) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+    prepare_upload_job_offer(offer, UPLOAD_VERSION)
+}
+
+/// Explicitly select recursive upload jobs under the original upload/duplex
+/// boundaries. As with downloads, the v2 marker promises ATP profiles 2 and 3;
+/// it supplies neither local source consent nor a destination path.
+pub fn prepare_recursive_upload_offer(
+    offer: crate::negotiation::Offer,
+) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+    prepare_upload_job_offer(offer, RECURSIVE_VERSION)
+}
+
+fn prepare_upload_job_offer(
+    offer: crate::negotiation::Offer,
+    version: u16,
 ) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
     if has_capability(
         &offer.capabilities,
@@ -93,12 +124,7 @@ pub fn prepare_upload_offer(
     ) {
         return Err(crate::negotiation::Error::RequiredCapability);
     }
-    prepare_job_offer(
-        offer,
-        &UPLOAD_REQUIREMENTS,
-        UPLOAD_CAPABILITY,
-        UPLOAD_VERSION,
-    )
+    prepare_job_offer(offer, &UPLOAD_REQUIREMENTS, UPLOAD_CAPABILITY, version)
 }
 
 fn prepare_job_offer(
@@ -118,12 +144,19 @@ fn prepare_job_offer(
     {
         return Err(negotiation::Error::RequiredCapability);
     }
-    if let Some(existing) = offer.capabilities.iter().find(|cap| cap.name == capability) {
-        return if existing.version == version && !existing.required {
-            Ok(offer)
-        } else {
-            Err(negotiation::Error::RequiredCapability)
-        };
+    if let Some(existing) = offer
+        .capabilities
+        .iter_mut()
+        .find(|cap| cap.name == capability)
+    {
+        if existing.required
+            || (existing.version != version
+                && !(version == RECURSIVE_VERSION && existing.version == VERSION))
+        {
+            return Err(negotiation::Error::RequiredCapability);
+        }
+        existing.version = version;
+        return Ok(offer);
     }
     for (optional, known_version) in [
         (
@@ -169,21 +202,40 @@ fn prepare_job_offer(
 /// pair; it never enables an upload or grants either endpoint a local path.
 pub fn selected(selection: &crate::negotiation::Selection) -> bool {
     job_selected(selection, &DOWNLOAD_REQUIREMENTS, CAPABILITY, VERSION)
+        || recursive_selected(selection)
+}
+
+/// The original download pair positively selected recursive directory jobs.
+/// Exact v2 is required; a flat v1 marker or an unknown future version cannot
+/// enable subtree scans or directory publication.
+pub fn recursive_selected(selection: &crate::negotiation::Selection) -> bool {
+    job_selected(
+        selection,
+        &DOWNLOAD_REQUIREMENTS,
+        CAPABILITY,
+        RECURSIVE_VERSION,
+    )
 }
 
 /// Positive upload-job selection on an original controller-to-host pair.
 /// Download-only peers and ambiguous legacy dual-direction offers stay out.
 pub fn upload_selected(selection: &crate::negotiation::Selection) -> bool {
-    job_selected(
-        selection,
-        &UPLOAD_REQUIREMENTS,
-        UPLOAD_CAPABILITY,
-        UPLOAD_VERSION,
-    ) && (!has_capability(
-        &selection.capabilities,
-        crate::files::DOWNLOAD_CAPABILITY,
-        crate::files::DOWNLOAD_VERSION,
-    ) || crate::files::duplex_selected(selection))
+    upload_job_selected(selection, UPLOAD_VERSION) || recursive_upload_selected(selection)
+}
+
+/// Recursive upload selection remains independent of the download marker and
+/// requires the same complete duplex agreement when both file directions exist.
+pub fn recursive_upload_selected(selection: &crate::negotiation::Selection) -> bool {
+    upload_job_selected(selection, RECURSIVE_VERSION)
+}
+
+fn upload_job_selected(selection: &crate::negotiation::Selection, version: u16) -> bool {
+    job_selected(selection, &UPLOAD_REQUIREMENTS, UPLOAD_CAPABILITY, version)
+        && (!has_capability(
+            &selection.capabilities,
+            crate::files::DOWNLOAD_CAPABILITY,
+            crate::files::DOWNLOAD_VERSION,
+        ) || crate::files::duplex_selected(selection))
 }
 
 fn job_selected(

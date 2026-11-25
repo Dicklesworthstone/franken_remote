@@ -1,6 +1,6 @@
 //! Bounded selection of a locally supplied directory descriptor. Never reopen a
 //! child by an absolute/cwd path, and never follow links or open special devices.
-use super::{Error, File, Gate, Identity, identity, unchanged};
+use super::{Error, File, Identity, identity, unchanged};
 use crate::receive::directory::{
     MAX_TREE_ENTRIES, MAX_TREE_NAMES_BYTES, MAX_TREE_NODES, path_components,
 };
@@ -32,6 +32,7 @@ pub(super) struct Selection {
     bytes: u64,
     names: usize,
     nodes: usize,
+    maximum_nodes: usize,
 }
 impl Selection {
     pub(super) fn new(
@@ -39,9 +40,20 @@ impl Selection {
         name: &str,
         directory: bool,
         maximum: u64,
-        gate: &Gate,
+        check: &mut impl FnMut() -> Result<(), Error>,
     ) -> Result<Self, Error> {
-        gate.check()?;
+        Self::with_node_limit(file, name, directory, maximum, MAX_TREE_NODES, check)
+    }
+
+    pub(super) fn with_node_limit(
+        file: File,
+        name: &str,
+        directory: bool,
+        maximum: u64,
+        maximum_nodes: usize,
+        check: &mut impl FnMut() -> Result<(), Error>,
+    ) -> Result<Self, Error> {
+        check()?;
         let m = file.metadata()?;
         let original = identity(&m);
         let mut selection = Self {
@@ -50,13 +62,14 @@ impl Selection {
             bytes: 0,
             names: name.len(),
             nodes: 0,
+            maximum_nodes: maximum_nodes.min(MAX_TREE_NODES),
         };
         if directory {
             if !m.is_dir() {
                 return Err(Error::Source);
             }
             selection.directories.push((file, original));
-            selection.visit(0, "", maximum, gate)?;
+            selection.visit(0, "", maximum, check)?;
             selection.entries.sort_by(|a, b| a.path.cmp(&b.path));
         } else {
             if !m.is_file() || m.len() > maximum {
@@ -68,7 +81,7 @@ impl Selection {
                 contents: Contents::File { file, original },
             });
         }
-        selection.check(gate)?;
+        selection.check(check)?;
         Ok(selection)
     }
     fn visit(
@@ -76,13 +89,13 @@ impl Selection {
         parent: usize,
         prefix: &str,
         maximum: u64,
-        gate: &Gate,
+        check: &mut impl FnMut() -> Result<(), Error>,
     ) -> Result<(), Error> {
         let before = self.entries.len();
         let mut iterator =
             fs::Dir::read_from(&self.directories[parent].0).map_err(std::io::Error::from)?;
         while let Some(entry) = iterator.read() {
-            gate.check()?;
+            check()?;
             let entry = entry.map_err(std::io::Error::from)?;
             let name = entry.file_name().to_str().map_err(|_| Error::Name)?;
             if matches!(name, "." | "..") {
@@ -95,7 +108,7 @@ impl Selection {
                 format!("{prefix}/{name}")
             };
             path_components(&path).map_err(|_| Error::Limits)?;
-            if self.nodes >= MAX_TREE_NODES {
+            if self.nodes >= self.maximum_nodes {
                 return Err(Error::Limits);
             }
             self.nodes += 1;
@@ -130,7 +143,7 @@ impl Selection {
                 }
                 let index = self.directories.len();
                 self.directories.push((file, original));
-                self.visit(index, &path, maximum, gate)?;
+                self.visit(index, &path, maximum, check)?;
             } else {
                 if !m.is_file() {
                     return Err(Error::SourceChanged);
@@ -162,8 +175,8 @@ impl Selection {
         }
         Ok(())
     }
-    pub(super) fn check(&self, gate: &Gate) -> Result<(), Error> {
-        gate.check()?;
+    pub(super) fn check(&self, check: &mut impl FnMut() -> Result<(), Error>) -> Result<(), Error> {
+        check()?;
         for (fd, original) in &self.directories {
             unchanged(fd, original)?;
         }
@@ -172,10 +185,14 @@ impl Selection {
                 unchanged(file, original)?;
             }
         }
-        gate.check()
+        check()
     }
     pub(super) fn total_bytes(&self) -> u64 {
         self.bytes
+    }
+    #[cfg(unix)]
+    pub(super) fn inspected_entries(&self) -> usize {
+        self.nodes
     }
 }
 use crate::rx::MetadataExt;

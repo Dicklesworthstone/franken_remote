@@ -17,6 +17,8 @@ use std::{
 
 #[cfg(unix)]
 pub(super) use super::super::cache::ScanCache;
+#[cfg(unix)]
+mod recursive;
 #[cfg(not(unix))]
 #[derive(Default)]
 pub(super) struct ScanCache {}
@@ -56,6 +58,7 @@ impl Scan {
     ) -> Result<Self, LiveError> {
         let root = config.root.clone();
         let limits = config.limits;
+        let recursive = config.recursive;
         let clock = scope.cx.timer_driver().ok_or(LiveError::Clock)?;
         let thread = thread::Builder::new()
             .name("fr-folder-scan".into())
@@ -81,6 +84,15 @@ impl Scan {
                 };
                 #[cfg(unix)]
                 {
+                    if recursive {
+                        return recursive::prepare(
+                            root.root_fd(),
+                            limits,
+                            &ledger,
+                            after.as_deref(),
+                            &mut check,
+                        );
+                    }
                     let mut cache = cache;
                     let manifest = cache
                         .scan(root.root_fd(), revision, limits, &mut check)
@@ -126,7 +138,9 @@ impl Scan {
                 }
                 #[cfg(not(unix))]
                 {
-                    let _ = (root, revision, ledger, after, limits, cache, &mut check);
+                    let _ = (
+                        root, revision, ledger, after, limits, recursive, cache, &mut check,
+                    );
                     Err(LiveError::Source(SyncError::UnsupportedPlatform))
                 }
             })

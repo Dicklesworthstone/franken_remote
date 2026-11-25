@@ -1,5 +1,33 @@
 # Implementation status
 
+## Recursive atomic folder-job delivery (2026-11-25)
+
+Explicit one-way jobs can now select recursive source and receiver owners.
+Version 2 of the existing direction-specific sync capability freezes that
+choice on the original attachment, without another capability slot or a larger
+job-state record. Both local owners must match it before scanning or accepting
+job state; flat jobs and older peers cannot silently gain recursive authority.
+
+Changed top-level directories use the existing ATP tree profiles and atomic
+KeepBoth publication, including nested files, empty files and empty directories.
+They are complete subtree versions, without in-place merging or deletion
+propagation. Recursive scans count all admitted descendants against the original
+scan limits and rehash child content. Independent sender preparation checks
+kind, size, canonical content root and structural metadata before an offer;
+the scanned size also caps subsequent reads, including a zero-byte version.
+Only confirmed publication and cleanup advance the version ledger. Original
+round/session budgets, cancellation and no reconnect replay remain in force.
+
+Added filesystem, source-version, real UDP/TLS and negotiation regressions.
+The exact pinned nightly passed all 15 sync wire tests and strict all-target
+`fr-wire` Clippy. Source review and scoped formatting passed. Transport test
+code generation and a metadata-only `fr-files --all-targets` check were both
+killed by SIGKILL inside the unchanged pinned Asupersync dependency, before
+those packages or their new tests could execute. No file-transfer, native,
+desktop, live-tailnet or performance qualification is claimed. Native command
+integration and remaining validation are tracked by `fr-sync-recursive-trees-m4n2`;
+the broader parent remains open for bidirectional and persistent remote jobs.
+
 ## Incremental content verification for active folder jobs (2026-11-25)
 
 Live source scans now retain unchanged entries' exact ATP digests when another
