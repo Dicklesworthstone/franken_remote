@@ -325,7 +325,16 @@ fn prepare(
                     check()?;
                     let n = usize::try_from((size - offset).min(MAX_CHUNK_BYTES as u64))
                         .map_err(|_| Error::Limits)?;
-                    file.read_exact(&mut buffer[..n])?;
+                    // EOF before the selected length is a changed source,
+                    // not a persistent I/O fault. A pre-offer folder scan may
+                    // retry it within its existing round and attempt budget.
+                    file.read_exact(&mut buffer[..n]).map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                            Error::SourceChanged
+                        } else {
+                            Error::from(error)
+                        }
+                    })?;
                     hash.update_with_chunk(&buffer[..n]);
                     offset += n as u64;
                 }

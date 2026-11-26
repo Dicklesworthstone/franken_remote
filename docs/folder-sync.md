@@ -155,7 +155,9 @@ active until the settlement acknowledgment drains. A round does not start while 
 publication proof, source cleanup or job-state custody remains outstanding.
 
 A source edited or removed during the pre-transfer scan can be scanned again
-within the same round. The source owner makes at most three scan attempts, separated by
+within the same round. Premature EOF while hashing a selected file or recursive
+tree is classified as a changed source; permission and other I/O errors retain
+their original failure. A failed hash cannot publish a partial manifest. The source owner makes at most three scan attempts, separated by
 at least 100 ms, after joining each preceding worker. Retries retain the same
 job, manifest revision, pinned root, authority and original five-minute deadline.
 They neither announce another round nor spend transfer quota. Cancellation,
@@ -359,6 +361,13 @@ post-rename directory-sync boundary. They retain the actual filesystem
 publication and validate partial results, authority refusal and no replay after
 local edits or deletion. This injected fault is not failing-storage hardware
 qualification; execution status is recorded separately.
+
+The sender's `truncation_during_snapshot_hashing_is_a_retryable_source_change`
+regression truncates real selected files and tree payloads after the first
+bounded content read, checks the typed source-change result, then scans the
+settled shorter version. It is source-reviewed but unexecuted as of
+2026-11-26 because the local executor disconnected; this is not a passing
+runtime or live-tailnet result.
 
 ### Reading the native CLI receive report
 

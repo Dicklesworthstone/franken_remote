@@ -255,3 +255,53 @@ fn an_expected_version_cannot_hash_growth_under_the_ordinary_larger_limit() {
         }
     }
 }
+
+#[test]
+fn truncation_during_snapshot_hashing_is_a_retryable_source_change() {
+    for directory in [false, true] {
+        fixture(|path, _cx| {
+            let pathname = path.join("payload");
+            fs::write(&pathname, vec![7_u8; 2 * MAX_CHUNK_BYTES]).unwrap();
+            let selected_path = if directory { path } else { &pathname };
+            let mut selected = tree::Selection::new(
+                File::open(selected_path).unwrap(),
+                "selected",
+                directory,
+                (2 * MAX_CHUNK_BYTES) as u64,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            let tree::Contents::File { file, .. } = &selected.entries[0].contents else {
+                panic!("the selected payload must be a regular file");
+            };
+            // This clone shares the original file offset, so the edit happens
+            // only after a real bounded content read, independent of the number
+            // of authority checks or directory-enumeration callbacks.
+            let mut position = file.try_clone().unwrap();
+            let editor = fs::OpenOptions::new().write(true).open(&pathname).unwrap();
+            let mut truncated = false;
+            let result = prepare(&mut selected, "selected".into(), directory, &mut || {
+                if !truncated && position.stream_position().unwrap() >= MAX_CHUNK_BYTES as u64 {
+                    editor.set_len(MAX_CHUNK_BYTES as u64).unwrap();
+                    truncated = true;
+                }
+                Ok(())
+            });
+            assert!(truncated, "the source changed after its first content read");
+            assert!(matches!(result, Err(Error::SourceChanged)));
+
+            // A fresh scan can inspect the settled shorter version. No
+            // partially hashed manifest escaped the failed original scan.
+            let fresh = snapshot_selected(
+                File::open(selected_path).unwrap(),
+                "selected",
+                directory,
+                (2 * MAX_CHUNK_BYTES) as u64,
+                1,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(fresh.version.size(), MAX_CHUNK_BYTES as u64);
+        });
+    }
+}
