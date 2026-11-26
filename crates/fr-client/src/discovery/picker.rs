@@ -75,12 +75,17 @@ pub struct Candidate {
     probe_hint: Option<ProbeHint>,
 }
 impl Candidate {
+    /// Check the same identity grammar at each local picker process boundary.
+    pub fn valid_identity(stable_id: &str, certificate_name: &str) -> bool {
+        valid_id(stable_id) && valid_name(certificate_name)
+    }
+
     pub fn new(
         stable_id: String,
         certificate_name: String,
         path_hint: PathHint,
     ) -> Result<Self, Error> {
-        if !valid_id(&stable_id) || !valid_name(&certificate_name) {
+        if !Self::valid_identity(&stable_id, &certificate_name) {
             return Err(Error::InvalidCandidate);
         }
         // Drop spare caller capacity. Retained identity text is bounded by the

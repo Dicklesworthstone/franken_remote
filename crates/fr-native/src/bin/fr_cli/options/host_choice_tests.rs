@@ -51,6 +51,27 @@ fn host_choice_is_explicit_and_retains_all_connection_permissions_and_limits() {
 }
 
 #[test]
+fn expected_certificate_name_requires_one_exact_positional_identity() {
+    let base = "connect n-selected --view-only --experimental-native --display only";
+    for suffix in [
+        "--expect-certificate-name",
+        "--expect-certificate-name HOST.tail.ts.net",
+        "--expect-certificate-name host.tail.ts.net.",
+        "--expect-certificate-name host.tail.ts.net --by-name",
+        "--saved --expect-certificate-name host.tail.ts.net",
+        "--expect-certificate-name a.tail.ts.net --expect-certificate-name b.tail.ts.net",
+    ] {
+        assert!(parsed(&format!("{base} {suffix}")).is_err());
+    }
+    for command in [
+        "connect --choose-host --view-only --experimental-native --display only --expect-certificate-name host.tail.ts.net",
+        "displays n-selected --experimental-native --expect-certificate-name host.tail.ts.net",
+    ] {
+        assert!(parsed(command).is_err());
+    }
+}
+
+#[test]
 fn host_choice_never_changes_the_required_role_or_experimental_opt_in() {
     for args in [
         "connect --choose-host --experimental-native --display only",

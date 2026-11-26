@@ -74,7 +74,14 @@ fn only_fresh_supported_control_consent_reaches_the_connect_parser() {
                 control,
                 ..Settings::default()
             };
-            let args = session_args_with_shortcuts("nOriginal", &settings, 9443, false, consent);
+            let args = selected_session_args(
+                "nOriginal",
+                "original.fixture.ts.net",
+                &settings,
+                9443,
+                false,
+                consent,
+            );
             if consent && (!control || !system_shortcuts_available()) {
                 assert_eq!(args.unwrap_err().code, "app_system_shortcuts_unavailable");
                 continue;
@@ -94,10 +101,26 @@ fn only_fresh_supported_control_consent_reaches_the_connect_parser() {
             assert_eq!(connection.control, control);
             assert_eq!(connection.capture_system_shortcuts, consent);
             assert!(connection.pick.is_none());
+            let selected = crate::saved_hosts::select(&connection.target).unwrap();
+            assert!(matches!(
+                selected.selector(),
+                fr_tailnet::PeerSelector::Pinned {
+                    stable_id: "nOriginal",
+                    certificate_name: "original.fixture.ts.net"
+                }
+            ));
+            assert_eq!(selected.port, 9443);
             // A later choice starts from the same ordinary preferences, with
             // no system-shortcut consent inherited from this connection.
-            let later =
-                session_args_with_shortcuts("nLater", &settings, 9443, false, false).unwrap();
+            let later = selected_session_args(
+                "nLater",
+                "later.fixture.ts.net",
+                &settings,
+                9443,
+                false,
+                false,
+            )
+            .unwrap();
             assert!(!later.iter().any(|arg| arg == "--capture-system-shortcuts"));
             assert!(!settings.to_json().contains("capture_system_shortcuts"));
         }

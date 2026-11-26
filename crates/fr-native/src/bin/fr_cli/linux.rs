@@ -2985,6 +2985,7 @@ mod tests {
         let options = crate::options::Connection {
             choose_host: false,
             target: crate::options::Target {
+                expected_name: None,
                 saved: None,
                 node: "node-1".into(),
                 by_name: false,

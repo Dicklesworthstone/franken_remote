@@ -55,8 +55,10 @@ The advertisement does not qualify the current desktop or codec; see
 With the appropriate desktop build, `fr app` opens the native machine picker
 and follows the selected viewer through its terminal outcome. A picker choice
 is applied only after its original command exits successfully and reports the
-selection-only, fresh-lookup-required result. Each viewer still resolves the
-selected identity again before connecting.
+selection-only, fresh-lookup-required result. The app passes the selected stable node ID and canonical certificate name
+to the viewer. Every fresh connection must resolve that exact pair through
+Tailscale, including on reconnect. If the machine has been renamed, the viewer
+refuses the stale selection and the user can choose the new name in the picker.
 
 Use `fr app --probe` to inspect up to 64 discovered machines before each
 machine picker. The explicit sweep has a 20-second budget and a five-second

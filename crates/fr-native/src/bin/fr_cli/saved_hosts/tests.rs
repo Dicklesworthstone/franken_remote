@@ -16,6 +16,7 @@ fn file() -> PathBuf {
 }
 fn target(file: &std::path::Path, saved: bool) -> Target {
     Target {
+        expected_name: None,
         saved: saved.then(|| SavedSelection {
             file: Some(file.to_owned()),
         }),

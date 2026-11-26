@@ -60,7 +60,12 @@ pub(super) fn notice(connection: &Connection) -> Option<&str> {
 }
 
 pub(super) fn validate(target: &Target) -> Result<(), Failure> {
-    if !target.node.is_empty() || target.saved.is_some() || target.by_name || target.port == 0 {
+    if !target.node.is_empty()
+        || target.saved.is_some()
+        || target.expected_name.is_some()
+        || target.by_name
+        || target.port == 0
+    {
         return Err(Failure::new(
             "invalid_host_choice",
             "Use --choose-host in place of the positional host, without --saved or --by-name.",

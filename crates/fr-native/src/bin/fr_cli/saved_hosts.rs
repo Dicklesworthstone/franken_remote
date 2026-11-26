@@ -240,7 +240,7 @@ pub(super) fn select(target: &Target) -> Result<Selection, Failure> {
             node: target.node.clone(),
             port: target.port,
             by_name: target.by_name,
-            name: None,
+            name: target.expected_name.clone(),
         })
     }
 }

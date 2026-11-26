@@ -422,7 +422,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             Some(microphone_controls),
             Some(capture_system_shortcuts),
         ) = (
-            text("node_id").filter(|id| valid_id(id)),
+            text("node_id"),
             text("certificate_name"),
             flag("control"),
             flag("clipboard"),
@@ -436,6 +436,9 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
         else {
             return None;
         };
+        if !fr_client::discovery::picker::Candidate::valid_identity(&node, &name) {
+            return None;
+        }
         if (send_files || receive_files || microphone_controls || capture_system_shortcuts)
             && !control
         {
@@ -648,8 +651,9 @@ const fn system_shortcuts_available() -> bool {
 
 /// Fresh picker consent belongs only to the selected connection. It never
 /// enters remembered settings, a later picker, or a viewing-only invocation.
-fn session_args_with_shortcuts(
+fn selected_session_args(
     node: &str,
+    name: &str,
     settings: &Settings,
     port: u16,
     send_files: bool,
@@ -663,6 +667,7 @@ fn session_args_with_shortcuts(
         ));
     }
     let mut args = session_args(node, settings, port, send_files);
+    args.extend(["--expect-certificate-name".to_owned(), name.to_owned()]);
     if capture_system_shortcuts {
         args.push("--capture-system-shortcuts".into());
     }
@@ -1027,8 +1032,9 @@ fn application(
             &mut receiving,
             microphone::take_for_choice(
                 &mut microphone,
-                session_args_with_shortcuts(
+                selected_session_args(
                     &node,
+                    &name,
                     &settings,
                     port,
                     send_files,
@@ -1794,6 +1800,18 @@ mod tests {
             })
         );
         let mut malformed: Value = serde_json::from_slice(selected).unwrap();
+        for (key, value) in [
+            ("certificate_name", ""),
+            ("certificate_name", "mac"),
+            ("certificate_name", "Mac.tail.ts.net"),
+            ("certificate_name", "mac.tail.ts.net."),
+            ("node_id", "--choose-host"),
+            ("node_id", "n/alias"),
+        ] {
+            malformed[key] = json!(value);
+            assert_eq!(last_report(malformed.to_string().as_bytes()), None);
+            malformed = serde_json::from_slice(selected).unwrap();
+        }
         malformed["playback_audio"] = json!("yes");
         assert_eq!(last_report(malformed.to_string().as_bytes()), None);
         malformed.as_object_mut().unwrap().remove("playback_audio");

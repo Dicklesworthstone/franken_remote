@@ -132,6 +132,8 @@ pub struct SavedSelection {
     pub file: Option<PathBuf>,
 }
 pub struct Target {
+    /// Exact certificate name shown with the positional stable ID by the app picker.
+    pub expected_name: Option<String>,
     pub saved: Option<SavedSelection>,
     pub node: String,
     pub by_name: bool,
@@ -853,6 +855,7 @@ fn parse_command(
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
+    let mut expected_name = None;
     let (mut saved, mut hosts_file) = (false, None);
     let mut send = Vec::new();
     let mut choose_files = false;
@@ -880,6 +883,9 @@ fn parse_command(
             "--json" => json = true,
             "--socket" => socket = Some(next_path(args, &mut index)?),
             "--by-name" if remote => by_name = true,
+            "--expect-certificate-name" if connect && !choose_host => {
+                expected_name = Some(next_arg(args, &mut index)?.to_owned());
+            }
             "--saved" if remote => saved = true,
             "--hosts-file" if remote => hosts_file = Some(next_path(args, &mut index)?),
             "--view-only" if connect => view_only = true,
@@ -1055,6 +1061,13 @@ fn parse_command(
     }
     let command = if remote {
         let node = node.unwrap_or_default();
+        if let Some(name) = expected_name.as_deref()
+            && (saved
+                || by_name
+                || !fr_client::discovery::picker::Candidate::valid_identity(&node, name))
+        {
+            return Err(usage());
+        }
         if saved
             && (by_name
                 || seen.contains("--port")
@@ -1183,6 +1196,7 @@ fn parse_command(
             return Err(usage());
         }
         let target = Target {
+            expected_name,
             saved: saved.then_some(SavedSelection { file: hosts_file }),
             node,
             by_name,
