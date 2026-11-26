@@ -541,7 +541,9 @@ fn connect(
         } else {
             files::select(
                 chosen.as_deref().unwrap_or(&connection.upload.paths),
-                connection.upload.file_drop,
+                // Explicit --send paths have historically included drops on Linux.
+                // A native picker grants only its initial selection.
+                connection.upload.file_drop || !connection.upload.paths.is_empty(),
                 connection.upload.file_commands,
             )?
         };

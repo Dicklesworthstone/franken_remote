@@ -112,7 +112,7 @@ pub(super) fn select(
         sync_source: None,
         sizes,
         attempt: None,
-        file_drop: true,
+        file_drop,
         commands,
     }))
 }
@@ -463,6 +463,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(local.sizes, [Some(1)]);
+        assert!(!local.file_drop);
+        let with_drops = select(std::slice::from_ref(&chosen), true, false)
+            .unwrap()
+            .unwrap();
+        assert!(with_drops.file_drop);
         assert_eq!(local.summary().absence, Some("files_not_started"));
         let tree = select(std::slice::from_ref(&dir), false, false)
             .unwrap()
