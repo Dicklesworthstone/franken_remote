@@ -321,6 +321,7 @@ pub use parent::{ParentUnbound, bind_parent};
         target_os = "linux",
         any(
             feature = "linux-input",
+            feature = "linux-audio",
             feature = "linux-microphone-process",
             feature = "linux-microphone-playout"
         )
@@ -330,6 +331,7 @@ pub use parent::{ParentUnbound, bind_parent};
         any(
             test,
             feature = "macos-input",
+            feature = "macos-audio",
             feature = "macos-host-audio",
             feature = "macos-microphone-process",
             feature = "macos-clipboard",

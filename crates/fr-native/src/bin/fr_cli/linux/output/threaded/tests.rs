@@ -7,12 +7,11 @@ use fr_core::audio::{AudioChannels, AudioStopReason};
 // production ACK wait; dedicated progress tests supply an observable callback.
 fn forward_ack(
     shared: &Shared,
-    origin: Instant,
-    until: Instant,
+    until: ClientInstant,
     replies: &SyncSender<Ack>,
     bytes: &[u8],
 ) -> Result<(), ViewerAudioRefused> {
-    super::forward_ack(shared, origin, until, replies, bytes, &mut || Ok(()))
+    super::forward_ack(shared, until, replies, bytes, &mut || Ok(()))
 }
 
 #[test]
@@ -58,9 +57,9 @@ fn offer() -> AudioConfiguration {
 fn fixture(
     work: impl FnOnce(&Shared, Receiver<Packet>, SyncSender<Ack>) -> bool + Send + 'static,
 ) -> (Output, Arc<Shared>, Arc<AtomicBool>) {
-    let origin = Instant::now();
-    let shared = Arc::new(Shared::new(0));
-    shared.authorize_at(0).unwrap();
+    let at = now().0;
+    let shared = Arc::new(Shared::new(at));
+    shared.authorize_at(at).unwrap();
     let slot = Arc::new(AtomicBool::new(false));
     let job = Job::spawn(&slot, shared.clone(), work).unwrap();
     let report = Rc::new(RefCell::new(Report::default()));
@@ -73,7 +72,6 @@ fn fixture(
             sink: None,
         },
         image: Some(PathBuf::from("/unused-fixture")),
-        origin,
         job: Some(job),
         pending: None,
         setup_until: None,
@@ -209,6 +207,35 @@ fn packet(sequence: u64) -> Vec<u8> {
     bytes
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn packet_receipt_and_replacement_deadline_use_the_suspend_inclusive_kernel_clock() {
+    let boot_us = || crate::clock::suspend_inclusive_ns().unwrap() / 1000;
+    let (release, blocked) = mpsc::sync_channel(1);
+    let (send, received) = mpsc::sync_channel(1);
+    let (mut output, shared, _) = fixture(move |_, inbox, _| {
+        send.send(inbox.recv_timeout(Duration::from_secs(2)).unwrap().arrived)
+            .unwrap();
+        blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+        true
+    });
+    output.job.as_mut().unwrap().acknowledged = true;
+    let before = boot_us();
+    output.receive(&packet(0), &mut || true).unwrap();
+    let arrived = received.recv_timeout(Duration::from_secs(1)).unwrap().0;
+    assert!((before..=boot_us()).contains(&arrived));
+
+    output.reset();
+    let mut next = offer();
+    next.generation = AudioGeneration::from_raw(8);
+    let before = boot_us();
+    output.configure(73, next).unwrap();
+    let until = output.setup_until.unwrap().0;
+    assert!((before + SETUP_US..=boot_us() + SETUP_US).contains(&until));
+    release.send(()).unwrap();
+    retired(&shared);
+}
+
 #[test]
 fn expired_permission_is_terminal_even_before_the_worker_notices() {
     let shared = Shared::new(0);
@@ -330,13 +357,13 @@ fn ack_record() -> Ack {
 
 #[test]
 fn queued_ack_is_not_success_until_the_session_accepts_the_exact_bytes() {
-    let origin = Instant::now();
+    let deadline = ClientInstant(now().0 + SETUP_US);
     let (result, completion) = mpsc::sync_channel(1);
     // The worker keeps playing after its acknowledgement, as in production,
     // until the test releases it.
     let (release, released) = mpsc::sync_channel::<()>(1);
     let (mut output, shared, _) = fixture(move |shared, _, replies| {
-        let accepted = forward_ack(shared, origin, origin + SETUP, &replies, &ack_record()).is_ok();
+        let accepted = forward_ack(shared, deadline, &replies, &ack_record()).is_ok();
         result.send(accepted).unwrap();
         let _ = released.recv_timeout(Duration::from_secs(5));
         true
@@ -370,11 +397,11 @@ fn queued_ack_is_not_success_until_the_session_accepts_the_exact_bytes() {
 
 #[test]
 fn failed_transport_acceptance_never_unblocks_playback_as_acknowledged() {
-    let origin = Instant::now();
+    let deadline = ClientInstant(now().0 + SETUP_US);
     let (result, completion) = mpsc::sync_channel(1);
     let (mut output, shared, _) = fixture(move |shared, _, replies| {
         result
-            .send(forward_ack(shared, origin, origin + SETUP, &replies, &ack_record()).is_ok())
+            .send(forward_ack(shared, deadline, &replies, &ack_record()).is_ok())
             .unwrap();
         true
     });

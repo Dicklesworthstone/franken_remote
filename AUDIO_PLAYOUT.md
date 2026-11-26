@@ -228,6 +228,16 @@ acknowledgement and joint decoder/device retirement. Its qualified test slice is
 results, retained timing failures, resource limits and remaining session/device
 qualification. This does not complete host capture or the network/audio worker.
 
+## Playback across client sleep
+
+On Linux, macOS and Windows, the desktop playback proxy and output worker use
+a common suspend-inclusive clock for packet arrival, permission, worker progress,
+configuration and acknowledgment. Sleeping consumes the original budgets,
+including setup time spent waiting for a previous worker to retire. The local
+speaker sample clock still schedules PCM. A late output cannot refresh its
+permission or submit queued pre-sleep sound. Hardware behavior for sound
+already buffered by the OS at suspend remains unqualified.
+
 ## Local controls in the native Linux client
 
 `fr connect --audio` now connects the native shell's local volume/mute

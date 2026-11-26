@@ -17,6 +17,14 @@ use std::sync::{
 
 mod native;
 
+/// Suspend-inclusive local time for the playback proxy and its worker.
+#[cfg(feature = "windows-audio")]
+pub(crate) fn playback_now_us() -> u64 {
+    // SAFETY: an infallible kernel counter read with no pointer arguments.
+    let ticks = unsafe { windows::Win32::System::WindowsProgramming::QueryInterruptTimePrecise() };
+    ticks / 10 // 100 ns ticks to microseconds
+}
+
 /// Confirmed retirement of this original output. An uncertain native stop or
 /// reset keeps the witness false; dropping a Rust value cannot forge success.
 #[derive(Clone)]

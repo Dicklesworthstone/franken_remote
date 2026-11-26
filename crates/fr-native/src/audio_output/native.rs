@@ -35,7 +35,7 @@ use fr_client::audio::output::{
 use fr_client::input::ClientInstant;
 use fr_core::audio::{AudioStopReason, AudioStreamConfig};
 use fr_wire::audio::AudioConfiguration;
-use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Instant};
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 /// At most this many decode/render steps per service turn.
 const RENDERS_PER_TURN: usize = 4;
@@ -110,7 +110,6 @@ pub struct Output {
     #[cfg(any(target_os = "macos", windows))]
     device_retirement: Option<DeviceRetirement>,
     selected: Selected,
-    origin: Instant,
     stage: Stage,
     failure: Option<Failure>,
     report: Rc<RefCell<Report>>,
@@ -137,7 +136,6 @@ impl Output {
             #[cfg(any(target_os = "macos", windows))]
             device_retirement: None,
             selected,
-            origin: Instant::now(),
             stage: Stage::Idle,
             failure: None,
             report,
@@ -156,10 +154,9 @@ impl Output {
         arrived: ClientInstant,
         live: &mut dyn FnMut() -> bool,
     ) -> Result<(), ViewerAudioRefused> {
-        let origin = self.origin;
         let mut checkpoint = || {
             if live() {
-                Ok(now(origin))
+                Ok(now())
             } else {
                 Err(DeviceError::Denied)
             }
@@ -188,8 +185,15 @@ impl Output {
         Ok(())
     }
 }
-fn now(origin: Instant) -> ClientInstant {
-    ClientInstant(u64::try_from(origin.elapsed().as_micros()).unwrap_or(u64::MAX))
+// Session receipt, worker custody and native playout share the same local boot
+// clock. An unavailable reading expires existing bounds and cannot form a
+// new checked deadline.
+fn now() -> ClientInstant {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let micros = crate::clock::suspend_inclusive_ns().map_or(u64::MAX, |ns| ns / 1000);
+    #[cfg(windows)]
+    let micros = crate::windows_audio::playback_now_us();
+    ClientInstant(micros)
 }
 fn end_reason(end: ViewerAudioEnd) -> &'static str {
     match end {
@@ -227,12 +231,12 @@ impl ViewerAudioOutput for Output {
         .map_err(|_| ViewerAudioRefused)?;
         let selection = self.selected.open().map_err(|_| ViewerAudioRefused)?;
         #[cfg(target_os = "linux")]
-        let device = PlaybackDevice::connect(selection, config, now(self.origin))
+        let device = PlaybackDevice::connect(selection, config, now())
             .map_err(|_| ViewerAudioRefused)?;
         #[cfg(any(target_os = "macos", windows))]
         let device = {
             let (device, retirement) =
-                PlaybackDevice::connect_retained(selection, config, now(self.origin));
+                PlaybackDevice::connect_retained(selection, config, now());
             // Partial native setup can still own an unresolved queue.
             // Retain its cleanup witness before propagating an open error.
             self.device_retirement = Some(retirement);
@@ -257,7 +261,7 @@ impl ViewerAudioOutput for Output {
         bytes: &[u8],
         live: &mut dyn FnMut() -> bool,
     ) -> Result<(), ViewerAudioRefused> {
-        self.receive_at(bytes, now(self.origin), live)
+        self.receive_at(bytes, now(), live)
     }
     fn reset(&mut self) {
         // Retain the exact retirement until proven complete. A new epoch
@@ -275,7 +279,7 @@ impl ViewerAudioOutput for Output {
         self.report.borrow_mut().absent(end_reason(end));
         match std::mem::replace(&mut self.stage, Stage::Done) {
             Stage::Playing(mut playout) | Stage::Configuring(mut playout) => {
-                if playout.stop(now(self.origin)).is_ok() {
+                if playout.stop(now()).is_ok() {
                     self.stage = Stage::Stopping(playout);
                 }
             }
@@ -295,10 +299,9 @@ impl Output {
         live: &mut dyn FnMut() -> bool,
         acknowledge: &mut AckSender<'_>,
     ) -> Result<(), ViewerAudioRefused> {
-        let origin = self.origin;
         let mut checkpoint = || {
             if live() {
-                Ok(now(origin))
+                Ok(now())
             } else {
                 Err(DeviceError::Denied)
             }
@@ -370,9 +373,8 @@ impl Output {
                 self.stage = Stage::Playing(playout);
             }
             Stage::Stopping(mut playout) => {
-                let origin = self.origin;
                 // Cleanup only: fresh local time, not a renewed grant.
-                if playout.poll_stop(|| Ok(now(origin))).ok() != Some(State::Closed)
+                if playout.poll_stop(|| Ok(now())).ok() != Some(State::Closed)
                     || self.retirement.as_ref().is_some_and(|r| !r.is_complete())
                 {
                     self.stage = Stage::Stopping(playout);

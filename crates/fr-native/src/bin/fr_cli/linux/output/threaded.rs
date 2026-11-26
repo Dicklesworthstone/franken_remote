@@ -34,7 +34,7 @@ const TICK: Duration = Duration::from_millis(1);
 const CLEANUP: Duration = Duration::from_secs(2);
 // One absolute setup budget, including original-owner retirement. Starting the
 // replacement thread or accepting its reply cannot restart this clock.
-const SETUP: Duration = Duration::from_secs(2);
+const SETUP_US: u64 = 2_000_000;
 const ACK_PENDING: u8 = 0;
 const ACK_ACCEPTED: u8 = 1;
 type Ack = [u8; wire::AUDIO_CONFIGURED_RECORD_BYTES];
@@ -309,10 +309,9 @@ pub struct Output {
     external_stop: Arc<AtomicBool>,
     selected: Selected,
     image: Option<PathBuf>,
-    origin: Instant,
     job: Option<Job>,
     pending: Option<NativeConfig>,
-    setup_until: Option<Instant>,
+    setup_until: Option<ClientInstant>,
     current: Option<(u32, AudioConfiguration)>,
     last: Option<AudioGeneration>,
     ended: bool,
@@ -370,7 +369,6 @@ impl Output {
             image: None,
             #[cfg(not(windows))]
             image: super::super::decoder_image(),
-            origin: Instant::now(),
             job: None,
             pending: None,
             setup_until: None,
@@ -421,7 +419,7 @@ impl Output {
             job.stop();
             return Err(ViewerAudioRefused);
         }
-        job.shared.authorize_at(now(self.origin).0)?;
+        job.shared.authorize_at(now().0)?;
         job.thread.thread().unpark();
         Ok(())
     }
@@ -443,7 +441,7 @@ impl Output {
         self.check_setup()?;
         let config = self.pending.take().ok_or(ViewerAudioRefused)?;
         let shared = Arc::new(Shared::with_stop(
-            now(self.origin).0,
+            now().0,
             self.external_stop.clone(),
         ));
         let job = spawn(shared, config).inspect_err(|_| {
@@ -468,10 +466,7 @@ impl Output {
             self.setup_until = None;
             return Err(ViewerAudioRefused);
         }
-        if self
-            .setup_until
-            .is_some_and(|until| Instant::now() >= until)
-        {
+        if self.setup_until.is_some_and(|until| now() >= until) {
             if self.pending.take().is_some() {
                 self.report
                     .borrow_mut()
@@ -503,13 +498,10 @@ impl ViewerAudioOutput for Output {
             return Err(ViewerAudioRefused);
         }
         let image = self.image.clone().ok_or(ViewerAudioRefused)?;
-        let setup_until = Instant::now()
-            .checked_add(SETUP)
-            .ok_or(ViewerAudioRefused)?;
+        let setup_until = ClientInstant(now().0.checked_add(SETUP_US).ok_or(ViewerAudioRefused)?);
         let config = NativeConfig {
             selected: self.selected.clone(),
             image,
-            origin: self.origin,
             binding,
             offer,
             volume: self.volume.clone(),
@@ -559,11 +551,11 @@ impl ViewerAudioOutput for Output {
         let job = self.job.as_mut().ok_or(ViewerAudioRefused)?;
         match job.replies.try_recv() {
             Ok(record) => {
-                if setup_until.is_some_and(|until| Instant::now() >= until) {
+                if setup_until.is_some_and(|until| now() >= until) {
                     job.shared.fail(Fault::Setup);
                     return Err(ViewerAudioRefused);
                 }
-                if job.acknowledged || !job.shared.live_at(now(self.origin).0) || !live() {
+                if job.acknowledged || !job.shared.live_at(now().0) || !live() {
                     job.shared.fail(Fault::Acknowledgement);
                     return Err(ViewerAudioRefused);
                 }
@@ -575,11 +567,11 @@ impl ViewerAudioOutput for Output {
                 // transport acceptance is reported separately below; frd does
                 // not deliver any packets until that admission succeeds.
                 job.acknowledged = true;
-                if setup_until.is_some_and(|until| Instant::now() >= until) {
+                if setup_until.is_some_and(|until| now() >= until) {
                     job.shared.fail(Fault::Setup);
                     return Err(ViewerAudioRefused);
                 }
-                if !live() || !job.shared.live_at(now(self.origin).0) {
+                if !live() || !job.shared.live_at(now().0) {
                     job.stop();
                     return Err(ViewerAudioRefused);
                 }
@@ -605,7 +597,7 @@ impl ViewerAudioOutput for Output {
             || self
                 .job
                 .as_ref()
-                .is_none_or(|job| !job.acknowledged || !job.shared.live_at(now(self.origin).0))
+                .is_none_or(|job| !job.acknowledged || !job.shared.live_at(now().0))
         {
             return Err(ViewerAudioRefused);
         }
@@ -618,7 +610,7 @@ impl ViewerAudioOutput for Output {
         bytes: &[u8],
         live: &mut dyn FnMut() -> bool,
     ) -> Result<(), ViewerAudioRefused> {
-        let arrived = now(self.origin);
+        let arrived = now();
         let (binding, offer) = self.current.ok_or(ViewerAudioRefused)?;
         // A stop is never enqueued behind media, even when the inbox is full.
         if let Ok(stop) = wire::decode_stop(bytes, binding) {
@@ -696,33 +688,31 @@ impl Drop for Output {
 struct NativeConfig {
     selected: Selected,
     image: PathBuf,
-    origin: Instant,
     binding: u32,
     offer: AudioConfiguration,
     volume: AudioVolumeControl,
-    setup_until: Instant,
+    setup_until: ClientInstant,
 }
 // The only wait in the acknowledgement bridge is on the foreign-work thread.
 // PulsePlayout::acknowledge cannot return success until the session accepted its
 // exact bytes. Cancellation and the ORIGINAL setup deadline still fence it.
 fn forward_ack(
     shared: &Shared,
-    origin: Instant,
-    setup_until: Instant,
+    setup_until: ClientInstant,
     replies: &SyncSender<Ack>,
     bytes: &[u8],
     progress: &mut super::AckProgress<'_>,
 ) -> Result<(), ViewerAudioRefused> {
     let record: Ack = bytes.try_into().map_err(|_| ViewerAudioRefused)?;
-    if Instant::now() >= setup_until {
+    if now() >= setup_until {
         shared.fail(Fault::Setup);
         return Err(ViewerAudioRefused);
     }
-    if !shared.live_at(now(origin).0) || replies.try_send(record).is_err() {
+    if !shared.live_at(now().0) || replies.try_send(record).is_err() {
         return Err(ViewerAudioRefused);
     }
-    let until = (Instant::now() + Duration::from_micros(PERMISSION_US)).min(setup_until);
-    while shared.live_at(now(origin).0) && Instant::now() < until {
+    let until = ClientInstant(now().0.saturating_add(PERMISSION_US)).min(setup_until);
+    while shared.live_at(now().0) && now() < until {
         if shared.ack.load(Ordering::Acquire) == ACK_ACCEPTED {
             return Ok(());
         }
@@ -733,12 +723,12 @@ fn forward_ack(
             shared.fail(super::Failure::from(error).into());
             ViewerAudioRefused
         })?;
-        if !shared.live_at(now(origin).0) || Instant::now() >= until {
+        if !shared.live_at(now().0) || now() >= until {
             break;
         }
         thread::park_timeout(TICK);
     }
-    shared.fail(if Instant::now() >= setup_until {
+    shared.fail(if now() >= setup_until {
         Fault::Setup
     } else {
         Fault::Acknowledgement
@@ -754,7 +744,6 @@ fn native(
     let report = Rc::new(RefCell::new(Report::default()));
     let mut output = super::Output::selected(config.selected, report.clone(), config.volume);
     output.image = Some(config.image);
-    output.origin = config.origin;
     let result = (|| {
         // configure() cannot receive the observation callback. Wait for the first
         // session service turn instead of assuming creation grants permission.
@@ -762,16 +751,16 @@ fn native(
             if shared.is_stopped() {
                 return Err(ViewerAudioRefused);
             }
-            if Instant::now() >= config.setup_until {
+            if now() >= config.setup_until {
                 shared.fail(Fault::Setup);
                 return Err(ViewerAudioRefused);
             }
             thread::park_timeout(TICK);
         }
-        if !shared.live_at(now(config.origin).0) {
+        if !shared.live_at(now().0) {
             return Err(ViewerAudioRefused);
         }
-        if Instant::now() >= config.setup_until {
+        if now() >= config.setup_until {
             shared.fail(Fault::Setup);
             return Err(ViewerAudioRefused);
         }
@@ -780,30 +769,23 @@ fn native(
             if shared.is_stopped() {
                 return Ok(());
             }
-            if !shared.live_at(now(config.origin).0) {
+            if !shared.live_at(now().0) {
                 shared.fail(Fault::Permission);
                 return Err(ViewerAudioRefused);
             }
-            if !report.borrow().acknowledged && Instant::now() >= config.setup_until {
+            if !report.borrow().acknowledged && now() >= config.setup_until {
                 shared.fail(Fault::Setup);
                 return Err(ViewerAudioRefused);
             }
             output.service_with_ack(
-                &mut || shared.live_at(now(config.origin).0),
+                &mut || shared.live_at(now().0),
                 &mut |bytes, progress| {
-                    forward_ack(
-                        shared,
-                        config.origin,
-                        config.setup_until,
-                        replies,
-                        bytes,
-                        progress,
-                    )
+                    forward_ack(shared, config.setup_until, replies, bytes, progress)
                 },
             )?;
             shared
                 .progress
-                .store(now(config.origin).0, Ordering::Release);
+                .store(now().0, Ordering::Release);
             shared
                 .submitted
                 .store(report.borrow().submitted, Ordering::Release);
@@ -812,7 +794,7 @@ fn native(
                     Ok(packet) => output.receive_at(
                         &packet.bytes[..packet.len],
                         packet.arrived,
-                        &mut || shared.live_at(now(config.origin).0),
+                        &mut || shared.live_at(now().0),
                     )?,
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return Ok(()),

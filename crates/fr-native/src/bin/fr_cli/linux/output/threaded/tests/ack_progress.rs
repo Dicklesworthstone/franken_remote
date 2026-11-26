@@ -6,7 +6,7 @@ use crate::audio_output::native::{DeviceError, PlayoutError};
 
 #[test]
 fn pending_ack_maintains_same_owner_progress_without_admitting_audio() {
-    let origin = Instant::now();
+    let at = now().0;
     let (progress, observed) = mpsc::sync_channel(1);
     let (result, completion) = mpsc::sync_channel(1);
     let (release, released) = mpsc::sync_channel(1);
@@ -16,8 +16,7 @@ fn pending_ack_maintains_same_owner_progress_without_admitting_audio() {
         let mut polls = 0;
         let accepted = maintain_ack(
             shared,
-            origin,
-            origin + SETUP,
+            ClientInstant(at + SETUP_US),
             &replies,
             &ack_record(),
             &mut || {
@@ -61,17 +60,16 @@ fn pending_ack_maintains_same_owner_progress_without_admitting_audio() {
 #[test]
 fn stop_or_permission_expiry_during_progress_refuses_a_racing_ack() {
     for stop in [true, false] {
-        let origin = Instant::now();
-        let shared = Shared::new(0);
-        shared.authorize_at(0).unwrap();
+        let at = now().0;
+        let shared = Shared::new(at);
+        shared.authorize_at(at).unwrap();
         let original_until = shared.until.load(Ordering::Acquire);
         let (replies, records) = mpsc::sync_channel(1);
         let mut polls = 0;
         assert!(
             maintain_ack(
                 &shared,
-                origin,
-                origin + SETUP,
+                ClientInstant(at + SETUP_US),
                 &replies,
                 &ack_record(),
                 &mut || {
@@ -81,7 +79,7 @@ fn stop_or_permission_expiry_during_progress_refuses_a_racing_ack() {
                     } else {
                         // Force the exact permission boundary while native
                         // maintenance is in progress, without a timing race.
-                        shared.until.store(now(origin).0, Ordering::Release);
+                        shared.until.store(now().0, Ordering::Release);
                     }
                     shared.ack.store(ACK_ACCEPTED, Ordering::Release);
                     Ok(())
@@ -99,16 +97,15 @@ fn stop_or_permission_expiry_during_progress_refuses_a_racing_ack() {
 
 #[test]
 fn native_progress_expiry_keeps_its_reason_and_original_deadline() {
-    let origin = Instant::now();
-    let shared = Shared::new(0);
-    shared.authorize_at(0).unwrap();
+    let at = now().0;
+    let shared = Shared::new(at);
+    shared.authorize_at(at).unwrap();
     let original_until = shared.until.load(Ordering::Acquire);
     let (replies, records) = mpsc::sync_channel(1);
     assert!(
         maintain_ack(
             &shared,
-            origin,
-            origin + SETUP,
+            ClientInstant(at + SETUP_US),
             &replies,
             &ack_record(),
             &mut || Err(PlayoutError::Device(DeviceError::Expired)),

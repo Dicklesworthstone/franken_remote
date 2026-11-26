@@ -21,11 +21,11 @@ fn overflow_retains_exact_original_records_and_the_worker_accepts_more_after_dra
         true
     });
     output.job.as_mut().unwrap().acknowledged = true;
-    let first_arrival = now(output.origin);
+    let first_arrival = now();
     for seq in 0..10 {
         output.receive(&packet(seq), &mut || true).unwrap();
     }
-    let last_arrival = now(output.origin);
+    let last_arrival = now();
     assert_eq!(output.report.borrow().dropped_packets, 2);
     assert_eq!(shared.fault.load(Ordering::Acquire), 0);
     assert!(shared.live_at(last_arrival.0));

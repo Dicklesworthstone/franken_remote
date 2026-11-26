@@ -9,7 +9,12 @@ use fr_core::audio::{AudioChannels, AudioDirection, AudioGeneration};
 use fr_media::audio::{AudioEncoder, AudioPcmFrame};
 use fr_wire::audio::{self, AudioConfigured, AudioPacket};
 use pulse_support::Server;
-use std::{process::Command, sync::Mutex, thread, time::Duration};
+use std::{
+    process::Command,
+    sync::Mutex,
+    thread,
+    time::{Duration, Instant},
+};
 static SERIAL: Mutex<()> = Mutex::new(());
 const BINDING: u32 = 61;
 

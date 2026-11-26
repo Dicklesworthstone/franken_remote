@@ -1,6 +1,6 @@
 //! Explicit kernel clock domains for private native process boundaries.
-//! Input uses suspend-inclusive time; existing audio, microphone and clipboard
-//! protocols retain their separate raw monotonic clock. Neither is wall time.
+//! Input and local playback use suspend-inclusive time. Private microphone,
+//! capture and clipboard protocols retain their separate raw monotonic clock.
 use core::ffi::{c_int, c_long};
 
 #[repr(C)]
@@ -29,6 +29,11 @@ const INPUT_AUTHORITY_CLOCK: c_int = CLOCK_MONOTONIC;
 /// was queued or its native preflight was blocked. Never replace this with
 /// Linux `CLOCK_MONOTONIC` or `Instant`: neither includes suspended time.
 pub fn input_authority_ns() -> Option<u64> {
+    suspend_inclusive_ns()
+}
+
+/// Same-boot local time for deadlines that must continue aging during sleep.
+pub fn suspend_inclusive_ns() -> Option<u64> {
     clock_ns(INPUT_AUTHORITY_CLOCK)
 }
 
