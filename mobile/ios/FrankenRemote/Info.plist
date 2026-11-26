@@ -3,8 +3,21 @@
 <plist version="1.0">
 <dict>
 	<!-- Merged with the generated Info.plist (GENERATE_INFOPLIST_FILE): only
-	     keys the build settings cannot set. Lets the session's Metal view run
-	     at 120 Hz on ProMotion iPhones (preferredFramesPerSecond). -->
+	     keys provided by the application. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).machine</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>fr</string>
+				<string>frs</string>
+			</array>
+		</dict>
+	</array>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 </dict>

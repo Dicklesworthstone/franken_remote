@@ -17,6 +17,12 @@ struct SavedHost: Codable, Identifiable, Equatable, Hashable {
     /// directory existed).
     var direct: Bool?
 
+    /// Only the name and service port are shared.
+    var shareURL: URL? {
+        guard port != 0 else { return nil }
+        return URL(string: "fr://\(name):\(port)")
+    }
+
     /// A direct dial needs the pin it dials.
     var dialsDirectly: Bool { direct == true && pin != nil }
 
@@ -28,6 +34,25 @@ struct SavedHost: Codable, Identifiable, Equatable, Hashable {
     var tailnet: String {
         let labels = name.split(separator: ".")
         return labels.count == 4 ? String(labels[1]) : ""
+    }
+}
+
+/// The reviewed destination in a link. Parsing never saves or connects.
+struct MachineLink: Equatable {
+    let name: String
+    let port: UInt16
+
+    init?(_ url: URL) {
+        let raw = url.absoluteString
+        guard raw.utf8.count <= 265, !raw.utf8.contains(0) else { return nil }
+        var buffer = [CChar](repeating: 0, count: 254)
+        var servicePort: UInt16 = 0
+        let valid = buffer.withUnsafeMutableBufferPointer { output in
+            raw.withCString { fr_host_link_parse($0, output.baseAddress, output.count, &servicePort) }
+        }
+        guard valid else { return nil }
+        name = buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+        port = servicePort
     }
 }
 
@@ -88,6 +113,19 @@ final class HostStore: ObservableObject {
         hosts.append(host)
         save()
         return host
+    }
+
+    func savedHost(for link: MachineLink) -> SavedHost? {
+        hosts.first { $0.name.caseInsensitiveCompare(link.name) == .orderedSame }
+    }
+
+    /// Resolve again when the user accepts. An existing name keeps its port,
+    /// address pin and dialing policy even if the store changed during review.
+    func accept(_ link: MachineLink) -> SavedHost? {
+        if let saved = savedHost(for: link) {
+            return saved.port == link.port ? saved : nil
+        }
+        return add(link.name, port: link.port)
     }
 
     func update(_ host: SavedHost) {

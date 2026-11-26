@@ -198,6 +198,10 @@ typedef struct FrDisplayInfo {
 } FrDisplayInfo;
 
 bool fr_host_name_valid(const char *_Nullable name);
+/* Parse fr:// or frs:// plus a MagicDNS name and optional port without I/O.
+ * On success write a complete NUL-terminated name and the service port. */
+bool fr_host_link_parse(const char *_Nullable raw, char *_Nullable buffer,
+                        size_t capacity, uint16_t *_Nullable port);
 
 int32_t fr_session_start(const FrConfig *_Nullable config, FrHandle *_Nullable out);
 int32_t fr_session_start_with_display(const FrConfig *_Nullable config,

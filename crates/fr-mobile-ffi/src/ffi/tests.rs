@@ -24,6 +24,42 @@ fn precise_scroll_requires_a_live_handle_and_does_not_imply_line_emulation() {
     assert!(HEADER.contains("int32_t fr_session_scroll_pixels(FrHandle session, double dx, double dy, double x, double y);"));
 }
 
+#[test]
+fn host_link_abi_never_truncates_an_endpoint_or_partially_accepts_it() {
+    let url = CString::new("fr://WORK.tailnet.ts.net:9443").unwrap();
+    let mut name = [0; 64];
+    let mut port = 0_u16;
+    // SAFETY: the input is NUL-terminated and the two outputs are disjoint.
+    unsafe {
+        assert!(!fr_host_link_parse(
+            url.as_ptr(),
+            name.as_mut_ptr(),
+            3,
+            &mut port,
+        ));
+        assert_eq!(name, [0; 64]);
+        assert_eq!(port, 0);
+        assert!(!fr_host_link_parse(
+            url.as_ptr(),
+            name.as_mut_ptr(),
+            name.len(),
+            core::ptr::null_mut(),
+        ));
+        assert_eq!(name, [0; 64]);
+        assert!(fr_host_link_parse(
+            url.as_ptr(),
+            name.as_mut_ptr(),
+            name.len(),
+            &mut port,
+        ));
+        assert_eq!(
+            CStr::from_ptr(name.as_ptr()).to_bytes(),
+            b"work.tailnet.ts.net"
+        );
+        assert_eq!(port, 9443);
+    }
+}
+
 /// `#define NAME value` lines of the header, values parsed as integers.
 fn defines() -> Vec<(String, i64)> {
     HEADER

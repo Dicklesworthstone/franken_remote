@@ -34,6 +34,44 @@ final class HostStoreTests: XCTestCase {
         XCTAssertNil(s.add("other.tail1f21e.ts.net", port: 0))
     }
 
+    func testMachineLinksReviewWithoutSavingAndReuseTheSavedIdentity() throws {
+        let s = store()
+        let url = try XCTUnwrap(URL(string: "frs://MAC.tailtest.ts.net:18443"))
+        let link = try XCTUnwrap(MachineLink(url))
+        XCTAssertEqual(link.name, "mac.tailtest.ts.net")
+        XCTAssertEqual(link.port, 18443)
+        XCTAssertTrue(s.hosts.isEmpty)
+
+        var host = try XCTUnwrap(s.accept(link))
+        host.nickname = "Work"
+        host.pin = "fr-pin-v1 mac.tailtest.ts.net 100.64.0.1"
+        host.direct = true
+        s.update(host)
+        let shared = try XCTUnwrap(host.shareURL)
+        XCTAssertEqual(shared.absoluteString, "fr://mac.tailtest.ts.net:18443")
+        XCTAssertEqual(MachineLink(shared), link)
+        XCTAssertEqual(s.accept(link), host)
+
+        let different = try XCTUnwrap(MachineLink(try XCTUnwrap(URL(string: "fr://mac.tailtest.ts.net"))))
+        XCTAssertEqual(different.port, 8443)
+        XCTAssertNil(s.accept(different))
+        XCTAssertEqual(s.hosts, [host])
+        XCTAssertEqual(store().hosts, [host])
+    }
+
+    func testMachineLinkRejectsCredentialsAmbiguousTargetsAndUnusablePorts() {
+        for raw in [
+            "https://mac.tailtest.ts.net", "fr://100.64.0.1", "fr://mac", "fr://mac.example.com",
+            "fr://a.b.c.ts.net", "fr://mac.tailtest.ts.net:0", "fr://mac.tailtest.ts.net:65536",
+            "fr://mac.tailtest.ts.net:", "fr://person@mac.tailtest.ts.net",
+            "fr://mac.tailtest.ts.net?control=1", "fr://mac.tailtest.ts.net?token=abc",
+            "fr://mac.tailtest.ts.net#pin", "fr://mac.tailtest.ts.net/file",
+            "fr://mac%2etailtest.ts.net", "fr://mac.tailtest.ts.net/%00"
+        ] {
+            XCTAssertNil(URL(string: raw).flatMap(MachineLink.init), raw)
+        }
+    }
+
     func testHostsPersistAndPinsAreRecordedOnlyForTheirOwnNameAndNeverReplaced() throws {
         let s = store()
         let host = try XCTUnwrap(s.add("mac.tailtest.ts.net", port: 18443, nickname: "Mac"))

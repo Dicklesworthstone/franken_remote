@@ -256,6 +256,52 @@ pub unsafe extern "C" fn fr_host_name_valid(name: *const c_char) -> bool {
     unsafe { text(name) }.is_some_and(|name| HostName::parse(name).is_ok())
 }
 
+/// Parse a link for the iOS named dialer. Only the endpoint can travel in
+/// a link; display selection and permissions belong to the receiving device.
+fn linked_endpoint(raw: &str) -> Option<(HostName, u16)> {
+    let (scheme, authority) = raw.split_once("://")?;
+    if raw.len() > 265
+        || !matches!(scheme, "fr" | "frs")
+        || !authority
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+    {
+        return None;
+    }
+    let link = fr_client::discovery::saved_hosts::HostLink::parse(raw).ok()?;
+    let host = HostName::parse(&link.host).ok()?;
+    (link.port != 0).then_some((host, link.port))
+}
+
+/// Write the canonical name and port of a mobile host link. Does no I/O.
+/// On failure, including a short output buffer, both outputs stay untouched.
+///
+/// # Safety
+/// `raw` is NULL or a NUL-terminated string. Non-null outputs must be
+/// disjoint and writable for `capacity` bytes and one `u16` respectively.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_host_link_parse(
+    raw: *const c_char,
+    buffer: *mut c_char,
+    capacity: usize,
+    port: *mut u16,
+) -> bool {
+    // SAFETY: the caller supplies a NUL-terminated string or NULL.
+    let Some((host, service_port)) = (unsafe { text(raw) }).and_then(linked_endpoint) else {
+        return false;
+    };
+    let name = host.as_str().as_bytes();
+    if buffer.is_null() || capacity <= name.len() || port.is_null() {
+        return false;
+    }
+    // SAFETY: both disjoint outputs are non-null and large enough.
+    unsafe {
+        copy_out(name, buffer, capacity);
+        port.write(service_port);
+    }
+    true
+}
+
 /// Start a session; on `FR_OK` writes its handle to `out`.
 ///
 /// # Safety

@@ -57,6 +57,17 @@ The app is built on exactly those two, plus checks of its own:
    policy (own-user sharing, approval, capability limits). Tailscale is the
    authority for who the phone is; frd's policy decides what it may do.
 
+**Sharing and opening a machine.** In Machines, touch and hold a saved row and
+choose **Share machine link**. A link such as `fr://studio.tail1234.ts.net:9443`
+contains the full MagicDNS name and service port. The iPhone and iPad app accepts
+`fr://` and `frs://` and uses the same certificate-checked connection for both.
+Omitting the port selects 8443. Credentials, IP literals, paths, query parameters
+and fragments are refused. The recipient reviews the name and port, then chooses
+**Save and view only** for a new machine or **View only** for a saved one.
+An existing machine keeps its address pin and dialing policy. A link naming a
+different port requires the user to edit that saved machine separately.
+Opening a link during a connection leaves the current session in place.
+
 **The machine list.** Tailscale offers no way for another iOS app to list the
 tailnet's machines, so a FrankenRemote host lists them instead. A host started
 with `frd run --directory` answers an admitted viewer with itself and that

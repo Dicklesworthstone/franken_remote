@@ -12,10 +12,13 @@ struct MachinePickerView: View {
     @State private var confirmReceiving = false
     @State private var receiveHost: SavedHost?
     @State private var receiveMachine: DirectoryMachine?
+    @State private var pendingLink: MachineLink?
+    @State private var linkError: String?
 
     var body: some View {
         NavigationStack {
             List {
+                linkReview
                 if let offer = model.reconnectOffer {
                     Section {
                         Button {
@@ -130,7 +133,7 @@ struct MachinePickerView: View {
                 Text("Once you take control, this host can send selected files into FrankenRemote on this device: up to 256 MiB per file and 1 GiB for this session. Existing files are kept. Nothing opens automatically. This permission ends with the original connection; a reconnect needs a new choice.")
             }
             .overlay {
-                if store.hosts.isEmpty {
+                if store.hosts.isEmpty && pendingLink == nil && linkError == nil {
                     ContentUnavailableView {
                         Label("No machines yet", systemImage: "desktopcomputer")
                     } description: {
@@ -142,6 +145,56 @@ struct MachinePickerView: View {
                 }
             }
         }
+        .onOpenURL { url in
+            guard model.session == nil, model.starting == nil else { return }
+            pendingLink = MachineLink(url)
+            linkError = pendingLink == nil ? "This link needs a full MagicDNS machine name and an optional service port." : nil
+        }
+        .onChange(of: model.session != nil || model.starting != nil) { _, busy in
+            if busy { dismissLink() }
+        }
+    }
+
+    @ViewBuilder
+    private var linkReview: some View {
+        if let link = pendingLink {
+            let saved = store.savedHost(for: link)
+            Section {
+                Text(verbatim: "\(link.name):\(link.port)")
+                    .textSelection(.enabled)
+                if let saved, saved.port != link.port {
+                    Text(verbatim: "This machine is saved on port \(saved.port). To change its port, edit the saved machine.")
+                } else {
+                    Button(saved == nil ? "Save and view only" : "View only") {
+                        guard model.session == nil, model.starting == nil else {
+                            dismissLink()
+                            return
+                        }
+                        dismissLink()
+                        if let host = store.accept(link) {
+                            model.connect(host, control: false)
+                        } else {
+                            linkError = "The saved machine changed. Open the link again to review it."
+                        }
+                    }
+                }
+                Button("Dismiss", role: .cancel) { dismissLink() }
+            } header: {
+                Text("Machine from link")
+            }
+        } else if let linkError {
+            Section {
+                Label(linkError, systemImage: "exclamationmark.triangle")
+                Button("Dismiss", role: .cancel) { dismissLink() }
+            } header: {
+                Text("Machine link")
+            }
+        }
+    }
+
+    private func dismissLink() {
+        pendingLink = nil
+        linkError = nil
     }
 
     private var sortedHosts: [SavedHost] {
@@ -312,6 +365,9 @@ private struct HostRow: View {
             Button { connect(true) } label: { Label("View and control", systemImage: "cursorarrow.rays") }
             Button { connect(false) } label: { Label("View only", systemImage: "eye") }
             Button(action: receiveFiles) { Label("Connect and receive files…", systemImage: "tray.and.arrow.down") }
+            if let url = host.shareURL {
+                ShareLink(item: url) { Label("Share machine link", systemImage: "square.and.arrow.up") }
+            }
             Button { edit() } label: { Label("Edit", systemImage: "pencil") }
         }
         .swipeActions(edge: .leading) {
