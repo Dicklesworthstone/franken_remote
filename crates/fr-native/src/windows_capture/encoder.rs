@@ -593,9 +593,7 @@ impl Encoder {
                 .map_err(|_| NativeError::Codec)?;
         }
         // 100 ns units, strictly increasing.
-        let time = i64::try_from(micros.saturating_mul(10))
-            .unwrap_or(i64::MAX)
-            .max(self.time.saturating_add(1));
+        let time = bounds::next_sample_time(self.time, micros).ok_or(NativeError::Codec)?;
         // SAFETY: a DXGI surface buffer over the converter's NV12 texture
         // (alive until the unit returns: the transform has read the picture
         // by the time it outputs it) wrapped in a new sample.
@@ -627,7 +625,7 @@ impl Encoder {
             match self.next(deadline)? {
                 Event::NeedInput => self.credits.grant().map_err(event_failure)?,
                 Event::HaveOutput => {
-                    if let Some(unit) = self.take(deadline)? {
+                    if let Some(unit) = self.take(time, deadline)? {
                         return Ok(unit);
                     }
                 }
@@ -638,7 +636,11 @@ impl Encoder {
 
     /// One `ProcessOutput`; `None` after an output type renegotiation.
     #[allow(clippy::too_many_lines, reason = "one ordered native output operation")]
-    fn take(&mut self, deadline: Instant) -> Result<Option<(Vec<u8>, bool)>, NativeError> {
+    fn take(
+        &mut self,
+        submitted: i64,
+        deadline: Instant,
+    ) -> Result<Option<(Vec<u8>, bool)>, NativeError> {
         self.events.check(deadline).map_err(event_failure)?;
         let own = if self.identity.provides_samples {
             None
@@ -664,13 +666,17 @@ impl Encoder {
         let mut status = 0_u32;
         // SAFETY: one output buffer for the live transform; the sample and
         // event references it holds afterwards are taken exactly once.
-        let (result, sample) = unsafe {
+        let (result, sample, stream_status) = unsafe {
             let result = self
                 .transform
                 .ProcessOutput(0, &mut buffers, &raw mut status);
             let [entry] = &mut buffers;
             drop(ManuallyDrop::take(&mut entry.pEvents));
-            (result, ManuallyDrop::take(&mut entry.pSample))
+            (
+                result,
+                ManuallyDrop::take(&mut entry.pSample),
+                entry.dwStatus,
+            )
         };
         self.events.check(deadline).map_err(event_failure)?;
         match result {
@@ -709,6 +715,17 @@ impl Encoder {
         // SAFETY: reads of a live output sample; the lock is released before
         // the copy leaves this block.
         unsafe {
+            // Output events announce availability, not ownership. A delayed
+            // or second sample from a previous input may arrive after a new
+            // input credit. Never label its bytes as the new desktop.
+            if !bounds::owns_unit(
+                submitted,
+                sample.GetSampleTime().ok(),
+                stream_status,
+                status,
+            ) {
+                return Err(NativeError::Codec);
+            }
             let clean = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
             let total = sample.GetTotalLength().map_err(|_| NativeError::Codec)?;
             self.output_limit

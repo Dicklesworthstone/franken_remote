@@ -129,6 +129,25 @@ impl Credits {
     }
 }
 
+/// Media Foundation timestamps are in 100 ns units. Keep the capture clock
+/// for rate control, but distinguish even successive captures in the same
+/// microsecond. Saturating here would let two submissions share an identity.
+pub(crate) fn next_sample_time(previous: i64, micros: u64) -> Option<i64> {
+    let clock = i64::try_from(micros).ok()?.checked_mul(10)?;
+    Some(clock.max(previous.checked_add(1)?))
+}
+
+/// Only a complete sample from the sole stream and the original input can
+/// carry that capture's frame id and source-observation timestamp.
+pub(crate) fn owns_unit(
+    submitted: i64,
+    returned: Option<i64>,
+    stream_status: u32,
+    process_status: u32,
+) -> bool {
+    returned == Some(submitted) && stream_status == 0 && process_status == 0
+}
+
 /// The selected protocol's access-unit byte ceiling, carried into the native
 /// boundary before Media Foundation is asked to allocate any output buffer.
 #[derive(Clone, Copy)]
@@ -269,6 +288,32 @@ mod tests {
             credits.consume().unwrap();
         }
         assert!(!credits.available());
+    }
+
+    #[test]
+    fn captures_use_distinct_native_times_without_stretching_the_capture_clock() {
+        let first = next_sample_time(0, 5).unwrap();
+        let second = next_sample_time(first, 5).unwrap();
+        assert_eq!((first, second), (50, 51));
+        assert_eq!(next_sample_time(second, 6), Some(60));
+        assert_eq!(next_sample_time(i64::MAX, 5), None);
+        assert_eq!(next_sample_time(0, (i64::MAX as u64 / 10) + 1), None);
+        assert_eq!(next_sample_time(0, u64::MAX), None);
+    }
+
+    #[test]
+    fn queued_extra_output_cannot_become_a_new_capture_even_at_the_same_clock() {
+        let first = next_sample_time(0, 10).unwrap();
+        let second = next_sample_time(first, 10).unwrap();
+        assert!(owns_unit(first, Some(first), 0, 0));
+        assert!(!owns_unit(second, Some(first), 0, 0));
+        assert!(!owns_unit(second, None, 0, 0));
+        assert!(!owns_unit(second, Some(second + 1), 0, 0));
+        // INCOMPLETE and a newly announced stream both break this
+        // transform's single-stream, one-complete-unit contract.
+        assert!(!owns_unit(second, Some(second), 1 << 24, 0));
+        assert!(!owns_unit(second, Some(second), 0, 1 << 8));
+        assert!(owns_unit(second, Some(second), 0, 0));
     }
 
     #[test]
