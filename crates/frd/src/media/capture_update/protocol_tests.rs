@@ -219,6 +219,7 @@ fn skipped_candidate_cannot_bootstrap_cross_backends_or_accept_unknown_reason() 
 fn rate_preflight_preserves_original_cap_for_every_implemented_backend() {
     let mut configuration = request(None).configuration;
     for backend in [
+        worker::Backend::Nvenc,
         worker::Backend::SoftwareExplicit,
         worker::Backend::VideoToolbox,
         worker::Backend::MediaFoundation,
@@ -234,14 +235,12 @@ fn rate_preflight_preserves_original_cap_for_every_implemented_backend() {
             );
         }
     }
-    for backend in [worker::Backend::Nvenc, worker::Backend::Vaapi] {
-        configuration.backend = backend;
-        assert_eq!(
-            validate_bitrate(configuration, Some(4_000_000)),
-            Err(worker::Error::Unsupported)
-        );
-        assert_eq!(validate_bitrate(configuration, None), Ok(()));
-    }
+    configuration.backend = worker::Backend::Vaapi;
+    assert_eq!(
+        validate_bitrate(configuration, Some(4_000_000)),
+        Err(worker::Error::Unsupported)
+    );
+    assert_eq!(validate_bitrate(configuration, None), Ok(()));
 }
 
 #[test]

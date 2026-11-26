@@ -79,7 +79,7 @@ static int qualified_level(int level) {
 int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level_idc,FrEncoder **out) {
     if (!out) return FR_INVALID; *out=NULL;
     if (!geometry(w,h) || fps<1 || fps>240 || bitrate<10000 || bitrate>200000000 || gop<1 || gop>14400) return FR_INVALID;
-    if (!qualified_level(level_idc) || (level_idc && backend!=2)) return FR_INVALID;
+    if (!qualified_level(level_idc) || (level_idc && backend!=0 && backend!=2)) return FR_INVALID;
     const char *name = backend==0?"hevc_nvenc":backend==1?"hevc_vaapi":backend==2?"libx265":NULL;
     if (!name) return FR_INVALID;
     const AVCodec *codec=avcodec_find_encoder_by_name(name);
@@ -123,6 +123,12 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level
     AVDictionary *opts=NULL;
     av_dict_set(&opts,"profile","main",0);
     if (backend==0) {
+        /* hevc_nvenc's level option uses the bitstream's numeric level_idc.
+         * Pin the original admitted level across rate cuts/recovery: automatic
+         * level selection can otherwise change the decoder parameter sets. */
+        if (level_idc && av_dict_set_int(&opts,"level",level_idc,0)<0) {
+            av_dict_free(&opts); fr_encoder_free(e); return FR_MEMORY;
+        }
         av_dict_set(&opts,"preset","p1",0); av_dict_set(&opts,"tune","ull",0);
         av_dict_set(&opts,"zerolatency","1",0); av_dict_set(&opts,"rc-lookahead","0",0);
         av_dict_set(&opts,"forced-idr","1",0); av_dict_set(&opts,"delay","0",0);
@@ -150,7 +156,9 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level
         av_dict_set(&opts,"x265-params",params,0); av_dict_set(&opts,"forced-idr","1",0);
     }
     int r=avcodec_open2(c,codec,&opts), unused=av_dict_count(opts); av_dict_free(&opts);
-    if (r<0 || unused) { fr_encoder_free(e); return FR_UNAVAILABLE; }
+    if (r<0 || unused || (backend==0 && level_idc && c->bit_rate!=bitrate)) {
+        fr_encoder_free(e); return FR_UNAVAILABLE;
+    }
     e->input->format=sw; e->input->width=w; e->input->height=h;
     e->input->color_primaries=c->color_primaries; e->input->color_trc=c->color_trc;
     e->input->colorspace=c->colorspace; e->input->color_range=c->color_range;

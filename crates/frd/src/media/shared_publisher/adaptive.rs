@@ -500,7 +500,12 @@ impl Publisher {
             return Err(Error::InvalidBudget);
         }
         let adaptive = self.adaptive.as_mut().ok_or(Error::InvalidBudget)?;
-        if !self.source.configuration.backend.accepts_rate_capture() {
+        if !self
+            .source
+            .configuration
+            .backend
+            .use_path_bitrate(!adaptive.receiver_rescue())
+        {
             return Ok(false);
         }
         adaptive.enable_bitrate(self.source.configuration.bitrate)?;

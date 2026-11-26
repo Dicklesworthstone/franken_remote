@@ -1,4 +1,4 @@
-//! Real software stop/reopen and original decoder/configuration regressions.
+//! Stop/reopen and original decoder/configuration regressions on native encoders.
 use super::*;
 use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::config::{CodedGeometry, GopPolicy};
@@ -39,9 +39,19 @@ fn submit(encoder: &mut HevcEncoder, frame: u64, pixels: &BgraFrame) -> EncodedA
 }
 #[test]
 fn software_rates_reuse_exact_original_decoder_configuration_and_frame_identity() {
-    let config = configuration(64, 64);
-    let mut encoder = encoder(config, 8_000_000);
-    let pixels = flat();
+    check_rate_transitions(EncodeBackend::SoftwareExplicit, flat());
+}
+
+#[test]
+#[ignore = "requires a working NVIDIA HEVC encoder and driver"]
+fn nvenc_rates_reuse_exact_original_decoder_configuration_and_frame_identity() {
+    check_rate_transitions(EncodeBackend::Nvenc, busy_desktop(0));
+}
+
+fn check_rate_transitions(backend: EncodeBackend, pixels: BgraFrame) {
+    let config = configuration(pixels.width(), pixels.height());
+    let mut encoder =
+        HevcEncoder::new(config, ProtocolLimits::ABSOLUTE, backend, 30, 8_000_000).unwrap();
     let first = submit(&mut encoder, 0, &pixels);
     let original = encoder.admission.decoder_record().unwrap().bytes().to_vec();
     let level = encoder.level_idc;

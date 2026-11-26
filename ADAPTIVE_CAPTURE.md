@@ -78,7 +78,8 @@ The original controlled publisher receives the existing measured source-work,
 send-admission, retention-credit and negotiated decoder-load samples. Collected
 native input retains its existing bounded idle wake path. Software, VideoToolbox
 and Media Foundation can change their bitrate targets within the original local
-ceiling; NVENC and VA-API retain their fixed bitrate. Resolution and the exact
+ceiling. NVENC can change its target under explicit adaptive capture. VA-API
+retains its fixed bitrate. Resolution and the exact
 decoder configuration stay fixed. An observer-first share uses the
 same pacing state machine in its original shared publisher, with measured source
 work, genuine changed/unchanged observations and aggregate capture credit. A
@@ -209,9 +210,9 @@ serving owner are refused without replacing the controller. Existing callers
 retain their fixed policy until they explicitly enable adaptation. These public
 library calls enable capture cadence only and preserve legacy worker messages.
 Native host startup additionally enables the bitrate controller for an explicitly
-selected software, VideoToolbox or Media Foundation encoder when
+selected software, NVENC, VideoToolbox or Media Foundation encoder when
 `--adaptive-capture` is selected.
-NVENC and VA-API retain cadence adaptation without native bitrate transactions.
+VA-API retains cadence adaptation at its opening bitrate.
 
 For an independently owned shared source, call
 `Publisher::enable_adaptive_capture(capture_interval, maximum)` before its
@@ -436,7 +437,14 @@ also restarts across gaps between genuinely new RTTs; repeated stale readings
 cannot mature it. These checks preserve capture gating
 while the path is congested; they do not extend any delivery deadline.
 
-Backends that cannot change their rate (NVENC, VA-API) keep a fixed rate and
+Linux NVENC can participate when `--adaptive-capture` is enabled. On a useful
+capture after the rate controller's dwell, the worker releases the old NVENC
+session before opening the same FFmpeg encoder at the requested bitrate. It
+pins the original HEVC level and publishes the change only with a validated
+IDR and byte-identical decoder parameter sets. Driver refusal, a different
+configuration or a missed capture deadline ends that source. An idle desktop
+can defer the switch. Native NVENC rate changes and decoder continuity still
+need a GPU run. Default NVENC hosting and VA-API keep their opening target and
 the capture gate. A Media Foundation transform that cannot change its rate
 while streaming defers every target. With `--adaptive-capture`, the same
 controller also sees send pressure.
@@ -527,7 +535,8 @@ hardware HEVC session with the worker's exact properties and synthetic frames:
 
 Remaining work includes live impaired-path qualification of software bitrate
 changes, native VideoToolbox and Media Foundation rate-change qualification,
-runtime resolution changes, NVENC/VA-API bitrate transactions and hardware quantizer control,
+runtime resolution changes, NVENC rate-change qualification, VA-API bitrate
+transactions and hardware quantizer control,
 platform presentation feedback, aggregate host/path budgets, qualified
 damage-event and local-input wakeup, and platform/GUI policy selection. Collected
 remote-input wakeup is implemented separately in
@@ -569,9 +578,9 @@ The software adapter stops the old encoder before reopening it, preserves the
 original validated HEVC level and exact VPS/SPS/PPS, and releases the replacement
 only as a verified IDR. Frame identity, source timestamps and configuration
 generation stay bound to the same source. The existing decoder consumes the new
-IDR and following P pictures. NVENC and VA-API return typed unavailability for
-this operation; the host keeps their cadence adaptation without bitrate
-switching or silently substituting an encoder. VideoToolbox uses its own native
+IDR and following P pictures. Under explicit adaptive capture, NVENC uses the
+same stop/reopen and IDR admission path with its own FFmpeg encoder. VA-API
+retains cadence adaptation at its configured bitrate. VideoToolbox uses its own native
 transaction described below, without replacing the capture session.
 
 Applied-rate accounting happens before sender admission or recipient expiry can

@@ -228,7 +228,7 @@ impl Publisher {
         if let Some(adaptive) = &mut self.adaptive {
             return Ok(adaptive.bitrate_mut().is_some());
         }
-        if !self.source.configuration.backend.accepts_rate_capture() {
+        if !self.source.configuration.backend.use_path_bitrate(false) {
             return Ok(false);
         }
         self.path_rate = Some(Box::new(PathRate::new(self.source.configuration.bitrate)?));

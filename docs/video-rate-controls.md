@@ -27,7 +27,8 @@ observation-indicator wrapper. They remain the host run's original ceilings
 through its existing bounded retries. The default path can reduce bitrate when
 the viewer's path holds a queue, then slowly probe back toward the original
 ceiling. Software, VideoToolbox and modifiable Media Foundation encoders expose
-the required rate transaction; NVENC and VA-API retain their fixed targets.
+the rate transaction by default. NVENC enables rate changes under explicit
+`--adaptive-capture`. VA-API retains its fixed target.
 `--adaptive-capture` additionally adapts capture cadence and uses measured local
 send pressure in the same bitrate controller.
 See [adaptive capture](../ADAPTIVE_CAPTURE.md#live-software-bitrate-control).
@@ -136,10 +137,10 @@ cargo test -p frd --lib host_run::tests --locked
 cargo test -p frd --test encoder_cli --locked
 ```
 
-## Bounded software bitrate changes in the native worker
+## Bounded Linux bitrate changes in the native worker
 
-The Linux software capture worker accepts an explicit target on one original
-capture credit and reports the **actual applied bitrate** with its encoded or
+The Linux software and opt-in NVENC paths accept an explicit target on one original
+capture credit and report the **actual applied bitrate** with each encoded or
 unchanged result. A request alone does not mean the encoder changed. This private
 worker operation is available to the media controller; ordinary fixed-rate
 capture keeps its existing request/reply contract.
@@ -149,10 +150,10 @@ An idle observation or optional settle-only refinement does not restart the
 encoder. After a validated transition, both the original host timestamp and the
 worker's monotonic clock must advance two seconds before another transition.
 The worker accepts targets only between the original ceiling and the greater of
-10,000 bits/s or one sixteenth of that ceiling. Hardware returns a typed
-unsupported result; it never falls back to software.
+10,000 bits/s or one sixteenth of that ceiling. VA-API returns a typed
+unsupported result for rate capture.
 
-The software adapter stops its one old encoder before reopening libx265. It
+The adapter stops its one old encoder before reopening libx265 or NVENC. It
 retains the original frame identities, geometry, color, GOP, nominal frame rate
 and decoder-configuration admission guard, and pins the HEVC level learned from
 validated original output. The first new picture must be an IDR with byte-exact
@@ -160,6 +161,15 @@ original VPS/SPS/PPS. A reopen or parameter-set failure ends that source instead
 of releasing incompatible media. There is no overlapping encoder or extra
 capture queue. Legacy recovery capture cancels a still-deferred rate request so
 an old response shape cannot conceal an applied change.
+
+The NVENC path supplies the validated original HEVC level to FFmpeg's
+`hevc_nvenc` level option on reopen. The worker keeps its originally selected
+backend, low-latency settings and VBV policy. A successful open describes
+the configured target. Sustained throughput still depends on desktop content
+and the driver's rate control. To exercise the same-decoder regression on an
+NVIDIA host, run
+`cargo test -p fr-native --features linux-media --lib nvenc_rates_reuse_exact_original_decoder_configuration_and_frame_identity -- --ignored`.
+NVENC device behavior and impaired-link performance remain unqualified.
 
 Production-source tests with FFmpeg 6.1/libx265 3.5 and Xvfb passed: 46 native unit
 tests (one pre-existing manual benchmark ignored), all 13 capture regressions,

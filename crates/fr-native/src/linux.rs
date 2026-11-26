@@ -232,7 +232,7 @@ pub struct HevcEncoder {
     config: CodecConfiguration,
     limits: ProtocolLimits,
     admission: HevcGuard,
-    refinement: bool,
+    backend: EncodeBackend,
     fps: u32,
     initial_bitrate: u32,
     bitrate: u32,
@@ -273,7 +273,7 @@ impl HevcEncoder {
             config,
             limits,
             admission,
-            refinement: backend == EncodeBackend::SoftwareExplicit,
+            backend,
             fps,
             initial_bitrate: bitrate,
             bitrate,
@@ -323,7 +323,7 @@ impl HevcEncoder {
         self.bitrate
     }
     pub(crate) fn validate_bitrate(&self, bitrate: u32) -> Result<(), NativeError> {
-        if !self.refinement {
+        if self.backend == EncodeBackend::Vaapi {
             return Err(NativeError::Unavailable);
         }
         if !(10_000.max(self.initial_bitrate / 16)..=self.initial_bitrate).contains(&bitrate) {
@@ -352,13 +352,7 @@ impl HevcEncoder {
         // SAFETY: no pending submission/output remains. This is the unique
         // encoder context, released BEFORE allocating the replacement.
         unsafe { fr_encoder_free(raw.as_ptr()) };
-        let replacement = Self::open(
-            self.config,
-            EncodeBackend::SoftwareExplicit,
-            self.fps,
-            bitrate,
-            level,
-        )?;
+        let replacement = Self::open(self.config, self.backend, self.fps, bitrate, level)?;
         self.raw = Some(replacement);
         self.pending_bitrate = Some(bitrate);
         self.closed = false;
@@ -377,10 +371,10 @@ impl HevcEncoder {
     /// libx265 path. It keeps the configured bitrate, VBV and parameter sets;
     /// hardware backends are not inferred from the existence of an ROI API.
     pub const fn supports_refinement(&self) -> bool {
-        self.refinement
+        matches!(self.backend, EncodeBackend::SoftwareExplicit)
     }
     pub(crate) fn refinement_ready(&self) -> bool {
-        self.refinement
+        self.supports_refinement()
             && !self.closed
             && !self.draining
             && self.pending.is_empty()

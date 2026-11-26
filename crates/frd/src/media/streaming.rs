@@ -169,7 +169,7 @@ impl Stream {
         Ok(())
     }
     /// Enable bitrate adaptation on the same source, after cadence adaptation
-    /// and before service. Software, `VideoToolbox` and Media Foundation implement
+    /// and before service. Software, NVENC, `VideoToolbox` and Media Foundation implement
     /// this transaction; other hardware backends retain cadence only.
     /// Native startup calls this under the existing adaptive-capture option;
     /// cadence-only library callers need not opt into the new worker operation.
@@ -190,7 +190,7 @@ impl Stream {
     /// Let the viewer's path lower the encoder's rate when it holds a queue,
     /// before service (fr-7al9). Without `--adaptive-capture` the controller
     /// sees only the path; with it, also send pressure. False when the
-    /// backend cannot change its rate (NVENC, VA-API).
+    /// backend is fixed-rate or requires explicit opt-in for changes.
     pub(crate) fn enable_path_bitrate(&mut self) -> Result<bool, super::Error> {
         self.control.check()?;
         if self.served {
@@ -199,7 +199,7 @@ impl Stream {
         if self.bitrate.is_some() {
             return Ok(true);
         }
-        if !self.source.configuration.backend.accepts_rate_capture() {
+        if !self.source.configuration.backend.use_path_bitrate(false) {
             return Ok(false);
         }
         self.bitrate = Some(

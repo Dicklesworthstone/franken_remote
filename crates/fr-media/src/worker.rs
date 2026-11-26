@@ -404,8 +404,14 @@ impl Backend {
     pub const fn accepts_rate_capture(self) -> bool {
         matches!(
             self,
-            Self::SoftwareExplicit | Self::VideoToolbox | Self::MediaFoundation
+            Self::SoftwareExplicit | Self::Nvenc | Self::VideoToolbox | Self::MediaFoundation
         )
+    }
+
+    /// NVENC reopens its hardware session on rate changes. Enable this only
+    /// under explicit adaptive capture until driver continuity is qualified.
+    pub const fn use_path_bitrate(self, adaptive_capture: bool) -> bool {
+        self.accepts_rate_capture() && (adaptive_capture || !matches!(self, Self::Nvenc))
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -228,11 +228,11 @@ impl ChangeAwareCapture {
     ) -> Result<CaptureOutput, NativeError> {
         self.capture_request(frame, observed_micros, force_idr, only_if_changed, None)
     }
-    /// Request a bounded software bitrate on the original source. Static
+    /// Request a bounded libx265 or NVENC bitrate on the original source. Static
     /// observations do not restart the encoder or manufacture video. A target
     /// waits for actual changed/unconditional/recovery capture and the native
     /// dual-clock dwell; a settle-only refinement does not trigger the switch.
-    /// Hardware refuses before any native mutation. Every applied switch is a
+    /// VA-API refuses before any native mutation. Every applied switch is a
     /// verified IDR with the original exact decoder configuration and timestamp.
     pub fn capture_with_bitrate(
         &mut self,

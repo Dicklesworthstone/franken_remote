@@ -22,13 +22,25 @@ fn request() -> rate::Capture {
 fn capture_rate_selects_only_backends_with_a_native_transaction() {
     for backend in [
         Backend::SoftwareExplicit,
+        Backend::Nvenc,
         Backend::VideoToolbox,
         Backend::MediaFoundation,
     ] {
         assert!(backend.accepts_rate_capture());
     }
+    assert!(!Backend::Vaapi.accepts_rate_capture());
     for backend in [Backend::Nvenc, Backend::Vaapi] {
-        assert!(!backend.accepts_rate_capture());
+        assert!(!backend.use_path_bitrate(false));
+    }
+    assert!(Backend::Nvenc.use_path_bitrate(true));
+    assert!(!Backend::Vaapi.use_path_bitrate(true));
+    for backend in [
+        Backend::SoftwareExplicit,
+        Backend::VideoToolbox,
+        Backend::MediaFoundation,
+    ] {
+        assert!(backend.use_path_bitrate(false));
+        assert!(backend.use_path_bitrate(true));
     }
 }
 fn unit(kind: FrameKind) -> EncodedAccessUnit {
