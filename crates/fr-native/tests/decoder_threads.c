@@ -230,7 +230,7 @@ static void roundtrip(int w,int h,int count,int noise) {
     assert(pixels && one_allocation && four_allocation);
     uint8_t *one=one_allocation+PIXEL_CANARY,*four=four_allocation+PIXEL_CANARY;
     FrEncoder *encoder=NULL;
-    assert(fr_encoder_new(2,w,h,30,8000000,60,0,&encoder)==FR_OK);
+    assert(fr_encoder_new(2,w,h,30,8000000,8000000,60,0,&encoder)==FR_OK);
     uint32_t random=123;
     for (int i=0;i<count;i++) {
         for (int y=0;y<h;y++) for (int x=0;x<w;x++) {
@@ -287,7 +287,22 @@ static void roundtrip(int w,int h,int count,int noise) {
     for (int i=0;i<count;i++) free(units[i].bytes);
     free(pixels); free(one_allocation); free(four_allocation);
 }
+/* Inspect the exact context fields supplied to FFmpeg without a GPU. */
+static void rate_envelope(void) {
+    AVCodecContext *ctx=avcodec_alloc_context3(NULL);
+    assert(ctx);
+    configure_rate(ctx,0,8000000,8000000);
+    int64_t peak=ctx->rc_max_rate;
+    int buffer=ctx->rc_buffer_size;
+    assert(ctx->bit_rate==8000000 && peak==8000000 && buffer==1600000);
+    configure_rate(ctx,0,2000000,8000000);
+    assert(ctx->bit_rate==2000000 && ctx->rc_max_rate==peak && ctx->rc_buffer_size==buffer);
+    configure_rate(ctx,2,2000000,8000000);
+    assert(ctx->bit_rate==2000000 && ctx->rc_max_rate==2000000 && ctx->rc_buffer_size==400000);
+    avcodec_free_context(&ctx);
+}
 int main(int argc,char **argv) {
+    rate_envelope();
     fr_native_quiet();
     if (argc==1) {
         roundtrip(192,128,20,0);

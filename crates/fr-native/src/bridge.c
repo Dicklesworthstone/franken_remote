@@ -76,9 +76,20 @@ static int qualified_level(int level) {
         default: return 0;
     }
 }
-int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level_idc,FrEncoder **out) {
+/* NVENC's SPS signals the peak rate and buffer capacity in HRD. Keep that
+ * original envelope on reopen; varying the average alone does not request a
+ * new decoder configuration. x265 keeps its 200 ms VBV at the current target. */
+static void configure_rate(AVCodecContext *c,int backend,int bitrate,int opening_bitrate) {
+    c->bit_rate=bitrate;
+    if (backend!=1) {
+        int peak=backend==0?opening_bitrate:bitrate;
+        c->rc_max_rate=peak;
+        c->rc_buffer_size=peak/5;
+    }
+}
+int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int opening_bitrate,int gop,int level_idc,FrEncoder **out) {
     if (!out) return FR_INVALID; *out=NULL;
-    if (!geometry(w,h) || fps<1 || fps>240 || bitrate<10000 || bitrate>200000000 || gop<1 || gop>14400) return FR_INVALID;
+    if (!geometry(w,h) || fps<1 || fps>240 || bitrate<10000 || bitrate>opening_bitrate || opening_bitrate>200000000 || gop<1 || gop>14400) return FR_INVALID;
     if (!qualified_level(level_idc) || (level_idc && backend!=0 && backend!=2)) return FR_INVALID;
     const char *name = backend==0?"hevc_nvenc":backend==1?"hevc_vaapi":backend==2?"libx265":NULL;
     if (!name) return FR_INVALID;
@@ -90,7 +101,8 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level
     if (!e->ctx || !e->input || !e->packet || !e->source) { fr_encoder_free(e); return FR_MEMORY; }
     AVCodecContext *c=e->ctx; c->width=w; c->height=h;
     c->time_base=(AVRational){1,fps}; c->framerate=(AVRational){fps,1};
-    c->bit_rate=bitrate; c->gop_size=gop; c->max_b_frames=0;
+    configure_rate(c,backend,bitrate,opening_bitrate);
+    c->gop_size=gop; c->max_b_frames=0;
     /* hevc_nvenc reads any explicit refs as a multiple-reference-frame request
      * and Pascal-class NVENC refuses it ("No capable devices found"); its
      * low-latency P1/ULL profile already uses one reference. */
@@ -110,15 +122,6 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level
         c->hw_frames_ctx=av_buffer_ref(e->frames);
         if (!c->hw_frames_ctx) { fr_encoder_free(e); return FR_MEMORY; }
         c->pix_fmt=AV_PIX_FMT_VAAPI;
-    }
-    if (backend!=1) {
-        /* Bound the short-term rate, not only the average. Without a VBV, at a
-         * 2 Mbit/s target on busy content, libx265's ABR emitted 77 KB P
-         * pictures and NVENC's defaults 70 KB: about 300 ms of link time for
-         * ONE picture, past the 250 ms reference horizon. A 200 ms buffer at
-         * the target rate caps them (largest P about 17 KB and 24 KB). VA-API
-         * keeps its defaults: not measured. */
-        c->rc_max_rate=bitrate; c->rc_buffer_size=bitrate/5;
     }
     AVDictionary *opts=NULL;
     av_dict_set(&opts,"profile","main",0);
@@ -156,7 +159,8 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level
         av_dict_set(&opts,"x265-params",params,0); av_dict_set(&opts,"forced-idr","1",0);
     }
     int r=avcodec_open2(c,codec,&opts), unused=av_dict_count(opts); av_dict_free(&opts);
-    if (r<0 || unused || (backend==0 && level_idc && c->bit_rate!=bitrate)) {
+    if (r<0 || unused || (backend==0 && level_idc && (c->bit_rate!=bitrate ||
+            c->rc_max_rate!=opening_bitrate || c->rc_buffer_size!=opening_bitrate/5))) {
         fr_encoder_free(e); return FR_UNAVAILABLE;
     }
     e->input->format=sw; e->input->width=w; e->input->height=h;

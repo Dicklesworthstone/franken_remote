@@ -164,8 +164,11 @@ an old response shape cannot conceal an applied change.
 
 The NVENC path supplies the validated original HEVC level to FFmpeg's
 `hevc_nvenc` level option on reopen. The worker keeps its originally selected
-backend, low-latency settings and VBV policy. A successful open describes
-the configured target. Sustained throughput still depends on desktop content
+backend and low-latency settings. NVENC uses the opening peak bitrate and VBV
+capacity across average-rate changes because its SPS can signal those values in
+the decoder buffering model. Individual pictures can still burst against the
+opening envelope. libx265 continues to resize its VBV to the current target.
+A successful open describes the configured average target. Sustained throughput still depends on desktop content
 and the driver's rate control. To exercise the same-decoder regression on an
 NVIDIA host, run
 `cargo test -p fr-native --features linux-media --lib nvenc_rates_reuse_exact_original_decoder_configuration_and_frame_identity -- --ignored`.

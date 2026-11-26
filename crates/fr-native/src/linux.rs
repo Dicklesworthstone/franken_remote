@@ -55,6 +55,7 @@ unsafe extern "C" {
         h: c_int,
         fps: c_int,
         bitrate: c_int,
+        opening_bitrate: c_int,
         gop: c_int,
         level_idc: c_int,
         out: *mut *mut c_void,
@@ -267,7 +268,7 @@ impl HevcEncoder {
         }
         let admission =
             HevcGuard::new(config, limits, 4).map_err(|_| NativeError::InvalidConfiguration)?;
-        let raw = Self::open(config, backend, fps, bitrate, 0)?;
+        let raw = Self::open(config, backend, fps, bitrate, bitrate, 0)?;
         Ok(Self {
             raw: Some(raw),
             config,
@@ -293,6 +294,7 @@ impl HevcEncoder {
         backend: EncodeBackend,
         fps: u32,
         bitrate: u32,
+        opening_bitrate: u32,
         level_idc: u8,
     ) -> Result<NonNull<c_void>, NativeError> {
         let g = config.geometry();
@@ -306,6 +308,7 @@ impl HevcEncoder {
                 c_int::try_from(g.crop_height()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(fps).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(bitrate).map_err(|_| NativeError::InvalidConfiguration)?,
+                c_int::try_from(opening_bitrate).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(config.gop().max_gop_frames())
                     .map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::from(level_idc),
@@ -352,7 +355,14 @@ impl HevcEncoder {
         // SAFETY: no pending submission/output remains. This is the unique
         // encoder context, released BEFORE allocating the replacement.
         unsafe { fr_encoder_free(raw.as_ptr()) };
-        let replacement = Self::open(self.config, self.backend, self.fps, bitrate, level)?;
+        let replacement = Self::open(
+            self.config,
+            self.backend,
+            self.fps,
+            bitrate,
+            self.initial_bitrate,
+            level,
+        )?;
         self.raw = Some(replacement);
         self.pending_bitrate = Some(bitrate);
         self.closed = false;

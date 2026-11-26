@@ -440,7 +440,8 @@ while the path is congested; they do not extend any delivery deadline.
 Linux NVENC can participate when `--adaptive-capture` is enabled. On a useful
 capture after the rate controller's dwell, the worker releases the old NVENC
 session before opening the same FFmpeg encoder at the requested bitrate. It
-pins the original HEVC level and publishes the change only with a validated
+keeps the original peak bitrate, VBV capacity and HEVC level while changing
+the average target. It publishes the change only with a validated
 IDR and byte-identical decoder parameter sets. Driver refusal, a different
 configuration or a missed capture deadline ends that source. An idle desktop
 can defer the switch. Native NVENC rate changes and decoder continuity still
