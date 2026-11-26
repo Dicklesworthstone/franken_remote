@@ -61,6 +61,7 @@ pub(super) fn select(
             choose_display: choices.choose_display,
             playback_audio: choices.playback_audio,
             send_files: choices.send_files,
+            choose_files: choices.choose_files,
             receive_available: choices.receive_available,
             receive_files: choices.receive_files,
             microphone_available: connection
@@ -93,6 +94,7 @@ pub(super) fn select(
         choose_display: choices.choose_display,
         playback_audio: choices.playback_audio,
         send_files: choices.send_files,
+        choose_files: choices.choose_files,
         receive_available: choices.receive_available,
         receive_files: choices.receive_files,
         microphone_controls: choices.microphone_controls,

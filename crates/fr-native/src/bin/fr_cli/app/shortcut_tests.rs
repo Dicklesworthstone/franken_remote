@@ -15,6 +15,7 @@ fn selected(control: bool, capture_system_shortcuts: bool) -> Value {
         choose_display: false,
         playback_audio: false,
         send_files: false,
+        choose_files: false,
         receive_available: false,
         receive_files: false,
         microphone_controls: false,
@@ -79,7 +80,7 @@ fn only_fresh_supported_control_consent_reaches_the_connect_parser() {
                 "original.fixture.ts.net",
                 &settings,
                 9443,
-                false,
+                UploadChoices::default(),
                 consent,
             );
             if consent && (!control || !system_shortcuts_available()) {
@@ -117,7 +118,7 @@ fn only_fresh_supported_control_consent_reaches_the_connect_parser() {
                 "later.fixture.ts.net",
                 &settings,
                 9443,
-                false,
+                UploadChoices::default(),
                 false,
             )
             .unwrap();

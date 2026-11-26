@@ -63,9 +63,9 @@ Talk there. This choice starts off in every picker. On macOS, Capture system\n\
 shortcuts is a separate choice for the next controlling connection, requiring\n\
 Accessibility access. It starts off in every picker; the viewer has a local Off\n\
 button. With control, select Send\n\
-files to allow file drops\n\
-onto this viewer only. On Linux or macOS, select Receive files to choose a private\n\
-folder before connecting. Both choices start off in every new picker. Closing the\n\
+files to allow later file drops. Select Choose files now to select an initial upload\n\
+before this viewer connects. On Linux or macOS, select Receive files to choose a private\n\
+folder before connecting. File choices start off in every new picker. Closing the\n\
 viewer returns to the picker with the outcome; Cancel or Escape quits. Viewing\n\
 preferences are remembered. An unused\n\
 picker reopens with a fresh machine list every two minutes; after half an\n\
@@ -353,6 +353,18 @@ fn save(path: &Path, settings: &Settings) {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct UploadChoices {
+    choose_files: bool,
+    file_drop: bool,
+}
+
+impl UploadChoices {
+    const fn requested(self) -> bool {
+        self.choose_files || self.file_drop
+    }
+}
+
 /// One child command's result, from its complete final nonempty line only.
 #[derive(Debug, PartialEq, Eq)]
 enum Report {
@@ -365,6 +377,7 @@ enum Report {
         choose_display: bool,
         playback_audio: bool,
         send_files: bool,
+        choose_files: bool,
         receive_files: bool,
         microphone_controls: bool,
         capture_system_shortcuts: bool,
@@ -439,7 +452,16 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
         if !fr_client::discovery::picker::Candidate::valid_identity(&node, &name) {
             return None;
         }
-        if (send_files || receive_files || microphone_controls || capture_system_shortcuts)
+        // Older selection-only reports had only the file-drop checkbox.
+        let choose_files = match value.get("choose_files") {
+            Some(value) => value.as_bool()?,
+            None => false,
+        };
+        if (choose_files
+            || send_files
+            || receive_files
+            || microphone_controls
+            || capture_system_shortcuts)
             && !control
         {
             return None;
@@ -455,6 +477,7 @@ fn last_report(stdout: &CompletionCapture) -> Option<Report> {
             choose_display,
             playback_audio,
             send_files,
+            choose_files,
             receive_files,
             microphone_controls,
             capture_system_shortcuts,
@@ -656,7 +679,7 @@ fn selected_session_args(
     name: &str,
     settings: &Settings,
     port: u16,
-    send_files: bool,
+    uploads: UploadChoices,
     capture_system_shortcuts: bool,
 ) -> Result<Vec<String>, Failure> {
     if capture_system_shortcuts && (!settings.control || !system_shortcuts_available()) {
@@ -666,7 +689,17 @@ fn selected_session_args(
             2,
         ));
     }
-    let mut args = session_args(node, settings, port, send_files);
+    if uploads.requested() && !settings.control {
+        return Err(Failure::new(
+            "app_file_choice_invalid",
+            "Choose file uploads only for a new controlling connection.",
+            2,
+        ));
+    }
+    let mut args = session_args(node, settings, port, uploads.file_drop);
+    if uploads.choose_files {
+        args.push("--choose-files".into());
+    }
     args.extend(["--expect-certificate-name".to_owned(), name.to_owned()]);
     if capture_system_shortcuts {
         args.push("--capture-system-shortcuts".into());
@@ -743,7 +776,10 @@ fn session_notice_with_transfers(
         stdout,
         name,
         success,
-        upload_expected,
+        UploadChoices {
+            file_drop: upload_expected,
+            ..UploadChoices::default()
+        },
         receive_expected,
         None,
     )
@@ -753,7 +789,7 @@ fn session_notice_with_job(
     stdout: &CompletionCapture,
     name: &str,
     success: bool,
-    upload_expected: bool,
+    uploads: UploadChoices,
     receive_expected: bool,
     expected_job: Option<u64>,
 ) -> Result<String, Failure> {
@@ -761,7 +797,7 @@ fn session_notice_with_job(
     // Inspect both directions even if either fails. Their original committed
     // effects survive independently; an upload failure must not erase a known
     // download, and a receiver failure must not erase host publication proof.
-    let upload = upload_completion::inspect(stdout, upload_expected, report.as_ref());
+    let upload = upload_completion::inspect(stdout, uploads, report.as_ref());
     let receive =
         receive_completion::inspect_job(stdout, receive_expected, expected_job, report.as_ref());
     let upload = upload.map_err(|mut failure| {
@@ -981,7 +1017,7 @@ fn application(
             microphone::available(microphone.as_ref()),
         );
         refuse_uncertain_report(report.as_ref())?;
-        let (node, name, send_files, receive_files, microphone_controls, capture_system_shortcuts) =
+        let (node, name, uploads, receive_files, microphone_controls, capture_system_shortcuts) =
             match report {
                 Some(Report::Selected {
                     node,
@@ -991,6 +1027,7 @@ fn application(
                     choose_display,
                     playback_audio,
                     send_files,
+                    choose_files,
                     receive_files,
                     microphone_controls,
                     capture_system_shortcuts,
@@ -1005,7 +1042,10 @@ fn application(
                     (
                         node,
                         name,
-                        send_files,
+                        UploadChoices {
+                            choose_files,
+                            file_drop: send_files,
+                        },
                         receive_files,
                         microphone_controls,
                         capture_system_shortcuts,
@@ -1037,7 +1077,7 @@ fn application(
                     &name,
                     &settings,
                     port,
-                    send_files,
+                    uploads,
                     capture_system_shortcuts,
                 )?,
                 microphone_controls,
@@ -1049,7 +1089,7 @@ fn application(
             &session.stdout,
             short_name(&name),
             session.status.success(),
-            send_files,
+            uploads,
             receive_expected,
             expected_job,
         )?);
@@ -1780,6 +1820,81 @@ mod tests {
     }
 
     #[test]
+    fn one_use_upload_picker_requires_control_and_uses_the_native_chooser() {
+        for control in [false, true] {
+            for drop_files in [false, true] {
+                let settings = Settings {
+                    control,
+                    ..Settings::default()
+                };
+                let args = selected_session_args(
+                    "nPicked",
+                    "original.fixture.ts.net",
+                    &settings,
+                    9443,
+                    UploadChoices {
+                        choose_files: true,
+                        file_drop: drop_files,
+                    },
+                    false,
+                );
+                if !control {
+                    assert_eq!(args.unwrap_err().code, "app_file_choice_invalid");
+                    continue;
+                }
+                let crate::options::Command::Connect(connection) =
+                    crate::options::parse(&args.unwrap()).unwrap().command
+                else {
+                        panic!("viewer");
+                    };
+                assert!(connection.upload.choose_files && connection.control);
+                assert!(connection.upload.paths.is_empty());
+                assert_eq!(connection.upload.file_drop, drop_files);
+                assert!(!connection.upload.file_commands);
+                assert_eq!(
+                    connection.target.expected_name.as_deref(),
+                    Some("original.fixture.ts.net")
+                );
+                assert!(!settings.to_json().contains("choose_files"));
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_initial_file_selection_keeps_the_machine_picker_available() {
+        let uploads = UploadChoices {
+            choose_files: true,
+            file_drop: false,
+        };
+        for receiving in [true, false] {
+            let completion = |code, exit| {
+                let mut failure = Failure::new(code, "Choose files again.", exit);
+                if receiving {
+                    crate::file_reports::download::Summary::unavailable("files_receive_not_started")
+                        .preserve(&mut failure);
+                }
+                let json = crate::terminal::output(failure, true);
+                fr_client::completion::capture_completion(json.as_bytes())
+            };
+            for (code, exit) in [("file_choice_cancelled", 130), ("send_symlink", 2)] {
+                let result = completion(code, exit);
+                let notice =
+                    session_notice_with_job(&result, "original", false, uploads, receiving, None)
+                        .unwrap();
+                assert!(notice.contains("Choose files again."));
+                // A drop-only viewer never offered this dialog.
+                assert!(session_notice_with_transfers(&result, "original", false, true, receiving)
+                    .unwrap_err()
+                    .unknown_effect);
+            }
+            let unfinished = completion("file_picker_cleanup_incomplete", 1);
+            assert!(session_notice_with_job(&unfinished, "original", false, uploads, receiving, None)
+                .unwrap_err()
+                .unknown_effect);
+        }
+    }
+
+    #[test]
     fn child_reports_become_selections_exits_and_notices() {
         let selected = br#"{"schema_version":1,"event":"host_selected","node_id":"nMAC","certificate_name":"mac.tail.ts.net","port":8443,"control":true,"clipboard":false,"choose_display":false,"playback_audio":true,"send_files":true,"receive_files":false,"microphone_controls":false,"capture_system_shortcuts":false,"selection_only":true,"fresh_lookup_required":true,"remote_session_started":false,"input_requested":false}
 "#;
@@ -1794,6 +1909,7 @@ mod tests {
                 choose_display: false,
                 playback_audio: true,
                 send_files: true,
+                choose_files: false,
                 receive_files: false,
                 microphone_controls: false,
                 capture_system_shortcuts: false,
@@ -1812,6 +1928,28 @@ mod tests {
             assert_eq!(last_report(malformed.to_string().as_bytes()), None);
             malformed = serde_json::from_slice(selected).unwrap();
         }
+        malformed["choose_files"] = json!(true);
+        assert!(matches!(
+            last_report(malformed.to_string().as_bytes()),
+            Some(Report::Selected {
+                choose_files: true,
+                send_files: true,
+                ..
+            })
+        ));
+        malformed["send_files"] = json!(false);
+        assert!(matches!(
+            last_report(malformed.to_string().as_bytes()),
+            Some(Report::Selected {
+                choose_files: true,
+                ..
+            })
+        ));
+        malformed["control"] = json!(false);
+        assert_eq!(last_report(malformed.to_string().as_bytes()), None);
+        malformed["choose_files"] = json!("yes");
+        assert_eq!(last_report(malformed.to_string().as_bytes()), None);
+        malformed = serde_json::from_slice(selected).unwrap();
         malformed["playback_audio"] = json!("yes");
         assert_eq!(last_report(malformed.to_string().as_bytes()), None);
         malformed.as_object_mut().unwrap().remove("playback_audio");

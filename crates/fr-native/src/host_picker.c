@@ -14,11 +14,11 @@
 #include <time.h>
 
 struct fr_host_row { char name[255], stable_id[129]; uint32_t path; char probe[65]; };
-/* Keys before KEY_REQUIRED must exist in the keymap. F2-F8 toggle the
+/* Keys before KEY_REQUIRED must exist in the keymap. F2-F9 toggle the
  * optional connection choices and may be absent (then only clicks do). */
 enum { KEY_ESCAPE, KEY_ENTER, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
        KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_HOME, KEY_END, KEY_REQUIRED,
-       KEY_F2 = KEY_REQUIRED, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_COUNT };
+       KEY_F2 = KEY_REQUIRED, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_COUNT };
 /* Optional host-picker connection choices (`fr app`): local preferences for
  * the next command line, never authority. Must match host_picker.rs. */
 #define CHOICE_NONE UINT32_MAX
@@ -26,7 +26,8 @@ enum { KEY_ESCAPE, KEY_ENTER, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
 #define CHOICE_FILES 16u
 #define CHOICE_RECEIVE 32u
 #define CHOICE_MICROPHONE 64u
-#define CHOICE_ALL 127u
+#define CHOICE_PICK_FILES 128u
+#define CHOICE_ALL 255u
 #define NOTICE_MAX 384
 struct fr_host_picker {
     xcb_connection_t *c;
@@ -45,8 +46,8 @@ struct fr_host_picker {
      * in the footer, for clicks. */
     uint8_t has_choices, playback_audio_available, receive_available, microphone_available;
     uint32_t choices;
-    int choice_y[7];
-    uint16_t choice_from[7], choice_to[7];
+    int choice_y[8];
+    uint16_t choice_from[8], choice_to[8];
     char notice[NOTICE_MAX + 1];
 };
 
@@ -98,7 +99,7 @@ static void *xkb_reply(struct fr_host_picker *h, uint32_t sequence) {
 static int keymap(struct fr_host_picker *h) {
     static const uint32_t symbols[KEY_COUNT] = {
         0xff1b, 0xff0d, 0xff52, 0xff54, 0xff51, 0xff53,
-        0xff55, 0xff56, 0xff50, 0xff57, 0xffbf, 0xffc0, 0xffc1, 0xffc2, 0xffc3, 0xffc4, 0xffc5
+        0xff55, 0xff56, 0xff50, 0xff57, 0xffbf, 0xffc0, 0xffc1, 0xffc2, 0xffc3, 0xffc4, 0xffc5, 0xffc6
     };
     memset(h->keycodes, 0, sizeof(h->keycodes));
     const xcb_setup_t *setup = xcb_get_setup(h->c);
@@ -218,34 +219,34 @@ static void colors(struct fr_host_picker *h, uint32_t foreground, uint32_t backg
  * ignores its toggle, keeping the remembered value for the next control. */
 static void toggle(struct fr_host_picker *h, uint32_t bit) {
     if (!h->has_choices || (bit == 2u && !(h->choices & 1u)) ||
-        ((bit == CHOICE_FILES || bit == CHOICE_RECEIVE || bit == CHOICE_MICROPHONE) && !(h->choices & 1u)) ||
+        ((bit == CHOICE_FILES || bit == CHOICE_PICK_FILES || bit == CHOICE_RECEIVE || bit == CHOICE_MICROPHONE) && !(h->choices & 1u)) ||
         (bit == CHOICE_RECEIVE && !h->receive_available) ||
         (bit == CHOICE_MICROPHONE && !h->microphone_available) ||
         (bit == CHOICE_AUDIO && !h->playback_audio_available)) return;
     h->choices ^= bit; h->dirty = 1;
     /* File and microphone choices are one-use consent, not a remembered preference. A role
      * downgrade clears it; returning to control needs a new explicit toggle. */
-    if (!(h->choices & 1u)) h->choices &= ~(CHOICE_FILES | CHOICE_RECEIVE | CHOICE_MICROPHONE);
+    if (!(h->choices & 1u)) h->choices &= ~(CHOICE_FILES | CHOICE_PICK_FILES | CHOICE_RECEIVE | CHOICE_MICROPHONE);
 }
 static int choice_at(const struct fr_host_picker *h, int16_t x, int16_t y, uint32_t *bit) {
     if (!h->has_choices || !h->char_width || x < 12) return 0;
     unsigned column = ((unsigned)x - 12) / h->char_width;
-    for (unsigned i = 0; i < 7; ++i) {
+    for (unsigned i = 0; i < 8; ++i) {
         if (y >= h->choice_y[i] && y < h->choice_y[i] + (int)h->line &&
             column >= h->choice_from[i] && column < h->choice_to[i]) { *bit = 1u << i; return 1; }
     }
     return 0;
 }
 static void draw_choices(struct fr_host_picker *h, int y) {
-    static const char *const full[7] = { "View and control", "Share clipboard", "Ask which display", "Play host audio", "Send files (this connection)", "Receive files (this connection)", "Show microphone controls" };
-    static const char *const brief[7] = { "Control", "Clipboard", "Display", "Audio", "Send files once", "Receive once", "Microphone controls" };
+    static const char *const full[8] = { "View and control", "Share clipboard", "Ask which display", "Play host audio", "Send files (this connection)", "Receive files (this connection)", "Show microphone controls", "Choose files now" };
+    static const char *const brief[8] = { "Control", "Clipboard", "Display", "Audio", "Send files once", "Receive once", "Mic controls", "Pick files" };
     int wide = h->columns >= 75;
     /* Four rows keep every option visible even at the 40-column minimum. */
     for (unsigned group = 0; group < 4; ++group) {
         char line[128];
         size_t at = 0;
-        for (unsigned i = group * 2; i < 7 && i < group * 2 + 2 && at < sizeof(line); ++i) {
-            int disabled = ((i == 1 || i == 4 || i == 5 || i == 6) && !(h->choices & 1u)) ||
+        for (unsigned i = group * 2; i < 8 && i < group * 2 + 2 && at < sizeof(line); ++i) {
+            int disabled = ((i == 1 || i >= 4) && !(h->choices & 1u)) ||
                 (i == 3 && !h->playback_audio_available) || (i == 5 && !h->receive_available) ||
                 (i == 6 && !h->microphone_available);
             char mark = disabled ? '-' : (h->choices >> i) & 1u ? 'x' : ' ';
@@ -255,7 +256,7 @@ static void draw_choices(struct fr_host_picker *h, int y) {
             if (i == 5 && !h->receive_available)
                 label = wide ? "Receive: set --receive DIR" : "Set --receive";
             if (i == 6 && !h->microphone_available)
-                label = wide ? "Microphone unavailable for this launch" : "Microphone unavailable";
+                label = wide ? "Microphone unavailable for this launch" : "Mic unavailable";
             if (i % 2) at += (size_t)snprintf(line + at, sizeof(line) - at, wide ? "   " : " ");
             if (at >= sizeof(line)) break;
             h->choice_from[i] = (uint16_t)at;
@@ -311,7 +312,7 @@ static int draw(struct fr_host_picker *h) {
     /* Every footer line fits one row (at least 40 columns) so the choice line
      * stays inside the reserved footer. */
     y = text(h, !h->has_choices ? "Enter or click: choose  Esc: cancel" :
-                h->columns >= 62 ? "Enter or click: connect  Esc: cancel  F2-F8 or click: options" :
+                h->columns >= 62 ? "Enter or click: connect  Esc: cancel  F2-F9 or click: options" :
                 "Enter/click: connect  Esc: cancel", y);
     if (h->has_choices) draw_choices(h, y);
     /* Local accessibility/geometry metadata. It is not read for selection. */
@@ -359,8 +360,8 @@ struct fr_host_picker *fr_host_picker_open(const char *display,
     h->rows = rows; h->count = count;
     h->has_choices = choices != CHOICE_NONE;
     h->choices = h->has_choices ? choices : 0;
-    h->choices &= ~(CHOICE_RECEIVE | CHOICE_MICROPHONE);
-    if (!(h->choices & 1u)) h->choices &= ~(CHOICE_FILES | CHOICE_RECEIVE | CHOICE_MICROPHONE);
+    h->choices &= ~(CHOICE_RECEIVE | CHOICE_MICROPHONE | CHOICE_PICK_FILES);
+    if (!(h->choices & 1u)) h->choices &= ~(CHOICE_FILES | CHOICE_PICK_FILES | CHOICE_RECEIVE | CHOICE_MICROPHONE);
     h->microphone_available = (uint8_t)microphone_available;
     h->receive_available = (uint8_t)receive_available;
     if (!h->receive_available) h->choices &= ~CHOICE_RECEIVE;
@@ -515,7 +516,7 @@ static int event(struct fr_host_picker *h, xcb_generic_event_t *event) {
         if (down && !was_down && !before_held && since && since < (1u << 31)) {
             if (slot == KEY_ENTER) {
                 h->pressed = 1; h->press_at = key->time; h->press_row = h->selected;
-            } else if (slot >= KEY_F2 && slot <= KEY_F8) toggle(h, 1u << (slot - KEY_F2));
+            } else if (slot >= KEY_F2 && slot <= KEY_F9) toggle(h, 1u << (slot - KEY_F2));
             else if (slot < KEY_REQUIRED) navigate(h, slot);
         }
         return 0;

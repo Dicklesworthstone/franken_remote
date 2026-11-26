@@ -31,8 +31,8 @@ fn complete(control: &Control) {
 fn choices_bind_file_and_microphone_consent_to_control_and_local_availability() {
     for receive_available in [false, true] {
         for microphone_available in [false, true] {
-            for bits in 0..128 {
-                let invalid = (bits & 0b111_0000 != 0 && bits & 1 == 0)
+            for bits in 0..256 {
+                let invalid = (bits & 0b1111_0000 != 0 && bits & 1 == 0)
                     || (bits & 32 != 0 && !receive_available)
                     || (bits & 64 != 0 && !microphone_available);
                 let choice = Choices::from_bits(bits, receive_available, microphone_available);
@@ -47,7 +47,7 @@ fn choices_bind_file_and_microphone_consent_to_control_and_local_availability() 
                 }
             }
             assert_eq!(
-                Choices::from_bits(128, receive_available, microphone_available),
+                Choices::from_bits(256, receive_available, microphone_available),
                 None
             );
             assert_eq!(
@@ -60,9 +60,9 @@ fn choices_bind_file_and_microphone_consent_to_control_and_local_availability() 
 
 #[test]
 fn every_picker_starts_muted_even_if_a_previous_choice_is_reused() {
-    for bits in 0..128 {
+    for bits in 0..256 {
         if let Some(choice) = Choices::from_bits(bits, true, true) {
-            assert_eq!(choice.initial_bits(), bits & !64);
+            assert_eq!(choice.initial_bits(), bits & !(64 | 128));
         }
     }
 }

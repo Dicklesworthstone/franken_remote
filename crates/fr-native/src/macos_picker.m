@@ -30,7 +30,8 @@ enum {
 #define FR_CHOICE_RECEIVE 32u
 #define FR_CHOICE_MICROPHONE 64u
 #define FR_CHOICE_SHORTCUTS 128u
-#define FR_CHOICE_ALL 255u
+#define FR_CHOICE_PICK_FILES 256u
+#define FR_CHOICE_ALL 511u
 
 // Must match RawRow in macos/picker.rs. Each byte range is borrowed only for
 // fr_mac_picker_open; NSString makes its own immutable copy before return.
@@ -82,6 +83,7 @@ typedef struct {
     NSButton *chooseDisplay;
     NSButton *playbackAudio;
     NSButton *sendFiles;
+    NSButton *chooseFiles;
     NSButton *receiveFiles;
     NSButton *microphoneControls;
     NSButton *captureSystemShortcuts;
@@ -182,6 +184,8 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     chooseDisplay.state = (choices & FR_CHOICE_DISPLAY) ? NSControlStateValueOn : NSControlStateValueOff;
     playbackAudio.enabled = playbackAudioAvailable;
     playbackAudio.state = (choices & FR_CHOICE_AUDIO) ? NSControlStateValueOn : NSControlStateValueOff;
+    chooseFiles.enabled = control;
+    chooseFiles.state = (choices & FR_CHOICE_PICK_FILES) ? NSControlStateValueOn : NSControlStateValueOff;
     sendFiles.enabled = control;
     sendFiles.state = (choices & FR_CHOICE_FILES) ? NSControlStateValueOn : NSControlStateValueOff;
     receiveFiles.enabled = control && receiveAvailable;
@@ -204,6 +208,8 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
         if (playbackAudio.enabled) choices ^= FR_CHOICE_AUDIO;
     } else if (fr_picker_hit(sendFiles, event)) {
         if (sendFiles.enabled) choices ^= FR_CHOICE_FILES;
+    } else if (fr_picker_hit(chooseFiles, event)) {
+        if (chooseFiles.enabled) choices ^= FR_CHOICE_PICK_FILES;
     } else if (fr_picker_hit(receiveFiles, event)) {
         if (receiveFiles.enabled) choices ^= FR_CHOICE_RECEIVE;
     } else if (fr_picker_hit(microphoneControls, event)) {
@@ -213,7 +219,7 @@ static BOOL fr_picker_hit(NSView *view, NSEvent *event) {
     } else return NO;
     // Returning to control requires fresh file, microphone and shortcut choices.
     if (!(choices & FR_CHOICE_CONTROL))
-        choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
+        choices &= ~(FR_CHOICE_FILES | FR_CHOICE_PICK_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
     [self showChoices];
     return YES;
 }
@@ -363,9 +369,9 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
         owner->choices = hasChoices ? initial : 0;
         // Sensitive opt-ins never survive opening a new picker. Microphone
         // controls still require their separate Allow and Talk actions.
-        owner->choices &= ~(FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
+        owner->choices &= ~(FR_CHOICE_PICK_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
         if (!(owner->choices & FR_CHOICE_CONTROL))
-            owner->choices &= ~(FR_CHOICE_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
+            owner->choices &= ~(FR_CHOICE_FILES | FR_CHOICE_PICK_FILES | FR_CHOICE_RECEIVE | FR_CHOICE_MICROPHONE | FR_CHOICE_SHORTCUTS);
         owner->microphoneAvailable = microphone_available != 0;
         owner->systemShortcutsAvailable = system_shortcuts_available != 0;
         owner->receiveAvailable = receive_available != 0;
@@ -414,7 +420,7 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             owner->playbackAudio = [NSButton checkboxWithTitle:owner->playbackAudioAvailable
                 ? @"Play host audio" : @"Audio unavailable in this build" target:nil action:nil];
             owner->playbackAudio.frame = NSMakeRect(20, 80, 260, 24);
-            owner->sendFiles = [NSButton checkboxWithTitle:@"Send files" target:nil action:nil];
+            owner->sendFiles = [NSButton checkboxWithTitle:@"Allow file drops" target:nil action:nil];
             owner->sendFiles.frame = NSMakeRect(20, 110, 160, 24);
             owner->receiveFiles = [NSButton checkboxWithTitle:@"Receive files" target:nil action:nil];
             owner->receiveFiles.frame = NSMakeRect(20, 140, 160, 24);
@@ -433,11 +439,9 @@ int fr_mac_picker_open(uint32_t kind, const FrPickerRow *rows, size_t count, uin
             audioHint.font = [NSFont systemFontOfSize:11];
             audioHint.textColor = NSColor.secondaryLabelColor;
             [content addSubview:audioHint];
-            NSTextField *fileHint = [NSTextField labelWithString:@"Drop files onto the viewer for this connection only."];
-            fileHint.frame = NSMakeRect(200, 112, width - 220, 20);
-            fileHint.font = [NSFont systemFontOfSize:11];
-            fileHint.textColor = NSColor.secondaryLabelColor;
-            [content addSubview:fileHint];
+            owner->chooseFiles = [NSButton checkboxWithTitle:@"Choose files before connecting" target:nil action:nil];
+            owner->chooseFiles.frame = NSMakeRect(200, 110, 260, 24);
+            [content addSubview:owner->chooseFiles];
             NSTextField *receiveHint = [NSTextField labelWithString:owner->receiveAvailable
                 ? @"Into a local folder you select, for this connection only."
                 : @"Start fr app with --receive DIR to select a local folder."];
@@ -599,6 +603,7 @@ int fr_mac_picker_close(void *handle) {
         owner->chooseDisplay = nil;
         owner->playbackAudio = nil;
         owner->sendFiles = nil;
+        owner->chooseFiles = nil;
         owner->microphoneControls = nil;
         owner->titles = nil;
         owner->details = nil;

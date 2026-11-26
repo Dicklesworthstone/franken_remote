@@ -40,6 +40,8 @@ pub struct Choices {
     pub playback_audio: bool,
     /// Explicit file-drop opt-in for this controlling connection only.
     pub send_files: bool,
+    /// Choose initial files in the native file dialog for this connection.
+    pub choose_files: bool,
     /// The caller retained a receive destination; it never enters this adapter.
     pub receive_available: bool,
     /// Explicit receive opt-in for this controlling connection only.
@@ -57,11 +59,13 @@ impl Choices {
             | (u32::from(self.choose_display) << 2)
             | (u32::from(self.playback_audio) << 3)
             | (u32::from(self.send_files) << 4)
+            | (u32::from(self.choose_files) << 7)
             | (u32::from(self.receive_files) << 5)
             | (u32::from(self.microphone_controls) << 6)
     }
     fn initial_bits(self) -> u32 {
         Self {
+            choose_files: false,
             microphone_controls: false,
             ..self
         }
@@ -72,8 +76,8 @@ impl Choices {
         receive_available: bool,
         microphone_available: bool,
     ) -> Option<Self> {
-        if bits & !127 != 0
-            || (bits & 0b111_0000 != 0 && bits & 1 == 0)
+        if bits & !255 != 0
+            || (bits & 0b1111_0000 != 0 && bits & 1 == 0)
             || (bits & 32 != 0 && !receive_available)
             || (bits & 64 != 0 && !microphone_available)
         {
@@ -85,6 +89,7 @@ impl Choices {
             choose_display: bits & 4 != 0,
             playback_audio: bits & 8 != 0,
             send_files: bits & 16 != 0,
+            choose_files: bits & 128 != 0,
             receive_available,
             receive_files: bits & 32 != 0,
             microphone_available,

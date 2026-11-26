@@ -339,7 +339,7 @@ fn later_viewer_failure_preserves_original_upload_results_once() {
     assert_eq!(failure.code, "app_session_outcome_unknown");
     let report = retained(failure);
     assert_eq!(report["files_sent"], value["files_sent"]);
-    let evidence = Record::parse(&value).unwrap().evidence();
+    let evidence = Record::parse(&value, MAX_RESULTS).unwrap().evidence();
     let mut original = failure;
     preserve(&evidence, &mut original);
     assert_eq!(retained(original)["files_sent"], value["files_sent"]);
@@ -532,4 +532,26 @@ fn actual_upload_formatter_roundtrips_mixed_publications_and_aggregate_drops() {
             .unwrap()
             .starts_with("Uploads did not start (files_not_started).")
     );
+}
+
+#[test]
+fn an_initial_picker_and_later_drops_have_separate_receipt_budgets() {
+    let budgets = [(true, false, 8), (false, true, 64), (true, true, 72)];
+    for (choose_files, file_drop, limit) in budgets {
+        let choices = UploadChoices {
+            choose_files,
+            file_drop,
+        };
+        for count in [limit, limit + 1] {
+            let mut value = completion(false);
+            value["files_requested"] = json!(count);
+            value["files_absence"] = Value::Null;
+            let receipts = (0..count)
+                .map(|index| json!({"index":index, "bytes":1, "durable":true}))
+                .collect();
+            value["files_sent"] = Value::Array(receipts);
+            let result = inspect(&capture(&value), choices, Some(&Report::Ended));
+            assert_eq!(result.is_ok(), count == limit);
+        }
+    }
 }

@@ -127,6 +127,7 @@ fn picker_request_reports_the_confirmed_choices_with_the_identity() {
         choose_display: true,
         playback_audio: true,
         send_files: false,
+        choose_files: false,
         receive_available: false,
         receive_files: false,
         microphone_controls: false,

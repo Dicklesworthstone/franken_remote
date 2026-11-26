@@ -44,7 +44,14 @@ fn folder_completion(macos: bool) -> Value {
 }
 
 fn check_job(value: &Value, job: Option<u64>) -> Result<String, Failure> {
-    super::super::session_notice_with_job(&capture(value), "workstation", true, false, true, job)
+    super::super::session_notice_with_job(
+        &capture(value),
+        "workstation",
+        true,
+        super::super::UploadChoices::default(),
+        true,
+        job,
+    )
 }
 
 #[test]

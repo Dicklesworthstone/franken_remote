@@ -3,12 +3,12 @@
 //! Progress is never publication. A single source may report its own cleanup;
 //! aggregate drop histories deliberately omit that field and keep the original
 //! viewer's cleanup obligation. Neither form permits replay or a new selection.
-use super::{CompletionCapture, Failure, Report, notice_text};
+use super::{CompletionCapture, Failure, Report, UploadChoices, notice_text};
 use crate::ControlHistory;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt::Write as _};
 
-/// The app enables only native drops: eight batches of at most eight choices.
+/// Native drops allow eight later batches of eight, independent of the initial picker batch.
 /// It never enables the separately bounded local file-command endpoint.
 const MAX_RESULTS: usize = 64;
 const SOURCE_FIELDS: [&str; 5] = [
@@ -60,17 +60,24 @@ fn preserve(evidence: &ControlHistory, failure: &mut Failure) {
 
 pub(super) fn inspect(
     stdout: &CompletionCapture,
-    expected: bool,
+    uploads: UploadChoices,
     report: Option<&Report>,
 ) -> Result<Inspection, Failure> {
+    let expected = uploads.requested();
+    let limit = match (uploads.choose_files, uploads.file_drop) {
+        (true, true) => MAX_RESULTS + 8,
+        (true, false) => 8,
+        // Keep bounded evidence of unexpected publications even without an opt-in.
+        (false, _) => MAX_RESULTS,
+    };
     let Ok(line) = stdout.completion() else {
         let evidence = stdout
             .retained_document()
             .and_then(|line| serde_json::from_str::<Value>(line).ok())
             .filter(has_metadata)
             .map(|value| {
-                Record::parse(&value)
-                    .map_or_else(|()| incomplete(&value), |record| record.evidence())
+                Record::parse(&value, limit)
+                    .map_or_else(|()| incomplete(&value, limit), |record| record.evidence())
             });
         return if expected || evidence.is_some() {
             Err(unknown(evidence))
@@ -87,13 +94,14 @@ pub(super) fn inspect(
         };
     };
     if !has_metadata(&value) {
-        return if expected && !pre_start_refusal(&value, report) {
+        return if expected && !pre_start_refusal(&value, report, uploads.choose_files) {
             Err(unknown(None))
         } else {
             Ok(Inspection::default())
         };
     }
-    let record = Record::parse(&value).map_err(|()| unknown(Some(incomplete(&value))))?;
+    let record =
+        Record::parse(&value, limit).map_err(|()| unknown(Some(incomplete(&value, limit))))?;
     let evidence = record.evidence();
     if !record.consistent(expected) {
         return Err(unknown(Some(evidence)));
@@ -147,7 +155,7 @@ fn has_metadata(value: &Value) -> bool {
 
 /// Only exact, local preflight failures establish that no source owner exists.
 /// A generic transport/cancellation failure does not prove that nothing was sent.
-fn pre_start_refusal(value: &Value, report: Option<&Report>) -> bool {
+fn pre_start_refusal(value: &Value, report: Option<&Report>, choose_files: bool) -> bool {
     matches!(
         value.get("outcome").and_then(Value::as_str),
         Some("refused" | "cancelled")
@@ -176,7 +184,13 @@ fn pre_start_refusal(value: &Value, report: Option<&Report>) -> bool {
                 | "files_directory_unsafe" | "files_directory_unavailable"
                 | "receive_directory_choice_cancelled" | "receive_directory_choice_expired"
                 | "receive_directory_choice_invalid" | "receive_directory_choice_event_overflow"
-                | "receive_directory_picker_unavailable"))
+                | "receive_directory_picker_unavailable")
+                || (choose_files && matches!(code.as_str(),
+                    "file_choice_cancelled" | "file_choice_expired" | "file_choice_invalid"
+                    | "file_choice_event_overflow" | "file_picker_unavailable"
+                    | "send_too_many" | "send_missing" | "send_symlink" | "send_directory"
+                    | "send_special_file" | "send_name_not_portable" | "send_duplicate_name"
+                    | "send_unreadable" | "send_changed")))
 }
 
 fn unknown(evidence: Option<ControlHistory>) -> Failure {
@@ -293,7 +307,7 @@ struct Record {
     source: Option<Source>,
 }
 impl Record {
-    fn parse(value: &Value) -> Result<Self, ()> {
+    fn parse(value: &Value, limit: usize) -> Result<Self, ()> {
         // fr app has no file-command endpoint. Do not silently project its
         // unrelated request identities into a native-drop completion.
         if value.get("files_commands").is_some()
@@ -317,7 +331,7 @@ impl Record {
             .get("files_refused")
             .and_then(Value::as_array)
             .ok_or(())?;
-        if requested > MAX_RESULTS as u64 || sent.len().saturating_add(refused.len()) > MAX_RESULTS
+        if requested > limit as u64 || sent.len().saturating_add(refused.len()) > limit
         {
             return Err(());
         }
@@ -449,13 +463,13 @@ fn evidence(value: &Value, notice: &str) -> ControlHistory {
     }
 }
 
-fn incomplete(value: &Value) -> ControlHistory {
+fn incomplete(value: &Value, limit: usize) -> ControlHistory {
     let sent: Vec<_> = value
         .get("files_sent")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .take(MAX_RESULTS)
+        .take(limit)
         .filter_map(Published::parse)
         .map(|receipt| receipt.json())
         .collect();
@@ -464,7 +478,7 @@ fn incomplete(value: &Value) -> ControlHistory {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .take(MAX_RESULTS.saturating_sub(sent.len()))
+        .take(limit.saturating_sub(sent.len()))
         .filter_map(Refused::parse)
         .map(|receipt| receipt.json())
         .collect();

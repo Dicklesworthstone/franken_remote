@@ -40,6 +40,8 @@ pub struct Choices {
     pub playback_audio: bool,
     /// Explicit file-drop opt-in for this controlling connection only.
     pub send_files: bool,
+    /// Choose initial files in the native file dialog for this connection.
+    pub choose_files: bool,
     /// The caller retained a receive destination; it never enters this adapter.
     pub receive_available: bool,
     /// Explicit receive opt-in for this controlling connection only.
@@ -58,6 +60,7 @@ impl Choices {
             | (u32::from(self.choose_display) << 2)
             | (u32::from(self.playback_audio) << 3)
             | (u32::from(self.send_files) << 4)
+            | (u32::from(self.choose_files) << 8)
             | (u32::from(self.receive_files) << 5)
             | (u32::from(self.microphone_controls) << 6)
             | (u32::from(self.capture_system_shortcuts) << 7)
@@ -65,6 +68,7 @@ impl Choices {
     fn initial_bits(self) -> u32 {
         // A prior choice never preselects microphone or system-shortcut capture.
         Self {
+            choose_files: false,
             microphone_controls: false,
             capture_system_shortcuts: false,
             ..self
@@ -77,8 +81,8 @@ impl Choices {
         microphone_available: bool,
         system_shortcuts_available: bool,
     ) -> Option<Self> {
-        if bits & !255 != 0
-            || (bits & 0b1111_0000 != 0 && bits & 1 == 0)
+        if bits & !511 != 0
+            || (bits & 0b1_1111_0000 != 0 && bits & 1 == 0)
             || (bits & 32 != 0 && !receive_available)
             || (bits & 64 != 0 && !microphone_available)
             || (bits & 128 != 0 && !system_shortcuts_available)
@@ -91,6 +95,7 @@ impl Choices {
             choose_display: bits & 4 != 0,
             playback_audio: bits & 8 != 0,
             send_files: bits & 16 != 0,
+            choose_files: bits & 256 != 0,
             receive_available,
             receive_files: bits & 32 != 0,
             microphone_controls: bits & 64 != 0,
@@ -521,10 +526,12 @@ mod tests {
     fn native_choices_require_control_and_original_file_and_microphone_availability() {
         for receive_available in [false, true] {
             for microphone_available in [false, true] {
-                for bits in 0..128 {
+                for bits in 0..512 {
                     let confirmed =
                         Choices::from_bits(bits, receive_available, microphone_available, false);
-                    if (bits & 0b111_0000 != 0 && bits & 1 == 0)
+                    if (bits & 256 != 0 && bits & 1 == 0)
+                        || bits & 128 != 0
+                        || (bits & 0b111_0000 != 0 && bits & 1 == 0)
                         || (bits & 32 != 0 && !receive_available)
                         || (bits & 64 != 0 && !microphone_available)
                     {
@@ -533,10 +540,18 @@ mod tests {
                     }
                     let choices = confirmed.unwrap();
                     assert_eq!(choices.bits(), bits);
+                    let fresh = Choices::from_bits(
+                        choices.initial_bits(),
+                        receive_available,
+                        microphone_available,
+                        false,
+                    )
+                    .unwrap();
+                    assert!(!fresh.choose_files);
                     assert_eq!(choices.receive_available, receive_available);
                 }
                 assert_eq!(
-                    Choices::from_bits(256, receive_available, microphone_available, true),
+                    Choices::from_bits(512, receive_available, microphone_available, true),
                     None
                 );
                 assert_eq!(

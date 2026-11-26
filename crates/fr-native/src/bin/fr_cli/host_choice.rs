@@ -24,6 +24,8 @@ pub(super) struct Choices {
     pub playback_audio: bool,
     /// A new local opt-in for this connection, never a saved preference.
     pub send_files: bool,
+    /// Choose initial files in the native file dialog for this connection.
+    pub choose_files: bool,
     /// The parent retains the destination; the picker receives only this hint.
     pub receive_available: bool,
     /// Explicit consent for this controlling connection, never remembered.
@@ -44,6 +46,7 @@ impl Choices {
             choose_display: matches!(connection.display, DisplayChoice::Choose),
             playback_audio: pick.playback_audio,
             send_files: false,
+            choose_files: false,
             receive_available: pick.receive_available,
             receive_files: false,
             microphone_controls: false,
@@ -161,6 +164,7 @@ pub(super) fn selected_report(
             object.insert("choose_display".into(), choices.choose_display.into());
             object.insert("playback_audio".into(), choices.playback_audio.into());
             object.insert("send_files".into(), choices.send_files.into());
+            object.insert("choose_files".into(), choices.choose_files.into());
             object.insert("receive_files".into(), choices.receive_files.into());
             object.insert(
                 "microphone_controls".into(),
@@ -197,7 +201,11 @@ pub(super) fn selected_report(
             } else {
                 "off"
             },
-            if choices.control && choices.send_files {
+            if choices.control && choices.choose_files && choices.send_files {
+                "choose local files before connecting and allow later drops"
+            } else if choices.control && choices.choose_files {
+                "choose local files before connecting"
+            } else if choices.control && choices.send_files {
                 "enabled for this connection"
             } else {
                 "off"
@@ -343,6 +351,7 @@ mod tests {
                 choose_display: false,
                 playback_audio: false,
                 send_files: false,
+                choose_files: false,
                 receive_available: false,
                 receive_files: false,
                 microphone_controls,

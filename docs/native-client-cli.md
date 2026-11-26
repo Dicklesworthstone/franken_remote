@@ -168,8 +168,17 @@ or removal. On macOS, `--microphone-source UID` can similarly select one explici
 input for the next choice; without it the existing per-choice default-device
 pinning remains available.
 
-With **View and control**, select **Send files** to allow file drops onto that
-viewer through the existing `--file-drop` transfer path. This choice applies
+With **View and control**, select **Choose files now** (Linux F9) or
+**Choose files before connecting** (macOS) to open the native upload dialog
+for the selected machine. The viewer pins the selection before it connects.
+Linux accepts up to eight regular files through the desktop portal. macOS
+accepts up to eight files or folders through its native panel. Canceling the
+dialog returns you to the machine picker before a remote session opens.
+The selection applies only to this connection.
+
+Select **Send files** (macOS **Allow file drops**) to enable later drops onto
+the viewer through the existing `--file-drop` transfer path. You can enable
+either upload choice or both. The file-drop choice applies
 only to the connection you are about to open. Switching to **View only** clears
 and disables it; switching back to control does not restore it. Every new
 picker starts with file sending off, including after a session ends. The
