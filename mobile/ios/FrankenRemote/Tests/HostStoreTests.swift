@@ -59,6 +59,24 @@ final class HostStoreTests: XCTestCase {
         XCTAssertEqual(store().hosts, [host])
     }
 
+    func testPastingALinkIntoTheEditorUsesItsOwnPortAndDoesNotConnect() {
+        let s = store()
+        let input = MachineAddressInput("  fr://MAC.tailtest.ts.net:18443\n", portField: "9443")
+        XCTAssertEqual(input.name, "mac.tailtest.ts.net")
+        XCTAssertEqual(input.port, 18443)
+        XCTAssertTrue(input.portFromLink)
+        XCTAssertNil(s.problem(with: input.name))
+        XCTAssertTrue(s.hosts.isEmpty)
+        XCTAssertEqual(MachineAddressInput("frs://mac.tailtest.ts.net", portField: "9443").port, 8443)
+        let manual = MachineAddressInput(" Mac.tailtest.ts.net ", portField: "9443")
+        XCTAssertEqual(manual.name, input.name)
+        XCTAssertEqual(manual.port, 9443)
+        XCTAssertFalse(manual.portFromLink)
+        XCTAssertNil(MachineAddressInput(manual.name, portField: "0").port)
+        let malformed = MachineAddressInput("fr://mac.tailtest.ts.net?token=abc", portField: "8443")
+        XCTAssertEqual(s.problem(with: malformed.name), .notTailnetName)
+    }
+
     func testMachineLinkRejectsCredentialsAmbiguousTargetsAndUnusablePorts() {
         for raw in [
             "https://mac.tailtest.ts.net", "fr://100.64.0.1", "fr://mac", "fr://mac.example.com",

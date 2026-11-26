@@ -67,6 +67,9 @@ and fragments are refused. The recipient reviews the name and port, then chooses
 An existing machine keeps its address pin and dialing policy. A link naming a
 different port requires the user to edit that saved machine separately.
 Opening a link during a connection leaves the current session in place.
+If a terminal or messaging app displays the link as plain text, copy the output
+of `fr hosts link ALIAS` into **Add a machine**. The form shows the port from
+the link and **Save** adds it to Machines for later use.
 
 **The machine list.** Tailscale offers no way for another iOS app to list the
 tailnet's machines, so a FrankenRemote host lists them instead. A host started

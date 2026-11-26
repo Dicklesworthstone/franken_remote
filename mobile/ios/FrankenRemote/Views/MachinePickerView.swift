@@ -403,8 +403,8 @@ struct HostEditor: View {
         return nil
     }
 
-    private var problem: HostNameProblem? { store.problem(with: name, excluding: existing?.id) }
-    private var portValue: UInt16? { UInt16(port).flatMap { $0 == 0 ? nil : $0 } }
+    private var address: MachineAddressInput { MachineAddressInput(name, portField: port) }
+    private var problem: HostNameProblem? { store.problem(with: address.name, excluding: existing?.id) }
 
     var body: some View {
         NavigationStack {
@@ -416,11 +416,11 @@ struct HostEditor: View {
                         .keyboardType(.URL)
                         .textContentType(.URL)
                 } header: {
-                    Text("MagicDNS name")
+                    Text("MagicDNS name or machine link")
                 } footer: {
                     switch problem {
                     case .some(.notTailnetName) where !name.isEmpty:
-                        Text("Use the full name ending in .ts.net, exactly as the Tailscale app shows it.")
+                        Text("Enter a full MagicDNS name or paste a machine link from FrankenRemote.")
                             .foregroundStyle(.orange)
                     case .some(.duplicate):
                         Text("This machine is already saved.").foregroundStyle(.orange)
@@ -432,7 +432,11 @@ struct HostEditor: View {
                     TextField("Studio Mac", text: $nickname)
                 }
                 Section {
-                    TextField("8443", text: $port).keyboardType(.numberPad)
+                    if address.portFromLink, let linkedPort = address.port {
+                        LabeledContent("Port from link", value: String(linkedPort))
+                    } else {
+                        TextField("8443", text: $port).keyboardType(.numberPad)
+                    }
                 } header: {
                     Text("Port")
                 } footer: {
@@ -453,7 +457,7 @@ struct HostEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }.disabled(problem != nil || portValue == nil)
+                    Button("Save") { save() }.disabled(problem != nil || address.port == nil)
                 }
             }
             .onAppear(perform: load)
@@ -473,15 +477,16 @@ struct HostEditor: View {
     }
 
     private func save() {
-        guard let port = portValue else { return }
+        let endpoint = address
+        guard problem == nil, let port = endpoint.port else { return }
         let label = nickname.trimmingCharacters(in: .whitespaces)
         if var host = existing {
-            host.name = HostStore.normalize(name)
+            host.name = endpoint.name
             host.nickname = label.isEmpty ? nil : label
             host.port = port
             store.update(host)
         } else {
-            store.add(name, port: port, nickname: label)
+            store.add(endpoint.name, port: port, nickname: label)
         }
         dismiss()
     }

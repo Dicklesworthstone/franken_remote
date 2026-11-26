@@ -43,8 +43,13 @@ struct MachineLink: Equatable {
     let port: UInt16
 
     init?(_ url: URL) {
-        let raw = url.absoluteString
-        guard raw.utf8.count <= 265, !raw.utf8.contains(0) else { return nil }
+        self.init(text: url.absoluteString)
+    }
+
+    init?(text raw: String) {
+        guard raw.utf8.count <= 265,
+              raw.hasPrefix("fr://") || raw.hasPrefix("frs://"),
+              !raw.utf8.contains(0) else { return nil }
         var buffer = [CChar](repeating: 0, count: 254)
         var servicePort: UInt16 = 0
         let valid = buffer.withUnsafeMutableBufferPointer { output in
@@ -53,6 +58,22 @@ struct MachineLink: Equatable {
         guard valid else { return nil }
         name = buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
         port = servicePort
+    }
+}
+
+/// A pasted host link supplies its own port. A manually entered name uses
+/// the port field from the form, including the user's configured default.
+struct MachineAddressInput {
+    let name: String
+    let port: UInt16?
+    let portFromLink: Bool
+
+    init(_ text: String, portField: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let link = MachineLink(text: trimmed)
+        name = link?.name ?? HostStore.normalize(trimmed)
+        port = link?.port ?? UInt16(portField).flatMap { $0 == 0 ? nil : $0 }
+        portFromLink = link != nil
     }
 }
 
