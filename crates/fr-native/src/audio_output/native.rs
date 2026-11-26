@@ -40,17 +40,16 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc};
 /// At most this many decode/render steps per service turn.
 const RENDERS_PER_TURN: usize = 4;
 
-/// Locally selected device, before any native output is opened. The Mac
-/// subset pins its current default output; Linux retains its named socket.
+/// Local playback destination, before any native output is opened.
 #[derive(Clone)]
 pub(super) struct Selected {
     #[cfg(target_os = "linux")]
     server: PathBuf,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     sink: Option<String>,
 }
 impl Selected {
-    #[cfg_attr(any(target_os = "macos", windows), allow(clippy::unused_self))] // Mac's default-only selection carries no unqualified device name.
+    #[cfg_attr(windows, allow(clippy::unused_self))]
     fn open(&self) -> Result<Selection, DeviceError> {
         #[cfg(target_os = "linux")]
         {
@@ -59,7 +58,14 @@ impl Selected {
                 None => Selection::default_output(&self.server),
             }
         }
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(target_os = "macos")]
+        {
+            match self.sink.as_deref() {
+                Some(uid) => Selection::named(uid),
+                None => Selection::default_output(),
+            }
+        }
+        #[cfg(windows)]
         {
             Selection::default_output()
         }
@@ -70,6 +76,8 @@ impl Selected {
 /// Expiring old sound is a freshness refusal, not a broken output device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Failure {
+    #[cfg(target_os = "macos")]
+    Selection,
     Expired,
     Native,
 }
@@ -78,6 +86,8 @@ impl From<PlayoutError> for Failure {
         use crate::opus::playout::Error as ReceiveError;
         use fr_client::audio::{jitter::JitterError, playout::PlayoutError as Playback};
         match error {
+            #[cfg(target_os = "macos")]
+            PlayoutError::Device(DeviceError::Selection) => Self::Selection,
             // Each enforces the freshness contract: this sound, or the
             // timeline it continues, outran its window and is never played.
             // A gap or stall longer than the concealment ceiling ends here.
@@ -229,7 +239,7 @@ impl ViewerAudioOutput for Output {
             offer.jitter_target_ms,
         )
         .map_err(|_| ViewerAudioRefused)?;
-        let selection = self.selected.open().map_err(|_| ViewerAudioRefused)?;
+        let selection = self.selected.open().map_err(|error| self.refuse(PlayoutError::Device(error)))?;
         #[cfg(target_os = "linux")]
         let device =
             PlaybackDevice::connect(selection, config, now()).map_err(|_| ViewerAudioRefused)?;
@@ -239,7 +249,7 @@ impl ViewerAudioOutput for Output {
             // Partial native setup can still own an unresolved queue.
             // Retain its cleanup witness before propagating an open error.
             self.device_retirement = Some(retirement);
-            device.map_err(|_| ViewerAudioRefused)?
+            device.map_err(|error| self.refuse(PlayoutError::Device(error)))?
         };
         self.stage = Stage::Starting {
             device,

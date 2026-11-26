@@ -87,7 +87,8 @@ pub mod macos_microphone_capture;
     allow(dead_code)
 )]
 mod macos_microphone_policy;
-#[cfg(any(test, feature = "microphone-process"))]
+// Core Audio input and output share the same exact local device UID syntax.
+#[cfg(any(test, feature = "microphone-process", feature = "cli"))]
 pub mod microphone_selection;
 
 #[cfg(all(target_os = "linux", feature = "linux-pipewire-mic"))]

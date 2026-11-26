@@ -460,7 +460,8 @@ fn connect_selected(
     .with_files(selected_files)
     .with_system_shortcuts(connection.capture_system_shortcuts)
     .clipboard(connection.control && connection.clipboard);
-    session = playback::install(session, audio);
+    let sink = connection.audio.as_ref().and_then(|request| request.sink.clone());
+    session = playback::install(session, audio, sink);
     session = microphone::install(session, microphone);
     if display == DisplayChoice::Choose {
         session = session.with_display_picker();

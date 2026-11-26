@@ -1,7 +1,7 @@
 //! Bounded, worker-confined Core Audio PCM output for an explicitly enabled
 //! remote downlink. Opus remains in its separately supervised decoder process.
 //!
-//! The default local output is resolved and pinned once. Device/format changes,
+//! The selected local output is resolved and pinned once. Device/format changes,
 //! stalled clocks and late sound retire this owner. Native callbacks provide
 //! allocation credit only; actual Audio Queue sample time paces playback.
 
@@ -14,7 +14,7 @@ use fr_client::{
 use fr_core::audio::{AudioDirection, AudioStreamConfig};
 use fr_media::audio::AudioPcmFrame;
 use std::{
-    ffi::{c_int, c_void},
+    ffi::{CString, c_char, c_int, c_void},
     marker::PhantomData,
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::NonNull,
@@ -35,14 +35,24 @@ impl Retirement {
     }
 }
 
-/// Only the locally selected default output. Remote records cannot name an
-/// output device or cause routing to a different speaker after configuration.
-#[derive(Debug)]
-pub struct Selection(());
+/// Local output choice. Only the worker resolves this value with Core Audio.
+pub struct Selection(Option<CString>);
+impl std::fmt::Debug for Selection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CoreAudioOutputSelection")
+    }
+}
 impl Selection {
     #[allow(clippy::unnecessary_wraps)] // same fallible selection seam as native Linux output
     pub fn default_output() -> Result<Self, Error> {
-        Ok(Self(()))
+        Ok(Self(None))
+    }
+
+    pub fn named(uid: &str) -> Result<Self, Error> {
+        if !crate::microphone_selection::Selection::valid_mac_uid(uid) {
+            return Err(Error::Selection);
+        }
+        CString::new(uid).map(|uid| Self(Some(uid))).map_err(|_| Error::Selection)
     }
 }
 
@@ -75,7 +85,12 @@ struct NativeClock {
     lead: u64,
 }
 unsafe extern "C" {
-    fn fr_macos_audio_create(channels: u32, largest_frames: u32, out: *mut *mut c_void) -> c_int;
+    fn fr_macos_audio_create(
+        uid: *const c_char,
+        channels: u32,
+        largest_frames: u32,
+        out: *mut *mut c_void,
+    ) -> c_int;
     fn fr_macos_audio_clock(handle: *mut c_void, clock: *mut NativeClock) -> c_int;
     fn fr_macos_audio_submit(
         handle: *mut c_void,
@@ -140,7 +155,7 @@ impl PlaybackDevice {
     }
 
     fn create(
-        _selection: Selection,
+        selection: Selection,
         configuration: AudioStreamConfig,
         now: ClientInstant,
         retirement: Retirement,
@@ -156,10 +171,12 @@ impl PlaybackDevice {
             .checked_add(nominal.div_ceil(1000))
             .ok_or(Error::Configuration)?;
         let mut handle = std::ptr::null_mut();
-        // SAFETY: C copies the checked format scalars and writes one owned opaque
-        // pointer. Its returned allocation, even on failure, belongs to us.
+        let uid = selection.0;
+        // SAFETY: the optional NUL-terminated UID lives through this call.
+        // C copies it, writes one owned opaque handle and retains no Rust pointer.
         let code = unsafe {
             fr_macos_audio_create(
+                uid.as_ref().map_or(std::ptr::null(), |uid| uid.as_ptr()),
                 u32::from(configuration.channels().count()),
                 largest,
                 &raw mut handle,
@@ -495,6 +512,30 @@ const fn native_error(code: c_int) -> Error {
         -9 => Error::Denied,
         -10 => Error::SubmissionUnknown,
         -11 => Error::Closed,
+        -12 => Error::Selection,
         _ => Error::Native,
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use fr_core::audio::{AudioChannels, AudioGeneration};
+
+    #[test]
+    fn absent_explicit_output_retires_without_opening_default_speakers() {
+        let uid = "org.frankenremote.test.missing-output.CC3979DA-41C2-4B00-A570-DF148D95B437";
+        let config = AudioStreamConfig::new(
+            AudioDirection::Downlink,
+            AudioGeneration::INITIAL,
+            AudioChannels::Stereo,
+            20,
+            20,
+        )
+        .unwrap();
+        let (device, retirement) =
+            PlaybackDevice::connect_retained(Selection::named(uid).unwrap(), config, ClientInstant(0));
+        assert_eq!(device.unwrap_err(), Error::Selection);
+        assert!(retirement.is_complete());
     }
 }

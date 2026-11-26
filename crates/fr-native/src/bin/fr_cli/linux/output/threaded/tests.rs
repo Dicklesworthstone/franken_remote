@@ -68,7 +68,7 @@ fn fixture(
         selected: Selected {
             #[cfg(target_os = "linux")]
             server: PathBuf::from("/unused-fixture"),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             sink: None,
         },
         image: Some(PathBuf::from("/unused-fixture")),
@@ -103,7 +103,7 @@ fn retained_stop_before_configuration_or_worker_spawn_is_terminal() {
             Selected {
                 #[cfg(target_os = "linux")]
                 server: PathBuf::from("/unused-fixture"),
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 sink: None,
             },
             report,

@@ -52,6 +52,8 @@ enum Fault {
     Acknowledgement = 5,
     Expired,
     Setup,
+    #[cfg(target_os = "macos")]
+    Selection,
 }
 fn reason(code: u8) -> &'static str {
     match code {
@@ -60,6 +62,8 @@ fn reason(code: u8) -> &'static str {
         5 => "audio_output_acknowledgement_failed",
         6 => "audio_output_late",
         7 => "audio_output_setup_timeout",
+        #[cfg(target_os = "macos")]
+        8 => "audio_output_selection_unavailable",
         _ => "audio_output_failed",
     }
 }
@@ -68,6 +72,8 @@ impl From<super::Failure> for Fault {
         match failure {
             super::Failure::Expired => Self::Expired,
             super::Failure::Native => Self::Native,
+            #[cfg(target_os = "macos")]
+            super::Failure::Selection => Self::Selection,
         }
     }
 }
@@ -322,7 +328,16 @@ pub struct Output {
 impl Output {
     #[cfg(target_os = "macos")]
     pub fn macos(report: Rc<RefCell<Report>>, volume: AudioVolumeControl) -> Self {
-        Self::selected(Selected {}, report, volume)
+        Self::macos_with_sink(None, report, volume)
+    }
+    /// Keep the exact local output UID for every generation on this attempt.
+    #[cfg(target_os = "macos")]
+    pub fn macos_with_sink(
+        sink: Option<String>,
+        report: Rc<RefCell<Report>>,
+        volume: AudioVolumeControl,
+    ) -> Self {
+        Self::selected(Selected { sink }, report, volume)
     }
     #[cfg(target_os = "linux")]
     pub fn new(

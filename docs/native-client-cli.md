@@ -818,9 +818,10 @@ fr connect <host> --view-only --audio --experimental-native --display only
 The host must independently enable playback capture. An older host or an
 unselected optional capability leaves the desktop working with a typed audio
 absence. A build without `macos-audio` refuses an explicit audio request before
-dialing. This subset pins the current local default output when the original
-stream opens; choose it in System Settings before connecting. Linux-specific
-`--audio-server` and `--audio-sink` selectors are refused on Mac.
+dialing. With `--audio-sink UID`, the worker pins this stream to the exact
+local Core Audio output and keeps that choice through audio resets. If the
+device disappears, playback stops. Omitting the option selects the current
+default output when the stream opens. `--audio-server` is Linux-only.
 
 The negotiated profile admits at most 24 capabilities. Playback with clipboard
 and a single file direction fits, as does playback with both file directions

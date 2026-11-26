@@ -793,6 +793,7 @@ fn embed_macos_microphone_plists() {
 /// Native output only. Opus decoding stays in its separately supervised child.
 fn build_macos_audio() {
     println!("cargo:rerun-if-changed=src/macos_audio.m");
+    println!("cargo:rerun-if-changed=src/macos_audio_device.h");
     println!("cargo:rerun-if-changed=src/macos_audio_clock.h");
     if env::var_os("CARGO_FEATURE_MACOS_AUDIO").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")

@@ -1,7 +1,7 @@
 # Native Mac client playback
 
 The optional `macos-audio` build connects an explicitly requested host audio
-downlink to the Mac client's local default output. It uses the existing native
+downlink to a selected local Core Audio output. It uses the existing native
 audio negotiation, original observation permission, Opus decoder process,
 bounded worker inbox, jitter buffer and generation-replacement protocol.
 
@@ -26,12 +26,19 @@ enabled playback sharing:
 ```sh
 fr connect HOST --view-only --audio
 fr connect HOST --control --audio --audio-volume 50
+fr connect HOST --view-only --audio --audio-sink 'BuiltInSpeakerDevice'
 ```
 
 `--audio-muted` starts the local remote-audio output muted. Gain and mute apply
-to this downlink, not to the Mac's system mixer or the host. The initial Mac
-implementation selects the current local default output only; Linux-specific
-`--audio-server` and `--audio-sink` requests are refused before connection.
+to this downlink, not to the Mac's system mixer or the host. With no sink,
+FrankenRemote pins the local default output when each stream opens. To play on a
+particular speaker or headset without changing the system default, supply its
+exact Core Audio UID with `--audio-sink`. The example UID applies only if
+your Mac reports that device. If you use SwitchAudioSource,
+`SwitchAudioSource -a -t output -f json` lists installed outputs and their UIDs.
+The UID stays local. The worker checks it on each configuration and while
+playing. An unavailable UID leaves playback silent and is reported as
+`audio_output_selection_unavailable`. `--audio-server` is Linux-only.
 A build without `macos-audio` and a missing matching decoder executable also
 produce specific preconnection refusals.
 
@@ -65,7 +72,8 @@ disables core/file output and independently watches parent death. This is
 same-user crash/hang containment, **not an OS sandbox claim**. Linux retains its
 existing mandatory seccomp boundary; no in-process decoder fallback is added.
 
-The native output resolves the default device and pins its UID once. Every
+The native output resolves the selected UID or current default and pins its
+queue to that UID. Changing the system default does not redirect a named output. Every
 native clock read checks the queue's actual routing, device liveness, sample
 rate, buffer size, safety offset, latency and bounded output-stream layout;
 a change requires retirement and a fresh negotiated generation. Only 48 kHz
@@ -107,6 +115,10 @@ actual decoder-child reap witness before releasing its own slot or admitting a
 replacement.
 
 ## Evidence and limits
+
+The UID lookup regression exercises the Core Audio property-call contract and
+the choice between a named device and the default. Physical audio routing,
+hot-unplug behavior and audibility on a Mac still require device qualification.
 
 The implementation reuses the production Opus/ACK/packet/worker pipeline. On the
 Linux development runner, the four normal core, wire, media and client test

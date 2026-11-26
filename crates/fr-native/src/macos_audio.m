@@ -5,6 +5,7 @@
 #import <CoreAudio/CoreAudio.h>
 #include <mach/mach_time.h>
 #include "macos_audio_clock.h"
+#include "macos_audio_device.h"
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,7 +20,7 @@ enum {
     FR_AUDIO_CHANGED = -5, FR_AUDIO_BOUNDS = -6,
     FR_AUDIO_BUSY = -7, FR_AUDIO_NATIVE = -8,
     FR_AUDIO_DENIED = -9, FR_AUDIO_UNKNOWN = -10,
-    FR_AUDIO_CLOSED = -11
+    FR_AUDIO_CLOSED = -11, FR_AUDIO_SELECTION = -12
 };
 #define FR_AUDIO_BUFFERS 3
 #define FR_AUDIO_MAX_OWNERS 4
@@ -34,6 +35,7 @@ typedef struct {
     AudioQueueTimelineRef timeline;
     AudioDeviceID device;
     CFStringRef uid;
+    bool explicit_uid;
     Float64 device_rate;
     UInt32 device_buffer;
     UInt32 device_latency;
@@ -81,17 +83,13 @@ static int property(AudioObjectID object, AudioObjectPropertySelector selector,
     return FR_AUDIO_OK;
 }
 
-static int current_device(AudioDeviceID *device) {
-    return property(kAudioObjectSystemObject, kAudioHardwarePropertyDefaultOutputDevice,
-                    kAudioObjectPropertyScopeGlobal, device, sizeof *device);
-}
-
 static int device_properties(FrAudioOutput *owner, bool initial) {
-    AudioDeviceID current = kAudioObjectUnknown;
+    AudioDeviceID current = fr_audio_output_device(owner->explicit_uid ? owner->uid : NULL);
+    if (current == kAudioObjectUnknown || current != owner->device)
+        return owner->explicit_uid ? FR_AUDIO_SELECTION : FR_AUDIO_CHANGED;
     UInt32 alive = 0, buffer = 0, latency = 0, safety = 0;
     Float64 rate = 0;
-    if (current_device(&current) != FR_AUDIO_OK || current != owner->device ||
-        property(owner->device, kAudioDevicePropertyDeviceIsAlive,
+    if (property(owner->device, kAudioDevicePropertyDeviceIsAlive,
                  kAudioObjectPropertyScopeGlobal, &alive, sizeof alive) != FR_AUDIO_OK || !alive ||
         property(owner->device, kAudioDevicePropertyNominalSampleRate,
                  kAudioObjectPropertyScopeGlobal, &rate, sizeof rate) != FR_AUDIO_OK ||
@@ -201,9 +199,12 @@ int fr_macos_audio_destroy(void *handle) {
     return FR_AUDIO_OK;
 }
 
-int fr_macos_audio_create(uint32_t channels, uint32_t largest_frames, void **out) {
+int fr_macos_audio_create(const char *requested_uid, uint32_t channels,
+                          uint32_t largest_frames, void **out) {
     if (!out) return FR_AUDIO_CONFIG;
     *out = NULL;
+    if (requested_uid && (!*requested_uid || strnlen(requested_uid, 256) > 255))
+        return FR_AUDIO_SELECTION;
     if ((channels != 1 && channels != 2) ||
         (largest_frames != FR_AUDIO_MAX_10MS_FRAMES && largest_frames != FR_AUDIO_MAX_20MS_FRAMES)) return FR_AUDIO_CONFIG;
     unsigned count = atomic_load_explicit(&owners, memory_order_acquire);
@@ -223,13 +224,21 @@ int fr_macos_audio_create(uint32_t channels, uint32_t largest_frames, void **out
         !sleep_offset(owner, &owner->original_sleep_offset)) return FR_AUDIO_CLOCK;
     owner->channels = channels;
     owner->largest_frames = largest_frames;
-    if (current_device(&owner->device) != FR_AUDIO_OK || owner->device == kAudioObjectUnknown)
+    owner->explicit_uid = requested_uid != NULL;
+    if (owner->explicit_uid) {
+        owner->uid = CFStringCreateWithCString(kCFAllocatorDefault, requested_uid,
+                                               kCFStringEncodingUTF8);
+        if (!owner->uid) return FR_AUDIO_SELECTION;
+    }
+    owner->device = fr_audio_output_device(owner->uid);
+    if (owner->device == kAudioObjectUnknown)
+        return owner->explicit_uid ? FR_AUDIO_SELECTION : FR_AUDIO_UNAVAILABLE;
+    if (!owner->explicit_uid &&
+        (property(owner->device, kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal,
+                  &owner->uid, sizeof owner->uid) != FR_AUDIO_OK || !owner->uid))
         return FR_AUDIO_UNAVAILABLE;
     int checked = device_properties(owner, true);
     if (checked != FR_AUDIO_OK) return checked;
-    if (property(owner->device, kAudioDevicePropertyDeviceUID,
-                 kAudioObjectPropertyScopeGlobal, &owner->uid, sizeof owner->uid) != FR_AUDIO_OK ||
-        !owner->uid) return FR_AUDIO_UNAVAILABLE;
     AudioStreamBasicDescription format = {0};
     format.mSampleRate = 48000;
     format.mFormatID = kAudioFormatLinearPCM;

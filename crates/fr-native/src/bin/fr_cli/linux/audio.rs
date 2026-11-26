@@ -102,14 +102,15 @@ pub(super) fn output(
     (Box::new(output), retirement)
 }
 
-/// The same bounded proxy and decoder ownership, selecting only the Mac's
-/// current local default output. The caller retains the real cleanup witness.
+/// The same bounded proxy and decoder ownership for a locally selected Mac
+/// output. The caller retains the original cleanup witness.
 #[cfg(all(target_os = "macos", feature = "macos-audio"))]
 pub(super) fn macos_output(
+    sink: Option<String>,
     report: &std::rc::Rc<std::cell::RefCell<Report>>,
     volume: fr_client::audio::AudioVolumeControl,
 ) -> (Box<dyn frd::session_startup::ViewerAudioOutput>, Retirement) {
-    let output = Output::macos(report.clone(), volume);
+    let output = Output::macos_with_sink(sink, report.clone(), volume);
     let retirement = output.retirement();
     (Box::new(output), retirement)
 }

@@ -9,9 +9,8 @@ use std::{cell::RefCell, rc::Rc};
 #[cfg(target_os = "macos")]
 pub(super) type Report = Rc<RefCell<audio::Report>>;
 
-/// Pure preflight, also exercised by the Linux CLI tests. The first `CoreAudio`
-/// subset pins the current local default output rather than interpreting a
-/// Linux socket or sink name as a Mac device.
+/// Pure preflight. A Core Audio UID is a local output choice; a PulseAudio
+/// server path is meaningful only on Linux.
 pub(super) fn check(request: Option<&AudioRequest>, available: bool) -> Result<(), Failure> {
     let Some(request) = request else {
         return Ok(());
@@ -23,10 +22,19 @@ pub(super) fn check(request: Option<&AudioRequest>, available: bool) -> Result<(
             2,
         ));
     }
-    if request.server.is_some() || request.sink.is_some() {
+    if request.server.is_some() {
         return Err(Failure::new(
             "audio_output_selection_unsupported",
-            "macOS playback pins the current local default output. Select it in System Settings before connecting; --audio-server and --audio-sink are Linux-only.",
+            "Use --audio-sink with a local Core Audio device UID, or omit it for the default output. --audio-server is Linux-only.",
+            2,
+        ));
+    }
+    if request.sink.as_deref().is_some_and(|uid| {
+        !fr_native::microphone_selection::Selection::valid_mac_uid(uid)
+    }) {
+        return Err(Failure::new(
+            "audio_output_selection_invalid",
+            "Use an exact local Core Audio output UID of 1 to 255 bytes, or omit --audio-sink for the default output.",
             2,
         ));
     }
@@ -142,13 +150,14 @@ fn invalid_offer() -> Failure {
 pub(super) fn install(
     session: fr_native::macos::session::Session,
     report: Option<&Report>,
+    sink: Option<String>,
 ) -> fr_native::macos::session::Session {
     #[cfg(feature = "macos-audio")]
     if let Some(report) = report {
         let report = report.clone();
         return session.with_audio_output(move |observer| {
             let volume = report.borrow_mut().begin_attempt();
-            let (output, cleanup) = audio::macos_output(&report, volume.clone());
+            let (output, cleanup) = audio::macos_output(sink.clone(), &report, volume.clone());
             if let Err(error) = observer.configure_audio(output) {
                 let reason = match error {
                     frd::session_startup::ViewerAudioUnavailable::NotSelected => {
@@ -168,7 +177,7 @@ pub(super) fn install(
         });
     }
     #[cfg(not(feature = "macos-audio"))]
-    let _ = report;
+    let _ = (report, sink);
     session
 }
 
@@ -325,16 +334,20 @@ mod tests {
             "audio_unavailable_in_build"
         );
         assert!(check(Some(&request()), true).is_ok());
-        for source in [true, false] {
-            let mut request = request();
-            if source {
-                request.server = Some("/unused".into());
-            } else {
-                request.sink = Some("speakers".into());
-            }
+        let mut request = request();
+        request.server = Some("/unused".into());
+        assert_eq!(
+            check(Some(&request), true).unwrap_err().code,
+            "audio_output_selection_unsupported"
+        );
+        request.server = None;
+        request.sink = Some("USB headphones:1".into());
+        assert!(check(Some(&request), true).is_ok());
+        for invalid in ["", "auto", "default", " device", "a\0b", &"x".repeat(256)] {
+            request.sink = Some(invalid.into());
             assert_eq!(
                 check(Some(&request), true).unwrap_err().code,
-                "audio_output_selection_unsupported"
+                "audio_output_selection_invalid"
             );
         }
     }
