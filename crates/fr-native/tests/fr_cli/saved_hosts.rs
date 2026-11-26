@@ -151,6 +151,44 @@ fn saved_host_cli_persists_selection_and_refuses_a_renamed_peer() {
     );
 }
 #[test]
+fn offline_link_shares_only_the_saved_magicdns_endpoint() {
+    let directory = path("offline-host-link");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = directory.join("hosts.json");
+    let record = r#"{"schema_version":1,"hosts":[{"alias":"office","stable_id":"n-private","certificate_name":"desk.fixture.ts.net","port":9443}]}"#;
+    std::fs::write(&file, record).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let file = file.to_str().unwrap();
+    let args = ["hosts", "link", "office", "--hosts-file", file];
+    let link = run_cli(&args);
+    assert!(link.status.success());
+    assert_eq!(link.stdout.as_slice(), b"fr://desk.fixture.ts.net:9443\n");
+    let report = run_cli(&["hosts", "link", "office", "--hosts-file", file, "--json"]);
+    assert!(report.status.success());
+    json(
+        &report,
+        "assert x['link']=='fr://desk.fixture.ts.net:9443' and x['selection_only'] and x['fresh_lookup_required']\nassert x['action']=='link' and x['outcome']=='success' and isinstance(x['timestamp_unix_ms'],int)\nassert set(x)=={'schema_version','timestamp_unix_ms','outcome','action','selection_only','fresh_lookup_required','link'}",
+    );
+    assert_eq!(std::fs::read_to_string(file).unwrap(), record);
+    let missing = run_cli(&["hosts", "link", "absent", "--hosts-file", file, "--json"]);
+    assert_eq!(missing.status.code(), Some(1));
+    json(&missing, "assert x['error']['code']=='saved_host_not_found'");
+    for (document, expected) in [
+        (
+            record.replace("desk.fixture.ts.net", "work.example.org"),
+            "saved_host_link_unavailable",
+        ),
+        (record.replace("9443", "0"), "saved_hosts_invalid"),
+    ] {
+        std::fs::write(file, &document).unwrap();
+        let refused = run_cli(&["hosts", "link", "office", "--hosts-file", file, "--json"]);
+        assert_eq!(refused.status.code(), Some(1));
+        json(&refused, &format!("assert x['error']['code']=='{expected}'"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), document);
+    }
+}
+#[test]
 fn an_unknown_alias_refuses_inspect_and_disconnect_without_any_lookup() {
     let directory = path("saved-host-unknown");
     std::fs::create_dir(&directory).unwrap();

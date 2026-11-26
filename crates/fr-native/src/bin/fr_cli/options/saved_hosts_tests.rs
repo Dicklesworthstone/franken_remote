@@ -29,7 +29,22 @@ fn local_profile_commands_are_explicit_and_bounded() {
     assert!(
         matches!(parsed("hosts forget office").unwrap().command, Command::SavedHosts(SavedHostOptions { action: SavedHostAction::Forget { alias }, .. }) if alias == "office")
     );
+    let link = parsed("hosts link office --json --hosts-file /tmp/hosts.json").unwrap();
+    assert!(link.json);
+    assert!(link.socket.is_none());
+    let Command::SavedHosts(link) = link.command else {
+        panic!("saved host link");
+    };
+    assert!(matches!(link.action, SavedHostAction::Link { alias } if alias == "office"));
+    assert_eq!(link.file, Some(PathBuf::from("/tmp/hosts.json")));
     for command in [
+        "hosts link",
+        "hosts link Office",
+        "hosts link office --socket /tmp/api",
+        "hosts link office --port 8443",
+        "hosts link office --control",
+        "hosts link office --hosts-file relative",
+        "hosts link office --json --json",
         "hosts save Office n-peer",
         "hosts save office",
         "hosts save office n-peer --port 0",

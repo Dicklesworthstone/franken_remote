@@ -12,6 +12,7 @@ fn every_topic_has_bounded_help_in_both_command_forms() {
         (&["peers"][..], OVERVIEW),
         (&["hosts", "save"][..], OVERVIEW),
         (&["hosts", "saved"][..], OVERVIEW),
+        (&["hosts", "link"][..], OVERVIEW),
         (&["hosts", "forget"][..], OVERVIEW),
         (&["status"][..], OVERVIEW),
         (&["doctor"][..], OVERVIEW),

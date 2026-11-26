@@ -124,6 +124,9 @@ pub enum SavedHostAction {
         port: u16,
     },
     List,
+    Link {
+        alias: String,
+    },
     Forget {
         alias: String,
     },
@@ -477,7 +480,7 @@ fn parse_saved_hosts(args: &[String]) -> Result<Options, Failure> {
     };
     let mut index = match action {
         "save" => 4,
-        "forget" => 3,
+        "link" | "forget" => 3,
         "saved" => 2,
         _ => return Err(usage()),
     };
@@ -502,6 +505,9 @@ fn parse_saved_hosts(args: &[String]) -> Result<Options, Failure> {
             alias: alias.ok_or_else(usage)?,
             node: node.ok_or_else(usage)?,
             port,
+        },
+        "link" => SavedHostAction::Link {
+            alias: alias.ok_or_else(usage)?,
         },
         "forget" => SavedHostAction::Forget {
             alias: alias.ok_or_else(usage)?,
@@ -798,7 +804,7 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
         "hosts"
             if args
                 .get(1)
-                .is_some_and(|s| matches!(s.as_str(), "save" | "saved" | "forget")) =>
+                .is_some_and(|s| matches!(s.as_str(), "save" | "saved" | "link" | "forget")) =>
         {
             parse_saved_hosts(args)
         }

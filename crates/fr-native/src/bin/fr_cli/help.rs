@@ -43,7 +43,8 @@ pub(super) fn page(args: &[String]) -> Result<Option<&'static str>, InvalidReque
         [command] if command == "robot" => ROBOT,
         [command] if command == "send" => SEND,
         [command, action]
-            if command == "hosts" && matches!(action.as_str(), "save" | "saved" | "forget") =>
+            if command == "hosts"
+                && matches!(action.as_str(), "save" | "saved" | "link" | "forget") =>
         {
             OVERVIEW
         }

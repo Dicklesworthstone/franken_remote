@@ -241,6 +241,7 @@ Mac display changes/resizes requiring a new view end publication without redial.
 Saved local hosts:
 fr hosts save ALIAS NODE_ID [--port PORT] [--hosts-file PATH] [--socket PATH] [--json]
 fr hosts saved [--hosts-file PATH] [--json]
+fr hosts link ALIAS [--hosts-file PATH] [--json]
 fr hosts forget ALIAS [--hosts-file PATH] [--json]
 fr connect ALIAS --saved [--hosts-file PATH] [connect options above]
 fr displays ALIAS --saved [--hosts-file PATH] --experimental-native [display options]
@@ -250,6 +251,7 @@ Tailscale resolves saved stable node ID/canonical TLS name/port, never addresses
 permissions. Connections recheck identity; rename/reassignment needs resaving.
 --saved excludes --by-name/--port; otherwise use node IDs.
 Profiles: $XDG_CONFIG_HOME/franken_remote/hosts.json, else
-$HOME/.config/franken_remote/hosts.json. List/forget needs no Tailscale.
+$HOME/.config/franken_remote/hosts.json. List/link/forget work offline.
+A link shares the full MagicDNS name and port. The recipient verifies the host.
 Private atomic storage: 100 entries/128 KiB; symlinks/duplicates/malformed data
 refuse. Saving never contacts frd/enables hosting.

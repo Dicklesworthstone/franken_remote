@@ -101,7 +101,7 @@ fn default_path(
 fn store(options: &SavedHostOptions) -> Result<Store, Failure> {
     Store::new(&path(options.file.as_ref()).map_err(failure)?).map_err(failure)
 }
-/// List/forget work with the installed daemon stopped and create no runtime.
+/// Read and remove saved selections before a daemon lookup or runtime is constructed.
 pub(super) fn local(options: &SavedHostOptions, json: bool) -> Result<Option<String>, Failure> {
     match &options.action {
         SavedHostAction::Save { .. } => Ok(None),
@@ -111,6 +111,30 @@ pub(super) fn local(options: &SavedHostOptions, json: bool) -> Result<Option<Str
             None,
             json,
         ))),
+        SavedHostAction::Link { alias } => {
+            let peers = store(options)?.load().map_err(failure)?;
+            let peer = peers
+                .get(alias)
+                .ok_or_else(|| failure(Error::Data(SavedPeerError::NotFound)))?;
+            let name = fr_tailnet::HostName::parse(peer.certificate_name()).map_err(|_| {
+                Failure::new(
+                    "saved_host_link_unavailable",
+                    "A host link requires a full machine.tailnet.ts.net certificate name.",
+                    1,
+                )
+            })?;
+            let link = format!("fr://{}:{}", name.as_str(), peer.port());
+            let result = if json {
+                format!(
+                    "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"success\",\"action\":\"link\",\"selection_only\":true,\"fresh_lookup_required\":true,\"link\":{}}}\n",
+                    output::timestamp(),
+                    output::quoted(&link),
+                )
+            } else {
+                format!("{link}\n")
+            };
+            Ok(Some(result))
+        }
         SavedHostAction::Forget { alias } => {
             let saved = store(options)?
                 .update(Change::Forget(alias.clone()))

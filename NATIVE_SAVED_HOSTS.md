@@ -9,6 +9,7 @@ native connection and approved display discovery:
 fr hosts --json
 fr hosts save workstation NODE_ID --json
 fr hosts saved --json
+fr hosts link workstation
 fr displays workstation --saved --experimental-native --json
 fr connect workstation --saved --view-only --experimental-native --display only
 fr hosts forget workstation --json
@@ -29,8 +30,7 @@ followed by a fresh save.
 ## Fresh identity on every connection
 
 Save performs the installed daemon's existing credential-checked, two-read peer
-lookup. It contacts no remote desktop. Listing and forgetting are local
-operations; they need no running Tailscale daemon and create no async runtime.
+lookup. It contacts no remote desktop. Listing, exporting a host link and forgetting an alias work offline.
 
 A saved selection checks the stable node ID and certificate name together during
 both reads of every new LocalAPI resolution. The existing native dialer still
@@ -53,6 +53,19 @@ Local session-control endpoints use the resolved stable node ID. For robot
 commands, use that ID from `fr hosts saved --json` with
 `fr robot session close NODE_ID`. Robot commands do not silently adopt saved
 alias mode.
+
+## Share a saved host with an iOS viewer
+
+Run `fr hosts link workstation` to print a destination such as
+`fr://desk.example.ts.net:9443`. The link contains the saved machine's full
+MagicDNS certificate name and service port. It omits the local alias, stable
+node ID, identity pins and session permissions. A recipient reviews the
+destination and verifies the host through their own connection.
+
+Use `--json` to read the URL from the `link` field. A profile whose certificate
+name does not match `machine.tailnet.ts.net` returns
+`saved_host_link_unavailable`. The command reads the profile without contacting
+the host or Tailscale.
 
 ## Bounded local storage
 
