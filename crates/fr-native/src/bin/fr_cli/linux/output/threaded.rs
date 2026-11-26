@@ -440,10 +440,7 @@ impl Output {
         }
         self.check_setup()?;
         let config = self.pending.take().ok_or(ViewerAudioRefused)?;
-        let shared = Arc::new(Shared::with_stop(
-            now().0,
-            self.external_stop.clone(),
-        ));
+        let shared = Arc::new(Shared::with_stop(now().0, self.external_stop.clone()));
         let job = spawn(shared, config).inspect_err(|_| {
             self.report
                 .borrow_mut()
@@ -777,15 +774,10 @@ fn native(
                 shared.fail(Fault::Setup);
                 return Err(ViewerAudioRefused);
             }
-            output.service_with_ack(
-                &mut || shared.live_at(now().0),
-                &mut |bytes, progress| {
-                    forward_ack(shared, config.setup_until, replies, bytes, progress)
-                },
-            )?;
-            shared
-                .progress
-                .store(now().0, Ordering::Release);
+            output.service_with_ack(&mut || shared.live_at(now().0), &mut |bytes, progress| {
+                forward_ack(shared, config.setup_until, replies, bytes, progress)
+            })?;
+            shared.progress.store(now().0, Ordering::Release);
             shared
                 .submitted
                 .store(report.borrow().submitted, Ordering::Release);

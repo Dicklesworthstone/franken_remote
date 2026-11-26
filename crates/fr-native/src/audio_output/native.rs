@@ -231,12 +231,11 @@ impl ViewerAudioOutput for Output {
         .map_err(|_| ViewerAudioRefused)?;
         let selection = self.selected.open().map_err(|_| ViewerAudioRefused)?;
         #[cfg(target_os = "linux")]
-        let device = PlaybackDevice::connect(selection, config, now())
-            .map_err(|_| ViewerAudioRefused)?;
+        let device =
+            PlaybackDevice::connect(selection, config, now()).map_err(|_| ViewerAudioRefused)?;
         #[cfg(any(target_os = "macos", windows))]
         let device = {
-            let (device, retirement) =
-                PlaybackDevice::connect_retained(selection, config, now());
+            let (device, retirement) = PlaybackDevice::connect_retained(selection, config, now());
             // Partial native setup can still own an unresolved queue.
             // Retain its cleanup witness before propagating an open error.
             self.device_retirement = Some(retirement);

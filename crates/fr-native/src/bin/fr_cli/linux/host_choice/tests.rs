@@ -158,3 +158,23 @@ fn picker_request_reports_the_confirmed_choices_with_the_identity() {
             .contains("file sending enabled for this connection")
     );
 }
+
+#[test]
+fn only_an_expired_machine_choice_triggers_the_apps_idle_refresh() {
+    use host_picker::Error;
+    assert_eq!(
+        picker_failure(Error::ChoiceTimeout).code,
+        "host_choice_expired"
+    );
+    assert_eq!(
+        picker_failure(Error::EventFlood).code,
+        "host_choice_event_overflow"
+    );
+    for error in [
+        Error::MapTimeout,
+        Error::NativeChanged,
+        Error::WorkerPanicked,
+    ] {
+        assert_eq!(picker_failure(error).code, "host_picker_unavailable");
+    }
+}

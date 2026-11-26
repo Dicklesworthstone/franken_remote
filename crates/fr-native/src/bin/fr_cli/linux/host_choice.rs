@@ -148,7 +148,7 @@ async fn wait(cx: &Cx, picker: &mut HostPicker) -> Result<usize, Failure> {
             Err(_) if picker.status() == host_picker::Status::Cancelled => {
                 return Err(cancelled());
             }
-            Err(_) => return Err(unavailable()),
+            Err(error) => return Err(picker_failure(error)),
         }
         // No X-server call or blocking join runs on this runtime turn.
         asupersync::time::sleep(clock.now(), POLL).await;
@@ -164,6 +164,20 @@ fn finish(picker: &HostPicker) -> bool {
     }
     picker.is_complete()
 }
+fn picker_failure(error: host_picker::Error) -> Failure {
+    match error {
+        host_picker::Error::ChoiceTimeout => failure(
+            "host_choice_expired",
+            "The original host-choice deadline expired. Start a fresh local choice; no desktop observation was opened.",
+        ),
+        host_picker::Error::EventFlood => failure(
+            "host_choice_event_overflow",
+            "The local picker could not finish its bounded event batch. No queued choice was accepted and no desktop observation was opened.",
+        ),
+        _ => unavailable(),
+    }
+}
+
 fn unavailable() -> Failure {
     failure(
         "host_picker_unavailable",
