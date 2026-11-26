@@ -9,6 +9,8 @@ on:
       - 'crates/fr-native/build.rs'
       - 'crates/fr-native/src/macos_audio_capture*'
       - 'crates/fr-native/src/macos_audio_clock.h'
+      - 'crates/fr-native/src/macos_audio_device.h'
+      - 'crates/fr-native/tests/macos_audio_device.c'
       - 'crates/fr-native/src/macos_microphone*'
       - 'crates/fr-native/src/microphone_selection.rs'
       - 'crates/fr-native/macos-microphone*'
@@ -70,6 +72,8 @@ jobs:
           done
       - name: Exercise original source age and callback retirement
         run: |
+          cc -std=c11 -Wall -Wextra -Werror crates/fr-native/tests/macos_audio_device.c -o "$RUNNER_TEMP/fr-macos-device"
+          "$RUNNER_TEMP/fr-macos-device"
           cc -std=c11 -Wall -Wextra -Werror -pedantic -pthread crates/fr-native/tests/macos_audio_capture_policy.c -o "$RUNNER_TEMP/fr-macos-audio-policy"
           "$RUNNER_TEMP/fr-macos-audio-policy"
           cc -std=c11 -Wall -Wextra -Werror -pedantic crates/fr-native/tests/macos_microphone_capture_policy.c -o "$RUNNER_TEMP/fr-macos-microphone-policy"

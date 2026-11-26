@@ -686,6 +686,7 @@ fn build_macos_microphone() {
         "src/macos_microphone_permission.m",
         "src/macos_microphone_panel.m",
         "src/macos_microphone_capture.h",
+        "src/macos_audio_device.h",
     ];
     for source in sources {
         println!("cargo:rerun-if-changed={source}");

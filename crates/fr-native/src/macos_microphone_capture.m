@@ -19,6 +19,7 @@
 #include <string.h>
 #include <time.h>
 #include "macos_audio_clock.h"
+#include "macos_audio_device.h"
 #include "macos_microphone_capture.h"
 
 #define FR_MIC_NATIVE_BUFFERS 3u
@@ -121,15 +122,8 @@ static int property(AudioObjectID object, AudioObjectPropertySelector selector,
 }
 
 static int selected_device(FrMicCapture *owner) {
-    AudioDeviceID current = kAudioObjectUnknown;
-    AudioValueTranslation translation = {
-        &owner->uid, sizeof owner->uid, &current, sizeof current
-    };
-    int result = property(kAudioObjectSystemObject, kAudioHardwarePropertyTranslateUIDToDevice,
-                          kAudioObjectPropertyScopeGlobal, &translation, sizeof translation);
-    if (result != FR_MIC_OK || current == kAudioObjectUnknown) return FR_MIC_SELECTION;
-    owner->device = current;
-    return FR_MIC_OK;
+    owner->device = fr_audio_device_for_uid(owner->uid);
+    return owner->device == kAudioObjectUnknown ? FR_MIC_SELECTION : FR_MIC_OK;
 }
 
 static int device_properties(FrMicCapture *owner, bool initial) {
