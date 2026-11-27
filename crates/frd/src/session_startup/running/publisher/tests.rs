@@ -262,3 +262,24 @@ fn adaptive_policy_keeps_operator_low_fps_limits_fixed() {
         }
     }
 }
+
+#[test]
+fn quality_without_adaptive_capture_refuses_before_native_source_work() {
+    for quality in [WorkstationProfile::Text, WorkstationProfile::Motion] {
+        run(|c, h| async move {
+            let (host, _viewer) = pair_initialized(&c, &h, caps(), |_| {}).await;
+            let control = host.opened.control.clone();
+            let future = host.publish_controlled_display_with_profile(
+                launch(),
+                Policy::default(),
+                quality,
+                |_| panic!("invalid local quality cannot configure a source"),
+                || panic!("invalid local quality cannot mint tickets"),
+            );
+            assert_send(&future);
+            assert!(matches!(future.await, Err(Error::InvalidConfiguration)));
+            assert!(control.check().is_err());
+            assert!(c.checkpoint().is_ok());
+        });
+    }
+}

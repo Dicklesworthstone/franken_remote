@@ -19,6 +19,8 @@ use crate::{
     input_process::ProcessLaunch,
 };
 #[cfg(host_stack)]
+use fr_media::quality::WorkstationProfile;
+#[cfg(host_stack)]
 pub use process::Error as IndicatorError;
 #[cfg(all(host_stack, not(windows)))]
 use process::Owner;
@@ -107,8 +109,32 @@ pub fn run_with_policy_and_encoder(
     image: &Path,
     encoder: impl Into<host_run::EncoderSelection>,
 ) -> Result<(), Error> {
+    run_with_policy_encoder_and_quality(
+        options,
+        report,
+        stop,
+        policy,
+        image,
+        encoder,
+        WorkstationProfile::Auto,
+    )
+}
+
+/// Keep the host's local workstation preference through the mandatory surface.
+#[cfg(host_stack)]
+pub fn run_with_policy_encoder_and_quality(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    image: &Path,
+    encoder: impl Into<host_run::EncoderSelection>,
+    quality: WorkstationProfile,
+) -> Result<(), Error> {
     run_with_surface(options, stop, image, || {
-        host_run::run_with_policy_and_encoder(options, report, stop, policy, encoder)
+        host_run::run_with_policy_encoder_and_quality(
+            options, report, stop, policy, encoder, quality,
+        )
     })
 }
 
@@ -124,8 +150,35 @@ pub fn run_with_desktop_approval(
     encoder: impl Into<host_run::EncoderSelection>,
     approval: &host_run::approval::Configuration,
 ) -> Result<(), Error> {
+    run_with_desktop_approval_and_quality(
+        options,
+        report,
+        stop,
+        policy,
+        image,
+        encoder,
+        approval,
+        WorkstationProfile::Auto,
+    )
+}
+
+/// Local approval and the Stop Sharing surface retain the same quality choice.
+#[cfg(host_stack)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_desktop_approval_and_quality(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    image: &Path,
+    encoder: impl Into<host_run::EncoderSelection>,
+    approval: &host_run::approval::Configuration,
+    quality: WorkstationProfile,
+) -> Result<(), Error> {
     run_with_surface(options, stop, image, || {
-        host_run::run_with_desktop_approval(options, report, stop, policy, encoder, approval)
+        host_run::run_with_desktop_approval_and_quality(
+            options, report, stop, policy, encoder, approval, quality,
+        )
     })
 }
 

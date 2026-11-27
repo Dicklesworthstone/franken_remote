@@ -111,6 +111,7 @@ impl LocalHost {
             control: None,
             encoder: Encoder::SoftwareExplicit,
             approval: None,
+            quality: WorkstationProfile::Auto,
         }
     }
 }

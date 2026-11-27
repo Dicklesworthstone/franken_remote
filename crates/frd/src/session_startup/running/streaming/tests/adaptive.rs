@@ -539,3 +539,45 @@ fn receiver_rescue_preserves_a_fractional_slow_capture_baseline() {
             .unwrap();
     });
 }
+
+#[test]
+fn local_quality_reaches_both_controllers_on_the_original_native_stream() {
+    use fr_media::quality::WorkstationProfile;
+
+    for profile in [
+        WorkstationProfile::Auto,
+        WorkstationProfile::Text,
+        WorkstationProfile::Motion,
+    ] {
+        run(|c, h| async move {
+            let (mut host, _viewer, _channels, _receiver) =
+                Box::pin(fixture(&c, &h, "healthy", SendPolicy::default())).await;
+            let original_worker = host.worker_id();
+            let original_configuration = host.stream.capture_configuration();
+            host.stream
+                .enable_adaptive_capture_with_profile(Duration::from_millis(200), profile)
+                .unwrap();
+            assert!(host.stream.enable_adaptive_bitrate().unwrap());
+            assert_eq!(host.pacing().unwrap().profile(), profile);
+            let bitrate = host.stream.bitrate().unwrap();
+            assert_eq!(bitrate.profile(), profile);
+            assert_eq!(bitrate.applied_bitrate(), original_configuration.bitrate);
+            assert!(bitrate.pending().is_none());
+            assert!(
+                host.stream
+                    .enable_adaptive_capture_with_profile(
+                        Duration::from_millis(200),
+                        WorkstationProfile::Auto,
+                    )
+                    .is_err()
+            );
+            assert_eq!(host.pacing().unwrap().profile(), profile);
+            assert_eq!(host.stream.bitrate().unwrap().profile(), profile);
+            assert_eq!(host.worker_id(), original_worker);
+            assert_eq!(host.stream.capture_configuration(), original_configuration);
+            host.reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
+                .await
+                .unwrap();
+        });
+    }
+}

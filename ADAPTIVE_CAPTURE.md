@@ -117,6 +117,70 @@ The `--fps` setting remains the maximum capture rate. The adaptive maximum is
 below 5 then keeps that slower interval fixed. The host never speeds up a low-fps
 operator choice to fit the adaptive range.
 
+## Auto, Text, and Motion
+
+Choose a host-local preference with `--quality` while enabling adaptive capture:
+
+```sh
+frd run --encoder software --adaptive-capture --quality text
+frd run --encoder software --adaptive-capture --quality motion
+```
+
+Omitting `--quality` retains the existing Auto behavior. An explicit
+`--quality auto` also requires `--adaptive-capture`. Values are exactly
+`auto`, `text`, or `motion`; missing, repeated, or unknown values are refused.
+The selection is immutable for that host run and applies to both the first
+controlling publisher and the original shared source. Existing approval,
+observation-indicator, input authority and source-lifetime rules still apply.
+Installed services retain the validated flags in their existing `--` arguments.
+The host's startup JSON names the selection as `quality_profile`.
+
+The preference changes the ordering of responses to sustained **local send
+pressure** in the production cadence and encoder-target controllers:
+
+| Profile | First local-pressure response | Secondary response if pressure persists |
+| --- | --- | --- |
+| Auto | Existing cadence and bitrate responses after 100 ms of evidence | Existing policy |
+| Text | Reduce capture cadence after 100 ms of evidence | Reduce local bitrate after 250 ms |
+| Motion | Reduce local bitrate after 100 ms of evidence | Reduce capture cadence after 250 ms |
+
+If fresh evidence shows that the preferred response cleared the pressure, the
+other dimension keeps its operating point. Text can therefore retain more
+encoder budget while asking for fewer captures; Motion can retain cadence while
+lowering the encoder target. These are accumulated evidence thresholds, not
+wall-clock latency promises. Existing service-gap resets, adjustment dwell,
+native application receipts, required IDRs, floors and configured ceilings still
+govern whether a change can occur.
+
+Measured path congestion keeps the original 200 ms queue-response policy and
+delivered-rate cap for every profile. Source-work pressure, capture-credit
+pressure and receiver overload keep their existing 100 ms cadence response;
+Motion's local-send grace cannot defer them. Unknown or stale source evidence
+cannot justify an upward probe. Shared sources retain their original
+healthy-sibling and unknown-sibling vetoes.
+
+Text and Motion require a backend that supports the existing native
+`CaptureAtRate` transaction. Software HEVC, NVENC, VideoToolbox and Media
+Foundation have that implementation; their separate platform qualification
+status is unchanged. VA-API currently has fixed bitrate and refuses these
+preferences. Explicit incompatible selections are rejected before native
+startup, and an automatic hardware selection is checked again against its
+actual winner before the listener starts. Auto retains existing cadence-only
+VA-API behavior.
+
+This selection changes cadence and bitrate ordering while keeping the current
+resolution and decoder configuration. Auto remains the current conservative
+adaptive policy; automatic Text/Motion selection from damage statistics,
+resolution ladders, a viewer-shell mode switch and readable-text/hardware
+scenario qualification remain separate work in `fr-p4-controller-tuning-kyo`.
+The complete production `fr-core`, `fr-wire`, and `fr-media` libraries compiled
+with the exact pinned compiler and `-D warnings`. All 91 tests across the actual
+`workstation_profiles`, `pacing`, `bitrate`, and `bitrate_path` targets passed,
+including the ten new policy regressions. The tested source versions differ from the
+final versions only by the pinned formatter's whitespace changes.
+Native handoff tests, normal Cargo/Clippy gates and platform qualification remain
+pending.
+
 ## Viewing the host's operating decisions
 
 With `--adaptive-capture`, the host optionally offers `quality-decisions` v1.

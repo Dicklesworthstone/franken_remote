@@ -300,3 +300,235 @@ fn installed_adaptive_capture_retains_the_choice_for_controlled_and_observer_onl
     assert!(parsed.input_agent.is_none());
     assert_eq!(command.matches("--adaptive-capture").count(), 1);
 }
+
+#[test]
+fn quality_is_a_local_adaptation_choice_with_unchanged_auto_defaults() {
+    for args in [&[][..], &["--adaptive-capture"][..]] {
+        assert_eq!(
+            parse(args).unwrap().quality_profile().unwrap(),
+            WorkstationProfile::Auto
+        );
+    }
+    #[cfg(not(windows))]
+    for args in [
+        &["--adaptive-capture", "--encoder", "vaapi"][..],
+        &[
+            "--adaptive-capture",
+            "--quality",
+            "auto",
+            "--encoder",
+            "vaapi",
+        ][..],
+    ] {
+        assert_eq!(
+            parse(args).unwrap().quality_profile().unwrap(),
+            WorkstationProfile::Auto
+        );
+    }
+    for (name, quality) in [
+        ("auto", WorkstationProfile::Auto),
+        ("text", WorkstationProfile::Text),
+        ("motion", WorkstationProfile::Motion),
+    ] {
+        for args in [
+            vec!["--adaptive-capture", "--quality", name],
+            vec!["--quality", name, "--adaptive-capture"],
+        ] {
+            let options = parse(&args).unwrap();
+            assert_eq!(options.quality, Some(quality));
+            assert_eq!(options.quality_profile().unwrap(), quality);
+            assert_eq!(options.video_profile().unwrap(), video::Profile::default());
+            assert!(options.selected_encoder().unwrap().is_none());
+            assert!(options.input_agent.is_none() && !options.control);
+            assert!(!options.clipboard && !options.audio && options.files.is_none());
+            assert!(options.approval.is_none() && options.sharing.is_none());
+        }
+        for encoder in [
+            "software",
+            "nvenc",
+            "videotoolbox",
+            "mediafoundation",
+            "auto",
+        ]
+        .into_iter()
+        .filter(|encoder| EncoderSelection::parse(encoder).is_some())
+        {
+            assert_eq!(
+                parse(&[
+                    "--encoder",
+                    encoder,
+                    "--adaptive-capture",
+                    "--quality",
+                    name
+                ])
+                .unwrap()
+                .quality_profile()
+                .unwrap(),
+                quality
+            );
+        }
+    }
+}
+
+#[test]
+fn quality_refuses_inert_misspelled_duplicate_and_fixed_rate_requests() {
+    for args in [
+        &["--quality"][..],
+        &["--quality", ""][..],
+        &["--quality", "--adaptive-capture"][..],
+        &["--quality", "auto"][..],
+        &["--quality", "text"][..],
+        &["--quality", "motion"][..],
+        &["--adaptive-capture", "--quality", "Text"][..],
+        &["--adaptive-capture", "--quality", "balanced"][..],
+        &["--adaptive-capture", "--quality", "text "][..],
+        &["--adaptive-capture", "--quality=motion"][..],
+        &[
+            "--adaptive-capture",
+            "--quality",
+            "auto",
+            "--quality",
+            "auto",
+        ][..],
+        &[
+            "--adaptive-capture",
+            "--quality",
+            "text",
+            "--quality",
+            "motion",
+        ][..],
+        &[
+            "--adaptive-capture",
+            "--quality",
+            "motion",
+            "--quality",
+            "text",
+        ][..],
+        &[
+            "--encoder",
+            "vaapi",
+            "--adaptive-capture",
+            "--quality",
+            "text",
+        ][..],
+        &[
+            "--quality",
+            "motion",
+            "--adaptive-capture",
+            "--encoder",
+            "vaapi",
+        ][..],
+    ] {
+        assert!(
+            matches!(parse(args), Err(Error::InvalidArgument)),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn quality_programmatic_refusals_precede_saved_policy_io() {
+    for quality in [
+        WorkstationProfile::Auto,
+        WorkstationProfile::Text,
+        WorkstationProfile::Motion,
+    ] {
+        let options = RunOptions {
+            config: Some(PathBuf::from("relative/policy.json")),
+            quality: Some(quality),
+            ..RunOptions::default()
+        };
+        assert_eq!(options.quality_profile(), Err(Error::InvalidArgument));
+        assert!(matches!(options.resolve(), Err(Error::InvalidArgument)));
+    }
+    for quality in [WorkstationProfile::Text, WorkstationProfile::Motion] {
+        let options = RunOptions {
+            config: Some(PathBuf::from("relative/policy.json")),
+            encoder: Some(Encoder::Vaapi.into()),
+            adaptive_capture: true,
+            quality: Some(quality),
+            ..RunOptions::default()
+        };
+        assert_eq!(options.quality_profile(), Err(Error::InvalidArgument));
+        assert!(matches!(options.resolve(), Err(Error::InvalidArgument)));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn installed_quality_survives_rendering_for_controlled_and_shared_hosts() {
+    for quality in ["auto", "text", "motion"] {
+        for controlled in [false, true] {
+            let mut run_args = ["--adaptive-capture", "--quality", quality]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if controlled {
+                run_args.extend(
+                    ["--input-agent", "/usr/libexec/fr-input-agent"]
+                        .into_iter()
+                        .map(str::to_owned),
+                );
+            }
+            let options = InstallOptions {
+                kind: ServiceKind::SystemdUser,
+                exec_path: PathBuf::from("/usr/bin/frd"),
+                approval_mode: "none".into(),
+                software_explicit: true,
+                run_args,
+                ..InstallOptions::default()
+            };
+            options.validate().unwrap();
+            let unit = render_systemd_unit(&options);
+            let command = unit
+                .lines()
+                .find_map(|line| line.strip_prefix("ExecStart=:"))
+                .unwrap();
+            let args = command
+                .split_whitespace()
+                .skip(2)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let parsed = RunOptions::parse(&args).unwrap();
+            assert_eq!(
+                parsed.quality_profile().unwrap(),
+                parse(&["--adaptive-capture", "--quality", quality])
+                    .unwrap()
+                    .quality_profile()
+                    .unwrap()
+            );
+            assert!(parsed.adaptive_capture);
+            assert_eq!(parsed.input_agent.is_some(), controlled);
+            assert_eq!(command.matches("--quality").count(), 1);
+            assert!(command.contains(&format!("--quality {quality}")));
+            assert_eq!(command.matches("--adaptive-capture").count(), 1);
+        }
+    }
+    for args in [
+        &["--quality", "auto"][..],
+        &["--quality", "text"][..],
+        &["--quality", "motion"][..],
+        &[
+            "--encoder",
+            "vaapi",
+            "--adaptive-capture",
+            "--quality",
+            "text",
+        ][..],
+        &[
+            "--encoder",
+            "vaapi",
+            "--adaptive-capture",
+            "--quality",
+            "motion",
+        ][..],
+    ] {
+        let options = InstallOptions {
+            kind: ServiceKind::SystemdUser,
+            exec_path: PathBuf::from("/usr/bin/frd"),
+            run_args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ..InstallOptions::default()
+        };
+        assert!(options.validate().is_err(), "{args:?}");
+    }
+}

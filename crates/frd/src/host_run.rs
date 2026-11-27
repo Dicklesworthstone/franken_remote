@@ -67,6 +67,7 @@ use fr_core::{
 };
 use fr_media::{
     delivery::SharedFramePool,
+    quality::WorkstationProfile,
     worker::{Configuration as Codec, Role as WorkerRole},
 };
 use fr_tailnet::{CertificatePolicy, GrantPolicy, LocalApi, Scope, ingress, trust::TrustError};
@@ -180,10 +181,24 @@ pub enum Error {
     /// Details retain bounded probe reasons. Nothing was bound and software
     /// is never substituted for a hardware request.
     EncoderUnavailable(String),
+    /// Text/Motion ordering requires the explicit local adaptation enable.
+    QualityRequiresAdaptiveCapture,
+    /// The selected backend cannot apply the paired bitrate transaction.
+    QualityBackendUnavailable(Encoder),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "frd-run: {self:?}")
+        match self {
+            Self::QualityRequiresAdaptiveCapture => {
+                f.write_str("frd-run: --quality requires --adaptive-capture")
+            }
+            Self::QualityBackendUnavailable(encoder) => write!(
+                f,
+                "frd-run: text/motion quality needs native bitrate adaptation; {} does not support rate-capture transactions",
+                encoder.as_str()
+            ),
+            _ => write!(f, "frd-run: {self:?}"),
+        }
     }
 }
 impl std::error::Error for Error {}
@@ -217,6 +232,8 @@ impl Error {
             Self::InputAgentUnavailable(_) => "input_agent_unavailable",
             Self::ControlCapabilityMissing(_) => "control_capability_missing",
             Self::EncoderUnavailable(_) => "encoder_unavailable",
+            Self::QualityRequiresAdaptiveCapture => "quality_requires_adaptive_capture",
+            Self::QualityBackendUnavailable(_) => "quality_bitrate_backend_unavailable",
         }
     }
     /// The macOS privacy permission this startup refusal reports missing: the
@@ -1021,6 +1038,7 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
         None,
         Encoder::SoftwareExplicit.into(),
         None,
+        WorkstationProfile::Auto,
     )
 }
 
@@ -1049,7 +1067,36 @@ pub fn run_with_policy_and_encoder(
     policy: policy::Configuration,
     encoder: impl Into<EncoderSelection>,
 ) -> Result<(), Error> {
-    run_inner(options, report, stop, Some(policy), encoder.into(), None)
+    run_with_policy_encoder_and_quality(
+        options,
+        report,
+        stop,
+        policy,
+        encoder,
+        WorkstationProfile::Auto,
+    )
+}
+
+/// Apply one immutable host-local workstation preference to controlled and
+/// shared sources. Auto retains the existing policy; Text/Motion require the
+/// explicit adaptive enable and a backend with native bitrate transactions.
+pub fn run_with_policy_encoder_and_quality(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    encoder: impl Into<EncoderSelection>,
+    quality: WorkstationProfile,
+) -> Result<(), Error> {
+    run_inner(
+        options,
+        report,
+        stop,
+        Some(policy),
+        encoder.into(),
+        None,
+        quality,
+    )
 }
 
 /// Local desktop consent backed by the installed UI child (native surface on
@@ -1064,6 +1111,27 @@ pub fn run_with_desktop_approval(
     encoder: impl Into<EncoderSelection>,
     approval: &approval::Configuration,
 ) -> Result<(), Error> {
+    run_with_desktop_approval_and_quality(
+        options,
+        report,
+        stop,
+        policy,
+        encoder,
+        approval,
+        WorkstationProfile::Auto,
+    )
+}
+
+/// The same local approval path with an immutable host-selected quality policy.
+pub fn run_with_desktop_approval_and_quality(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    encoder: impl Into<EncoderSelection>,
+    approval: &approval::Configuration,
+    quality: WorkstationProfile,
+) -> Result<(), Error> {
     run_inner(
         options,
         report,
@@ -1071,7 +1139,27 @@ pub fn run_with_desktop_approval(
         Some(policy),
         encoder.into(),
         Some(approval),
+        quality,
     )
+}
+
+fn check_quality(
+    adaptive_capture: bool,
+    selection: EncoderSelection,
+    quality: WorkstationProfile,
+) -> Result<(), Error> {
+    if quality == WorkstationProfile::Auto {
+        return Ok(());
+    }
+    if !adaptive_capture {
+        return Err(Error::QualityRequiresAdaptiveCapture);
+    }
+    if let EncoderSelection::Exact(encoder) = selection
+        && !encoder.backend().accepts_rate_capture()
+    {
+        return Err(Error::QualityBackendUnavailable(encoder));
+    }
+    Ok(())
 }
 
 fn run_inner(
@@ -1081,8 +1169,10 @@ fn run_inner(
     policy: Option<policy::Configuration>,
     selection: EncoderSelection,
     approval: Option<&approval::Configuration>,
+    quality: WorkstationProfile,
 ) -> Result<(), Error> {
     check(options)?;
+    check_quality(options.adaptive_capture, selection, quality)?;
     if stop.is_requested() {
         report(Event::Stopped);
         return Ok(());
@@ -1150,6 +1240,7 @@ fn run_inner(
         report(Event::Stopped);
         return Ok(());
     }
+    check_quality(options.adaptive_capture, encoder.into(), quality)?;
     if selection == EncoderSelection::AutomaticHardware {
         report(Event::EncoderSelected { encoder });
     }
@@ -1170,6 +1261,7 @@ fn run_inner(
         control,
         encoder,
         approval,
+        quality,
     );
     // Sampled before our own stop: only a native end is a session end.
     let ended = session_ended(lifetime.as_ref());
@@ -1192,6 +1284,7 @@ fn serve_run(
     control: Option<Capabilities>,
     encoder: Encoder,
     approval: Option<&approval::Configuration>,
+    quality: WorkstationProfile,
 ) -> Result<(), Error> {
     // One Seat per run: an uncertain release keeps later control refused.
     let seat = Seat::default();
@@ -1285,6 +1378,7 @@ fn serve_run(
                         control,
                         encoder,
                         approval,
+                        quality,
                     };
                     match share.serve(&broker).await? {
                         Ended::Served => failures = 0,
@@ -1515,6 +1609,7 @@ struct Share<'a> {
     /// Immutable for the run; policy refresh or a native failure cannot switch it.
     encoder: Encoder,
     approval: Option<&'a approval::Configuration>,
+    quality: WorkstationProfile,
 }
 /// How ingress is enforced, the node addresses served, and the tunnel interface.
 type IngressPlan = (ingress::Enforcement, Vec<std::net::IpAddr>, String);
@@ -1670,7 +1765,9 @@ impl Share<'_> {
             )
             .map_err(|_| Error::Configuration)?;
             let profile = if self.options.adaptive_capture {
-                profile.with_adaptive_capture()
+                profile
+                    .with_adaptive_capture_profile(self.quality)
+                    .map_err(|_| Error::Configuration)?
             } else {
                 profile
             };
@@ -1714,7 +1811,10 @@ impl Share<'_> {
             .map_err(Error::Desktop)?;
         if self.options.adaptive_capture {
             driver
-                .with_shared_adaptive_capture(interval.max(Duration::from_millis(200)))
+                .with_shared_adaptive_capture_profile(
+                    interval.max(Duration::from_millis(200)),
+                    self.quality,
+                )
                 .map_err(Error::Desktop)
         } else {
             Ok(driver)
@@ -2984,6 +3084,55 @@ mod tests {
         assert_eq!(capture_interval(15), Some(Duration::from_micros(66_667)));
         assert_eq!(capture_interval(1), Some(Duration::from_secs(1)));
         assert_eq!(capture_interval(0), None);
+    }
+
+    #[test]
+    fn quality_backend_checks_cover_exact_and_resolved_hardware_choices() {
+        let encoders = [
+            Encoder::SoftwareExplicit,
+            Encoder::Nvenc,
+            Encoder::Vaapi,
+            #[cfg(target_os = "macos")]
+            Encoder::VideoToolbox,
+            #[cfg(windows)]
+            Encoder::MediaFoundation,
+        ];
+        for encoder in encoders {
+            for adaptive in [false, true] {
+                assert_eq!(
+                    check_quality(adaptive, encoder.into(), WorkstationProfile::Auto),
+                    Ok(())
+                );
+            }
+            for quality in [WorkstationProfile::Text, WorkstationProfile::Motion] {
+                assert_eq!(
+                    check_quality(false, encoder.into(), quality),
+                    Err(Error::QualityRequiresAdaptiveCapture)
+                );
+                let result = check_quality(true, encoder.into(), quality);
+                if encoder.backend().accepts_rate_capture() {
+                    assert_eq!(result, Ok(()));
+                } else {
+                    assert_eq!(result, Err(Error::QualityBackendUnavailable(encoder)));
+                    assert_eq!(
+                        result.unwrap_err().code(),
+                        "quality_bitrate_backend_unavailable"
+                    );
+                }
+            }
+        }
+        for quality in [WorkstationProfile::Text, WorkstationProfile::Motion] {
+            // Auto selection may proceed to its real hardware probes, but the
+            // winner must pass the same concrete check before any listener.
+            assert_eq!(
+                check_quality(true, EncoderSelection::AutomaticHardware, quality),
+                Ok(())
+            );
+            assert_eq!(
+                check_quality(true, Encoder::Vaapi.into(), quality),
+                Err(Error::QualityBackendUnavailable(Encoder::Vaapi))
+            );
+        }
     }
 
     #[test]

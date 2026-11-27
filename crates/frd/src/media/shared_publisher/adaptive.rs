@@ -7,6 +7,7 @@ use crate::media::receiver_feedback::SharedSample;
 use fr_media::{
     bitrate,
     pacing::{self, Availability, Controller, Observation, ReceiverEvidence, Sample},
+    quality::WorkstationProfile,
 };
 use fr_wire::{decoder::Binding, receiver_metrics::Load};
 use std::time::Duration;
@@ -106,6 +107,14 @@ impl CapturePacing {
         crate::media::quality_decision::Point::current(&self.controller, self.bitrate.as_ref())
     }
     fn new(minimum: Duration, maximum: Duration, fps: u16) -> Result<Self, Error> {
+        Self::new_with_profile(minimum, maximum, fps, WorkstationProfile::Auto)
+    }
+    fn new_with_profile(
+        minimum: Duration,
+        maximum: Duration,
+        fps: u16,
+        profile: WorkstationProfile,
+    ) -> Result<Self, Error> {
         if fps == 0
             || minimum > Duration::from_secs(1)
             || minimum.as_micros() < u128::from(1_000_000_u64.div_ceil(u64::from(fps)))
@@ -119,7 +128,7 @@ impl CapturePacing {
                 .map_err(|_| Error::InvalidBudget)?,
         };
         Ok(Self {
-            controller: Controller::new(policy).map_err(pacing_error)?,
+            controller: Controller::new_with_profile(policy, profile).map_err(pacing_error)?,
             bitrate: None,
             bitrate_capture: None,
             in_flight: None,
@@ -142,7 +151,10 @@ impl CapturePacing {
         if self.bitrate.is_some() || self.in_flight.is_some() {
             return Err(Error::InvalidBudget);
         }
-        self.bitrate = Some(bitrate::Controller::new(initial).map_err(bitrate_error)?);
+        self.bitrate = Some(
+            bitrate::Controller::new_with_profile(initial, self.controller.profile())
+                .map_err(bitrate_error)?,
+        );
         Ok(())
     }
     pub(super) fn observe_receivers(&mut self, members: &Members) -> Result<(), Error> {
@@ -458,7 +470,21 @@ impl Publisher {
         capture_interval: Duration,
         maximum: Duration,
     ) -> Result<(), Error> {
-        self.enable_capture_pacing(capture_interval, maximum, false)
+        self.enable_adaptive_capture_with_profile(
+            capture_interval,
+            maximum,
+            WorkstationProfile::Auto,
+        )
+    }
+    /// Retain one host-selected preference for the shared source's paired cadence
+    /// and bitrate controllers. Peers never select or override this profile.
+    pub(crate) fn enable_adaptive_capture_with_profile(
+        &mut self,
+        capture_interval: Duration,
+        maximum: Duration,
+        profile: WorkstationProfile,
+    ) -> Result<(), Error> {
+        self.enable_capture_pacing(capture_interval, maximum, false, profile)
     }
     /// Preserve baseline source cadence unless every eligible viewer supplies
     /// sustained, still-valid receiver pressure. A healthy sibling vetoes rescue.
@@ -470,21 +496,35 @@ impl Publisher {
         let maximum = Duration::from_micros(
             u64::try_from(maximum.as_nanos().div_ceil(1000)).map_err(|_| Error::InvalidBudget)?,
         );
-        self.enable_capture_pacing(capture_interval, maximum, true)
+        self.enable_capture_pacing(capture_interval, maximum, true, WorkstationProfile::Auto)
     }
     fn enable_capture_pacing(
         &mut self,
         capture_interval: Duration,
         maximum: Duration,
         receiver_rescue: bool,
+        profile: WorkstationProfile,
     ) -> Result<(), Error> {
         self.members.lock().map_err(|_| Error::Poisoned)?.tick()?;
         // Path-following rate is enabled after this, into its controller.
-        if self.served || self.adaptive.is_some() || self.path_rate.is_some() {
+        if self.served
+            || self.adaptive.is_some()
+            || self.path_rate.is_some()
+            || (profile != WorkstationProfile::Auto
+                && !self.source.configuration.backend.accepts_rate_capture())
+        {
             return Err(Error::InvalidBudget);
         }
-        let mut pacing =
-            CapturePacing::new(capture_interval, maximum, self.source.configuration.fps)?;
+        let mut pacing = if profile == WorkstationProfile::Auto {
+            CapturePacing::new(capture_interval, maximum, self.source.configuration.fps)?
+        } else {
+            CapturePacing::new_with_profile(
+                capture_interval,
+                maximum,
+                self.source.configuration.fps,
+                profile,
+            )?
+        };
         if receiver_rescue {
             pacing.controller = Controller::for_receiver_overload(pacing.controller.policy())
                 .map_err(pacing_error)?;

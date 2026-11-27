@@ -4,7 +4,12 @@
 //! distinct. Unknown/idle samples cannot justify an upward probe. No action here
 //! changes codec parameters, discards encoded references or extends a deadline.
 
+use crate::quality::WorkstationProfile;
+
 const PRESSURE_DWELL_US: u64 = 100_000;
+/// Motion gives the bitrate controller one bounded opportunity to reduce
+/// sender load before reducing cadence. This never delays source/receiver rescue.
+const MOTION_SEND_DWELL_US: u64 = 250_000;
 const RECEIVER_RESCUE_DWELL_US: u64 = 1_000_000;
 const REDUCE_DWELL_US: u64 = 250_000;
 const PROBE_DWELL_US: u64 = 2_000_000;
@@ -112,6 +117,7 @@ pub struct Report {
 #[derive(Debug)]
 pub struct Controller {
     policy: Policy,
+    profile: WorkstationProfile,
     interval: u64,
     // None is the explicitly enabled adaptive policy. Default native rescue
     // stays dormant at the configured cadence until sustained receiver proof.
@@ -139,9 +145,17 @@ pub struct Controller {
 }
 impl Controller {
     pub fn new(policy: Policy) -> Result<Self, Error> {
+        Self::new_with_profile(policy, WorkstationProfile::Auto)
+    }
+    /// Choose the local workstation preference for this original capture owner.
+    /// Motion gives local sender pressure a bounded bitrate-first opportunity;
+    /// all profiles retain the same source, capture-credit and receiver limits.
+    /// A profile never changes the configured cadence ceiling or source lifetime.
+    pub fn new_with_profile(policy: Policy, profile: WorkstationProfile) -> Result<Self, Error> {
         policy.validate()?;
         Ok(Self {
             policy,
+            profile,
             interval: policy.conservative(),
             receiver_rescue: None,
             last_now: None,
@@ -182,6 +196,9 @@ impl Controller {
     }
     pub const fn policy(&self) -> Policy {
         self.policy
+    }
+    pub const fn profile(&self) -> WorkstationProfile {
+        self.profile
     }
     pub const fn interval_us(&self) -> u64 {
         self.interval
@@ -426,7 +443,15 @@ impl Controller {
         if let Some(index) = pressure_us
             .iter()
             .chain(receiver_pressure_us.iter())
-            .position(|&t| t >= PRESSURE_DWELL_US)
+            .enumerate()
+            .find_map(|(index, &duration)| {
+                let dwell = if index == 1 && self.profile == WorkstationProfile::Motion {
+                    MOTION_SEND_DWELL_US
+                } else {
+                    PRESSURE_DWELL_US
+                };
+                (duration >= dwell).then_some(index)
+            })
             && since_adjust >= REDUCE_DWELL_US
             && self.interval < self.policy.maximum_interval_us
         {

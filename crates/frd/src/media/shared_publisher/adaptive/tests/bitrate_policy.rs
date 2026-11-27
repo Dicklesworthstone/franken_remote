@@ -227,3 +227,80 @@ fn cadence_only_drop_has_work_cost_and_no_source_observation() {
     assert!(pacing.observation.is_none());
     pacing.start(21).unwrap();
 }
+
+fn enabled_profile(profile: WorkstationProfile) -> CapturePacing {
+    let mut pacing = CapturePacing::new_with_profile(
+        Duration::from_millis(50),
+        Duration::from_millis(200),
+        30,
+        profile,
+    )
+    .unwrap();
+    pacing.enable_bitrate(INITIAL).unwrap();
+    pacing
+}
+
+#[test]
+fn shared_source_applies_the_local_quality_order_to_one_paired_controller() {
+    for (profile, expected_interval, expected_target) in [
+        (WorkstationProfile::Auto, 200_000, Some(INITIAL / 2)),
+        (WorkstationProfile::Text, 200_000, None),
+        (WorkstationProfile::Motion, 100_000, Some(INITIAL / 2)),
+    ] {
+        let mut pacing = enabled_profile(profile);
+        let mut views = cohort();
+        pacing.observe_receiver_views(&views).unwrap();
+        for now in (0..=100_000).step_by(10_000) {
+            let blocked = (
+                Some((now, Availability::Blocked)),
+                ReceiverEvidence::Unobserved,
+            );
+            let evidence = peer_evidence(now, pacing.interval_us(), [blocked, blocked].into_iter());
+            pacing.sample(now, true, evidence).unwrap();
+        }
+        assert_eq!(pacing.controller.profile(), profile);
+        assert_eq!(policy(&pacing).profile(), profile);
+        assert_eq!(pacing.interval_us(), expected_interval);
+        assert_eq!(
+            policy(&pacing).pending().map(bitrate::Change::bitrate),
+            expected_target
+        );
+        assert_eq!(policy(&pacing).applied_bitrate(), INITIAL);
+        if let Some(target) = expected_target {
+            pacing.start(110_000).unwrap();
+            assert_eq!(pacing.capture_bitrate(), Some(target));
+            completed(&mut pacing, 110_000, target, true);
+            assert_eq!(policy(&pacing).applied_bitrate(), target);
+        }
+        views[0].as_mut().unwrap().recovery = binding().recovery.next().unwrap();
+        pacing.observe_receiver_views(&views).unwrap();
+        assert_eq!(pacing.controller.profile(), profile);
+        assert_eq!(policy(&pacing).profile(), profile);
+    }
+}
+
+#[test]
+fn quality_preferences_never_let_one_slow_viewer_reduce_a_shared_source() {
+    for profile in [
+        WorkstationProfile::Auto,
+        WorkstationProfile::Text,
+        WorkstationProfile::Motion,
+    ] {
+        for other in [Availability::Ready, Availability::Unknown] {
+            let mut pacing = enabled_profile(profile);
+            for now in (0..=400_000).step_by(10_000) {
+                let blocked = (
+                    Some((now, Availability::Blocked)),
+                    ReceiverEvidence::Unobserved,
+                );
+                let sibling = (Some((now, other)), ReceiverEvidence::Unobserved);
+                let evidence =
+                    peer_evidence(now, pacing.interval_us(), [blocked, sibling].into_iter());
+                pacing.sample(now, true, evidence).unwrap();
+            }
+            assert_eq!(pacing.interval_us(), 100_000);
+            assert_eq!(policy(&pacing).applied_bitrate(), INITIAL);
+            assert!(policy(&pacing).pending().is_none());
+        }
+    }
+}

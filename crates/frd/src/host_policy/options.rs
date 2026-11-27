@@ -4,6 +4,7 @@ use crate::{
     host_run::{Encoder, EncoderSelection, video},
     native_files::ConflictPolicy,
 };
+use fr_media::quality::WorkstationProfile;
 use fr_wire::sync_job_state::JobMode;
 mod files;
 use std::path::PathBuf;
@@ -56,9 +57,11 @@ pub struct RunOptions {
     /// (this host plus the viewer's own untagged machines). Off by default;
     /// it grants nothing and never starts capture or approval.
     pub directory: bool,
-    /// Local opt-in to measured raw-capture pacing for a controlling session.
-    /// Requires `input_agent`; an observer-first shared source keeps fixed cadence.
+    /// Local opt-in to measured raw-capture pacing for controlled and shared sources.
     pub adaptive_capture: bool,
+    /// Explicit host-local preference for paired cadence/bitrate adaptation.
+    /// Any supplied choice requires `adaptive_capture`; absence retains Auto.
+    pub quality: Option<WorkstationProfile>,
     /// Absolute `fr-input-agent` path. Absent: observation only (unchanged).
     /// Present: a first viewer may take the exclusive controlled share.
     pub input_agent: Option<PathBuf>,
@@ -232,6 +235,15 @@ impl RunOptions {
                     &mut options.encoder,
                     EncoderSelection::parse(value).ok_or(Error::InvalidArgument)?,
                 )?,
+                "--quality" => set(
+                    &mut options.quality,
+                    match value {
+                        "auto" => WorkstationProfile::Auto,
+                        "text" => WorkstationProfile::Text,
+                        "motion" => WorkstationProfile::Motion,
+                        _ => return Err(Error::InvalidArgument),
+                    },
+                )?,
                 "--fps" => set(
                     &mut options.fps,
                     u16::try_from(bytes(value)?).map_err(|_| Error::InvalidArgument)?,
@@ -278,6 +290,7 @@ impl RunOptions {
         options.clipboard = clipboard.unwrap_or(options.input_agent.is_some() || options.control);
         let _ = options.selected_encoder()?;
         let _ = options.video_profile()?;
+        let _ = options.quality_profile()?;
         // macOS requires a host-lifetime Stop sharing surface in addition to
         // the control executor's independent per-lease panel. Linux retains
         // its explicit view-only observation surface.
@@ -349,11 +362,30 @@ impl RunOptions {
         )
         .map_err(|_| Error::InvalidArgument)
     }
+    /// Resolve the host's local adaptation preference before policy or native
+    /// startup. Hardware-auto is checked again against its actual probe winner.
+    pub fn quality_profile(&self) -> Result<WorkstationProfile, Error> {
+        if self.quality.is_some() && !self.adaptive_capture {
+            return Err(Error::InvalidArgument);
+        }
+        let quality = self.quality.unwrap_or_default();
+        if quality != WorkstationProfile::Auto
+            && matches!(
+                self.selected_encoder()?,
+                Some(EncoderSelection::Exact(encoder))
+                    if !encoder.backend().accepts_rate_capture()
+            )
+        {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(quality)
+    }
     pub fn resolve(&self) -> Result<Effective, Error> {
         let _ = self.file_conflict_policy()?;
         self.validate_file_send()?;
         let _ = self.selected_encoder()?;
         let _ = self.video_profile()?;
+        let _ = self.quality_profile()?;
         if self.port == Some(0) {
             return Err(Error::InvalidArgument);
         }

@@ -13,7 +13,7 @@ use crate::{
     worker::{Deadline, Launch},
 };
 use asupersync::cx::Cx;
-use fr_media::worker::Configuration;
+use fr_media::{quality::WorkstationProfile, worker::Configuration};
 use fr_transport::quic::{self, ChannelRequest, Disposition, MediaChannel, QuicRecords, Route};
 use fr_wire::{
     attachment::{MediaRole, Ticket},
@@ -99,10 +99,21 @@ struct Budget {
     turn: Duration,
     failure: std::sync::Mutex<Option<Error>>,
     source: Option<media::shared_publisher::JoinQueue>,
+    quality: WorkstationProfile,
 }
 impl Budget {
     fn new(control: ObservationControl, policy: Policy) -> Result<Self, Error> {
+        Self::new_with_profile(control, policy, WorkstationProfile::Auto)
+    }
+    fn new_with_profile(
+        control: ObservationControl,
+        policy: Policy,
+        quality: WorkstationProfile,
+    ) -> Result<Self, Error> {
         policy.validate()?;
+        if quality != WorkstationProfile::Auto && policy.adaptive_capture.is_none() {
+            return Err(Error::InvalidConfiguration);
+        }
         let start = control.check().map_err(Error::Media)?.as_micros();
         let until = start
             .checked_add(
@@ -116,6 +127,7 @@ impl Budget {
             turn: policy.network_turn,
             failure: std::sync::Mutex::new(None),
             source: None,
+            quality,
         })
     }
     fn fail(&self, error: Error) -> Error {
@@ -412,7 +424,14 @@ impl HostSession {
         configure: impl FnOnce(Display) -> Result<Configuration, ()> + 'a,
         entropy: impl FnMut() -> Result<u128, ()> + 'a,
     ) -> impl Future<Output = Result<NativePublisher, Error>> + 'a {
-        self.publish_native(launch, policy, configure, entropy, false)
+        self.publish_native(
+            launch,
+            policy,
+            configure,
+            entropy,
+            false,
+            WorkstationProfile::Auto,
+        )
     }
     /// Explicit control-capable startup. The offer must already select control,
     /// input attachment, native grants, clock correlation and presentation proof.
@@ -425,7 +444,25 @@ impl HostSession {
         configure: impl FnOnce(Display) -> Result<Configuration, ()> + 'a,
         entropy: impl FnMut() -> Result<u128, ()> + 'a,
     ) -> impl Future<Output = Result<NativePublisher, Error>> + 'a {
-        self.publish_native(launch, policy, configure, entropy, true)
+        self.publish_controlled_display_with_profile(
+            launch,
+            policy,
+            WorkstationProfile::Auto,
+            configure,
+            entropy,
+        )
+    }
+    /// Carry the local workstation preference through the original controlled
+    /// source. Non-Auto profiles require adaptive capture and a rate-capable codec.
+    pub fn publish_controlled_display_with_profile<'a>(
+        self,
+        launch: Launch,
+        policy: Policy,
+        quality: WorkstationProfile,
+        configure: impl FnOnce(Display) -> Result<Configuration, ()> + 'a,
+        entropy: impl FnMut() -> Result<u128, ()> + 'a,
+    ) -> impl Future<Output = Result<NativePublisher, Error>> + 'a {
+        self.publish_native(launch, policy, configure, entropy, true, quality)
     }
     fn publish_native<'a>(
         self,
@@ -434,9 +471,10 @@ impl HostSession {
         configure: impl FnOnce(Display) -> Result<Configuration, ()> + 'a,
         mut entropy: impl FnMut() -> Result<u128, ()> + 'a,
         controlled: bool,
+        quality: WorkstationProfile,
     ) -> impl Future<Output = Result<NativePublisher, Error>> + 'a {
         let control = self.opened.control.clone();
-        let budget = Budget::new(control.clone(), policy);
+        let budget = Budget::new_with_profile(control.clone(), policy, quality);
         Attempt {
             control,
             complete: false,
@@ -766,6 +804,9 @@ async fn bootstrap(
         .map_err(|e| budget.fail(Error::Display(e)))?;
     let mut configuration =
         configure(display).map_err(|()| budget.fail(Error::InvalidConfiguration))?;
+    if budget.quality != WorkstationProfile::Auto && !configuration.backend.accepts_rate_capture() {
+        return Err(budget.fail(Error::InvalidConfiguration));
+    }
     crate::display_selection::fit_picture(&mut configuration, display, host.selection().picture)
         .map_err(|()| budget.fail(Error::InvalidConfiguration))?;
     budget.remaining()?;
@@ -904,7 +945,7 @@ async fn bootstrap(
     .map_err(|e| budget.fail(Error::Session(e)))?;
     if let Some(maximum) = policy.adaptive_capture {
         stream
-            .enable_adaptive_capture(maximum)
+            .enable_adaptive_capture_with_profile(maximum, budget.quality)
             .map_err(|e| budget.fail(Error::Media(e)))?;
         stream
             .enable_adaptive_bitrate()

@@ -209,3 +209,53 @@ fn adaptive_capture_preserves_the_original_control_profile_and_seat() {
     drop(reservation);
     assert!(!seat.is_occupied());
 }
+
+#[test]
+fn controlled_quality_requires_a_rate_backend_and_preserves_original_authority() {
+    for backend in [
+        Backend::SoftwareExplicit,
+        Backend::Nvenc,
+        Backend::Vaapi,
+        Backend::VideoToolbox,
+        Backend::MediaFoundation,
+    ] {
+        for quality in [
+            WorkstationProfile::Auto,
+            WorkstationProfile::Text,
+            WorkstationProfile::Motion,
+        ] {
+            let seat = Seat::default();
+            let original = ControlProfile::new(
+                Path::new("/usr/libexec/fr-input-agent"),
+                ":0",
+                None,
+                seat.clone(),
+                caps(),
+                30,
+                2_000_000,
+                backend,
+            )
+            .unwrap();
+            assert_eq!(original.quality_profile(), WorkstationProfile::Auto);
+            assert!(!original.adaptive_capture());
+            let result = original.with_adaptive_capture_profile(quality);
+            if quality != WorkstationProfile::Auto && !backend.accepts_rate_capture() {
+                assert_eq!(result.err(), Some(InvalidLaunch));
+                assert!(!seat.is_occupied());
+                continue;
+            }
+            let profile = result.unwrap();
+            let cloned = profile.clone();
+            assert!(cloned.adaptive_capture());
+            assert_eq!(cloned.quality_profile(), quality);
+            assert_eq!(cloned.backend, backend);
+            assert_eq!((cloned.fps, cloned.bitrate), (30, 2_000_000));
+            assert_eq!(cloned.capabilities(), caps());
+            assert!(!cloned.clipboard() && !cloned.files() && !cloned.file_download());
+            let reservation = cloned.seat().reserve().unwrap();
+            assert!(seat.is_occupied());
+            drop(reservation);
+            assert!(!seat.is_occupied());
+        }
+    }
+}

@@ -264,7 +264,11 @@ impl Fixture {
     }
 
     fn no_offer(&self) {
-        let connection = if self.upload { &self.link.c } else { &self.link.h };
+        let connection = if self.upload {
+            &self.link.c
+        } else {
+            &self.link.h
+        };
         assert_eq!(
             self.sender
                 .sync_lane()
@@ -292,14 +296,19 @@ impl Fixture {
         self.receiver.retire(destination).unwrap();
         let until = Instant::now() + Duration::from_secs(2);
         loop {
-            assert!(Instant::now() < until, "original worker cleanup did not finish");
+            assert!(
+                Instant::now() < until,
+                "original worker cleanup did not finish"
+            );
             let source = self.source.try_finish_cleanup(&mut self.sender);
             let destination = self.receiver.try_finish_cleanup();
             if let (Some(source), Some(destination)) = (source, destination) {
                 source.unwrap();
                 destination.unwrap();
                 self.receiver.collect_after_close().unwrap();
-                self.destination.collect_after_close(&self.receiver).unwrap();
+                self.destination
+                    .collect_after_close(&self.receiver)
+                    .unwrap();
                 self.destination.cleaned(destination);
                 self.cleaned = true;
                 break;
@@ -342,15 +351,16 @@ fn first_source_changes_rescan_before_offering_and_preserve_the_new_version_ledg
                 let destination = Directory::new();
                 let selected = selected_path(&source.0, recursive);
                 fs::write(&selected, b"old").unwrap();
-                let mut f = Fixture::new(
-                    &cx, &source.0, &destination.0, upload, recursive, 2_000_000,
-                )
-                .await;
-                f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer)).await;
+                let mut f =
+                    Fixture::new(&cx, &source.0, &destination.0, upload, recursive, 2_000_000)
+                        .await;
+                f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer))
+                    .await;
                 let revision = f.source.status().state.manifest_revision;
                 let deadline = f.source.round_until;
                 fs::write(&selected, b"new selected version").unwrap();
-                f.until(&cx, |f| matches!(f.source.step, Step::StartScan)).await;
+                f.until(&cx, |f| matches!(f.source.step, Step::StartScan))
+                    .await;
                 f.no_offer();
                 assert!(destination.empty());
                 assert_eq!(f.source.status().state.manifest_revision, revision);
@@ -364,7 +374,8 @@ fn first_source_changes_rescan_before_offering_and_preserve_the_new_version_ledg
                 assert!(f.sender.batch_report().is_none());
                 assert!(f.sender.cleanup_finished());
 
-                f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer)).await;
+                f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer))
+                    .await;
                 assert_eq!(f.source.scan_retry.attempts, 2);
                 assert_eq!(f.source.round_until, deadline);
                 assert_eq!(f.source.status().state.manifest_revision, revision);
@@ -404,14 +415,13 @@ fn repeated_preoffer_edits_spend_the_original_attempts_ids_and_byte_budget() {
             let destination = Directory::new();
             let selected = source.0.join("selected");
             fs::write(&selected, [0_u8; 3]).unwrap();
-            let mut f = Fixture::new(
-                &cx, &source.0, &destination.0, upload, false, 2_000_000,
-            )
-            .await;
+            let mut f =
+                Fixture::new(&cx, &source.0, &destination.0, upload, false, 2_000_000).await;
             let mut bytes = 0;
             let mut deadline = None;
             for attempt in 1..=MAX_SCAN_ATTEMPTS {
-                f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer)).await;
+                f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer))
+                    .await;
                 deadline.get_or_insert(f.source.round_until);
                 assert_eq!(deadline, Some(f.source.round_until));
                 bytes += fs::metadata(&selected).unwrap().len();
@@ -419,7 +429,8 @@ fn repeated_preoffer_edits_spend_the_original_attempts_ids_and_byte_budget() {
                 assert_eq!(f.source.budget.bytes, bytes);
                 fs::write(&selected, vec![attempt; usize::from(attempt) + 10]).unwrap();
                 if attempt < MAX_SCAN_ATTEMPTS {
-                    f.until(&cx, |f| matches!(f.source.step, Step::StartScan)).await;
+                    f.until(&cx, |f| matches!(f.source.step, Step::StartScan))
+                        .await;
                     f.no_offer();
                     assert!(f.sender.batch_report().is_none());
                     assert!(f.sender.cleanup_finished());
@@ -450,16 +461,20 @@ fn a_held_first_source_cannot_run_ordinary_service_and_revocation_cannot_start_a
         let source = Directory::new();
         let destination = Directory::new();
         fs::write(source.0.join("selected"), b"selected").unwrap();
-        let mut f = Fixture::new(
-            &cx, &source.0, &destination.0, true, false, 2_000_000,
-        )
-        .await;
-        f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer)).await;
+        let mut f = Fixture::new(&cx, &source.0, &destination.0, true, false, 2_000_000).await;
+        f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer))
+            .await;
         f.source_turn().unwrap();
         assert!(matches!(f.source.step, Step::PreparingTransfer));
-        let _ = f.sender.poll_sync_preflight(&f.link.c, &mut || true).unwrap();
+        let _ = f
+            .sender
+            .poll_sync_preflight(&f.link.c, &mut || true)
+            .unwrap();
         assert_eq!(f.sender.stage(), Stage::Preparing);
-        assert_eq!(f.sender.service(&mut f.link.c, || true), Err(SendError::Busy));
+        assert_eq!(
+            f.sender.service(&mut f.link.c, || true),
+            Err(SendError::Busy)
+        );
         f.no_offer();
 
         f.permission.revoke();
@@ -481,14 +496,15 @@ fn the_original_round_deadline_expires_while_the_prepared_source_is_held() {
         let source = Directory::new();
         let destination = Directory::new();
         fs::write(source.0.join("selected"), b"selected").unwrap();
-        let mut f = Fixture::new(
-            &cx, &source.0, &destination.0, false, false, 1_000_000,
-        )
-        .await;
-        f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer)).await;
+        let mut f = Fixture::new(&cx, &source.0, &destination.0, false, false, 1_000_000).await;
+        f.until(&cx, |f| matches!(f.source.step, Step::StartTransfer))
+            .await;
         let deadline = f.source.round_until;
         f.source_turn().unwrap();
-        let _ = f.sender.poll_sync_preflight(&f.link.h, &mut || true).unwrap();
+        let _ = f
+            .sender
+            .poll_sync_preflight(&f.link.h, &mut || true)
+            .unwrap();
         assert!(matches!(f.source.step, Step::PreparingTransfer));
         assert_eq!(f.sender.stage(), Stage::Preparing);
         asupersync::time::sleep(
@@ -515,11 +531,10 @@ fn a_change_after_the_first_offer_is_terminal_and_never_rescanned() {
             let destination = Directory::new();
             let selected = source.0.join("selected");
             fs::write(&selected, b"original selected version").unwrap();
-            let mut f = Fixture::new(
-                &cx, &source.0, &destination.0, upload, false, 2_000_000,
-            )
-            .await;
-            f.until(&cx, |f| f.sender.stage() == Stage::AwaitingAcceptance).await;
+            let mut f =
+                Fixture::new(&cx, &source.0, &destination.0, upload, false, 2_000_000).await;
+            f.until(&cx, |f| f.sender.stage() == Stage::AwaitingAcceptance)
+                .await;
             assert_eq!(f.source.status().state.phase, SyncPhase::Transferring);
             let deadline = f.source.round_until;
             fs::write(&selected, b"changed after offer").unwrap();

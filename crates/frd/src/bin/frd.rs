@@ -197,9 +197,17 @@ OPTIONS:
                     viewer decoder load (shared: only when every viewer is
                     behind) and verified idle, for controlled and shared viewing
                     sessions. Normally bounded at 200 ms; a slower --fps remains
-                    fixed. An explicit software encoder, VideoToolbox or Media
-                    Foundation may also lower its bitrate target, never above
-                    --bitrate. Off by default; see ADAPTIVE_CAPTURE.md
+                    fixed. Software, NVENC, VideoToolbox and Media Foundation
+                    may also lower the encoder target, never above --bitrate.
+                    Off by default; see ADAPTIVE_CAPTURE.md
+    --quality MODE  Host-local auto|text|motion preference (default auto).
+                    Requires --adaptive-capture, including explicit auto.
+                    Under local send pressure, Text prefers reducing cadence
+                    before bitrate; Motion prefers reducing bitrate first.
+                    Source/decoder overload and path congestion retain their
+                    bounded response. Text/Motion require native bitrate
+                    adaptation: VAAPI refuses, including an auto-selected VAAPI
+                    backend. Applies to controlled and shared viewing sessions
     --directory     Answer an admitted viewer's request for this host's tailnet
                     directory: this machine and that viewer's own untagged
                     machines (name, node ID, OS, online, tailnet addresses),
@@ -467,11 +475,21 @@ fn run_refusal(json: bool, code: &str, detail: &str, status: u8) -> ExitCode {
 struct Profile {
     control: bool,
     adaptive_capture: bool,
+    quality: fr_media::quality::WorkstationProfile,
     session_lifetime: bool,
     observation_indicator: bool,
     directory: bool,
     encoder: frd::host_run::EncoderSelection,
     video: frd::host_run::video::Profile,
+}
+
+#[cfg(host_stack)]
+const fn quality_name(quality: fr_media::quality::WorkstationProfile) -> &'static str {
+    match quality {
+        fr_media::quality::WorkstationProfile::Auto => "auto",
+        fr_media::quality::WorkstationProfile::Text => "text",
+        fr_media::quality::WorkstationProfile::Motion => "motion",
+    }
 }
 
 #[cfg(host_stack)]
@@ -493,6 +511,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "control": profile.control,
                 "controlled_adaptive_capture": profile.adaptive_capture && profile.control,
                 "shared_adaptive_capture": profile.adaptive_capture,
+                "quality_profile": quality_name(profile.quality),
                 "observation_indicator": profile.observation_indicator,
                 "directory": profile.directory,
                 "encoder_selection": profile.encoder.as_str(),
@@ -560,7 +579,8 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 );
                 if profile.adaptive_capture {
                     println!(
-                        "frd: adaptive raw-capture cadence enabled for controlling and shared viewing sessions; codec settings stay fixed"
+                        "frd: adaptive capture and supported bitrate targets use the host-local {} profile for controlled and shared viewing sessions",
+                        quality_name(profile.quality)
                     );
                 }
                 if profile.directory {
@@ -710,6 +730,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     };
     let video = match options.video_profile() {
         Ok(video) => video,
+        Err(error) => return local_policy::refusal(error, json),
+    };
+    let quality = match options.quality_profile() {
+        Ok(quality) => quality,
         Err(error) => return local_policy::refusal(error, json),
     };
     let effective = match options.resolve() {
@@ -905,6 +929,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     let profile = Profile {
         control: run_options.input_agent.is_some(),
         adaptive_capture: run_options.adaptive_capture,
+        quality,
         session_lifetime: run_options.session_monitor.is_some(),
         observation_indicator: observation_indicator.is_some(),
         directory: run_options.directory,
@@ -932,38 +957,48 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         None => None,
     };
     let result = match (local_ui.as_ref(), observation_indicator.as_deref()) {
-        (Some(approval), Some(image)) => frd::host_indicator::run_with_desktop_approval(
-            &run_options,
-            &report,
-            &stop,
-            policy,
-            image,
-            encoder,
-            approval,
-        )
-        .map_err(|error| (error.code(), error.to_string())),
-        (Some(approval), None) => host_run::run_with_desktop_approval(
-            &run_options,
-            &report,
-            &stop,
-            policy,
-            encoder,
-            approval,
-        )
-        .map_err(|error| (error.code(), error.to_string())),
-        (None, Some(image)) => frd::host_indicator::run_with_policy_and_encoder(
-            &run_options,
-            &report,
-            &stop,
-            policy,
-            image,
-            encoder,
-        )
-        .map_err(|error| (error.code(), error.to_string())),
-        (None, None) => {
-            host_run::run_with_policy_and_encoder(&run_options, &report, &stop, policy, encoder)
-                .map_err(|error| (error.code(), error.to_string()))
+        (Some(approval), Some(image)) => {
+            frd::host_indicator::run_with_desktop_approval_and_quality(
+                &run_options,
+                &report,
+                &stop,
+                policy,
+                image,
+                encoder,
+                approval,
+                quality,
+            )
+            .map_err(|error| (error.code(), error.to_string()))
         }
+        (Some(approval), None) => host_run::run_with_desktop_approval_and_quality(
+            &run_options,
+            &report,
+            &stop,
+            policy,
+            encoder,
+            approval,
+            quality,
+        )
+        .map_err(|error| (error.code(), error.to_string())),
+        (None, Some(image)) => frd::host_indicator::run_with_policy_encoder_and_quality(
+            &run_options,
+            &report,
+            &stop,
+            policy,
+            image,
+            encoder,
+            quality,
+        )
+        .map_err(|error| (error.code(), error.to_string())),
+        (None, None) => host_run::run_with_policy_encoder_and_quality(
+            &run_options,
+            &report,
+            &stop,
+            policy,
+            encoder,
+            quality,
+        )
+        .map_err(|error| (error.code(), error.to_string())),
     };
     #[cfg(unix)]
     let files_cleaned = file_commands_host::finish(file_owner.as_ref());

@@ -167,7 +167,10 @@ impl Sender<'_> {
     pub(crate) fn discard_sync_preflight(&mut self, q: &QuicRecords) -> Result<bool, Error> {
         self.check_preflight(q)?;
         let preflight = self.sync_preflight.as_mut().expect("checked hold");
-        if !matches!(preflight.phase, Preparation::Changed | Preparation::Discarding) {
+        if !matches!(
+            preflight.phase,
+            Preparation::Changed | Preparation::Discarding
+        ) {
             return Err(Error::Protocol);
         }
         preflight.phase = Preparation::Discarding;
@@ -196,8 +199,10 @@ impl Sender<'_> {
     /// may reconcile the channel's retained-record count.
     pub(crate) fn sync_preflight_ready(&mut self, q: &QuicRecords) -> Result<bool, Error> {
         self.check_preflight(q)?;
-        Ok(self.sync_preflight.as_ref().expect("checked hold").phase == Preparation::Ready
-            && self.lane.send_drained(q).map_err(Error::Transport)?)
+        Ok(
+            self.sync_preflight.as_ref().expect("checked hold").phase == Preparation::Ready
+                && self.lane.send_drained(q).map_err(Error::Transport)?,
+        )
     }
 
     /// The unchanged first Transferring announcement must already be drained.
@@ -240,7 +245,11 @@ impl Sender<'_> {
             || report.stop.is_some()
             || report.receipts().next().is_some()
             || !self.flight.is_empty()
-            || self.lane.retained_send_records(q).map_err(Error::Transport)? != 0
+            || self
+                .lane
+                .retained_send_records(q)
+                .map_err(Error::Transport)?
+                != 0
         {
             return Err(Error::Protocol);
         }
@@ -329,9 +338,7 @@ fn poll_prepared(transfer: &mut Transfer) -> Result<bool, Error> {
     };
     // Do not call Transfer::prepared here: it selects the directory-entry ATP
     // profile and must run exactly once when the offer is actually encoded.
-    if manifest.is_directory
-        != (transfer.profile == fr_wire::files::ATP_PORTABLE_DIRECTORY_FULL)
-    {
+    if manifest.is_directory != (transfer.profile == fr_wire::files::ATP_PORTABLE_DIRECTORY_FULL) {
         return Err(Error::Protocol);
     }
     #[cfg(unix)]

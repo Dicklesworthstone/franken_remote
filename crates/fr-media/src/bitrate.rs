@@ -7,9 +7,15 @@
 //! One capture token joins every request to its actual native result; a deferred
 //! request retains its identity without renewing a deadline or rate allowance.
 
-use crate::pacing::{Availability, Mode, ReceiverEvidence, Report};
+use crate::{
+    pacing::{Availability, Mode, ReceiverEvidence, Report},
+    quality::WorkstationProfile,
+};
 
 const PRESSURE_US: u64 = 100_000;
+/// Text lets cadence back off first, then still cuts a persistently blocked
+/// sender. Independently measured path queues retain their earlier hard cut.
+const TEXT_SEND_DWELL_US: u64 = 250_000;
 const CHANGE_DWELL_US: u64 = 2_000_000;
 const HEADROOM_US: u64 = 4_000_000;
 const EVIDENCE_GAP_US: u64 = 100_000;
@@ -133,6 +139,7 @@ impl Headroom {
 /// Native code independently enforces its own real-clock reconfiguration bound.
 #[derive(Debug)]
 pub struct Controller {
+    profile: WorkstationProfile,
     ceiling: u32,
     floor: u32,
     applied: u32,
@@ -161,10 +168,21 @@ pub struct Controller {
 }
 impl Controller {
     pub fn new(initial_bitrate: u32) -> Result<Self, Error> {
+        Self::new_with_profile(initial_bitrate, WorkstationProfile::Auto)
+    }
+    /// Choose the local workstation preference for this original encoder.
+    /// Text gives cadence one bounded opportunity before a local sender cut.
+    /// Measured path queues, native transactions, rate bounds and all evidence
+    /// expiry rules are independent of this preference.
+    pub fn new_with_profile(
+        initial_bitrate: u32,
+        profile: WorkstationProfile,
+    ) -> Result<Self, Error> {
         if !(10_000..=200_000_000).contains(&initial_bitrate) {
             return Err(Error::InvalidBitrate);
         }
         Ok(Self {
+            profile,
             ceiling: initial_bitrate,
             floor: (initial_bitrate / 8).max(100_000).min(initial_bitrate),
             applied: initial_bitrate,
@@ -188,6 +206,9 @@ impl Controller {
             path_evidence: None,
             closed: false,
         })
+    }
+    pub const fn profile(&self) -> WorkstationProfile {
+        self.profile
     }
     pub const fn applied_bitrate(&self) -> u32 {
         self.applied
@@ -255,7 +276,12 @@ impl Controller {
         if self.pending.is_some() || self.changed_at.is_some_and(|at| now - at < CHANGE_DWELL_US) {
             return Ok(());
         }
-        if blocked && pressure >= PRESSURE_US && self.applied > self.floor {
+        let pressure_dwell = if self.profile == WorkstationProfile::Text {
+            TEXT_SEND_DWELL_US
+        } else {
+            PRESSURE_US
+        };
+        if blocked && pressure >= pressure_dwell && self.applied > self.floor {
             self.propose((self.applied / 2).max(self.floor), Reason::SendPressure)?;
         } else if headroom >= HEADROOM_US && self.applied < self.ceiling {
             self.propose(

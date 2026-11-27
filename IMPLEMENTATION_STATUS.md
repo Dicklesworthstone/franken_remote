@@ -1,5 +1,42 @@
 # Implementation status
 
+## Native host Text and Motion adaptation preferences (2026-11-27)
+
+`frd run --adaptive-capture --quality auto|text|motion` now carries an immutable
+host-local preference through the real controlled and shared publishers into
+both production cadence and encoder-target controllers. Installed services
+retain the validated choice, and startup JSON reports `quality_profile`.
+Omitting the option preserves existing Auto behavior.
+
+Text permits a cadence reduction after 100 ms of local send pressure and a
+local bitrate reduction after 250 ms. Motion permits bitrate reduction after
+100 ms and the local-send cadence reduction after 250 ms. Fresh
+evidence that the first response succeeded preserves the other dimension.
+Measured path congestion, source/capture-credit/receiver overload, evidence
+expiry, native confirmation, dwell and original ceilings retain their existing
+rules. Shared sources keep their healthy/unknown-sibling vetoes.
+
+Both preferences require real bitrate transactions. Incompatible explicit
+backends refuse before startup; hardware auto checks its actual winner before
+starting a listener. This currently excludes fixed-rate VA-API while preserving
+its existing Auto behavior.
+
+Ten production-controller regressions and ten native parser, service retention,
+authority, backend, shared-evidence and initialized-stream handoff regressions
+were added and independently source reviewed. All 23 changed Rust files passed
+the exact pinned nightly formatter. The complete production `fr-core`,
+`fr-wire`, and `fr-media` libraries compiled with pinned `rustc -D warnings`;
+all 91 tests across `workstation_profiles` (10), `pacing` (19), `bitrate` (37),
+and `bitrate_path` (25) passed. These actual-source direct-compiler runs preceded
+only the whitespace formatting pass; they used no stubs or replacement types.
+Normal Cargo, native daemon/file integration and Clippy gates remain pending.
+No platform, throughput, readable-text or end-to-end latency result is claimed.
+
+This implements host selection and cadence/bitrate ordering. Automatic
+content-based selection, resolution ladders, aggregate ceilings and a
+viewer-shell mode switch remain in the broader `fr-p4-controller-tuning-kyo`
+bead. See [adaptive capture](ADAPTIVE_CAPTURE.md#auto-text-and-motion).
+
 ## Recover source edits before a folder transfer starts (2026-11-27)
 
 Standing native upload and download jobs now verify their first selected source
@@ -18,10 +55,11 @@ terminal as well; no offered or published work is replayed.
 Five new real UDP/TLS regression cases cover both directions, flat and recursive
 sources with empty directories, successful recovery and unchanged-version
 suppression, exhaustion, consent revocation, original deadline expiry and
-post-offer refusal. Independent source review completed. The pinned formatter
-ran on an earlier candidate, but the executor disconnected during dependency
-resolution before compilation. Final formatting, Clippy and tests remain
-unverified; no native/tailnet or performance qualification is claimed.
+post-offer refusal. Independent source review completed, and all changed Rust
+files passed the exact pinned nightly formatter after toolchain recovery.
+Compiler, Clippy and test execution remain pending after the earlier executor
+disconnected during dependency resolution. No native/tailnet or performance
+qualification is claimed.
 Tracking remains open in `fr-sync-preoffer-rescan-k3w8`; see
 [folder synchronization](docs/folder-sync.md).
 

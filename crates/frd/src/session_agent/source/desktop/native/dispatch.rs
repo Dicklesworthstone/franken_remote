@@ -341,6 +341,7 @@ pub struct Driver {
     policy: Policy,
     interval: Duration,
     shared_adaptive_capture: Option<Duration>,
+    shared_quality: fr_media::quality::WorkstationProfile,
     entropy: Entropy,
 }
 impl std::fmt::Debug for Driver {
@@ -384,6 +385,7 @@ impl SessionAgent {
                 policy,
                 interval,
                 shared_adaptive_capture: None,
+                shared_quality: fr_media::quality::WorkstationProfile::Auto,
                 entropy,
             },
         ))
@@ -393,7 +395,19 @@ impl Driver {
     /// Pace the shared observation source using its measured work and bounded
     /// capture credit. Configure before service; this starts no source and grants
     /// no control. The exclusive controller keeps its own `ControlProfile` choice.
-    pub fn with_shared_adaptive_capture(mut self, maximum: Duration) -> Result<Self, Error> {
+    pub fn with_shared_adaptive_capture(self, maximum: Duration) -> Result<Self, Error> {
+        self.with_shared_adaptive_capture_profile(
+            maximum,
+            fr_media::quality::WorkstationProfile::Auto,
+        )
+    }
+    /// A host-local immutable preference for the original shared source. Its
+    /// selected backend must support rate transactions before service can start.
+    pub fn with_shared_adaptive_capture_profile(
+        mut self,
+        maximum: Duration,
+        quality: fr_media::quality::WorkstationProfile,
+    ) -> Result<Self, Error> {
         let invalid = || {
             Error::from(super::super::Error::Capture(
                 crate::media::shared_publisher::Error::InvalidBudget,
@@ -403,13 +417,17 @@ impl Driver {
             return Err(invalid());
         }
         self.cx.checkpoint().map_err(|_| Error::Closed)?;
-        fr_media::pacing::Controller::new(fr_media::pacing::Policy {
-            minimum_interval_us: u64::try_from(self.interval.as_nanos().div_ceil(1000))
-                .map_err(|_| invalid())?,
-            maximum_interval_us: u64::try_from(maximum.as_micros()).map_err(|_| invalid())?,
-        })
+        fr_media::pacing::Controller::new_with_profile(
+            fr_media::pacing::Policy {
+                minimum_interval_us: u64::try_from(self.interval.as_nanos().div_ceil(1000))
+                    .map_err(|_| invalid())?,
+                maximum_interval_us: u64::try_from(maximum.as_micros()).map_err(|_| invalid())?,
+            },
+            quality,
+        )
         .map_err(|_| invalid())?;
         self.shared_adaptive_capture = Some(maximum);
+        self.shared_quality = quality;
         Ok(self)
     }
 
@@ -624,7 +642,11 @@ impl Driver {
                     desktop
                         .prepared
                         .publisher
-                        .enable_adaptive_capture(this.interval, maximum)
+                        .enable_adaptive_capture_with_profile(
+                            this.interval,
+                            maximum,
+                            this.shared_quality,
+                        )
                         .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
                 } else {
                     desktop

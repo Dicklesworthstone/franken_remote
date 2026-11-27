@@ -52,7 +52,10 @@ use fr_core::{
     input_submission::Capabilities,
     limits::ProtocolLimits,
 };
-use fr_media::worker::{Backend, Configuration};
+use fr_media::{
+    quality::WorkstationProfile,
+    worker::{Backend, Configuration},
+};
 use fr_wire::control::Target;
 use std::{
     fmt,
@@ -82,6 +85,7 @@ pub struct ControlProfile {
     bitrate: u32,
     backend: Backend,
     adaptive_capture: bool,
+    quality: WorkstationProfile,
     clipboard: bool,
     microphone: Option<crate::native_microphone::Configuration>,
     /// `frd run --files DIR`: the operator's pinned drop directory.
@@ -121,18 +125,36 @@ impl ControlProfile {
             bitrate,
             backend,
             adaptive_capture: false,
+            quality: WorkstationProfile::Auto,
             clipboard: false,
             microphone: None,
             files: None,
             file_download: None,
         })
     }
-    /// Enable measured raw-capture pacing on this original controlling owner.
-    /// It changes admission timing only, leaving codec settings and authority intact.
+    /// Enable measured raw-capture pacing with the existing balanced policy on
+    /// this original controlling owner. Authority and configured ceilings stay intact.
     #[must_use]
     pub const fn with_adaptive_capture(mut self) -> Self {
         self.adaptive_capture = true;
+        self.quality = WorkstationProfile::Auto;
         self
+    }
+    /// Prefer cadence or bitrate backoff using the same local source. A backend
+    /// without rate transactions cannot honor the pair and is refused here.
+    pub fn with_adaptive_capture_profile(
+        mut self,
+        quality: WorkstationProfile,
+    ) -> Result<Self, InvalidLaunch> {
+        if quality != WorkstationProfile::Auto && !self.backend.accepts_rate_capture() {
+            return Err(InvalidLaunch);
+        }
+        self.adaptive_capture = true;
+        self.quality = quality;
+        Ok(self)
+    }
+    pub const fn quality_profile(&self) -> WorkstationProfile {
+        self.quality
     }
     pub const fn adaptive_capture(&self) -> bool {
         self.adaptive_capture
@@ -713,9 +735,10 @@ where
     };
     let random = entropy.clone();
     let codec = profile.clone();
-    let publishing = session.publish_controlled_display(
+    let publishing = session.publish_controlled_display_with_profile(
         setup.launch,
         policy,
+        profile.quality_profile(),
         move |display| Ok(codec.configuration(display)),
         move || random(),
     );

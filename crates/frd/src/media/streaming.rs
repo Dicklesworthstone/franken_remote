@@ -3,6 +3,7 @@
 use super::{CaptureSource, ObservationControl, decoder_startup};
 use crate::{media_quic::QuicEgress, worker};
 use asupersync::process::ExitStatus;
+use fr_media::quality::WorkstationProfile;
 use fr_transport::quic::QuicRecords;
 use std::time::Duration;
 
@@ -129,20 +130,34 @@ impl Stream {
     /// verification, reference retention and authority deadlines are untouched.
     /// This does not estimate link bandwidth or provide aggregate bitrate control.
     pub fn enable_adaptive_capture(&mut self, maximum: Duration) -> Result<(), super::Error> {
-        self.enable_capture_pacing(maximum, false)
+        self.enable_adaptive_capture_with_profile(maximum, WorkstationProfile::Auto)
+    }
+    /// The host's local preference applies to both cadence and bitrate. A fixed-rate
+    /// backend cannot honor the ordering, so it refuses before service starts.
+    pub(crate) fn enable_adaptive_capture_with_profile(
+        &mut self,
+        maximum: Duration,
+        profile: WorkstationProfile,
+    ) -> Result<(), super::Error> {
+        self.enable_capture_pacing(maximum, false, profile)
     }
     /// Keep baseline raw cadence until the original negotiated receiver proves
     /// sustained overload. This does not enable local-pressure bitrate changes.
     pub(crate) fn enable_receiver_rescue(&mut self, maximum: Duration) -> Result<(), super::Error> {
-        self.enable_capture_pacing(maximum, true)
+        self.enable_capture_pacing(maximum, true, WorkstationProfile::Auto)
     }
     fn enable_capture_pacing(
         &mut self,
         maximum: Duration,
         receiver_rescue: bool,
+        profile: WorkstationProfile,
     ) -> Result<(), super::Error> {
         self.control.check()?;
-        if self.served || self.pacing.is_some() {
+        if self.served
+            || self.pacing.is_some()
+            || (profile != WorkstationProfile::Auto
+                && !self.source.configuration.backend.accepts_rate_capture())
+        {
             return Err(super::Error::InvalidFrame);
         }
         let minimum_interval_us =
@@ -162,7 +177,7 @@ impl Stream {
             if receiver_rescue {
                 fr_media::pacing::Controller::for_receiver_overload(policy)
             } else {
-                fr_media::pacing::Controller::new(policy)
+                fr_media::pacing::Controller::new_with_profile(policy, profile)
             }
             .map_err(super::Error::Pacing)?,
         );
@@ -181,9 +196,17 @@ impl Stream {
         if !self.source.configuration.backend.accepts_rate_capture() {
             return Ok(false);
         }
+        let profile = self
+            .pacing
+            .as_ref()
+            .ok_or(super::Error::InvalidFrame)?
+            .profile();
         self.bitrate = Some(
-            fr_media::bitrate::Controller::new(self.source.configuration.bitrate)
-                .map_err(super::Error::Bitrate)?,
+            fr_media::bitrate::Controller::new_with_profile(
+                self.source.configuration.bitrate,
+                profile,
+            )
+            .map_err(super::Error::Bitrate)?,
         );
         Ok(true)
     }

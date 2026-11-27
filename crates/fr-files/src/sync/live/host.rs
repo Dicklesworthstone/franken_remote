@@ -741,9 +741,7 @@ impl HostJob {
             }
             self.last = completed_at;
             if matches!(pending.next, Step::Transfer) {
-                sender
-                    .release_sync_preflight(q)
-                    .map_err(LiveError::Send)?;
+                sender.release_sync_preflight(q).map_err(LiveError::Send)?;
             }
             self.step = pending.next;
             self.pending = None;
