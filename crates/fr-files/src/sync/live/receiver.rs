@@ -126,6 +126,7 @@ impl ControllerJob {
     /// Explicitly accept atomic top-level subtree versions on this original
     /// job. The original attachment must independently select recursive sync;
     /// flat or unselected peers cannot cause directory staging.
+    #[must_use]
     pub fn with_recursive(self) -> Self {
         self.with_mode(JobMode::Recursive)
     }
@@ -638,3 +639,7 @@ mod tests {
         assert_eq!(Phase::Scan.check_acceptance(101, 100), Ok(()));
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "deadline_tests.rs"]
+mod deadline_tests;

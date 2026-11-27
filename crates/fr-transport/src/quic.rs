@@ -840,7 +840,8 @@ impl QuicRecords {
     /// `send_by_micros` is the record's usefulness deadline and is enforced at
     /// admission: a record already past it is refused. An admitted reliable
     /// record's fixed delivery bound is max(send-by, admission +
-    /// [`delivery_allowance_us`] for this path). A late drive may reconcile one
+    /// [`delivery_allowance_us`] for this path). Folder job state uses the caller's
+    /// stricter absolute deadline for retained delivery as well. A late drive may reconcile one
     /// bounded batch of authenticated ACKs for fully staged bytes before judging
     /// retained custody; it cannot send expired bytes or extend their deadlines.
     /// Between settled native I/O
@@ -910,7 +911,7 @@ impl QuicRecords {
         }
         let native = self.native.as_ref().ok_or(Error::Closed)?;
         let path = native.connection().path_stats();
-        let deliver_by = send_by_micros.max(current.saturating_add(delivery_allowance_us(
+        let path_deadline = send_by_micros.max(current.saturating_add(delivery_allowance_us(
             path.smoothed_rtt_micros,
             path.rttvar_micros,
         )));
@@ -1020,6 +1021,15 @@ impl QuicRecords {
                     .expect("validated outgoing route");
                 // Every earlier gate has passed. The record stays charged until
                 // the peer acknowledges its last byte, however early it stages.
+                // The original acceptance or round can end before a full path
+                // allowance. A folder state must not survive it in QUIC even
+                // when neither application owner runs again before expiry.
+                let kind = u16::from_be_bytes([bytes[6], bytes[7]]);
+                let deliver_by = if kind == fr_wire::Kind::SyncJobState as u16 {
+                    send_by_micros
+                } else {
+                    path_deadline
+                };
                 self.pending_writes.push_back(PendingWrite {
                     route,
                     bytes: storage,

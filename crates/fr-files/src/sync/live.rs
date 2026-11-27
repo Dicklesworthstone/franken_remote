@@ -279,6 +279,7 @@ impl HostConfig {
     /// Explicitly select atomic subtree versions as well as regular files.
     /// Both original endpoints must negotiate the recursive job version before
     /// scanning; this never upgrades an ordinary or flat file attachment.
+    #[must_use]
     pub fn with_recursive(self) -> Self {
         self.with_mode(JobMode::Recursive)
     }

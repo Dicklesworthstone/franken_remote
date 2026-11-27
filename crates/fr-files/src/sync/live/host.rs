@@ -390,26 +390,7 @@ impl HostJob {
                 }
             }
             Step::BeginRound => self.start_round(now)?,
-            Step::StartScan => {
-                if !self.scan_retry.begin(now, self.round_until)? {
-                    return Ok(());
-                }
-                self.scan = Some(Scan::start(
-                    &self.config,
-                    self.status.state.manifest_revision,
-                    self.ledger.clone(),
-                    self.cursor.after().map(str::to_owned),
-                    std::mem::take(&mut self.scan_cache),
-                    ScanScope {
-                        cx: self.cx.clone(),
-                        authority: self.authority.clone(),
-                        permission: self.permission.clone(),
-                        stopped: self.stopped.clone(),
-                        until: self.round_until,
-                    },
-                )?);
-                self.step = Step::Scanning;
-            }
+            Step::StartScan => self.start_scan(now)?,
             Step::Scanning => self.poll_scan(now)?,
             Step::StartTransfer => {
                 let prepared = self.prepared.take().ok_or(LiveError::WrongPhase)?;
@@ -502,6 +483,28 @@ impl HostJob {
                 .ok_or(LiveError::Clock)?
         };
         self.step = Step::Waiting;
+        Ok(())
+    }
+
+    fn start_scan(&mut self, now: u64) -> Result<(), LiveError> {
+        if !self.scan_retry.begin(now, self.round_until)? {
+            return Ok(());
+        }
+        self.scan = Some(Scan::start(
+            &self.config,
+            self.status.state.manifest_revision,
+            self.ledger.clone(),
+            self.cursor.after().map(str::to_owned),
+            std::mem::take(&mut self.scan_cache),
+            ScanScope {
+                cx: self.cx.clone(),
+                authority: self.authority.clone(),
+                permission: self.permission.clone(),
+                stopped: self.stopped.clone(),
+                until: self.round_until,
+            },
+        )?);
+        self.step = Step::Scanning;
         Ok(())
     }
 
