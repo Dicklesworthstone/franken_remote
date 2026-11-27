@@ -40,10 +40,11 @@ frd run --software-explicit --input-agent /absolute/path/fr-input-agent \
 The server defaults to `$XDG_RUNTIME_DIR/pipewire-0` only when the operator omits
 `--microphone-server`. It is a local socket selection, never a peer value.
 Missing workers, an unavailable socket, a view-only host and incompatible
-capability combinations refuse explicitly. The optional microphone capability
-may replace the optional quality-decision diagnostic when the existing
-24-capability ceiling is reached; authority, file and media capabilities and
-the ceiling itself remain unchanged.
+capability combinations refuse explicitly. At the 24-capability limit, microphone forwarding can use the slot for
+quality reporting, larger bulk records, attachment credit, or decoder-load
+reporting, in that order. With clipboard, two-way files, playback and microphone
+all requested, the desktop client keeps those features and physical keys.
+Direct Unicode Send Text is available when it also fits the negotiated profile.
 
 Only a controller that positively selected `native-audio-up` creates the
 separate Stop microphone window. The original input grant and its first renewal

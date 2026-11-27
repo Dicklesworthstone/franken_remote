@@ -18,18 +18,10 @@ fn microphone_and_text_fit_native_auxiliary_profiles_without_dropping_features()
                 native::control_offer_with_duplex(clipboard, audio),
             ];
             for (direction, original) in profiles.into_iter().enumerate() {
-                // Every optional fallback is already absent in the fullest
-                // profile. Preserve the same fixed bound and typed refusal.
-                if clipboard && audio && direction == 3 {
-                    assert_eq!(
-                        audio_up::with_microphone(original),
-                        Err(negotiation::Error::Limits)
-                    );
-                    continue;
-                }
+                let full_duplex_audio = clipboard && audio && direction == 3;
                 let microphone = audio_up::with_microphone(original.clone()).unwrap();
                 // This is the shipping Linux CLI's actual extension order.
-                let configured = control::with_committed_text(microphone).unwrap();
+                let configured = control::with_available_committed_text(microphone).unwrap();
                 configured.validate().unwrap();
                 assert_eq!(configured.role, Role::RequestControl);
                 assert_eq!(configured.limits, original.limits);
@@ -40,6 +32,7 @@ fn microphone_and_text_fit_native_auxiliary_profiles_without_dropping_features()
                             quality_decision::CAPABILITY,
                             attachment::BULK_RECORD_CAPABILITY,
                             attachment::credit::CAPABILITY,
+                            fr_wire::receiver_metrics::CAPABILITY,
                         ]
                         .contains(&capability.name.as_str());
                     assert!(may_yield || configured.capabilities.contains(capability));
@@ -48,11 +41,14 @@ fn microphone_and_text_fit_native_auxiliary_profiles_without_dropping_features()
                 assert!(audio_up::uplink_selected(&selected));
                 assert_eq!(fr_wire::audio_control::downlink_selected(&selected), audio);
                 assert_eq!(fr_wire::files::duplex_selected(&selected), direction == 3);
-                assert!(configured.capabilities.iter().any(|cap| {
-                    cap.name == control::TEXT_CAPABILITY
-                        && cap.version == control::TEXT_VERSION
-                        && !cap.required
-                }));
+                assert_eq!(
+                    configured.capabilities.iter().any(|cap| {
+                        cap.name == control::TEXT_CAPABILITY
+                            && cap.version == control::TEXT_VERSION
+                            && !cap.required
+                    }),
+                    !full_duplex_audio
+                );
                 let encoded = bytes(&Message::ClientHello(configured.clone()));
                 assert_eq!(
                     negotiation::decode(&encoded, negotiation::MAX_RECORD, 0).unwrap(),

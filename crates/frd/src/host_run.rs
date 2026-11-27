@@ -673,7 +673,8 @@ fn selected_offer(
         offer
     };
     let offer = if control.is_some_and(|c| c.contains(Capability::Text)) {
-        fr_wire::control::with_committed_text(offer).map_err(|_| serial::Error::Configuration)?
+        fr_wire::control::with_available_committed_text(offer)
+            .map_err(|_| serial::Error::Configuration)?
     } else {
         offer
     };
@@ -2551,7 +2552,7 @@ mod tests {
                         base
                     };
                     let base = if capabilities.contains(Capability::Text) {
-                        fr_wire::control::with_committed_text(base)?
+                        fr_wire::control::with_available_committed_text(base)?
                     } else {
                         base
                     };

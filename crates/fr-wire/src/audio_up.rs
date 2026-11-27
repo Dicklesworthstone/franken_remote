@@ -15,8 +15,8 @@ pub const VERSION: u16 = 1;
 /// Add the separately enabled microphone profile to a validated native offer.
 /// Call only after the application's capture/endpoint and local consent UI are
 /// configured. Optional quality reporting yields first, followed by optional
-/// bulk sizing and receiver credit, whose bounded legacy paths remain available.
-/// Required entries and all input, media and file capabilities stay intact.
+/// bulk sizing, receiver credit and decoder-load reporting. Each has a bounded
+/// baseline mode. Required entries and input, audio and file capabilities stay intact.
 pub fn with_microphone(mut offer: Offer) -> Result<Offer, Error> {
     offer.validate()?;
     if ![
@@ -54,6 +54,10 @@ pub fn with_microphone(mut offer: Offer) -> Result<Offer, Error> {
         (
             crate::attachment::credit::CAPABILITY,
             crate::attachment::credit::VERSION,
+        ),
+        (
+            crate::receiver_metrics::CAPABILITY,
+            crate::receiver_metrics::VERSION,
         ),
     ] {
         if offer.capabilities.len() < MAX_CAPABILITIES {
@@ -177,7 +181,7 @@ mod tests {
         assert!(!mic.required);
         assert_eq!(with_microphone(client.clone()), Ok(client));
     }
-    const OPTIONAL_FALLBACKS: [(&str, u16); 3] = [
+    const OPTIONAL_FALLBACKS: [(&str, u16); 4] = [
         (
             crate::quality_decision::CAPABILITY,
             crate::quality_decision::VERSION,
@@ -187,6 +191,10 @@ mod tests {
             attachment::BULK_RECORD_VERSION,
         ),
         (attachment::credit::CAPABILITY, attachment::credit::VERSION),
+        (
+            crate::receiver_metrics::CAPABILITY,
+            crate::receiver_metrics::VERSION,
+        ),
     ];
 
     #[test]

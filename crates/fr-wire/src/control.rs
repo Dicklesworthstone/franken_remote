@@ -65,7 +65,7 @@ pub fn requestable(selection: &[crate::negotiation::Capability]) -> Capabilities
 pub fn with_pixel_scroll(
     offer: crate::negotiation::Offer,
 ) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
-    with_optional_input(offer, PIXEL_SCROLL_CAPABILITY, PIXEL_SCROLL_VERSION)
+    with_optional_input(offer, PIXEL_SCROLL_CAPABILITY, PIXEL_SCROLL_VERSION, false)
 }
 
 /// Explicit direct-text producer or native-executor opt-in. Other clients
@@ -73,13 +73,22 @@ pub fn with_pixel_scroll(
 pub fn with_committed_text(
     offer: crate::negotiation::Offer,
 ) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
-    with_optional_input(offer, TEXT_CAPABILITY, TEXT_VERSION)
+    with_optional_input(offer, TEXT_CAPABILITY, TEXT_VERSION, false)
+}
+
+/// Offer direct Unicode entry as a desktop default. A full, valid offer can
+/// still connect using the previously selected physical-key profile.
+pub fn with_available_committed_text(
+    offer: crate::negotiation::Offer,
+) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+    with_optional_input(offer, TEXT_CAPABILITY, TEXT_VERSION, true)
 }
 
 fn with_optional_input(
     mut offer: crate::negotiation::Offer,
     name: &str,
     version: u16,
+    keep_full_offer: bool,
 ) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
     use crate::negotiation::{Capability as Negotiated, Error, MAX_CAPABILITIES};
     offer.validate()?;
@@ -123,7 +132,11 @@ fn with_optional_input(
             .retain(|cap| cap.name != optional || cap.version != known_version || cap.required);
     }
     if offer.capabilities.len() >= MAX_CAPABILITIES {
-        return Err(Error::Invalid);
+        return if keep_full_offer {
+            Ok(offer)
+        } else {
+            Err(Error::Invalid)
+        };
     }
     offer
         .capabilities
