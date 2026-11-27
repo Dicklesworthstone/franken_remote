@@ -164,7 +164,7 @@ fn eight_chunks_can_wait_for_acks_then_publish_once_on_the_original_lane() {
         let cx = Cx::current().unwrap();
         let mut f = Running::new(&cx).await;
         let path = f.path.join("source");
-        let data: Vec<u8> = (0..120_007)
+        let data: Vec<u8> = (0..250_007)
             .map(|i| u8::try_from(i % 251).unwrap())
             .collect();
         fs::write(&path, &data).unwrap();
@@ -192,6 +192,36 @@ fn eight_chunks_can_wait_for_acks_then_publish_once_on_the_original_lane() {
                 assert_eq!(bulk_flight(&f.link).1, 8);
             }
         }
+        // Consume the initial native stream credit and drain the first flight
+        // before measuring replenished credit on this exact attachment.
+        sender.set_paused(&f.link.c, true).unwrap();
+        let until = clock(&cx) + 1_000_000;
+        while bulk_flight(&f.link).1 != 0
+            || f.host.progress().unwrap().staged_bytes != filled.queued_bytes
+        {
+            assert!(
+                clock(&cx) < until,
+                "first file flight did not reach staging"
+            );
+            step(&mut sender, &mut f.host, &mut f.link, &cx).await;
+        }
+        assert_eq!(record_bytes, 8192);
+        assert!(filled.queued_bytes >= 7 * record_bytes as u64);
+        sender.set_paused(&f.link.c, false).unwrap();
+        fill_without_network(&mut sender, &mut f.link, &cx);
+        let staged = f.host.progress().unwrap();
+        // With one 8 KiB window, four further whole records cannot be
+        // acknowledged here. The disk/application reader stays parked.
+        let until = clock(&cx) + 500_000;
+        while bulk_flight(&f.link).1 > 4 {
+            assert!(
+                clock(&cx) < until,
+                "file credit stalled behind the parked reader"
+            );
+            f.link.drive(&cx).await;
+        }
+        assert_eq!(f.host.progress(), Some(staged));
+        assert!(!f.path.join("received").exists());
         let receipt = result(&mut sender, &mut f.host, &mut f.link, &cx).await;
         assert_eq!(
             receipt,

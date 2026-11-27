@@ -1,5 +1,9 @@
 #![cfg(target_os = "linux")]
 //! Real UDP/TLS/file I/O with explicit controller/admission fixtures, not Tailscale.
+#[expect(
+    dead_code,
+    reason = "the shared fixture also builds folder job peers for other integration targets"
+)]
 mod native_support;
 use asupersync::cx::Cx;
 use fr_files::{

@@ -62,18 +62,16 @@ pub(super) fn negotiated_maximum(
     )
 }
 
-/// The clipboard and the recovery lane may keep several bounded records in
-/// flight. Their grants limit each record, not the entire reliable stream
-/// window. Using that record ceiling as native credit serialized legacy 8 KiB
-/// clipboard chunks at roughly one per round trip, and it held the first
-/// viewer's startup IDR, which arrives as 1150-byte recovery records, to 8 KiB
-/// per round trip: ~110 KB/s at 75 ms, so a 2890x1624 IDR missed the host's
-/// two-second startup deadline on a 23 Mbit/s path. Both reservation and
-/// ticket arming keep the endpoint's existing policy cap; framing, negotiated
-/// records, aggregate receive credit and lifetimes are unchanged. Other roles
-/// retain their existing window calculation.
+/// Pipelined bulk attachments use the local receive window. A grant limits a
+/// single record; using a legacy 8 KiB grant as the whole window forces an
+/// upload or download to wait for new stream credit after roughly one chunk.
+/// Each endpoint still enforces its own stream and connection limits, and the
+/// application must consume the received bytes before credit is replenished.
 pub(super) fn receive_window(role: MediaRole, allowance: u64, stream_window: u64) -> u64 {
-    if matches!(role, MediaRole::Clipboard | MediaRole::Recovery) {
+    if matches!(
+        role,
+        MediaRole::Clipboard | MediaRole::Recovery | MediaRole::Files | MediaRole::FilesDownload
+    ) {
         stream_window
     } else {
         allowance
@@ -86,7 +84,7 @@ mod tests {
     use fr_core::limits::LimitOverrides;
 
     #[test]
-    fn clipboard_and_recovery_windows_are_local_even_when_the_record_grant_is_narrower() {
+    fn pipelined_bulk_windows_are_local_even_when_the_record_grant_is_narrower() {
         for (allowance, window) in [
             (8192, 65_536),
             (4096, 65_536),
@@ -94,15 +92,18 @@ mod tests {
             (4096, 4096),
             (65_536, 65_536),
         ] {
-            for role in [MediaRole::Clipboard, MediaRole::Recovery] {
+            for role in [
+                MediaRole::Clipboard,
+                MediaRole::Recovery,
+                MediaRole::Files,
+                MediaRole::FilesDownload,
+            ] {
                 assert_eq!(receive_window(role, allowance, window), window);
             }
             for role in [
                 MediaRole::Configuration,
                 MediaRole::Video,
                 MediaRole::Input,
-                MediaRole::Files,
-                MediaRole::FilesDownload,
                 MediaRole::AudioDown,
                 MediaRole::AudioUp,
             ] {

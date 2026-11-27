@@ -46,8 +46,7 @@ This is a local flow-control choice, not another wire capability.
 [`native-attachment-credit`](NATIVE_ATTACHMENT_CREDIT.md) defines
 `byte_allowance` as a maximum **record**, including when asymmetric policies
 narrow the final grant. The route and framing still enforce that exact grant.
-A smaller endpoint retains its own smaller native window, and every other role
-retains its previous window calculation. The connection receive cap remains at
+A smaller endpoint retains its own smaller native window. The connection receive cap remains at
 most 524,288 bytes; per-record allocation, sender byte/record budgets, priority,
 first-byte expiry and original item/authority deadlines are unchanged. An idle
 clipboard consumer does not read merely to return credit.
@@ -68,6 +67,27 @@ Unicode owner/framing cases in both directions. Strict Clippy and pinned
 rustfmt passed. Execution of the new native UDP/TLS regressions and full
 `frd`/OS/WAN qualification remains pending; these component results do not
 establish one-MiB transfer completion on a live connection.
+
+## File receive windows
+
+Uploads and downloads now use the receiving endpoint’s local stream window for
+native flow control. Previously, a peer with an 8,192-byte record grant also
+had only 8,192 bytes of replenished stream credit. After the initial window,
+a sender could have eight chunk records ready while the transport could carry
+roughly one before waiting for the receiver to read and return credit.
+
+With a 65,536-byte local window, multiple 8,192-byte-or-smaller records can
+travel before the next credit update. An endpoint configured for 8,192 bytes
+still returns at most that window. Each record must fit the original grant.
+The connection-wide credit reserve for control traffic, file quotas and
+deadlines, and disk publication checks apply in both directions.
+
+The native UDP/TLS test
+`duplex_file_windows_pipeline_uploads_and_downloads_under_a_narrow_grant`
+exercises both file attachments on one connection. It exhausts initial credit,
+parks the reader, and checks receipt of a bounded flight, backpressure on the
+next record and resumption after a read. Its assertions concern transport
+credit; end-user throughput also depends on congestion, disk and service time.
 
 ## Executed qualification
 

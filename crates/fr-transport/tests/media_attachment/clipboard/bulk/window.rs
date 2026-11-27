@@ -1,5 +1,5 @@
 //! Real UDP/TLS receive-credit regression. The reader remains parked until a
-//! bounded flight has been acknowledged; no OS clipboard effect is claimed.
+//! bounded flight has been acknowledged. Payloads exercise record framing.
 use super::*;
 use fr_wire::attachment::credit;
 
@@ -16,14 +16,19 @@ async fn drained(l: &mut Link, cx: &Cx, host: bool, until: u64) {
     while bulk_records(endpoint(l, host)) != 0 {
         assert!(
             clock(cx) < until,
-            "the clipboard flight must be acknowledged before any application read"
+            "the bulk flight must be acknowledged before any application read"
         );
         l.drive(cx).await;
     }
 }
 
 fn payload(route: StreamRoute, len: usize, tag: u8) -> Vec<u8> {
-    let mut bytes = record(0x51, route.binding, len);
+    let kind = match route.messages {
+        Messages::Clipboard => 0x51,
+        Messages::Files => 0x72,
+        _ => panic!("expected a clipboard or file route"),
+    };
+    let mut bytes = record(kind, route.binding, len);
     bytes[24..].fill(tag);
     bytes
 }
@@ -148,7 +153,7 @@ fn record_ceiling(l: &mut Link, cx: &Cx, host: bool, send: StreamRoute) {
         q.send(
             cx,
             Route::Stream(send),
-            &record(0x51, send.binding, send.maximum + 1),
+            &payload(send, send.maximum + 1, 0),
             clock(cx) + 1_000_000,
             || true
         ),
@@ -217,6 +222,59 @@ fn narrowed_clipboard_grant_keeps_each_endpoints_independent_receive_window() {
                 } else {
                     (c.outbound, h.inbound, hp.stream_window)
                 };
+                record_ceiling(&mut l, &cx, host, send);
+                warm(&mut l, &cx, host, send, recv).await;
+                flight(&mut l, &cx, host, send, recv, window).await;
+            }
+        }
+    });
+}
+
+#[test]
+fn duplex_file_windows_pipeline_uploads_and_downloads_under_a_narrow_grant() {
+    use fr_wire::files;
+
+    run_test!(cx, {
+        let small = Policy {
+            stream_window: 8192,
+            ..Policy::default()
+        };
+        for (hp, cp, legacy) in [
+            (Policy::default(), Policy::default(), true),
+            (small, Policy::default(), false),
+            (Policy::default(), small, false),
+        ] {
+            let mut l = link(&cx, hp, cp).await;
+            if legacy {
+                l.selection
+                    .capabilities
+                    .retain(|cap| cap.name != attachment::BULK_RECORD_CAPABILITY);
+            }
+            for (name, version) in [
+                (
+                    files::CHANNEL_SCOPE_CAPABILITY,
+                    files::CHANNEL_SCOPE_VERSION,
+                ),
+                (files::DOWNLOAD_CAPABILITY, files::DOWNLOAD_VERSION),
+                (files::DUPLEX_CAPABILITY, files::DUPLEX_VERSION),
+                (credit::CAPABILITY, credit::VERSION),
+            ] {
+                l.selection.capabilities.push(Capability {
+                    name: name.into(),
+                    version,
+                    required: true,
+                });
+            }
+            l.selection.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+            let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
+            let (_, _, hu, cu) = attach(&mut l, &cx, 9, MediaRole::Files).await;
+            let (_, _, hd, cd) = attach(&mut l, &cx, 10, MediaRole::FilesDownload).await;
+            for (host, send, recv, window) in [
+                (false, cu.outbound, hu.inbound, hp.stream_window),
+                (true, hd.outbound, cd.inbound, cp.stream_window),
+            ] {
+                assert_eq!(send.maximum, 8192);
+                assert_eq!(recv.maximum, 8192);
                 record_ceiling(&mut l, &cx, host, send);
                 warm(&mut l, &cx, host, send, recv).await;
                 flight(&mut l, &cx, host, send, recv, window).await;
