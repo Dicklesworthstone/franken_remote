@@ -246,15 +246,31 @@ Previously confirmed publications and their receipts remain intact.
 A source edited or removed during the pre-transfer scan can be scanned again
 within the same round. Premature EOF while hashing a selected file or recursive
 tree is classified as a changed source; permission and other I/O errors retain
-their original failure. A failed hash cannot publish a partial manifest. The source owner makes at most three scan attempts, separated by
-at least 100 ms, after joining each preceding worker. Retries retain the same
-job, manifest revision, pinned root, authority and original five-minute deadline.
-They neither announce another round nor spend transfer quota. Cancellation,
-unsafe entries, permission failures and other faults remain terminal. Continuous
-source changes exhaust the bounded attempts and report the last source failure.
-Once the transfer manifest has been announced, a changed source remains a
-terminal refusal; uncertain or published transfers are never replayed by this
-scan retry.
+their original failure. A failed hash cannot publish a partial manifest.
+
+After a successful scan, the source owner also prepares and verifies the first
+selected ATP source before announcing `Transferring` or offering any file.
+The receiver remains in the original `Scanning` phase during this check. The
+sender retains the actual prepared manifest for the later offer, so releasing
+the hold does not hash it again. Ordinary transfer service cannot bypass the
+hold or overlap the job-state record.
+
+If that first preparation detects a changed source, the owner stops and
+positively joins only that unpublished source worker before discarding the
+selection and rescanning. Scan failures and these preparation failures share
+the same three-attempt limit and 100 ms retry deferral. They retain the original
+job, manifest revision, pinned root, authority and five-minute round deadline.
+An incomplete scan does not spend transfer quota. Each completed scan still
+charges the cumulative job file and byte budgets, and reserved ATP transfer IDs
+are never reused. A retry clears unconfirmed scan cache without changing the
+confirmed publication ledger or advancing the page cursor.
+
+Cancellation, expiry, unsafe entries, permission failures, worker cleanup
+failures and other faults remain terminal. Continuous source changes exhaust
+the bounded attempts and report the last source failure. Once the transfer
+announcement begins, or a later selected file changes, the job stops with its
+original failure. Uncertain, offered or published transfers are never replayed
+by this retry.
 
 Flat live jobs keep a bounded manifest cache inside the original source owner.
 Every scan still enumerates the pinned directory, checks authority and resource

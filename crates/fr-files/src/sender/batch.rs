@@ -312,15 +312,21 @@ impl Sender<'_> {
                 return Err(error);
             }
             self.batch.as_mut().expect("original batch retained").last = now;
-            if self.transfer.is_none() && !self.paused {
-                self.start_selected(q)?;
+            if self.transfer.is_none()
+                && !self.paused
+                && let Err(error) = self.start_selected(q)
+            {
+                self.fail(error);
+                let _ = self.retire(q);
+                self.settle_batch();
+                return Err(error);
             }
         }
         let result = self.service_one(q, authorize);
         self.settle_batch();
         result.map(|_| self.stage())
     }
-    fn start_selected(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+    pub(super) fn start_selected(&mut self, q: &QuicRecords) -> Result<(), Error> {
         let batch = self.batch.as_mut().expect("batch service");
         let deadline = batch.deadline;
         let Some(selected) = batch.selection.files.pop_front() else {
@@ -330,19 +336,14 @@ impl Sender<'_> {
         let expected_bytes = selected.expected_source.as_ref().map(ExpectedSource::size);
         #[cfg(not(unix))]
         let expected_bytes = None;
-        if let Err(error) = self.begin_selected(
+        self.begin_selected(
             q,
             selected.file,
             &selected.name,
             Some(deadline),
             selected.directory,
             expected_bytes,
-        ) {
-            self.fail(error);
-            let _ = self.retire(q);
-            self.settle_batch();
-            return Err(error);
-        }
+        )?;
         #[cfg(unix)]
         {
             self.transfer

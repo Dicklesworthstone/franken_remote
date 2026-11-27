@@ -33,6 +33,8 @@ enum Step {
     StartScan,
     Scanning,
     StartTransfer,
+    PreparingTransfer,
+    DiscardTransfer,
     Transfer,
     EndRound,
     Settlement,
@@ -49,8 +51,8 @@ struct PendingState {
 const MAX_SCAN_ATTEMPTS: u8 = 3;
 const SCAN_RETRY_DELAY_US: u64 = 100_000;
 
-/// A failed, joined scan has not offered any files. It may inspect a newer
-/// source version, but never acquire a new round deadline or transfer budget.
+/// A failed, joined scan or unoffered first source may inspect a newer
+/// version, but never acquire a new round deadline or refund spent budgets.
 #[derive(Default)]
 struct ScanRetry {
     attempts: u8,
@@ -323,6 +325,8 @@ impl HostJob {
             Step::StartScan
                 | Step::Scanning
                 | Step::StartTransfer
+                | Step::PreparingTransfer
+                | Step::DiscardTransfer
                 | Step::Transfer
                 | Step::EndRound
                 | Step::Settlement
@@ -393,14 +397,16 @@ impl HostJob {
             Step::StartScan => self.start_scan(now)?,
             Step::Scanning => self.poll_scan(now)?,
             Step::StartTransfer => {
-                let prepared = self.prepared.take().ok_or(LiveError::WrongPhase)?;
-                self.versions = prepared.versions;
+                let prepared = self.prepared.as_mut().ok_or(LiveError::WrongPhase)?;
+                // Cleanup may run before the first offer. Retain the exact
+                // versions/report domain as soon as its source batch exists.
+                self.versions = std::mem::take(&mut prepared.versions);
                 self.reported = 0;
                 self.recorded_ledger = false;
                 sender
-                    .begin_sync_batch_before(
+                    .begin_sync_preflight_before(
                         q,
-                        prepared.selection,
+                        std::mem::take(&mut prepared.selection),
                         self.round_until,
                         SourceScope::new(
                             self.authority.clone(),
@@ -409,8 +415,10 @@ impl HostJob {
                         ),
                     )
                     .map_err(LiveError::Send)?;
-                self.step = Step::Transfer;
+                self.step = Step::PreparingTransfer;
             }
+            Step::PreparingTransfer => self.prepare_transfer(sender, q, authorize, now)?,
+            Step::DiscardTransfer => self.discard_transfer(sender, q)?,
             Step::Transfer => self.service_transfer(sender, q, authorize)?,
             Step::EndRound => {
                 if !sender.sync_ready(q).map_err(LiveError::Send)? {
@@ -534,8 +542,78 @@ impl HostJob {
         // Retain verified scan metadata even when this round has no new versions.
         // Publication evidence remains exclusively in the confirmed ledger.
         self.scan_cache = std::mem::take(&mut prepared.cache);
-        self.cursor
-            .stage(std::mem::take(&mut prepared.continuation))?;
+        if count == 0 {
+            self.cursor.stage(prepared.continuation)?;
+            return self.announce_transfer(0, prepared.bytes, Step::Settlement, now);
+        }
+        // Keep the peer in its original Scanning/Manifest phase until the
+        // first source independently verifies this selected version. No new
+        // state or ATP offer is emitted if that source has already changed.
+        self.prepared = Some(prepared);
+        self.step = Step::StartTransfer;
+        Ok(())
+    }
+
+    fn prepare_transfer(
+        &mut self,
+        sender: &mut Sender<'_>,
+        q: &QuicRecords,
+        authorize: &mut impl FnMut() -> bool,
+        now: u64,
+    ) -> Result<(), LiveError> {
+        match sender.poll_sync_preflight(q, authorize) {
+            Ok(false) => Ok(()),
+            Ok(true) => {
+                let prepared = self.prepared.take().ok_or(LiveError::WrongPhase)?;
+                self.cursor.stage(prepared.continuation)?;
+                let count = u32::try_from(self.versions.len()).map_err(|_| LiveError::Resource)?;
+                self.announce_transfer(count, prepared.bytes, Step::Transfer, now)
+            }
+            Err(crate::sender::Error::SourceChanged) => {
+                self.step = Step::DiscardTransfer;
+                self.discard_transfer(sender, q)
+            }
+            Err(error) => Err(LiveError::Send(error)),
+        }
+    }
+
+    fn discard_transfer(
+        &mut self,
+        sender: &mut Sender<'_>,
+        q: &QuicRecords,
+    ) -> Result<(), LiveError> {
+        if !sender.discard_sync_preflight(q).map_err(LiveError::Send)? {
+            return Ok(());
+        }
+        // The old worker is positively joined. Clear only unannounced scan
+        // state; original authority, ledger, cursor, spent IDs and cumulative
+        // transfer budgets remain unchanged.
+        self.prepared = None;
+        self.versions.clear();
+        self.reported = 0;
+        self.recorded_ledger = false;
+        self.scan_cache = ScanCache::default();
+        let retry_now = self.clock.now().as_nanos() / 1000;
+        if retry_now < self.last {
+            return Err(LiveError::Clock);
+        }
+        self.last = retry_now;
+        self.scan_retry.defer(
+            LiveError::Source(SyncError::SourceChanged),
+            retry_now,
+            self.round_until,
+        )?;
+        self.step = Step::StartScan;
+        Ok(())
+    }
+
+    fn announce_transfer(
+        &mut self,
+        count: u32,
+        bytes: u64,
+        next: Step,
+        now: u64,
+    ) -> Result<(), LiveError> {
         let mut announcement = state(
             self.config.job_id,
             self.direction,
@@ -543,13 +621,7 @@ impl HostJob {
             self.status.state.manifest_revision,
         );
         announcement.entries_total = count;
-        announcement.bytes_total = prepared.bytes;
-        let next = if count == 0 {
-            Step::Settlement
-        } else {
-            Step::StartTransfer
-        };
-        self.prepared = (count != 0).then_some(prepared);
+        announcement.bytes_total = bytes;
         self.queue(announcement, next, now)
     }
 
@@ -632,7 +704,13 @@ impl HostJob {
             return Err(LiveError::Expired);
         }
         if !pending.sent {
-            if !sender.sync_ready(q).map_err(LiveError::Send)? {
+            let ready = if matches!(pending.next, Step::Transfer) {
+                sender.sync_preflight_ready(q)
+            } else {
+                sender.sync_ready(q)
+            }
+            .map_err(LiveError::Send)?;
+            if !ready {
                 return Ok(());
             }
             match sender.sync_lane().send_sync(
@@ -662,6 +740,11 @@ impl HostJob {
                 return Err(LiveError::Expired);
             }
             self.last = completed_at;
+            if matches!(pending.next, Step::Transfer) {
+                sender
+                    .release_sync_preflight(q)
+                    .map_err(LiveError::Send)?;
+            }
             self.step = pending.next;
             self.pending = None;
         }
@@ -896,3 +979,7 @@ mod tests {
         assert_eq!(retry.not_before, 0);
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "host/preflight_tests.rs"]
+mod preflight_tests;

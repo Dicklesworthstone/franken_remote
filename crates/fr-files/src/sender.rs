@@ -200,6 +200,7 @@ pub struct Sender<'a> {
     flight: flight::Flight,
     batch: Option<batch::Batch>,
     transfer: Option<Transfer>,
+    sync_preflight: Option<sync::Preflight>,
     closed: bool,
     paused: bool,
 }
@@ -343,6 +344,7 @@ impl<'a> Sender<'a> {
             flight: flight::Flight::default(),
             batch: None,
             transfer: None,
+            sync_preflight: None,
             closed: false,
             paused: false,
         })
@@ -589,6 +591,12 @@ impl<'a> Sender<'a> {
         mut authorize: impl FnMut() -> bool,
     ) -> Result<Stage, Error> {
         self.identity(q)?;
+        // Folder jobs retain the first prepared source while their unchanged
+        // Transferring announcement drains. Ordinary service would admit an
+        // offer too early or mistake that job record for an ATP flight.
+        if self.sync_preflight.is_some() {
+            return Err(Error::Busy);
+        }
         let source_scope = self.source_scope.clone();
         let clock = self.clock.clone();
         // The caller can observe a local revoke or spend time inside its own
@@ -762,6 +770,7 @@ impl<'a> Sender<'a> {
         Ok(())
     }
     fn fail(&mut self, error: Error) {
+        self.sync_preflight = None;
         if let Some(scope) = &self.source_scope {
             scope.stop();
         }

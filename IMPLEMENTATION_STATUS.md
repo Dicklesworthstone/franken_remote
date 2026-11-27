@@ -1,5 +1,30 @@
 # Implementation status
 
+## Recover source edits before a folder transfer starts (2026-11-27)
+
+Standing native upload and download jobs now verify their first selected source
+before announcing `Transferring` or admitting an ATP offer. The actual prepared
+manifest stays with its original source owner until the job-state announcement
+drains. Ordinary sender service cannot bypass that hold.
+
+A changed first source can be stopped, positively joined and rescanned within
+the existing three-attempt limit, retry deferral and original round deadline.
+Completed scans retain their cumulative file and byte charges, reserved transfer
+IDs stay spent, and neither the confirmed publication ledger nor page cursor
+advances on failure. Permission loss, expiry and uncertain worker cleanup remain
+terminal. Changes after the announcement or on later batch entries remain
+terminal as well; no offered or published work is replayed.
+
+Five new real UDP/TLS regression cases cover both directions, flat and recursive
+sources with empty directories, successful recovery and unchanged-version
+suppression, exhaustion, consent revocation, original deadline expiry and
+post-offer refusal. Independent source review completed. The pinned formatter
+ran on an earlier candidate, but the executor disconnected during dependency
+resolution before compilation. Final formatting, Clippy and tests remain
+unverified; no native/tailnet or performance qualification is claimed.
+Tracking remains open in `fr-sync-preoffer-rescan-k3w8`; see
+[folder synchronization](docs/folder-sync.md).
+
 ## One-use folder uploads in the native application (2026-11-27)
 
 The Linux/macOS `fr app` now accepts an explicit `--sync-source` together with
