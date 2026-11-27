@@ -48,6 +48,8 @@ pub enum Cleanup {
 #[derive(Default)]
 pub(super) struct Slot {
     used: bool,
+    /// Retain the original choice after pending/active owners are retired.
+    folder_job: bool,
     stopped: bool,
     pending: Option<Pending>,
     receiver: Option<HostReceiver>,

@@ -196,6 +196,7 @@ enum ClipboardMode {
     FolderSyncUpload,
     RecursiveFolderSyncUpload,
     FolderSyncUploadDuplex,
+    FolderSyncJobsDuplex,
     FileDuplex,
     Combined,
     Microphone,
@@ -295,6 +296,7 @@ async fn fixture_with_recovery(
             | ClipboardMode::FolderSyncUpload
             | ClipboardMode::RecursiveFolderSyncUpload
             | ClipboardMode::FolderSyncUploadDuplex
+            | ClipboardMode::FolderSyncJobsDuplex
             | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
             | ClipboardMode::MicrophoneCombined
@@ -313,6 +315,7 @@ async fn fixture_with_recovery(
             | ClipboardMode::FolderSyncUpload
             | ClipboardMode::RecursiveFolderSyncUpload
             | ClipboardMode::FolderSyncUploadDuplex
+            | ClipboardMode::FolderSyncJobsDuplex
             | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
             | ClipboardMode::MicrophoneCombined
@@ -330,6 +333,7 @@ async fn fixture_with_recovery(
             | ClipboardMode::FolderSync
             | ClipboardMode::RecursiveFolderSync
             | ClipboardMode::FolderSyncUploadDuplex
+            | ClipboardMode::FolderSyncJobsDuplex
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::DOWNLOAD_CAPABILITY.into(),
@@ -339,7 +343,9 @@ async fn fixture_with_recovery(
     }
     if matches!(
         clipboard,
-        ClipboardMode::FileDuplex | ClipboardMode::FolderSyncUploadDuplex
+        ClipboardMode::FileDuplex
+            | ClipboardMode::FolderSyncUploadDuplex
+            | ClipboardMode::FolderSyncJobsDuplex
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::DUPLEX_CAPABILITY.into(),
@@ -352,6 +358,7 @@ async fn fixture_with_recovery(
         ClipboardMode::FolderSyncUpload
             | ClipboardMode::RecursiveFolderSyncUpload
             | ClipboardMode::FolderSyncUploadDuplex
+            | ClipboardMode::FolderSyncJobsDuplex
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::sync_job_state::UPLOAD_CAPABILITY.into(),
@@ -365,7 +372,9 @@ async fn fixture_with_recovery(
     }
     if matches!(
         clipboard,
-        ClipboardMode::FolderSync | ClipboardMode::RecursiveFolderSync
+        ClipboardMode::FolderSync
+            | ClipboardMode::RecursiveFolderSync
+            | ClipboardMode::FolderSyncJobsDuplex
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::sync_job_state::CAPABILITY.into(),

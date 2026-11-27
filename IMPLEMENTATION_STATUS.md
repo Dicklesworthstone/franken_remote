@@ -1,5 +1,29 @@
 # Implementation status
 
+## Standing folder uploads beside ordinary downloads (2026-11-27)
+
+One explicitly accepted controller folder upload can now share its original
+controlled session with an independently selected host download. Both peers
+must select the existing complete duplex profile. Linux/macOS command setup,
+the macOS pinned-destination handoff, streaming registration and both controlled
+session owners now preserve the two choices. Upload job flags never authorize
+a standing download. A second standing job remains refused even after the first
+has retired; no bidirectional reconciliation or reconnect replay is implied.
+
+The original per-direction permissions, deadlines, budgets, workers and receipts
+remain separate. Input/renewal priority and alternating bulk service are
+unchanged. Regressions exercise real ATP files over UDP/TLS in both attachment
+orders, repeated KeepBoth publications, an independent large download,
+cancellation of either completed direction, continued sibling transfers and
+input, retained receipts, and original cleanup. Native option/owner regressions
+also cover exact upload scope, fresh receive selection and one-use choices.
+
+Source review is complete; these new regressions have not yet executed. The
+executor disconnected during dependency compilation. Existing main-branch lint
+and formatting blockers were repaired in `6ca6db9c`; hosted Rust verification
+is the remaining build/test gate. No physical desktop, live-tailnet, hardware
+or performance qualification is claimed. Tracking: `fr-sync-upload-duplex-v8c2`.
+
 ## Original folder authority inside independent source workers (2026-11-27)
 
 The ATP preparation and payload worker now retains the original folder job's

@@ -561,7 +561,7 @@ impl StreamingViewer {
             || self
                 .files
                 .as_ref()
-                .is_some_and(|lane| lane.has_send() || lane.has_receive())
+                .is_some_and(|lane| lane.has_send() || lane.has_receive_job())
         {
             return Err(Absence::Unavailable);
         }
@@ -570,6 +570,11 @@ impl StreamingViewer {
         super::super::native_control::files_lane(&session.opened.selection)?;
         let mode = selection.sync_job_mode().ok_or(Absence::Unavailable)?;
         if !mode.upload_selected(&session.opened.selection) {
+            return Err(Absence::NotNegotiated);
+        }
+        if self.files.as_ref().is_some_and(files::Lane::has_receive)
+            && !fr_wire::files::duplex_selected(&session.opened.selection)
+        {
             return Err(Absence::NotNegotiated);
         }
         let source = selection.take()?;
@@ -677,7 +682,10 @@ impl StreamingViewer {
             || self
                 .files
                 .as_ref()
-                .is_some_and(|lane| lane.has_receive() || lane.has_folder_upload())
+                .is_some_and(|lane| {
+                    lane.has_receive()
+                        || (request.sync_job_id().is_some() && lane.has_folder_upload())
+                })
         {
             return Err(Absence::Unavailable);
         }

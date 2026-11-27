@@ -73,8 +73,8 @@ impl RunOptions {
             || self.sync_job == Some(0)
             || !self.once
             || self.input_agent.is_none()
-            || !self.send.is_empty()
-            || self.send_control.is_some()
+            || (self.sync_source.is_some()
+                && (!self.send.is_empty() || self.send_control.is_some()))
             || !source.is_absolute()
             || source.as_os_str().len() > 4096
             || source

@@ -55,9 +55,6 @@ pub(super) struct Pending {
     last: u64,
 }
 impl Pending {
-    pub(super) fn is_sync_upload(&self) -> bool {
-        matches!(self.target, Target::Receive(_, Some(_)))
-    }
     pub(super) fn is_download(&self) -> bool {
         matches!(self.target, Target::Send { .. })
     }
@@ -252,17 +249,13 @@ impl ControlledHost {
         target: Target,
     ) -> Result<(), Error> {
         let download = matches!(target, Target::Send { .. });
-        // This native slice retains one original controller file-authority
-        // projection. Refuse a second direction before spending its attachment.
-        if download
-            && (self.files.upload.sync_receive.is_some()
-                || self
-                    .files
-                    .upload
-                    .pending
-                    .as_ref()
-                    .is_some_and(Pending::is_sync_upload))
-        {
+        let folder_job = matches!(
+            target,
+            Target::Receive(_, Some(_)) | Target::Send { sync: Some(_), .. }
+        );
+        // Each completed direction owns separate authority and cancellation.
+        // This slice combines one job with ordinary transfers, not two jobs.
+        if folder_job && self.files.slot(!download).folder_job {
             return Err(Error::AlreadyAttached);
         }
         let duplex = files::duplex_selected(&self.session.opened.selected);
@@ -335,6 +328,7 @@ impl ControlledHost {
             last,
         });
         slot.used = true;
+        slot.folder_job = folder_job;
         Ok(())
     }
 }

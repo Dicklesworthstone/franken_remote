@@ -42,7 +42,7 @@ impl ControlledHost {
         if !mode.upload_selected(&self.session.opened.selected) {
             return Err(Error::NotNegotiated);
         }
-        if self.files.download.used {
+        if self.files.download.folder_job {
             return Err(Error::AlreadyAttached);
         }
         let job = ReceiverJob::for_host(job_id, configuration.directory.clone())

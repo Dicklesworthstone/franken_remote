@@ -89,14 +89,54 @@ enable this direction, and an unselected peer receives no ordinary-file
 fallback. The same bounded source owner, cache, ATP sender and tracked KeepBoth
 receiver handle both directions.
 
-This first reverse native job exclusively owns its file direction and the
-client's original authority projection. Do not combine the controller source
-with ordinary sends, file pickers, drops, local file commands, or downloads.
-The host destination excludes `--files`, `--send`, `--send-control`, and
-`--sync-source`. These combinations are refused before source admission; they
-do not silently discard a selection. Directory clones share one-use job consent,
-and a consumed job cannot fall back to ordinary receiving on another session.
-This does not yet implement a bidirectional reconciliation job.
+The source exclusively owns the upload direction. Ordinary sends, upload
+pickers, drops and local upload commands cannot share it. The host destination
+excludes another `--files` directory or `--sync-source` job.
+Directory clones share one-use job consent, and a consumed job cannot fall back
+to ordinary receiving on another session.
+
+### Upload a folder while receiving selected host files
+
+A standing controller upload can share its original controlled connection with
+an independently selected ordinary host download. On the host, combine the
+receiving job with a finite local selection:
+
+```sh
+frd run --once --input-agent /absolute/fr-input-agent \
+  --sync-destination /private/host-destination --sync-job 41 \
+  --files-conflict keep-both --send /private/host-report.pdf
+```
+
+On the controller, explicitly select both the source and a download destination:
+
+```sh
+fr connect NODE_ID --control --experimental-native --display only \
+  --sync-source /private/controller-source --sync-job 41 \
+  --receive /private/downloads --receive-conflict keep-both
+```
+
+The existing `--choose-receive-directory` option may replace the explicit
+download path. On the host, `--send-control NAME` may replace the initial
+`--send` selection to accept subsequent explicit local download commands.
+Each choice remains local and is consumed by the original connection.
+
+With `--sync-source`, `--sync-job` or `--sync-tree-job` applies only to
+the upload. It never opts the download into a standing job. The complete
+`file-duplex` profile must be selected for both directions; an older or
+unselected peer cannot silently create a second lane. Flat and recursive
+upload scope retain their original negotiation and limits.
+
+The two directions keep independent permissions, original deadlines, byte
+budgets, source/disk workers, cancellation and publication receipts. Once both
+attachments have completed, settling or cancelling one does not renew, cancel
+or replay the other. An uncertain attachment or unsettled native transport I/O
+still fences the parent connection. Control and renewal continue through the
+existing priority and alternating bulk-service rules. The macOS source handoff retains the originally pinned download
+destination, including a native chooser result.
+
+Two standing jobs on one connection remain refused, including after either
+job has ended. This combination does not implement bidirectional folder
+reconciliation or automatic reconnect resumption.
 
 ### Receive nested directories
 

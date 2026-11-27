@@ -28,7 +28,7 @@ pub(super) fn accept(
     if !control || conflicting_selection {
         return Err(Failure::new(
             "files_sync_selection_conflict",
-            "A standing upload requires --control and its own --sync-source. Omit ordinary sends, file pickers, drops, commands and downloads for this original job.",
+            "A standing upload requires --control and its own --sync-source. Omit ordinary sends, upload pickers, drops and commands. An independently selected ordinary download may share the connection.",
             2,
         ));
     }
@@ -120,6 +120,59 @@ mod tests {
     }
 
     #[test]
+    fn reverse_job_keeps_an_independent_download_choice_and_its_limits() {
+        for job_flag in ["--sync-job", "--sync-tree-job"] {
+            let Command::Connect(connection) = command(&format!(
+                "--control --sync-source /private/source {job_flag} 41 \
+                 --receive /private/download --receive-conflict keep-both \
+                 --receive-max-file-bytes 1024 --receive-max-session-bytes 4096",
+            ))
+            .unwrap()
+            .command
+            else {
+                panic!("connection");
+            };
+            assert!(connection.validate_folder_source().is_ok());
+            assert!(connection.uploads());
+            let source = connection.upload.sync_source.as_ref().unwrap();
+            assert_eq!(source.job_id, 41);
+            assert_eq!(
+                source.mode,
+                super::JobMode::from_recursive(job_flag == "--sync-tree-job")
+            );
+            let receive = connection.receive.as_ref().unwrap();
+            assert_eq!(receive.directory, Path::new("/private/download"));
+            assert_eq!(receive.max_file_bytes, Some(1024));
+            assert_eq!(receive.max_session_bytes, Some(4096));
+            assert!(receive.keep_both);
+            assert_eq!(
+                receive.sync_job, None,
+                "upload consent cannot authorize a download job"
+            );
+            assert!(!connection.choose_receive_directory);
+        }
+    }
+
+    #[test]
+    fn reverse_job_allows_a_fresh_ordinary_download_picker() {
+        let Command::Connect(connection) = command(
+            "--control --sync-source /private/source --sync-tree-job 41 --choose-receive-directory",
+        )
+        .unwrap()
+        .command
+        else {
+            panic!("connection");
+        };
+        assert!(connection.validate_folder_source().is_ok());
+        assert!(connection.uploads() && connection.choose_receive_directory);
+        assert!(connection.receive.is_none());
+        assert_eq!(connection.upload.sync_source.as_ref().unwrap().job_id, 41);
+        // With no source, a job is a receiving job and still needs an explicit
+        // keep-both destination. A chooser alone cannot acquire that scope.
+        assert!(command("--control --sync-job 41 --choose-receive-directory").is_err());
+    }
+
+    #[test]
     fn programmatic_native_options_cannot_discard_another_selection() {
         for conflict in 0..7 {
             let Command::Connect(mut connection) =
@@ -136,12 +189,23 @@ mod tests {
                 2 => connection.upload.choose_files = true,
                 3 => connection.upload.file_drop = true,
                 4 => connection.upload.file_commands = true,
-                5 => connection.choose_receive_directory = true,
-                _ => {
+                5 => {
                     let Command::Connect(other) =
                         command("--control --receive /private/destination")
                             .unwrap()
                             .command
+                    else {
+                        panic!("connection");
+                    };
+                    connection.receive = other.receive;
+                    connection.choose_receive_directory = true;
+                }
+                _ => {
+                    let Command::Connect(other) = command(
+                        "--control --receive /private/destination --receive-conflict keep-both --sync-job 42",
+                    )
+                    .unwrap()
+                    .command
                     else {
                         panic!("connection");
                     };
@@ -164,8 +228,7 @@ mod tests {
             "--control --sync-source /private/source --sync-job 41 --choose-files",
             "--control --sync-source /private/source --sync-job 41 --file-drop",
             "--control --sync-source /private/source --sync-job 41 --file-commands",
-            "--control --sync-source /private/source --sync-job 41 --receive /private/destination",
-            "--control --sync-source /private/source --sync-job 41 --choose-receive-directory",
+            "--control --sync-source /private/source --sync-job 41 --receive /private/destination --choose-receive-directory",
         ] {
             assert!(command(extra).is_err(), "{extra}");
         }

@@ -21,6 +21,8 @@ pub(in crate::session_startup) struct Lane {
     send: Option<Box<Sending>>,
     folder_upload: Option<Box<upload::Lane>>,
     receive: Option<Box<download::Lane>>,
+    /// The original receive choice survives handoff and cancellation.
+    receive_job: bool,
 }
 impl Lane {
     pub(in crate::session_startup) fn has_send(&self) -> bool {
@@ -32,12 +34,15 @@ impl Lane {
     pub(in crate::session_startup) fn has_receive(&self) -> bool {
         self.receive.is_some()
     }
+    pub(in crate::session_startup) fn has_receive_job(&self) -> bool {
+        self.receive_job
+    }
     pub(in crate::session_startup) fn add_folder_upload(
         &mut self,
         source: fr_files::sync::SourceConfig,
         control: SendControl,
     ) -> Result<(), Absence> {
-        if self.has_send() || self.has_receive() {
+        if self.has_send() || self.receive_job {
             return Err(Absence::Unavailable);
         }
         self.folder_upload = Some(Box::new(upload::Lane::new(source, control)));
@@ -81,10 +86,12 @@ impl Lane {
         request: crate::native_files::ReceiveRequest,
         control: crate::native_files::ReceiveControl,
     ) -> Result<(), Absence> {
-        if self.receive.is_some() || self.has_folder_upload() {
+        let folder_job = request.sync_job_id().is_some();
+        if self.receive.is_some() || (folder_job && self.has_folder_upload()) {
             return Err(Absence::Unavailable);
         }
         self.receive = Some(Box::new(download::Lane::new(request, control)));
+        self.receive_job = folder_job;
         Ok(())
     }
     pub(in crate::session_startup) fn viewer(&mut self, viewer: &mut ControlledViewer) {

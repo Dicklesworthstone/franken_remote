@@ -382,32 +382,33 @@ fn ordinary_upload_capability_cannot_enable_a_standing_job() {
 }
 
 #[test]
-fn native_duplex_refuses_competing_job_directions_before_spending_source_or_attachment() {
+fn native_duplex_refuses_two_standing_jobs_before_spending_source_or_attachment() {
     for download_first in [false, true] {
         run(|c, h| async move {
             let mut state =
-                Box::pin(setup_upload(&c, &h, ClipboardMode::FolderSyncUploadDuplex)).await;
+                Box::pin(setup_upload(&c, &h, ClipboardMode::FolderSyncJobsDuplex)).await;
             let source = Disk::new();
             let dest = Disk::new();
             fs::write(source.0.join("selected"), b"explicit local source").unwrap();
             let mut selected = Some(SourceConfig::open(&source.0, 41).unwrap());
-            let mut batch = fr_files::sender::batch::Selection::new();
-            batch
-                .push(File::open(source.0.join("selected")).unwrap(), "selected")
-                .unwrap();
+            let mut download_request = request(&state);
+            download_request.binding.parent.id = 15;
+            download_request.ticket = Ticket(815);
             if download_first {
                 state
                     .viewer
-                    .expect_file_download(dest.config(), Duration::from_secs(2))
+                    .expect_file_download_with_sync(
+                        destination(&dest),
+                        crate::native_files::ReceiveControl::new(),
+                        Some((42, fr_wire::sync_job_state::JobMode::Flat)),
+                        Duration::from_secs(2),
+                    )
                     .unwrap();
                 state
                     .host
-                    .offer_file_download(
-                        request(&state),
-                        batch,
-                        Permission::new(true),
-                        fr_files::sender::Policy::default(),
-                        Duration::from_secs(5),
+                    .offer_folder_sync(
+                        download_request,
+                        fr_files::sync::HostConfig::open(&source.0, 42).unwrap(),
                     )
                     .unwrap();
                 assert_eq!(
@@ -444,18 +445,18 @@ fn native_duplex_refuses_competing_job_directions_before_spending_source_or_atta
                     .unwrap();
                 assert!(selected.is_none());
                 assert_eq!(
-                    state
-                        .viewer
-                        .expect_file_download(dest.config(), Duration::from_secs(2)),
+                    state.viewer.expect_file_download_with_sync(
+                        destination(&dest),
+                        crate::native_files::ReceiveControl::new(),
+                        Some((42, fr_wire::sync_job_state::JobMode::Flat)),
+                        Duration::from_secs(2),
+                    ),
                     Err(SendError::Busy)
                 );
                 assert_eq!(
-                    state.host.offer_file_download(
-                        request(&state),
-                        batch,
-                        Permission::new(true),
-                        fr_files::sender::Policy::default(),
-                        Duration::from_secs(5),
+                    state.host.offer_folder_sync(
+                        download_request,
+                        fr_files::sync::HostConfig::open(&source.0, 42).unwrap(),
                     ),
                     Err(crate::session_startup::FileReceiveError::AlreadyAttached)
                 );
@@ -563,3 +564,5 @@ fn cancelling_before_or_during_attachment_never_starts_a_source_or_ends_input() 
         });
     }
 }
+
+mod duplex;

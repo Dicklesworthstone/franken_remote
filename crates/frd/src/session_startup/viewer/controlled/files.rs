@@ -26,6 +26,8 @@ use std::{fs::File, time::Duration};
 #[derive(Default)]
 pub(super) struct Slot {
     used: bool,
+    /// Original selection kind; retirement never permits a second standing job.
+    folder_job: bool,
     pending: Option<Pending>,
     sender: Option<Sender<'static>>,
     sync_send: Option<Box<fr_files::sync::SourceJob>>,

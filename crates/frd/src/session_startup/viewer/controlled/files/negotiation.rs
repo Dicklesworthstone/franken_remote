@@ -67,9 +67,6 @@ fn attachment_kind(bytes: &[u8]) -> bool {
         .is_some_and(|kind| (0x0018..=0x001c).contains(&u16::from_be_bytes([kind[0], kind[1]])))
 }
 impl Pending {
-    pub(super) fn is_sync_upload(&self) -> bool {
-        matches!(self.destination, Destination::Sync(_, _))
-    }
     pub(super) fn is_download(&self) -> bool {
         matches!(self.destination, Destination::Receive(_, _, _))
     }
@@ -450,15 +447,11 @@ impl ControlledViewer {
         timeout: Duration,
     ) -> Result<(), Error> {
         let download = matches!(destination, Destination::Receive(_, _, _));
-        if download
-            && (self.files.upload.sync_send.is_some()
-                || self
-                    .files
-                    .upload
-                    .pending
-                    .as_ref()
-                    .is_some_and(Pending::is_sync_upload))
-        {
+        let folder_job = matches!(
+            destination,
+            Destination::Sync(_, _) | Destination::Receive(_, _, Some(_))
+        );
+        if folder_job && self.files.slot(!download).folder_job {
             return Err(Error::Busy);
         }
         let duplex = fr_wire::files::duplex_selected(&self.session.opened.selection);
@@ -500,6 +493,7 @@ impl ControlledViewer {
             channel: None,
         });
         slot.used = true;
+        slot.folder_job = folder_job;
         Ok(())
     }
     pub fn file_send_negotiating(&self) -> bool {

@@ -232,13 +232,16 @@ impl Connection {
                 || self.upload.choose_files
                 || self.upload.file_drop
                 || self.upload.file_commands
-                || self.receive.is_some()
-                || self.choose_receive_directory
+                || self
+                    .receive
+                    .as_ref()
+                    .is_some_and(|receive| receive.sync_job.is_some())
+                || (self.receive.is_some() && self.choose_receive_directory)
                 || self.pick.is_some())
         {
             return Err(Failure::new(
                 "files_sync_selection_conflict",
-                "A standing folder upload requires its original controlling connection without another file selection.",
+                "A standing folder upload requires its original controlling connection and exclusive upload selection. An independently selected ordinary download may share the connection.",
                 2,
             ));
         }
@@ -1032,7 +1035,7 @@ fn parse_command(
         && (receive.is_some()
             || receive_max_file_bytes.is_some()
             || receive_max_session_bytes.is_some()
-            || sync_job.is_some()
+            || (sync_job.is_some() && sync_source.is_none())
             || receive_keep_both.is_some())
     {
         return Err(usage());
@@ -1047,12 +1050,7 @@ fn parse_command(
         sync_source,
         sync_job,
         control,
-        !send.is_empty()
-            || choose_files
-            || file_drop
-            || file_commands
-            || receive.is_some()
-            || choose_receive_directory,
+        !send.is_empty() || choose_files || file_drop || file_commands,
     )?;
     let receive = receive::accept_job(
         receive,

@@ -314,8 +314,6 @@ fn reverse_folder_destination_requires_explicit_keep_both_and_one_controlled_sha
     for extra in [
         vec!["--files", "/local/another"],
         vec!["--sync-source", "/local/source"],
-        vec!["--send", "/local/file"],
-        vec!["--send-control", "desk"],
     ] {
         let mut args = vec![
             "--once",
@@ -341,6 +339,51 @@ fn reverse_folder_destination_requires_explicit_keep_both_and_one_controlled_sha
     invalid.once = true;
     invalid.input_agent = None;
     assert!(invalid.validate_file_send().is_err());
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reverse_folder_destination_keeps_explicit_independent_download_selection() {
+    for mode in ["--sync-job", "--sync-tree-job"] {
+        for download in [["--send", "/local/selected"], ["--send-control", "desk"]] {
+            let mut args = vec![
+                "--once",
+                "--input-agent",
+                "/local/agent",
+                "--sync-destination",
+                "/local/destination",
+                mode,
+                "41",
+                "--files-conflict",
+                "keep-both",
+            ];
+            args.extend_from_slice(&download);
+            let mut options = parse(&args).unwrap();
+            assert_eq!(
+                options.sync_destination,
+                Some(PathBuf::from("/local/destination"))
+            );
+            assert_eq!(options.sync_job, Some(41));
+            assert!(options.sync_source.is_none() && options.files.is_none());
+            assert_eq!(
+                options.sync_job_mode,
+                fr_wire::sync_job_state::JobMode::from_recursive(mode == "--sync-tree-job")
+            );
+            if download[0] == "--send" {
+                assert_eq!(options.send, [PathBuf::from("/local/selected")]);
+                assert!(options.send_control.is_none());
+            } else {
+                assert_eq!(options.send_control.as_deref(), Some("desk"));
+                assert!(options.send.is_empty());
+            }
+            assert!(options.validate_file_send().is_ok());
+            options.once = false;
+            assert!(options.validate_file_send().is_err());
+            options.once = true;
+            options.input_agent = None;
+            assert!(options.validate_file_send().is_err());
+        }
+    }
 }
 
 #[test]

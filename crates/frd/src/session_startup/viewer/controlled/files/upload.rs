@@ -27,9 +27,9 @@ impl ControlledViewer {
         if !mode.upload_selected(&self.session.opened.selection) {
             return Err(Error::WrongRole);
         }
-        // One controller grant currently has one file-authority projection.
-        // Reject a competing download before consuming either local choice.
-        if self.files.download.used {
+        // An ordinary download keeps its independent receive authority. Two
+        // standing jobs still require a separate reconciliation contract.
+        if self.files.download.folder_job {
             return Err(Error::Busy);
         }
         self.expect_file_drop(Permission::new(true), Policy::default(), timeout)?;
@@ -38,6 +38,7 @@ impl ControlledViewer {
         let pending = self.files.upload.pending.as_mut().ok_or(Error::Closed)?;
         pending.destination =
             super::negotiation::Destination::Sync(source.take().ok_or(Error::Closed)?, control);
+        self.files.upload.folder_job = true;
         Ok(())
     }
     pub fn file_upload_sync_status(&self) -> Option<JobStatus> {

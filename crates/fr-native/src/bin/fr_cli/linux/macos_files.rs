@@ -66,26 +66,26 @@ pub(super) fn select(
             2,
         ));
     }
-    if let Some(source) = &connection.upload.sync_source {
-        let selection = upload::folder_source(source)?;
-        return Files::from_requests(None, None)
-            .map_err(upload::selection_failure)?
-            .with_folder_upload(selection)
-            .map_err(|absence| {
-                Failure::new(
-                    upload::absence_code(absence),
-                    "The original folder source cannot share another file selection. Start a new controlling connection for this job.",
-                    2,
-                )
-            });
-    }
-    let upload = upload::select(chosen.unwrap_or(&connection.upload.paths))?;
     let download = download
         .map(|directory| match &connection.receive {
             Some(options) => options.request(&directory),
             None => Ok(frd::native_files::ReceiveRequest::new(&directory)),
         })
         .transpose()?;
+    if let Some(source) = &connection.upload.sync_source {
+        let selection = upload::folder_source(source)?;
+        return Files::from_requests(None, download)
+            .map_err(upload::selection_failure)?
+            .with_folder_upload(selection)
+            .map_err(|absence| {
+                Failure::new(
+                    upload::absence_code(absence),
+                    "The original folder source conflicts with another upload or folder job. Start a new controlling connection for this job.",
+                    2,
+                )
+            });
+    }
+    let upload = upload::select(chosen.unwrap_or(&connection.upload.paths))?;
     let files = Files::from_requests(upload, download).map_err(upload::selection_failure)?;
     let files = if connection.upload.file_commands {
         files.with_commands()
@@ -243,6 +243,60 @@ mod tests {
                 .code,
             "receive_directory_choice_invalid"
         );
+    }
+
+    #[test]
+    fn selecting_a_folder_source_preserves_the_pinned_ordinary_download() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            sync::atomic::{AtomicU64, Ordering},
+        };
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "fr-macos-folder-download-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        for path in [&source, &destination] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for chooser in [false, true] {
+            let receiving = if chooser {
+                "--choose-receive-directory".to_owned()
+            } else {
+                format!("--receive {}", destination.display())
+            };
+            let selected = connection(&format!(
+                "--sync-source {} --sync-tree-job 41 {receiving}",
+                source.display()
+            ));
+            let pinned = receive(&selected, chooser.then_some(destination.as_path()))
+                .unwrap()
+                .unwrap();
+            let files = select(&selected, None, Some(pinned)).unwrap();
+            assert!(files.has_upload() && files.has_download());
+            assert_eq!(files.upload_status(), Some(Status::NotStarted));
+            assert_eq!(files.download_status(), Some(Status::NotStarted));
+            assert!(
+                files
+                    .offer(false)
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.name == fr_wire::files::DUPLEX_CAPABILITY)
+            );
+            assert!(files.upload_control().is_none() && files.download_control().is_none());
+            assert!(files.upload_folder_job_status().is_none());
+            assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+        }
+        fs::remove_dir(source).unwrap();
+        fs::remove_dir(destination).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 
     #[test]

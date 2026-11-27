@@ -214,12 +214,18 @@ impl Files {
         })
     }
 
-    /// Select one standing reverse job before connecting. This slice has one
-    /// file-authority projection, so a simultaneous download or ordinary upload
-    /// refuses before either local source is consumed.
+    /// Select one standing reverse job before connecting. An ordinary download
+    /// retains its separate destination, authority and receipts. Another upload
+    /// or standing download refuses before either local source is consumed.
     pub fn with_folder_upload(mut self, selection: UploadSelection) -> Result<Self, Absence> {
         if self.upload.is_some()
-            || self.download.is_some()
+            || self.download.as_ref().is_some_and(|download| {
+                download.outcome.is_some()
+                    || download
+                        .pending
+                        .as_ref()
+                        .is_none_or(|request| request.sync_job_id().is_some())
+            })
             || self.commands.is_some()
             || self.selections.is_some()
             || !selection.is_available()
@@ -621,12 +627,24 @@ mod tests {
     }
 
     #[test]
-    fn reverse_job_consent_is_explicit_single_direction_and_never_reads_source_contents() {
+    fn reverse_job_consent_is_explicit_and_never_replaces_an_upload_or_download_job() {
         let fixture = Fixture::new();
         let selection = UploadSelection::folder_job(&fixture.0, 41).unwrap();
         for files in [
             Files::new(Some(fixture.upload()), None).unwrap(),
-            Files::new(None, Some(fixture.download())).unwrap(),
+            Files::from_requests(
+                None,
+                Some(
+                    ReceiveRequest::new(
+                        &fixture
+                            .download()
+                            .with_conflict_policy(frd::native_files::ConflictPolicy::KeepBoth),
+                    )
+                    .with_sync_job(42)
+                    .unwrap(),
+                ),
+            )
+            .unwrap(),
             Files::default().with_commands(),
             Files::default().with_file_drop(),
         ] {
@@ -658,6 +676,68 @@ mod tests {
             fs::read(fixture.0.join("selected.txt")).unwrap(),
             b"selected"
         );
+    }
+
+    #[test]
+    fn reverse_job_and_ordinary_download_keep_independent_consent_and_cancellation() {
+        let source = Fixture::new();
+        let destination = Fixture::new();
+        for cancel_upload in [false, true] {
+            let selection = UploadSelection::folder_job(&source.0, 41).unwrap();
+            let mut files = Files::new(None, Some(destination.download()))
+                .unwrap()
+                .with_folder_upload(selection.clone())
+                .unwrap();
+            assert!(files.has_upload() && files.has_download());
+            assert!(files.folder_upload_available());
+            assert!(!files.folder_sync_available());
+            assert_eq!(files.download_status(), Some(Status::NotStarted));
+            for clipboard in [false, true] {
+                let offer = fr_client::native::with_folder_sync_upload(files.offer(clipboard))
+                    .unwrap();
+                assert!(has(&offer, fr_wire::files::DUPLEX_CAPABILITY));
+                assert!(has(&offer, fr_wire::sync_job_state::UPLOAD_CAPABILITY));
+                assert!(!has(&offer, fr_wire::sync_job_state::CAPABILITY));
+                assert!(offer.capabilities.len() <= 24);
+            }
+            if cancel_upload {
+                files.cancel_upload();
+                assert!(!files.folder_upload_available());
+                assert_eq!(files.download_status(), Some(Status::NotStarted));
+                assert!(has(&files.offer(false), fr_wire::files::DOWNLOAD_CAPABILITY));
+            } else {
+                files.cancel_download();
+                assert!(files.folder_upload_available());
+                assert_eq!(files.upload_status(), Some(Status::NotStarted));
+                assert!(!has(&files.offer(false), fr_wire::files::DOWNLOAD_CAPABILITY));
+                assert!(has(&files.offer(false), fr_wire::files::CHANNEL_SCOPE_CAPABILITY));
+            }
+            assert!(!has(&files.offer(false), fr_wire::files::DUPLEX_CAPABILITY));
+            assert!(selection.is_available(), "configuration has not consumed the source");
+            assert!(files.upload_folder_job_status().is_none());
+        }
+    }
+
+    #[test]
+    fn a_spent_or_cancelled_download_cannot_acquire_a_new_folder_source() {
+        let fixture = Fixture::new();
+        for cancelled in [false, true] {
+            let selection = UploadSelection::folder_job(&fixture.0, 41).unwrap();
+            let mut files = Files::new(None, Some(fixture.download())).unwrap();
+            if cancelled {
+                files.cancel_download();
+            } else {
+                // The actual one-use ownership move used by configure. This
+                // checks local consent only, not a simulated file publication.
+                let request = files.download.as_mut().unwrap().pending.take().unwrap();
+                drop(request);
+            }
+            assert!(matches!(
+                files.with_folder_upload(selection.clone()),
+                Err(Absence::Unavailable)
+            ));
+            assert!(selection.is_available());
+        }
     }
 
     #[test]
