@@ -8,8 +8,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// The source job's original consent and control lifetime. Cloning this handoff
-/// cannot renew authority, approve another source, or reopen a stopped job.
+/// An original sender or source job's consent and control lifetime. Cloning
+/// this handoff cannot renew authority or reopen a stopped owner.
 #[derive(Clone)]
 pub(crate) struct SourceScope {
     authority: Authority,
@@ -17,6 +17,10 @@ pub(crate) struct SourceScope {
     stopped: Arc<AtomicBool>,
 }
 impl SourceScope {
+    pub(super) fn for_sender(authority: Authority, permission: Permission) -> Self {
+        Self::new(authority, permission, Arc::new(AtomicBool::new(false)))
+    }
+
     pub(crate) fn new(
         authority: Authority,
         permission: Permission,
@@ -42,14 +46,17 @@ impl SourceScope {
         Ok(())
     }
 
-    fn check_lane(&self, lane: &FilesChannel) -> Result<(), Error> {
+    pub(super) fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+    }
+
+    pub(super) fn check_lane(&self, lane: &FilesChannel) -> Result<(), Error> {
         let context = lane.outgoing();
         let (direction, role) = match self.authority.direction() {
             Direction::ToHost => (Direction::ToController, Role::Host),
             Direction::ToController => (Direction::ToHost, Role::Controller),
         };
-        if !lane.sync_selected()
-            || context.direction != direction
+        if context.direction != direction
             || context.sender != role
             || self.authority.binding().session != context.session
             || self.authority.binding().lease != context.lease
@@ -65,7 +72,7 @@ impl SourceScope {
 impl Sender<'_> {
     /// Retain the same source authority through independent hashing and every
     /// later payload read, including while the parent reactor is not serviced.
-    /// Ordinary local selections keep their existing authorization contract.
+    /// A separately bound sender scope remains required by its disk worker too.
     pub(crate) fn begin_sync_batch_before(
         &mut self,
         q: &QuicRecords,
@@ -74,6 +81,9 @@ impl Sender<'_> {
         scope: SourceScope,
     ) -> Result<(), Error> {
         self.identity(q)?;
+        if !self.lane.sync_selected() {
+            return Err(Error::WrongRole);
+        }
         scope.check_lane(&self.lane)?;
         scope.check(self.now())?;
         self.begin_scoped_batch_before(q, selection, deadline, Some(scope))

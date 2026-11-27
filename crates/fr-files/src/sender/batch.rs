@@ -242,6 +242,9 @@ impl Sender<'_> {
         if deadline - now > 3_600_000_000 {
             return Err(Error::Limits);
         }
+        if let Some(scope) = &self.source_scope {
+            scope.check(now)?;
+        }
         self.batch = Some(Batch {
             selection,
             source_scope,

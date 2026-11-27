@@ -157,8 +157,15 @@ impl Pending {
                 policy,
                 sync,
             } => {
-                let mut sender =
-                    Sender::owning(self.cx.clone(), q, lane, policy).map_err(Error::Sender)?;
+                let mut sender = Sender::owning_authorized(
+                    self.cx.clone(),
+                    q,
+                    lane,
+                    policy,
+                    self.authority.clone(),
+                    permission.clone(),
+                )
+                .map_err(Error::Sender)?;
                 if let Some((selection, lifetime)) = batch
                     && let Err(error) = sender.begin_batch(q, selection, lifetime)
                 {

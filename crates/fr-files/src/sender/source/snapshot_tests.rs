@@ -250,6 +250,7 @@ fn an_expected_version_cannot_hash_growth_under_the_ordinary_larger_limit() {
                     Policy::default(),
                     cx.timer_driver().unwrap().now().as_nanos() / 1000 + 2_000_000,
                     None,
+                    None,
                 )
                 .unwrap();
                 assert!(matches!(event(&mut source), Err(Error::SourceChanged)));

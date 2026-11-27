@@ -19,6 +19,7 @@ mod sync;
 use crate::{
     atp,
     receive::{MAX_CHUNK_BYTES, Publication},
+    session::{Authority, Permission},
 };
 use asupersync::{
     atp::safety::validate_portable_path_component,
@@ -194,6 +195,7 @@ pub struct Sender<'a> {
     cx: Cx,
     clock: TimerDriverHandle,
     policy: Policy,
+    source_scope: Option<SourceScope>,
     next: u64,
     flight: flight::Flight,
     batch: Option<batch::Batch>,
@@ -230,13 +232,36 @@ impl Sender<'static> {
     /// No new attachment, authority, transfer identity or runtime is created.
     /// Call `cancel` before closing the parent and keep this owner until source
     /// cleanup/results are collected. Abandonment conservatively fences the lane.
+    /// This low-level entry point relies on the caller to stop source work;
+    /// native sessions use [`Self::owning_authorized`] for independent checks.
     pub fn owning(
         cx: Cx,
         q: &QuicRecords,
         lane: FilesChannel,
         policy: Policy,
     ) -> Result<Self, Error> {
-        Self::with_channel(cx, q, ChannelOwner::Owned(Box::new(lane)), policy)
+        Self::with_channel(cx, q, ChannelOwner::Owned(Box::new(lane)), policy, None)
+    }
+
+    /// Bind every later local selection to this original control owner and
+    /// file permission before any disk worker starts. Hashing and payload reads
+    /// keep checking that immutable scope even when the parent is not serviced.
+    /// Neither a later batch nor a successful publication can replace it.
+    pub fn owning_authorized(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: FilesChannel,
+        policy: Policy,
+        authority: Authority,
+        permission: Permission,
+    ) -> Result<Self, Error> {
+        Self::with_channel(
+            cx,
+            q,
+            ChannelOwner::Owned(Box::new(lane)),
+            policy,
+            Some(SourceScope::for_sender(authority, permission)),
+        )
     }
 }
 impl std::fmt::Debug for Sender<'_> {
@@ -248,19 +273,41 @@ impl std::fmt::Debug for Sender<'_> {
     }
 }
 impl<'a> Sender<'a> {
+    /// Low-level caller-supervised source lifetime. Native controlled owners
+    /// use [`Self::new_authorized`] or [`Self::owning_authorized`] instead.
     pub fn new(
         cx: Cx,
         q: &QuicRecords,
         lane: &'a mut FilesChannel,
         policy: Policy,
     ) -> Result<Self, Error> {
-        Self::with_channel(cx, q, ChannelOwner::Borrowed(lane), policy)
+        Self::with_channel(cx, q, ChannelOwner::Borrowed(lane), policy, None)
+    }
+
+    /// Borrow an original file lane while retaining independent source
+    /// authority for all its single-file, directory and batch selections.
+    pub fn new_authorized(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: &'a mut FilesChannel,
+        policy: Policy,
+        authority: Authority,
+        permission: Permission,
+    ) -> Result<Self, Error> {
+        Self::with_channel(
+            cx,
+            q,
+            ChannelOwner::Borrowed(lane),
+            policy,
+            Some(SourceScope::for_sender(authority, permission)),
+        )
     }
     fn with_channel(
         cx: Cx,
         q: &QuicRecords,
         lane: ChannelOwner<'a>,
         policy: Policy,
+        source_scope: Option<SourceScope>,
     ) -> Result<Self, Error> {
         lane.check(q).map_err(Error::Transport)?;
         if lane.retained_send_records(q).map_err(Error::Transport)? != 0 {
@@ -281,12 +328,17 @@ impl<'a> Sender<'a> {
         }
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let clock = cx.timer_driver().ok_or(Error::Clock)?;
+        if let Some(scope) = &source_scope {
+            scope.check_lane(&lane)?;
+            scope.check(clock.now().as_nanos() / 1000)?;
+        }
         Ok(Self {
             lane,
             connection: q.binding(),
             cx,
             clock,
             policy,
+            source_scope,
             next: 1,
             flight: flight::Flight::default(),
             batch: None,
@@ -425,7 +477,10 @@ impl<'a> Sender<'a> {
         if let Some(scope) = &scope {
             scope.check(now)?;
         }
-        let source = if expected_bytes.is_some() || scope.is_some() {
+        if let Some(scope) = &self.source_scope {
+            scope.check(now)?;
+        }
+        let source = if expected_bytes.is_some() || scope.is_some() || self.source_scope.is_some() {
             Source::spawn_selected(
                 self.cx.clone(),
                 source::SelectedSource {
@@ -437,6 +492,7 @@ impl<'a> Sender<'a> {
                 self.policy,
                 deadline,
                 scope,
+                self.source_scope.clone(),
             )?
         } else if directory {
             Source::spawn_directory(self.cx.clone(), file, name.into(), self.policy, deadline)?
@@ -533,10 +589,21 @@ impl<'a> Sender<'a> {
         mut authorize: impl FnMut() -> bool,
     ) -> Result<Stage, Error> {
         self.identity(q)?;
+        let source_scope = self.source_scope.clone();
+        let clock = self.clock.clone();
+        // The caller can observe a local revoke or spend time inside its own
+        // check. Recheck our immutable source owner AFTER that callback, at a
+        // fresh sample, for every transport admission as well as the turn.
+        let mut authorized = || {
+            authorize()
+                && source_scope
+                    .as_ref()
+                    .is_none_or(|scope| scope.check(clock.now().as_nanos() / 1000).is_ok())
+        };
         if self.batch.is_some() {
-            return self.service_batch(q, &mut authorize);
+            return self.service_batch(q, &mut authorized);
         }
-        self.service_one(q, &mut authorize)
+        self.service_one(q, &mut authorized)
     }
     fn service_one(
         &mut self,
@@ -563,6 +630,9 @@ impl<'a> Sender<'a> {
     ) -> Result<(), Error> {
         self.cx.checkpoint().map_err(|_| Error::Cancelled)?;
         self.lane.check(q).map_err(Error::Transport)?;
+        if let Some(scope) = &self.source_scope {
+            scope.check(self.now())?;
+        }
         // A paused turn may have neither inbound traffic nor an outbound send.
         // It must still observe revocation instead of retaining a dead source.
         if !authorize() {
@@ -692,6 +762,9 @@ impl<'a> Sender<'a> {
         Ok(())
     }
     fn fail(&mut self, error: Error) {
+        if let Some(scope) = &self.source_scope {
+            scope.stop();
+        }
         if let Some(batch) = &mut self.batch {
             batch.stop(batch::Stop::Local(error));
         }
@@ -737,6 +810,9 @@ impl<'a> Sender<'a> {
 }
 impl Drop for Sender<'_> {
     fn drop(&mut self) {
+        if let Some(scope) = &self.source_scope {
+            scope.stop();
+        }
         if let Some(t) = &self.transfer {
             t.source.stop();
         }

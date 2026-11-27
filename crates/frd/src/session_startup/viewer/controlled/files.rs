@@ -5,6 +5,7 @@ mod slots;
 mod upload;
 use super::{ControlledViewer, permitted};
 use asupersync::cx::Cx;
+use fr_client::input::ClientInstant;
 use fr_files::{
     sender::{
         Error, Policy, Progress, Receipt, Sender, Stage,
@@ -319,7 +320,24 @@ impl ControlledViewer {
         // The completed attachment has spent this single-use channel identity,
         // even if local sender configuration is subsequently refused.
         self.files.upload.used = true;
-        let sender = Sender::owning(self.session.cx.clone(), q, lane, policy)?;
+        let now = crate::session_startup::now(&self.session.cx).map_err(|_| Error::Clock)?;
+        let authority = self
+            .input
+            .file_send_authority(
+                self.session.opened.binding,
+                expected.parent.id,
+                self.input.binding().lease,
+                ClientInstant(now),
+            )
+            .map_err(|_| Error::Cancelled)?;
+        let sender = Sender::owning_authorized(
+            self.session.cx.clone(),
+            q,
+            lane,
+            policy,
+            fr_files::session::Authority::from_controller(authority),
+            permission.clone(),
+        )?;
         self.files.upload.sender = Some(sender);
         self.files.upload.permission = Some(permission);
         Ok(())

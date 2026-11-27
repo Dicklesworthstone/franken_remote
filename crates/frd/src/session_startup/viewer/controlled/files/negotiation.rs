@@ -299,7 +299,17 @@ impl Pending {
             FilesChannel::new(q, channel, self.lease, handle).map_err(Error::Transport)?;
         match self.destination {
             Destination::Send(policy) => {
-                let sender = Sender::owning(self.cx, q, lane, policy)?;
+                let authority = input
+                    .file_send_authority(self.parent, id, self.lease, ClientInstant(now))
+                    .map_err(|_| Error::Cancelled)?;
+                let sender = Sender::owning_authorized(
+                    self.cx,
+                    q,
+                    lane,
+                    policy,
+                    fr_files::session::Authority::from_controller(authority),
+                    self.permission.clone(),
+                )?;
                 Ok(Attached::Sender(Box::new(sender), self.permission, None))
             }
             Destination::Sync(config, control) => {
@@ -310,14 +320,22 @@ impl Pending {
                     return Ok(Attached::Cancelled);
                 }
                 let authority = input
-                    .file_receive_authority(self.parent, id, self.lease, ClientInstant(now))
+                    .file_send_authority(self.parent, id, self.lease, ClientInstant(now))
                     .map_err(|_| Error::Cancelled)?;
-                let mut sender = Sender::owning(self.cx.clone(), q, lane, Policy::default())?;
+                let authority = fr_files::session::Authority::from_controller(authority);
+                let mut sender = Sender::owning_authorized(
+                    self.cx.clone(),
+                    q,
+                    lane,
+                    Policy::default(),
+                    authority.clone(),
+                    self.permission.clone(),
+                )?;
                 sender.set_paused(q, control.pause_requested())?;
                 let job = fr_files::sync::SourceJob::for_controller(
                     config,
                     self.cx,
-                    fr_files::session::Authority::from_controller(authority),
+                    authority,
                     self.permission.clone(),
                     q,
                 )

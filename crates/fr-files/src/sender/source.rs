@@ -3,6 +3,8 @@
 #[cfg(all(test, target_os = "linux"))]
 mod cleanup_tests;
 #[cfg(all(test, unix))]
+mod custody_tests;
+#[cfg(all(test, unix))]
 mod scope_tests;
 #[cfg(all(test, unix))]
 mod snapshot_tests;
@@ -53,6 +55,7 @@ struct Gate {
     clock: TimerDriverHandle,
     deadline: u64,
     scope: Option<SourceScope>,
+    owner_scope: Option<SourceScope>,
 }
 impl Gate {
     fn check(&self) -> Result<(), Error> {
@@ -62,6 +65,9 @@ impl Gate {
         let now = self.clock.now().as_nanos() / 1000;
         if now >= self.deadline {
             return Err(Error::Expired);
+        }
+        if let Some(scope) = &self.owner_scope {
+            scope.check(now)?;
         }
         if let Some(scope) = &self.scope {
             scope.check(now)?;
@@ -100,6 +106,7 @@ impl Source {
             policy,
             deadline,
             None,
+            None,
         )
     }
     pub(super) fn spawn_directory(
@@ -120,6 +127,7 @@ impl Source {
             policy,
             deadline,
             None,
+            None,
         )
     }
     pub(super) fn spawn_selected(
@@ -128,6 +136,7 @@ impl Source {
         policy: Policy,
         deadline: u64,
         scope: Option<SourceScope>,
+        owner_scope: Option<SourceScope>,
     ) -> Result<Self, Error> {
         if selected
             .expected_bytes
@@ -147,6 +156,7 @@ impl Source {
             clock,
             deadline,
             scope,
+            owner_scope,
         };
         let thread = thread::Builder::new()
             .name("fr-file-source".into())

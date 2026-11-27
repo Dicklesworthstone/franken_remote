@@ -146,7 +146,7 @@ impl Link {
     }
 }
 
-fn accepted(cx: &Cx) -> (InputClient, Authority) {
+pub(crate) fn accepted(cx: &Cx) -> (InputClient, Authority) {
     let now = clock(cx);
     let at = ClientInstant(now);
     let target = binding(14);

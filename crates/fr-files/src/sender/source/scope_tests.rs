@@ -86,6 +86,7 @@ fn hashing_stops_at_the_original_permission_boundary_for_files_and_trees() {
                 clock,
                 deadline: now + 10_000_000,
                 scope: Some(owner.scope()),
+                owner_scope: None,
             };
             let root = if directory { path } else { &pathname };
             let mut selected = tree::Selection::new(
@@ -137,6 +138,7 @@ fn independent_scope_revocation_stops_the_waiting_source_without_a_sender_turn()
                     Policy::default(),
                     now + 10_000_000,
                     Some(owner.scope()),
+                    None,
                 )
                 .unwrap();
                 assert_eq!(prepared(&mut source).total_bytes, 15);
@@ -183,6 +185,7 @@ fn source_lease_expiry_is_independent_of_the_later_transfer_deadline() {
             Policy::default(),
             10_000_000,
             Some(owner.scope()),
+            None,
         )
         .unwrap();
         assert_eq!(prepared(&mut source).total_bytes, 15);
@@ -209,6 +212,7 @@ fn original_transfer_deadline_still_bounds_a_valid_source_scope() {
             clock: TimerDriverHandle::with_virtual_clock(clock.clone()),
             deadline: 1_000,
             scope: Some(owner.scope()),
+            owner_scope: None,
         };
         assert_eq!(gate.check(), Ok(()));
         clock.advance_to(Time::from_millis(1));
@@ -265,6 +269,7 @@ fn unread_prepared_and_chunk_results_cannot_mask_source_revocation_or_expiry() {
                     clock: TimerDriverHandle::with_virtual_clock(clock.clone()),
                     deadline: 1_000,
                     scope: Some(owner.scope()),
+                    owner_scope: None,
                 };
                 let (command, _requests) = mpsc::sync_channel(1);
                 let (reply, result) = mpsc::sync_channel(1);

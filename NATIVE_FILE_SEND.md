@@ -13,6 +13,32 @@ basename, never a peer-supplied source path. Hashing, metadata checks, seeks and
 reads happen on a dedicated disk thread using one outstanding command/result.
 No file-sized buffer or new async runtime is created.
 
+Native upload and download senders also retain the original control authority
+and local file permission in every source worker. Those checks run during
+hashing, before and after bounded payload reads, and while a worker waits for
+its next command. A stalled session loop therefore cannot leave a selected
+source reading until the much longer transfer deadline after control or file
+permission has ended. The worker stops independently; the original sender
+still owns its result and must confirm thread cleanup.
+
+The controller has separate one-use upload and download authority projections.
+Each follows the same accepted grant, authenticated clock and lifecycle, but
+revoking one direction leaves the other direction and clipboard alone. Later
+explicit selections on the same lane inherit its original authority; they cannot
+renew it. Folder jobs additionally retain their own stop flag. These checks
+do not interrupt a blocked kernel read, restore an expired grant, or retry an
+uncertain publication. Low-level caller-supervised sender constructors remain
+available for non-native integrations; native session paths use the authorized
+constructors before starting any disk work.
+
+The added regression sources cover independent duplex handoffs, original-owner
+expiry and revocation, bounded real descriptor reads, unattended worker exit,
+and revocation inside an otherwise permissive caller callback. They use virtual
+clock and explicit controller fixtures plus real file workers and UDP/TLS where
+applicable. Execution of these new tests is blocked by loss of the build
+environment; source review and earlier baseline results do not qualify this
+change. Native desktop and live-tailnet qualification remain separate.
+
 The source is hashed with the pinned upstream ATP streaming machinery and offered
 once. The sender validates the host's exact size, requested graph root and
 full-object profile before reading transfer chunks. It applies both its local

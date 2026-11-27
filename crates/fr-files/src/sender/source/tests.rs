@@ -243,6 +243,7 @@ fn empty_leaf_mutation_after_selection_is_refused_before_manifest() {
             deadline: clock.now().as_nanos() / 1000 + 2_000_000,
             clock,
             scope: None,
+            owner_scope: None,
         };
         let mut check = || gate.check();
         let mut tree =
