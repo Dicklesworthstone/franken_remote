@@ -53,6 +53,23 @@ not discover an arbitrary tailnet from an empty installation. Verify the entire
 flow from a clean iOS app state, including view-only and control modes, and
 retain evidence that the desktop contains no owner data or credentials.
 
+## Interrupted viewing
+
+Backgrounding the app, losing connectivity, or changing the active interface
+types closes the original session. The machine picker offers **Resume viewing**
+when the device is online. An interrupted live session needs its original pin
+and a successful close report before the app can reopen it. A failed or
+unverified close returns the user to machine selection. A cancelled start
+that never opened a service can be offered directly.
+
+Resume uses the original destination and performs a new authenticated dial.
+View-only sessions stay view-only. For control-capable sessions, the user
+must request control again, including when Control on Connect is enabled.
+Resume clears clipboard sharing and the one-use file-receive choice. Validate
+Wi-Fi/cellular transitions and loss of the VPN on physical devices as part of
+the network-transition gate. An interface notification alone cannot establish
+which route a connection takes.
+
 ## Required evidence before submission
 
 - iPhone and iPad XCTest results, plus actual remote-session interaction,

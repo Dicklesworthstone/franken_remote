@@ -3,6 +3,43 @@ import Network
 import SwiftUI
 import UIKit
 
+/// Interface changes are hints to retire the current connection. Only a new
+/// Rust dial can validate the destination, tailnet route and TLS identity.
+struct SessionNetworkPath: Equatable {
+    enum Medium: Hashable { case wifi, cellular, ethernet, loopback, other }
+
+    let online: Bool
+    let media: Set<Medium>
+
+    init(online: Bool, media: Set<Medium>) {
+        self.online = online
+        self.media = media
+    }
+
+    init(_ path: NWPath) {
+        let types: [(NWInterface.InterfaceType, Medium)] = [
+            (.wifi, .wifi), (.cellular, .cellular), (.wiredEthernet, .ethernet),
+            (.loopback, .loopback), (.other, .other)
+        ]
+        self.init(online: path.status == .satisfied,
+                  media: Set(types.compactMap { path.usesInterfaceType($0.0) ? $0.1 : nil }))
+    }
+
+    func interrupts(_ previous: Self?) -> Bool {
+        if !online { return true }
+        guard let previous else { return false }
+        return self != previous
+    }
+
+    var description: String {
+        guard online else { return "Offline" }
+        if media.contains(.wifi) { return "Wi-Fi" }
+        if media.contains(.cellular) { return "Cellular" }
+        if media.contains(.ethernet) { return "Ethernet" }
+        return "Online"
+    }
+}
+
 /// App-wide state: saved hosts, settings, the one live session, the network
 /// path, and the reconnect offer after the app returns to the foreground.
 @MainActor
@@ -38,53 +75,58 @@ final class AppModel: ObservableObject {
     /// confirmed. Closing the screen never silently permits a replacement.
     private var retiredReceiver: RemoteSession?
     private var receiverCleanupTask: Task<Void, Never>?
-    /// A session the app closed when it went to the background (or a start
-    /// it dropped), to offer again as it was (view-only stays view-only).
-    @Published var reconnectOffer: SessionStart?
+    struct ReconnectOffer: Identifiable {
+        let id = UUID()
+        let host: SavedHost
+        let controlCapable: Bool
+        let original: RemoteSession?
+        let reason: String
+
+        func renewed(reason: String) -> Self {
+            Self(host: host, controlCapable: controlCapable, original: original, reason: reason)
+        }
+    }
+
+    @Published var reconnectOffer: ReconnectOffer?
+    /// Retains the same closed owner if cleanup is interrupted a second time.
+    private var resuming: ReconnectOffer?
+    private var sceneAllowsResume = true
     @Published var startError: String?
     @Published private(set) var online = true
     @Published private(set) var pathDescription = ""
 
-    private let monitor = NWPathMonitor()
+    private let monitor: NWPathMonitor?
     private var subscriptions: Set<AnyCancellable> = []
-    private var lastPath: String?
+    private var lastPath: SessionNetworkPath?
 
-    init(store: HostStore, settings: AppSettings, directory: HostDirectory = TailnetDirectory()) {
+    init(store: HostStore, settings: AppSettings, directory: HostDirectory = TailnetDirectory(),
+         monitor: NWPathMonitor? = NWPathMonitor()) {
+        self.monitor = monitor
         self.store = store
         self.settings = settings
         self.directory = directory
-        monitor.pathUpdateHandler = { [weak self] path in
-            let online = path.status == .satisfied
-            let kind: String
-            if path.usesInterfaceType(.wifi) {
-                kind = "Wi-Fi"
-            } else if path.usesInterfaceType(.cellular) {
-                kind = "Cellular"
-            } else if path.usesInterfaceType(.wiredEthernet) {
-                kind = "Ethernet"
-            } else {
-                kind = online ? "Online" : "Offline"
-            }
-            Task { @MainActor in self?.pathChanged(online: online, kind: kind) }
+        monitor?.pathUpdateHandler = { [weak self] path in
+            // The monitor's serial main queue preserves the order of a rapid
+            // offline/online pair relative to cancellation and a new start.
+            MainActor.assumeIsolated { self?.pathChanged(SessionNetworkPath(path)) }
         }
-        monitor.start(queue: DispatchQueue(label: "fr.network-path"))
+        monitor?.start(queue: .main)
     }
+
+    deinit { monitor?.cancel() }
 
     convenience init() {
         self.init(store: HostStore(isValidName: { name in name.withCString { fr_host_name_valid($0) } }),
                   settings: AppSettings())
     }
 
-    private func pathChanged(online: Bool, kind: String) {
-        let changed = lastPath != nil && lastPath != kind
-        lastPath = kind
-        self.online = online
-        pathDescription = kind
-        guard let session, !session.phase.isEnded else { return }
-        if !online {
-            session.notice = "This device is offline. The session resumes if the network returns soon."
-        } else if changed {
-            session.notice = "Network changed to \(kind). Reconnecting if needed…"
+    func pathChanged(_ path: SessionNetworkPath) {
+        let interrupted = path.interrupts(lastPath)
+        lastPath = path
+        online = path.online
+        pathDescription = path.description
+        if interrupted, starting != nil || session.map({ !$0.phase.isEnded }) == true || switchingDisplay {
+            interruptViewing(reason: path.online ? "The device changed networks." : "The network connection was lost.")
         }
     }
 
@@ -99,6 +141,10 @@ final class AppModel: ObservableObject {
     /// the fetch (one short exchange, at most three seconds) and the host's
     /// cooldown first.
     func connect(_ host: SavedHost, control: Bool, receiveFiles: Bool = false) {
+        connect(host, control: control, receiveFiles: receiveFiles, after: nil)
+    }
+
+    private func connect(_ host: SavedHost, control: Bool, receiveFiles: Bool, after offer: ReconnectOffer?) {
         cancelDisplaySwitch()
         reconnectOffer = nil
         startError = nil
@@ -111,12 +157,24 @@ final class AppModel: ObservableObject {
             startError = "Receiving files requires a control-capable connection."
             return
         }
-        guard listingFrom == host.name || receiveFiles || retiredReceiver != nil else {
+        guard online else {
+            startError = "This device is offline. Connect to the network before opening a session."
+            return
+        }
+        guard listingFrom == host.name || receiveFiles || retiredReceiver != nil || offer != nil else {
             start(host, control: control)
             return
         }
         starting = SessionStart(host: host, control: control, receiveFiles: receiveFiles)
+        resuming = offer
         connectTask = Task { @MainActor [weak self] in
+            if let original = offer?.original, !(await Self.confirmedClose(original)) {
+                guard !Task.isCancelled else { return }
+                self?.cancelStart()
+                self?.startError = "The previous session did not confirm a clean close. Choose a machine to start again."
+                return
+            }
+            guard !Task.isCancelled else { return }
             if let previous = self?.retiredReceiver {
                 let deadline = ContinuousClock.now + .seconds(5)
                 while !previous.downloadCleanupComplete, ContinuousClock.now < deadline {
@@ -127,8 +185,7 @@ final class AppModel: ObservableObject {
                 }
                 guard let self, !Task.isCancelled else { return }
                 guard previous.downloadCleanupComplete else {
-                    self.starting = nil
-                    self.connectTask = nil
+                    self.cancelStart()
                     self.startError = "The previous file receiver has not confirmed cleanup. No new connection was opened."
                     return
                 }
@@ -162,7 +219,9 @@ final class AppModel: ObservableObject {
             guard let self, !Task.isCancelled else { return }
             self.connectTask = nil
             self.starting = nil
-            self.start(host, control: control, download: download)
+            self.resuming = nil
+            self.start(host, control: control, requestControl: offer == nil ? nil : false,
+                       download: download, clipboard: offer == nil)
         }
     }
 
@@ -171,6 +230,7 @@ final class AppModel: ObservableObject {
         connectTask?.cancel()
         connectTask = nil
         starting = nil
+        resuming = nil
     }
 
     /// The closed screen is no longer pumping. Continue collecting that exact
@@ -214,7 +274,14 @@ final class AppModel: ObservableObject {
                                          screen: Self.screenPixels(), download: download, clipboard: clipboard)
             next.$observedPin
                 .compactMap { $0 }
-                .sink { [weak self] pin in self?.store.recordPin(pin, for: host.id) }
+                .sink { [weak self] pin in
+                    // The offered destination can outlive edits to its saved row.
+                    guard let store = self?.store, let saved = store.host(host.id),
+                          saved.name == host.name, saved.port == host.port,
+                          saved.dialsDirectly == host.dialsDirectly,
+                          saved.pin == host.pin || saved.pin == pin else { return }
+                    store.recordPin(pin, for: host.id)
+                }
                 .store(in: &subscriptions)
             store.markConnected(host.id)
             session = next
@@ -252,32 +319,34 @@ final class AppModel: ObservableObject {
         original.close()
         original.setVisible(false)
         displaySwitchTask = Task { @MainActor [weak self, original] in
-            let clock = ContinuousClock()
-            let began = clock.now
-            var reopen = DisplayReopen()
-            while !Task.isCancelled {
-                guard let self, self.session === original, self.switchingDisplay else { return }
-                original.pump()
-                switch reopen.poll(status: original.reopenStatus, elapsed: began.duration(to: clock.now)) {
-                case .waiting:
-                    try? await Task.sleep(for: .milliseconds(50))
-                case .ready:
-                    self.displaySwitchTask = nil
-                    self.switchingDisplay = false
-                    self.releasingControl = false
-                    self.subscriptions.removeAll()
-                    self.session = nil
-                    self.start(host, control: original.controlCapable, requestControl: false, clipboard: false)
-                    return
-                case .refused:
-                    self.displaySwitchTask = nil
-                    self.switchingDisplay = false
-                    self.releasingControl = false
-                    self.displaySwitchError = "The previous session did not confirm a clean close. No new viewing session was opened."
-                    return
-                }
+            let clean = await Self.confirmedClose(original)
+            guard !Task.isCancelled, let self, self.session === original, self.switchingDisplay else { return }
+            self.displaySwitchTask = nil
+            self.switchingDisplay = false
+            self.releasingControl = false
+            guard clean else {
+                self.displaySwitchError = "The previous session did not confirm a clean close. No new viewing session was opened."
+                return
+            }
+            self.subscriptions.removeAll()
+            self.session = nil
+            self.start(host, control: original.controlCapable, requestControl: false, clipboard: false)
+        }
+    }
+
+    private static func confirmedClose(_ original: RemoteSession) async -> Bool {
+        let clock = ContinuousClock()
+        let began = clock.now
+        var cleanup = DisplayReopen()
+        while !Task.isCancelled {
+            original.pump()
+            switch cleanup.poll(status: original.reopenStatus, elapsed: began.duration(to: clock.now)) {
+            case .ready: return true
+            case .refused: return false
+            case .waiting: try? await Task.sleep(for: .milliseconds(50))
             }
         }
+        return false
     }
 
     private func cancelDisplaySwitch() {
@@ -335,10 +404,38 @@ final class AppModel: ObservableObject {
         await task.value
     }
 
-    /// Reconnect after the app came back: the saved host as it is now (a pin
-    /// recorded since), with the capability the closed session had.
-    func reconnect(_ offer: SessionStart) {
-        connect(store.host(offer.host.id) ?? offer.host, control: offer.control)
+    /// A new authenticated observation of the original destination. An
+    /// interrupted control-capable session needs a new physical Control tap.
+    func reconnect(_ offer: ReconnectOffer) {
+        guard reconnectOffer?.id == offer.id, online, sceneAllowsResume else { return }
+        connect(offer.host, control: offer.controlCapable, receiveFiles: false, after: offer)
+    }
+
+    private func interruptViewing(reason: String) {
+        cancelDisplaySwitch()
+        if let previous = resuming {
+            reconnectOffer = previous.renewed(reason: reason)
+        } else if let starting {
+            // The queued start has not opened a service. Drop all one-use choices.
+            reconnectOffer = ReconnectOffer(host: starting.host, controlCapable: starting.control,
+                                            original: nil, reason: reason)
+        }
+        cancelStart()
+        guard let original = session else { return }
+        if !original.phase.isEnded {
+            let host = original.displaySwitchHost()
+            original.close()
+            original.setVisible(false)
+            if let host {
+                reconnectOffer = ReconnectOffer(host: host, controlCapable: original.controlCapable,
+                                                original: original, reason: reason)
+            } else {
+                startError = reason + " Select the machine again to verify its identity."
+            }
+        }
+        retireReceiver(original)
+        session = nil
+        subscriptions.removeAll()
     }
 
     /// Open a session to a machine a host listed. A machine the user saved
@@ -381,20 +478,14 @@ final class AppModel: ObservableObject {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .background:
-            cancelDisplaySwitch()
-            // Never keep control (or a view) running unseen: close, and offer
-            // to reconnect when the user comes back.
-            // A start still waiting would open the session unseen: drop it too.
-            if let starting { reconnectOffer = SessionStart(host: starting.host, control: starting.control) }
-            cancelStart()
-            if let session, !session.phase.isEnded {
-                reconnectOffer = SessionStart(host: session.host, control: session.controlCapable)
-                session.close()
-            }
-            if let original = session { retireReceiver(original) }
-            session = nil
-            subscriptions.removeAll()
+            sceneAllowsResume = false
+            interruptViewing(reason: "FrankenRemote went into the background.")
         case .inactive:
+            sceneAllowsResume = false
+            if let offer = resuming {
+                cancelStart()
+                reconnectOffer = offer.renewed(reason: "FrankenRemote left the foreground.")
+            }
             // A scheduled replacement must not open behind Control Center,
             // a notification, or another app, even if the scene stays loaded.
             cancelDisplaySwitch()
@@ -402,7 +493,7 @@ final class AppModel: ObservableObject {
             // permission sheet, Control Center or another foreground owner.
             if starting?.receiveFiles == true { cancelStart() }
         case .active:
-            break
+            sceneAllowsResume = true
         @unknown default:
             break
         }

@@ -142,7 +142,7 @@ final class RemoteSession: ObservableObject, InputSink {
     private var lastDownloadPoll: ContinuousClock.Instant?
     var receivesFiles: Bool { downloadResource != nil }
 
-    private var wantsControl: Bool
+    private(set) var wantsControl: Bool
     /// Direct lifecycle fences do not wait for a SwiftUI render or let a
     /// sleep-excluding local clock preserve sharing across suspension.
     private var clipboardLifecycleObservers: [NSObjectProtocol] = []

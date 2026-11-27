@@ -24,11 +24,12 @@ struct MachinePickerView: View {
                         Button {
                             model.reconnect(offer)
                         } label: {
-                            Label("Reconnect to \(offer.host.title)", systemImage: "arrow.clockwise")
+                            Label("Resume viewing \(offer.host.title)", systemImage: "arrow.clockwise")
                         }
+                        .disabled(!model.online)
                         Button("Not now", role: .cancel) { model.reconnectOffer = nil }
                     } footer: {
-                        Text("The session closed when FrankenRemote left the screen.")
+                        Text("\(offer.reason) Resume opens a fresh view. Control requires another request.")
                     }
                 }
                 if let starting = model.starting {
