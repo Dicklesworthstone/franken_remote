@@ -3,21 +3,22 @@
 //! One adapter is retained across connection attempts. It never stores a nonce
 //! after hello issuance or retirement, never accepts a JavaScript-created
 //! session binding, and delegates lifecycle fencing to [`BrowserSessionCore`].
-//! The currently implemented host result is a canonical connection refusal;
-//! successful desktop negotiation/media/control remain separate integration.
+//! The selected view-only WSS profile composes the shared session/HEVC/receive
+//! owners. Observation, actual decoder readiness and visible freshness remain
+//! distinct; this adapter exposes no remote input grant.
 
 use crate::{BrowserLifecycleEvent, BrowserSessionCore, BrowserTransportProfile};
 use core::fmt;
 use fr_core::limits::ProtocolLimits;
 use fr_wire::{
-    WireError,
+    Kind,
     input::InputDelivery,
-    negotiation::{Offer, Role, browser},
+    negotiation::{Role, browser},
     refusal::{self, Reason},
 };
 use serde::{Deserialize, Serialize};
 
-pub const BROWSER_ABI_VERSION: u32 = 1;
+pub const BROWSER_ABI_VERSION: u32 = 2;
 pub const MAX_BOOTSTRAP_BYTES: usize = 4096;
 pub const MAX_CONTROL_RECORD_BYTES: usize = browser::MAX_RECORD;
 const MAX_BOOTSTRAP_LIFETIME_MS: u32 = 15_000;
@@ -52,6 +53,9 @@ pub enum BrowserAdapterError {
     InvalidLifecycle,
     AttemptExhausted,
     Encoding,
+    InvalidMedia,
+    MediaCleanup,
+    QueueFull,
 }
 
 impl BrowserAdapterError {
@@ -71,6 +75,9 @@ impl BrowserAdapterError {
             Self::InvalidLifecycle => "browser_lifecycle_invalid",
             Self::AttemptExhausted => "browser_attempts_exhausted",
             Self::Encoding => "browser_hello_encoding_failed",
+            Self::InvalidMedia => "browser_media_record_invalid",
+            Self::MediaCleanup => "browser_media_cleanup_incomplete",
+            Self::QueueFull => "browser_media_capacity",
         }
     }
 }
@@ -89,6 +96,7 @@ enum Phase {
     Bootstrapping,
     AwaitingTransport,
     AwaitingHost,
+    Viewing,
     Refused,
     Closed,
 }
@@ -100,6 +108,7 @@ impl Phase {
             Self::Bootstrapping => "bootstrapping",
             Self::AwaitingTransport => "awaiting_transport",
             Self::AwaitingHost => "awaiting_host",
+            Self::Viewing => "viewing",
             Self::Refused => "refused",
             Self::Closed => "closed",
         }
@@ -170,6 +179,7 @@ pub struct BrowserAdapterSnapshot {
 /// There is deliberately no setter for a successful session or input grant.
 pub struct BrowserConnectionAdapter {
     core: BrowserSessionCore,
+    desktop: Option<crate::desktop::DesktopSession>,
     last_attempt: u32,
     attempt: Option<BrowserAttempt>,
     phase: Phase,
@@ -191,6 +201,7 @@ impl BrowserConnectionAdapter {
     pub fn new() -> Self {
         Self {
             core: BrowserSessionCore::new(TRANSPORT, ProtocolLimits::ABSOLUTE),
+            desktop: None,
             last_attempt: 0,
             attempt: None,
             phase: Phase::Disconnected,
@@ -225,6 +236,7 @@ impl BrowserConnectionAdapter {
         if self.core.begin_connect(now_us).is_err() {
             return self.fail(BrowserAdapterError::InvalidState);
         }
+        self.desktop = None;
         let attempt = BrowserAttempt(serial);
         self.last_attempt = serial;
         self.attempt = Some(attempt);
@@ -312,14 +324,9 @@ impl BrowserConnectionAdapter {
         let Some(nonce) = self.nonce.take() else {
             return self.fail(BrowserAdapterError::InvalidState);
         };
-        let offer = Offer {
-            versions: vec![0],
-            profile: browser::WSS_PROFILE,
-            profile_version: browser::PROFILE_VERSION,
-            role: self.role.wire(),
-            limits: ProtocolLimits::ABSOLUTE,
-            capabilities: Vec::new(),
-        };
+        let mut offer = browser::offer(ProtocolLimits::ABSOLUTE);
+        offer.role = self.role.wire();
+        self.desktop = Some(crate::desktop::DesktopSession::new(offer.clone()));
         let Ok(hello) = browser::Hello::new(offer, nonce) else {
             return self.fail(BrowserAdapterError::Encoding);
         };
@@ -331,8 +338,8 @@ impl BrowserConnectionAdapter {
         Ok(out[..length].to_vec())
     }
 
-    /// Only a connection-level canonical refusal is implemented at this stage.
-    /// No record, socket opening, or bootstrap field creates observation.
+    /// Every successful transition comes from an exact canonical host record.
+    /// A socket opening or a bootstrap field never creates observation.
     pub fn receive_control(
         &mut self,
         attempt: BrowserAttempt,
@@ -340,28 +347,263 @@ impl BrowserConnectionAdapter {
         now_us: u64,
     ) -> Result<&'static str, BrowserAdapterError> {
         self.check_current(attempt, now_us)?;
-        if self.phase != Phase::AwaitingHost {
+        if !matches!(self.phase, Phase::AwaitingHost | Phase::Viewing) {
             return self.fail(BrowserAdapterError::InvalidState);
         }
         if bytes.len() > MAX_CONTROL_RECORD_BYTES {
             return self.fail(BrowserAdapterError::MessageTooLarge);
         }
-        let message =
-            match refusal::decode(bytes, 0, MAX_CONTROL_RECORD_BYTES, InputDelivery::Reliable) {
+        let binding = self
+            .desktop
+            .as_ref()
+            .map_or(0, crate::desktop::DesktopSession::control_binding);
+        let kind = match browser::record_kind(bytes, MAX_CONTROL_RECORD_BYTES, binding) {
+            Ok(kind) => kind,
+            Err(_) => return self.fail(BrowserAdapterError::InvalidControl),
+        };
+        if kind == Kind::Refused {
+            let message = match refusal::decode(
+                bytes,
+                binding,
+                MAX_CONTROL_RECORD_BYTES,
+                InputDelivery::Reliable,
+            ) {
                 Ok(message) => message,
-                Err(WireError::UnsupportedKind) => {
-                    return self.fail(BrowserAdapterError::UnsupportedControl);
-                }
                 Err(_) => return self.fail(BrowserAdapterError::InvalidControl),
             };
-        if message.operation.is_some() || message.stage.is_some() {
-            return self.fail(BrowserAdapterError::InvalidControl);
+            if message.operation.is_some() || message.stage.is_some() {
+                return self.fail(BrowserAdapterError::InvalidControl);
+            }
+            let Some(code) = host_refusal_code(message.reason) else {
+                return self.fail(BrowserAdapterError::InvalidControl);
+            };
+            self.retire(Phase::Refused, Some(code));
+            return Ok(code);
         }
-        let Some(code) = host_refusal_code(message.reason) else {
-            return self.fail(BrowserAdapterError::InvalidControl);
-        };
-        self.retire(Phase::Refused, Some(code));
-        Ok(code)
+        let result = self
+            .desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .receive_control(&mut self.core, bytes, now_us);
+        match result {
+            Ok(()) => Ok(""),
+            Err(error) => self.fail(error),
+        }
+    }
+
+    pub fn take_control(
+        &mut self,
+        attempt: BrowserAttempt,
+        now_us: u64,
+    ) -> Result<Option<Vec<u8>>, BrowserAdapterError> {
+        self.check_current(attempt, now_us)?;
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .take_control()
+    }
+    pub fn control_queued(
+        &mut self,
+        attempt: BrowserAttempt,
+        now_us: u64,
+    ) -> Result<(), BrowserAdapterError> {
+        // The original bytes have just entered the socket. Mark that exact
+        // clock probe sent before any tick can abandon or replace it.
+        self.require_attempt(attempt)?;
+        if now_us < self.last_now_us {
+            return self.fail(BrowserAdapterError::InvalidClock);
+        }
+        self.last_now_us = now_us;
+        let result = self
+            .desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .control_queued(&mut self.core, now_us);
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error),
+        }
+    }
+    pub fn needs_video(&self) -> bool {
+        self.desktop
+            .as_ref()
+            .is_some_and(crate::desktop::DesktopSession::needs_video)
+    }
+    pub fn video_attach(
+        &mut self,
+        attempt: BrowserAttempt,
+        now_us: u64,
+    ) -> Result<Vec<u8>, BrowserAdapterError> {
+        self.check_current(attempt, now_us)?;
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .video_attach()
+    }
+    pub fn receive_video(
+        &mut self,
+        attempt: BrowserAttempt,
+        bytes: &[u8],
+        now_us: u64,
+    ) -> Result<&'static str, BrowserAdapterError> {
+        self.check_current(attempt, now_us)?;
+        if bytes.len() > browser::MAX_VIDEO_RECORD_BYTES {
+            return self.fail(BrowserAdapterError::MessageTooLarge);
+        }
+        let result = self
+            .desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .receive_video(&mut self.core, bytes, now_us);
+        match result {
+            Ok(event) => Ok(event),
+            Err(error) => self.fail(error),
+        }
+    }
+    pub fn take_video_feedback(
+        &mut self,
+        attempt: BrowserAttempt,
+        now_us: u64,
+    ) -> Result<Option<Vec<u8>>, BrowserAdapterError> {
+        self.check_current(attempt, now_us)?;
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .take_video_feedback()
+    }
+    pub fn configuration_ready(&self) -> bool {
+        self.desktop
+            .as_ref()
+            .is_some_and(crate::desktop::DesktopSession::configuration_ready)
+    }
+    pub fn configuration_parameters(&self) -> Result<String, BrowserAdapterError> {
+        let parameters = self
+            .desktop
+            .as_ref()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .configuration_parameters()?;
+        serde_json::to_string(&parameters).map_err(|_| BrowserAdapterError::Encoding)
+    }
+    pub fn prepare_desktop_configuration(
+        &mut self,
+    ) -> Result<crate::media_adapter::PreparedConfiguration, BrowserAdapterError> {
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .prepare_configuration(&mut self.core)
+    }
+    pub fn desktop_configured(
+        &mut self,
+        decoder: u64,
+        now_us: u64,
+    ) -> Result<(), BrowserAdapterError> {
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .configured(&mut self.core, decoder, now_us)
+    }
+    pub fn take_video_chunk(
+        &mut self,
+        attempt: BrowserAttempt,
+        now_us: u64,
+    ) -> Result<Option<crate::media_adapter::PreparedChunk>, BrowserAdapterError> {
+        self.check_current(attempt, now_us)?;
+        let result = self
+            .desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .take_chunk(&mut self.core, now_us);
+        match result {
+            Ok(chunk) => Ok(chunk),
+            Err(error) => self.fail(error),
+        }
+    }
+    /// Native cleanup callbacks keep their original owner after the transport
+    /// attempt is retired. They cannot mutate any replacement connection.
+    pub fn desktop_output(
+        &mut self,
+        decoder: u64,
+        callback: u64,
+        now_us: u64,
+    ) -> Result<crate::media_adapter::OutputReceipt, BrowserAdapterError> {
+        let result = self
+            .desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .output(&mut self.core, decoder, callback, now_us)?;
+        if self
+            .desktop
+            .as_ref()
+            .is_some_and(crate::desktop::DesktopSession::ready)
+        {
+            self.phase = Phase::Viewing;
+        }
+        Ok(result)
+    }
+    pub fn desktop_presented(
+        &mut self,
+        decoder: u64,
+        callback: u64,
+        now_us: u64,
+        visible: bool,
+    ) -> Result<(), BrowserAdapterError> {
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .presented(&mut self.core, decoder, callback, now_us, visible)
+    }
+    pub fn desktop_frame_closed(
+        &mut self,
+        decoder: u64,
+        callback: u64,
+        now_us: u64,
+    ) -> Result<crate::media_adapter::ReleaseReceipt, BrowserAdapterError> {
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .frame_closed(&mut self.core, decoder, callback, now_us)
+    }
+    pub fn desktop_decoder_closed(
+        &mut self,
+        decoder: u64,
+    ) -> Result<Vec<crate::media_adapter::ReleaseReceipt>, BrowserAdapterError> {
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .decoder_closed(&mut self.core, decoder)
+    }
+    pub fn desktop_reclaim(
+        &mut self,
+        decoder: u64,
+        now_us: u64,
+    ) -> Result<(), BrowserAdapterError> {
+        self.desktop
+            .as_mut()
+            .ok_or(BrowserAdapterError::InvalidState)?
+            .reclaim(&mut self.core, decoder, now_us)
+    }
+    pub fn desktop_retire(&mut self) {
+        if let Some(desktop) = self.desktop.as_mut() {
+            desktop.retire_media(&mut self.core);
+        }
+    }
+    pub fn desktop_quarantine(&mut self) {
+        if let Some(desktop) = self.desktop.as_mut() {
+            desktop.quarantine(&mut self.core);
+        }
+    }
+    pub fn desktop_snapshot(&self) -> crate::media_adapter::MediaSnapshot {
+        self.desktop.as_ref().map_or(
+            crate::media_adapter::MediaSnapshot {
+                active_decoder: None,
+                retained_decoders: 0,
+                inflight_frames: 0,
+                inflight_bytes: 0,
+                stage: "awaiting_session",
+                quarantined: false,
+            },
+            |desktop| desktop.snapshot(&self.core),
+        )
     }
 
     pub fn lifecycle(
@@ -381,6 +623,14 @@ impl BrowserConnectionAdapter {
             _ => return self.fail(BrowserAdapterError::InvalidLifecycle),
         };
         self.core.on_lifecycle_event(event, now_us);
+        if matches!(
+            event,
+            BrowserLifecycleEvent::TabHidden | BrowserLifecycleEvent::FocusLost
+        ) {
+            if let Some(desktop) = self.desktop.as_mut() {
+                desktop.hide();
+            }
+        }
         if matches!(
             event,
             BrowserLifecycleEvent::PageHide | BrowserLifecycleEvent::BfcacheRestore
@@ -408,13 +658,22 @@ impl BrowserConnectionAdapter {
         let core = self.core.snapshot();
         BrowserAdapterSnapshot {
             attempt: self.attempt.map(BrowserAttempt::get),
-            state_label: self.phase.label(),
+            state_label: if self.phase == Phase::AwaitingHost
+                && self
+                    .desktop
+                    .as_ref()
+                    .is_some_and(crate::desktop::DesktopSession::opened)
+            {
+                "awaiting_media"
+            } else {
+                self.phase.label()
+            },
             transport_label: TRANSPORT.diagnostic_label(),
             visible: core.visible,
             focused: core.focused,
             view_fresh: core.view_fresh,
-            can_request_control: core.can_request_control,
-            is_controlling: core.is_controlling,
+            can_request_control: false,
+            is_controlling: false,
             refusal_code: self.refusal_code,
         }
     }
@@ -454,11 +713,18 @@ impl BrowserConnectionAdapter {
             return self.fail(BrowserAdapterError::InvalidClock);
         }
         self.last_now_us = now_us;
-        if now_us >= self.deadline_us {
+        if self.phase != Phase::Viewing && now_us >= self.deadline_us {
             return self.fail(BrowserAdapterError::Expired);
         }
         if self.core.tick(now_us).is_err() {
             return self.fail(BrowserAdapterError::InvalidClock);
+        }
+        if let Some(desktop) = self.desktop.as_mut() {
+            if desktop.opened() {
+                if let Err(error) = desktop.tick(&mut self.core, now_us) {
+                    return self.fail(error);
+                }
+            }
         }
         Ok(())
     }
@@ -467,6 +733,9 @@ impl BrowserConnectionAdapter {
         self.attempt = None;
         self.nonce = None;
         self.core.close();
+        if let Some(desktop) = self.desktop.as_mut() {
+            desktop.close(&mut self.core);
+        }
         self.phase = phase;
         self.refusal_code = refusal_code;
     }

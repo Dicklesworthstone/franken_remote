@@ -17,6 +17,7 @@
     const btnDisconnect = element("btn-disconnect");
     let connectionAttempt = null;
     let connecting = false;
+    let viewing = false;
     const btnProbe = element("btn-probe");
     const btnCancelProbe = element("btn-cancel-probe");
     const probeStatus = element("probe-status");
@@ -111,11 +112,11 @@
         btnProbe.disabled = connecting || !probe || probe.busy || !!audioProbe?.busy;
         btnAudioProbe.disabled = connecting || !audioProbe || !!probe?.busy;
         btnDisconnect.disabled = !connecting;
-        // This ABI has startup/refusal support only. The Rust session/media
-        // bridge must supply actual observation and input operations first.
+        // This host profile grants desktop observation only; input authority
+        // is never inferred from decoder or transport readiness.
         btnReqControl.disabled = true;
         btnRelControl.disabled = true;
-        btnFullscreen.disabled = true;
+        btnFullscreen.disabled = !viewing;
     }
 
     function clearRefusal() {
@@ -134,16 +135,21 @@
             bootstrapping: "Connecting...",
             awaiting_transport: "Connecting secure transport...",
             awaiting_host: "Awaiting session authorization",
+            awaiting_media: "Preparing desktop video...",
+            viewing: "Viewing desktop",
             refused: "Refused",
             closed: "Disconnected",
             disconnected: "Disconnected",
         };
-        badge(elConnection, labels[snapshot.state_label] || "Awaiting session authorization", "badge-neutral");
+        viewing = snapshot.state_label === "viewing";
+        badge(elConnection, labels[snapshot.state_label] || "Awaiting session authorization",
+            viewing ? "badge-ok" : "badge-neutral");
         badge(elTransport, "Transport: WSS (Degraded)", "badge-warn");
         badge(elAuthority, "Role: View-Only", "badge-neutral");
-        badge(elFreshness, "View: Unverified", "badge-neutral");
+        badge(elFreshness, snapshot.view_fresh ? "View: Current" : "View: Unverified",
+            snapshot.view_fresh ? "badge-ok" : "badge-neutral");
         elBanner.textContent =
-            "Compatibility transport uses TCP. Desktop observation and control require separate host authorization.";
+            "View-only desktop over WSS. Video shares one TCP media connection; control and authorization use a separate connection.";
         elBanner.classList.remove("hidden");
         buttons();
     }
@@ -155,11 +161,12 @@
             closeConnection(error.code, "Refused");
             showRefusal(error);
         },
-    });
+    }, { canvas: elCanvas });
 
     function closeConnection(reason, label) {
         connectionAttempt = null;
         connecting = false;
+        viewing = false;
         client.disconnect(reason);
         clearRefusal();
         badge(elConnection, label || "Disconnected", "badge-neutral");

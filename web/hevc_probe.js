@@ -277,6 +277,30 @@
                     ? error : "browser_hevc_admission_refused";
                 return { admitted: false, reason };
             }
+            return this._submitPrepared(owner, chunk);
+        }
+
+        // Session media arrives already parsed, bounded, HEVC-validated and
+        // charged by the original Rust connection owner. No JavaScript copy of
+        // the wire protocol or frame-credit ledger is constructed here.
+        submitPreparedChunk(chunk) {
+            const owner = this.current;
+            let matches = false;
+            try {
+                matches = !!owner && this._owns(owner) && this.configured && !this.unknownOutput
+                    && owner.decoder && owner.decoder.state === "configured"
+                    && integer(chunk.decoder()) === owner.id
+                    && integer(chunk.generation()).toString() === owner.generation
+                    && owner.decoder.decodeQueueSize < MAX_DECODE_QUEUE_SIZE;
+            } catch (_) {}
+            if (!matches) {
+                try { chunk.free(); } catch (_) {}
+                return { admitted: false, reason: "browser_media_owner_invalid" };
+            }
+            return this._submitPrepared(owner, chunk);
+        }
+
+        _submitPrepared(owner, chunk) {
             try {
                 owner.nativeBusy += 1;
                 // The generated callback timestamp is an exact local identity;

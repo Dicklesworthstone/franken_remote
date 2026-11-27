@@ -109,6 +109,20 @@ impl MediaBindings {
             repair: video,
         })
     }
+    /// Explicitly negotiated browser-video-wss: canonical media roles share
+    /// one physical reliable media socket and one immutable full view tuple.
+    /// This constructor grants no attachment or observation authority.
+    pub fn browser_wss(binding: u32) -> Result<Self, DeliveryError> {
+        if binding == 0 {
+            return Err(DeliveryError::StaleGeneration);
+        }
+        Ok(Self {
+            video: binding,
+            recovery: binding,
+            progress: binding,
+            repair: binding,
+        })
+    }
     pub const fn for_channel(self, channel: Channel) -> u32 {
         match channel {
             Channel::Video => self.video,

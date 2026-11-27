@@ -588,6 +588,16 @@ impl ReceivePipeline {
     pub const fn latest_progress(&self) -> Option<Progress> {
         self.progress
     }
+    /// A receiving adapter may return a queued frame's original receive credit
+    /// only after it is absent from both reassembly and active decode custody.
+    pub fn retains_frame(&self, frame: u64) -> bool {
+        self.in_flight.is_some_and(|pending| pending.frame == frame)
+            || self
+                .slots
+                .iter()
+                .flatten()
+                .any(|slot| slot.descriptor.frame == frame)
+    }
     pub fn budget_usage(&self) -> super::BudgetUsage {
         self.budget.usage()
     }

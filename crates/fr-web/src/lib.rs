@@ -23,6 +23,7 @@
 
 pub mod adapter;
 pub mod credit;
+mod desktop;
 pub mod hevc;
 pub mod media_adapter;
 pub mod protocol;

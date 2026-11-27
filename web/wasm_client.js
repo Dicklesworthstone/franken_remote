@@ -2,7 +2,7 @@
 // Load the self-hosted Rust protocol owner. No protocol/session implementation
 // lives here: this boundary only initializes the matching generated WASM pair.
 (function (global) {
-    const ABI_VERSION = 1;
+    const ABI_VERSION = 2;
     const MAX_PENDING_ADAPTERS = 16;
     let readyModule = null;
     let pendingLoad = null;
@@ -35,15 +35,17 @@
             || module.browserAbiVersion() !== ABI_VERSION
             || typeof module.BrowserAdapter !== "function"
             || typeof module.maxBootstrapBytes !== "function"
-            || typeof module.maxControlRecordBytes !== "function") {
+            || typeof module.maxControlRecordBytes !== "function"
+            || typeof module.maxVideoRecordBytes !== "function") {
             throw unavailable("browser_client_version_mismatch");
         }
         const maxBootstrapBytes = module.maxBootstrapBytes();
         const maxControlRecordBytes = module.maxControlRecordBytes();
-        if (maxBootstrapBytes !== 4096 || maxControlRecordBytes !== 4096) {
+        const maxVideoRecordBytes = module.maxVideoRecordBytes();
+        if (maxBootstrapBytes !== 4096 || maxControlRecordBytes !== 4096 || maxVideoRecordBytes !== 65536) {
             throw unavailable("browser_client_version_mismatch");
         }
-        return { module, maxBootstrapBytes, maxControlRecordBytes };
+        return { module, maxBootstrapBytes, maxControlRecordBytes, maxVideoRecordBytes };
     }
 
     function makeAdapter(loaded, kind, limits, signal) {
@@ -65,6 +67,7 @@
             core: new loaded.module.BrowserAdapter(),
             maxBootstrapBytes: loaded.maxBootstrapBytes,
             maxControlRecordBytes: loaded.maxControlRecordBytes,
+            maxVideoRecordBytes: loaded.maxVideoRecordBytes,
         };
     }
 

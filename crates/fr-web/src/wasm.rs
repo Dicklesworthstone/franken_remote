@@ -24,6 +24,11 @@ pub fn max_control_record_bytes() -> usize {
     MAX_CONTROL_RECORD_BYTES
 }
 
+#[wasm_bindgen(js_name = maxVideoRecordBytes)]
+pub fn max_video_record_bytes() -> usize {
+    fr_wire::negotiation::browser::MAX_VIDEO_RECORD_BYTES
+}
+
 #[wasm_bindgen]
 pub struct BrowserAdapter {
     inner: BrowserConnectionAdapter,
@@ -94,6 +99,163 @@ impl BrowserAdapter {
             .receive_control(attempt, bytes, instant)
             .map(str::to_owned)
             .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = takeControl)]
+    pub fn take_control(&mut self, attempt: u32, now_ms: f64) -> Result<Option<Vec<u8>>, JsValue> {
+        let attempt = BrowserAttempt(attempt);
+        let now = self.timestamp(attempt, now_ms)?;
+        self.inner.take_control(attempt, now).map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = controlQueued)]
+    pub fn control_queued(&mut self, attempt: u32, now_ms: f64) -> Result<(), JsValue> {
+        let attempt = BrowserAttempt(attempt);
+        let now = self.timestamp(attempt, now_ms)?;
+        self.inner.control_queued(attempt, now).map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = needsVideo)]
+    pub fn needs_video(&self) -> bool {
+        self.inner.needs_video()
+    }
+    #[wasm_bindgen(js_name = videoAttach)]
+    pub fn video_attach(&mut self, attempt: u32, now_ms: f64) -> Result<Vec<u8>, JsValue> {
+        let attempt = BrowserAttempt(attempt);
+        let now = self.timestamp(attempt, now_ms)?;
+        self.inner.video_attach(attempt, now).map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = receiveVideo)]
+    pub fn receive_video(
+        &mut self,
+        attempt: u32,
+        bytes: &[u8],
+        now_ms: f64,
+    ) -> Result<String, JsValue> {
+        let attempt = BrowserAttempt(attempt);
+        let now = self.timestamp(attempt, now_ms)?;
+        self.inner
+            .receive_video(attempt, bytes, now)
+            .map(str::to_owned)
+            .map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = takeVideoFeedback)]
+    pub fn take_video_feedback(
+        &mut self,
+        attempt: u32,
+        now_ms: f64,
+    ) -> Result<Option<Vec<u8>>, JsValue> {
+        let attempt = BrowserAttempt(attempt);
+        let now = self.timestamp(attempt, now_ms)?;
+        self.inner
+            .take_video_feedback(attempt, now)
+            .map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = configurationReady)]
+    pub fn configuration_ready(&self) -> bool {
+        self.inner.configuration_ready()
+    }
+    #[wasm_bindgen(js_name = configurationParameters)]
+    pub fn configuration_parameters(&self) -> Result<String, JsValue> {
+        self.inner.configuration_parameters().map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = prepareDesktopConfiguration)]
+    pub fn prepare_desktop_configuration(&mut self) -> Result<String, JsValue> {
+        media_json(
+            &self
+                .inner
+                .prepare_desktop_configuration()
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(js_name = desktopConfigured)]
+    pub fn desktop_configured(&mut self, decoder: u64, now_ms: f64) -> Result<(), JsValue> {
+        self.inner
+            .desktop_configured(decoder, microseconds(now_ms).map_err(js_error)?)
+            .map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = takeVideoChunk)]
+    pub fn take_video_chunk(
+        &mut self,
+        attempt: u32,
+        now_ms: f64,
+    ) -> Result<Option<BrowserPreparedChunk>, JsValue> {
+        let attempt = BrowserAttempt(attempt);
+        let now = self.timestamp(attempt, now_ms)?;
+        self.inner
+            .take_video_chunk(attempt, now)
+            .map(|chunk| chunk.map(|inner| BrowserPreparedChunk { inner }))
+            .map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = desktopOutput)]
+    pub fn desktop_output(
+        &mut self,
+        decoder: u64,
+        callback: u64,
+        now_ms: f64,
+    ) -> Result<String, JsValue> {
+        media_json(
+            &self
+                .inner
+                .desktop_output(decoder, callback, microseconds(now_ms).map_err(js_error)?)
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(js_name = desktopPresented)]
+    pub fn desktop_presented(
+        &mut self,
+        decoder: u64,
+        callback: u64,
+        now_ms: f64,
+        visible: bool,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .desktop_presented(
+                decoder,
+                callback,
+                microseconds(now_ms).map_err(js_error)?,
+                visible,
+            )
+            .map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = desktopFrameClosed)]
+    pub fn desktop_frame_closed(
+        &mut self,
+        decoder: u64,
+        callback: u64,
+        now_ms: f64,
+    ) -> Result<String, JsValue> {
+        media_json(
+            &self
+                .inner
+                .desktop_frame_closed(decoder, callback, microseconds(now_ms).map_err(js_error)?)
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(js_name = desktopDecoderClosed)]
+    pub fn desktop_decoder_closed(&mut self, decoder: u64) -> Result<String, JsValue> {
+        media_json(
+            &self
+                .inner
+                .desktop_decoder_closed(decoder)
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(js_name = desktopReclaim)]
+    pub fn desktop_reclaim(&mut self, decoder: u64, now_ms: f64) -> Result<(), JsValue> {
+        self.inner
+            .desktop_reclaim(decoder, microseconds(now_ms).map_err(js_error)?)
+            .map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = desktopRetire)]
+    pub fn desktop_retire(&mut self) {
+        self.inner.desktop_retire();
+    }
+    #[wasm_bindgen(js_name = desktopQuarantine)]
+    pub fn desktop_quarantine(&mut self) {
+        self.inner.desktop_quarantine();
+    }
+    #[wasm_bindgen(js_name = desktopSnapshot)]
+    pub fn desktop_snapshot(&self) -> Result<String, JsValue> {
+        media_json(&self.inner.desktop_snapshot())
     }
 
     pub fn lifecycle(&mut self, attempt: u32, event: &str, now_ms: f64) -> Result<(), JsValue> {
@@ -279,6 +441,12 @@ pub struct BrowserPreparedChunk {
 
 #[wasm_bindgen]
 impl BrowserPreparedChunk {
+    pub fn decoder(&self) -> u64 {
+        self.inner.inner.decoder.serial
+    }
+    pub fn generation(&self) -> u64 {
+        self.inner.inner.generation.as_raw()
+    }
     /// Exact JS-safe local timestamp used only to correlate native outputs.
     /// Original host timestamps stay in Rust and never become freshness here.
     pub fn timestamp(&self) -> u64 {

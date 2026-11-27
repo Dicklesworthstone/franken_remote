@@ -189,13 +189,16 @@ fn valid_limits(limits: ProtocolLimits) -> Result<(), Error> {
 }
 impl Offer {
     pub fn validate(&self) -> Result<(), Error> {
+        self.validate_for(NATIVE_PROFILE)
+    }
+    fn validate_for(&self, profile: u8) -> Result<(), Error> {
         if self.versions.is_empty()
             || self.versions.len() > MAX_VERSIONS
             || self.versions.windows(2).any(|w| w[0] >= w[1])
         {
             return Err(Error::Version);
         }
-        if self.profile != NATIVE_PROFILE || self.profile_version != PROFILE_VERSION {
+        if self.profile != profile || self.profile_version != PROFILE_VERSION {
             return Err(Error::Profile);
         }
         valid_limits(self.limits)?;
@@ -204,8 +207,11 @@ impl Offer {
     /// The host's implemented intersection. Neither side can erase the other's
     /// required capability, and an unknown future app version is never selected.
     pub fn intersect(&self, peer: &Self) -> Result<Self, Error> {
-        self.validate()?;
-        peer.validate()?;
+        self.intersect_for(peer, NATIVE_PROFILE)
+    }
+    fn intersect_for(&self, peer: &Self, profile: u8) -> Result<Self, Error> {
+        self.validate_for(profile)?;
+        peer.validate_for(profile)?;
         if !self.versions.contains(&0) || !peer.versions.contains(&0) {
             return Err(Error::Version);
         }
@@ -251,7 +257,14 @@ impl Offer {
     /// a picture, or from a host without them, the optional capability is
     /// omitted from the selection and every picture stays native.
     pub fn select_picture(&self, picture: Option<(u32, u32)>) -> Result<Selection, Error> {
-        self.validate()?;
+        self.select_picture_for(picture, NATIVE_PROFILE)
+    }
+    fn select_picture_for(
+        &self,
+        picture: Option<(u32, u32)>,
+        profile: u8,
+    ) -> Result<Selection, Error> {
+        self.validate_for(profile)?;
         if !self.versions.contains(&0) {
             return Err(Error::Version);
         }
@@ -273,13 +286,16 @@ impl Offer {
             capabilities,
             picture,
         };
-        selection.validate()?;
+        selection.validate_for(profile)?;
         Ok(selection)
     }
     /// Verify a received host intersection against the original client offer.
     pub fn check_host(&self, host: &Self) -> Result<(), Error> {
-        self.validate()?;
-        host.validate()?;
+        self.check_host_for(host, NATIVE_PROFILE)
+    }
+    fn check_host_for(&self, host: &Self, profile: u8) -> Result<(), Error> {
+        self.validate_for(profile)?;
+        host.validate_for(profile)?;
         if host.versions != [0]
             || !self.versions.contains(&0)
             || host.role != self.role
@@ -306,10 +322,13 @@ impl Offer {
 }
 impl Selection {
     pub fn validate(&self) -> Result<(), Error> {
+        self.validate_for(NATIVE_PROFILE)
+    }
+    fn validate_for(&self, profile: u8) -> Result<(), Error> {
         if self.version != 0 {
             return Err(Error::Version);
         }
-        if self.profile != NATIVE_PROFILE || self.profile_version != PROFILE_VERSION {
+        if self.profile != profile || self.profile_version != PROFILE_VERSION {
             return Err(Error::Profile);
         }
         valid_limits(self.limits)?;
@@ -331,8 +350,11 @@ impl Selection {
         }
     }
     pub fn check_against(&self, offer: &Offer) -> Result<(), Error> {
-        self.validate()?;
-        offer.validate()?;
+        self.check_against_for(offer, NATIVE_PROFILE)
+    }
+    fn check_against_for(&self, offer: &Offer, profile: u8) -> Result<(), Error> {
+        self.validate_for(profile)?;
+        offer.validate_for(profile)?;
         if !offer.versions.contains(&self.version)
             || self.role != offer.role
             || self.limits.negotiated(&offer.limits) != self.limits
@@ -426,7 +448,8 @@ fn selection_bytes(s: &Selection) -> usize {
 }
 fn write_offer(w: &mut Writer<'_>, o: &Offer) -> Result<(), Error> {
     write_offer_fields(w, o)?;
-    // Native QUIC has no Origin bootstrap nonce. Browser profiles are refused.
+    // Native ClientHello and HostCapabilities carry no bootstrap nonce.
+    // Browser ClientHello uses its separate mandatory-nonce codec.
     w.u8(0)?;
     Ok(())
 }
@@ -442,12 +465,12 @@ fn write_offer_fields(w: &mut Writer<'_>, o: &Offer) -> Result<(), Error> {
     write_caps(w, &o.capabilities)?;
     Ok(())
 }
-fn read_offer(r: &mut Reader<'_>) -> Result<Offer, Error> {
+fn read_offer(r: &mut Reader<'_>, profile: u8) -> Result<Offer, Error> {
     let offer = read_offer_fields(r)?;
     if r.u8()? != 0 {
         return Err(Error::Profile);
     }
-    offer.validate()?;
+    offer.validate_for(profile)?;
     Ok(offer)
 }
 fn read_offer_fields(r: &mut Reader<'_>) -> Result<Offer, Error> {
@@ -487,7 +510,7 @@ fn write_selection(w: &mut Writer<'_>, s: &Selection) -> Result<(), Error> {
     }
     Ok(())
 }
-fn read_selection(r: &mut Reader<'_>) -> Result<Selection, Error> {
+fn read_selection(r: &mut Reader<'_>, profile: u8) -> Result<Selection, Error> {
     let mut s = Selection {
         version: r.u16()?,
         profile: r.u8()?,
@@ -500,17 +523,25 @@ fn read_selection(r: &mut Reader<'_>) -> Result<Selection, Error> {
     if crate::display::picture::selected(&s.capabilities) {
         s.picture = Some((r.u32()?, r.u32()?));
     }
-    s.validate()?;
+    s.validate_for(profile)?;
     Ok(s)
 }
 pub fn encode(message: &Message, maximum: usize, out: &mut [u8]) -> Result<usize, Error> {
+    encode_for(message, maximum, out, NATIVE_PROFILE)
+}
+fn encode_for(
+    message: &Message,
+    maximum: usize,
+    out: &mut [u8],
+    profile: u8,
+) -> Result<usize, Error> {
     let size = match message {
         Message::ClientHello(o) | Message::HostCapabilities(o) => {
-            o.validate()?;
+            o.validate_for(profile)?;
             offer_bytes(o)
         }
         Message::SelectedConfiguration(s) => {
-            s.validate()?;
+            s.validate_for(profile)?;
             selection_bytes(s)
         }
         Message::ApprovalRequired { deadline_us, .. } => {
@@ -527,7 +558,7 @@ pub fn encode(message: &Message, maximum: usize, out: &mut [u8]) -> Result<usize
             if binding.id == 0 || *observation_until_us == 0 {
                 return Err(Error::Invalid);
             }
-            selection.validate()?;
+            selection.validate_for(profile)?;
             68 + selection_bytes(selection)
         }
         Message::BindingAccepted { binding } => {
@@ -576,6 +607,14 @@ pub fn encode(message: &Message, maximum: usize, out: &mut [u8]) -> Result<usize
     Ok(w.finish()?)
 }
 pub fn decode(bytes: &[u8], maximum: usize, expected_binding: u32) -> Result<Message, Error> {
+    decode_for(bytes, maximum, expected_binding, NATIVE_PROFILE)
+}
+fn decode_for(
+    bytes: &[u8],
+    maximum: usize,
+    expected_binding: u32,
+    profile: u8,
+) -> Result<Message, Error> {
     let record = Record::decode_bounded(bytes, maximum.min(MAX_RECORD), expected_binding, None)?;
     let kind = record.kind();
     if kind == Kind::Refused {
@@ -597,9 +636,11 @@ pub fn decode(bytes: &[u8], maximum: usize, expected_binding: u32) -> Result<Mes
         ))
     };
     let message = match kind {
-        Kind::ClientHello => Message::ClientHello(read_offer(&mut r)?),
-        Kind::HostCapabilities => Message::HostCapabilities(read_offer(&mut r)?),
-        Kind::SelectedConfiguration => Message::SelectedConfiguration(read_selection(&mut r)?),
+        Kind::ClientHello => Message::ClientHello(read_offer(&mut r, profile)?),
+        Kind::HostCapabilities => Message::HostCapabilities(read_offer(&mut r, profile)?),
+        Kind::SelectedConfiguration => {
+            Message::SelectedConfiguration(read_selection(&mut r, profile)?)
+        }
         Kind::ApprovalRequired => {
             let request = RemoteSessionId::from_raw(id(&mut r)?);
             let deadline_us = r.u64()?;
@@ -620,7 +661,7 @@ pub fn decode(bytes: &[u8], maximum: usize, expected_binding: u32) -> Result<Mes
             if binding_id == 0 || r.take(8)? != [0, 0, 0, 0, 0, 0, 1, 0] {
                 return Err(Error::Invalid);
             }
-            let selection = read_selection(&mut r)?;
+            let selection = read_selection(&mut r, profile)?;
             let observation_until_us = r.u64()?;
             if observation_until_us == 0 {
                 return Err(Error::Invalid);

@@ -25,7 +25,7 @@ before(async () => {
     const exports = await bindings.default({ module_or_path: bytes });
     assert.ok(exports.memory instanceof WebAssembly.Memory);
     assert.equal(typeof exports.browseradapter_new, "function");
-    assert.equal(bindings.browserAbiVersion(), 1);
+    assert.equal(bindings.browserAbiVersion(), 2);
     assert.equal(bindings.maxBootstrapBytes(), 4096);
     assert.equal(bindings.maxControlRecordBytes(), 4096);
 });
@@ -37,13 +37,16 @@ afterEach(() => {
 // Independent protocol goldens, shared with wasm_adapter.cjs. The offer-role
 // byte at offset 33 is the only change for a controller request. No production
 // encoder or simulated protocol implementation constructs these expectations.
-const OBSERVER_HELLO = Buffer.from((
-    "46524430 0000 0001 00000000 00000050 00000000 00000000" +
-    "00000001 0000 03 0000 00" +
-    "00010000 00100000 01000000 00002000 0000000001000000" +
-    "0c 0000000002000000 00000000 01" +
-    "a5".repeat(32)
-).replace(/\s/g, ""), "hex");
+const OBSERVER_HELLO = Buffer.from((`
+    46524430 0000 0001 00000000 0000009b 00000000 00000000
+    00000001 0000 03 0000 00
+    00010000 00100000 000aa555 00002000 0000000001000000
+    04 0000000000200000 00000003
+    00000011 62726f777365722d766964656f2d777373 0001 01
+    00000011 636c6f636b2d636f7272656c6174696f6e 0001 01
+    00000014 686576632d6465636f6465722d73746172747570 0001 01
+    01
+` + "a5".repeat(32)).replace(/\s/g, ""), "hex");
 const REQUIRED_CAPABILITY = Buffer.from(
     "46524430000000040000000000000004000000000000000000040000", "hex");
 
@@ -76,6 +79,7 @@ function rustFixture(response = available(), options = {}, fixture = ioFixture) 
         for (const name of [
             "begin", "bootstrapRequest", "acceptBootstrap", "clientHello",
             "receiveControl", "lifecycle", "tick", "disconnect", "snapshot",
+            "takeControl", "controlQueued", "needsVideo", "desktopSnapshot", "configurationReady",
         ]) {
             core[name] = (...args) => {
                 owner.calls.push({ name, args });
@@ -96,6 +100,7 @@ function rustFixture(response = available(), options = {}, fixture = ioFixture) 
             core,
             maxBootstrapBytes: bindings.maxBootstrapBytes(),
             maxControlRecordBytes: bindings.maxControlRecordBytes(),
+            maxVideoRecordBytes: bindings.maxVideoRecordBytes(),
         };
     };
     const f = fixture(response, {
@@ -140,7 +145,7 @@ test("production transport sends the actual Rust hello for both requested roles"
         const socket = await open(client, f, role);
         const expected = Buffer.from(OBSERVER_HELLO);
         if (role === "controller") expected[33] = 1;
-        assert.equal(expected.length, 104);
+        assert.equal(expected.length, 179);
         assert.equal(socket.sent.length, 1);
         assert.deepEqual(Buffer.from(socket.sent[0]), expected);
         assert.equal(f.requests[0].url, "/api/session/bootstrap");

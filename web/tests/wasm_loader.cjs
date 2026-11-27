@@ -47,9 +47,10 @@ function fixture(options = {}) {
                     free() { this.freed++; assert.equal(this.freed, 1); }
                 },
                 browserMediaAbiVersion: () => options.mediaAbi === undefined ? 1 : options.mediaAbi,
-                browserAbiVersion: () => options.abi === undefined ? 1 : options.abi,
+                browserAbiVersion: () => options.abi === undefined ? 2 : options.abi,
                 maxBootstrapBytes: () => options.bootstrapLimit === undefined ? 4096 : options.bootstrapLimit,
                 maxControlRecordBytes: () => options.controlLimit === undefined ? 4096 : options.controlLimit,
+                maxVideoRecordBytes: () => options.videoLimit === undefined ? 65536 : options.videoLimit,
             };
             const module = new vm.SyntheticModule(Object.keys(exports), function () {
                 for (const [name, value] of Object.entries(exports)) this.setExport(name, value);
@@ -181,7 +182,7 @@ test("failed shared loading retires before retry subscribers are notified", { ti
 });
 
 test("ABI or byte-limit mismatches refuse without constructing adapters and allow retry", async () => {
-    for (const key of ["abi", "bootstrapLimit", "controlLimit"]) {
+    for (const key of ["abi", "bootstrapLimit", "controlLimit", "videoLimit"]) {
         const options = { [key]: 99 };
         const f = fixture(options);
         await assert.rejects(f.api.createAdapter(), { code: "browser_client_version_mismatch" });

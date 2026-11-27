@@ -25,6 +25,11 @@
             browser_bootstrap_too_large: "The host bootstrap response exceeded the browser limit.",
             browser_bootstrap_unreadable: "The host bootstrap response could not be read.",
             browser_control_too_large: "The host control record exceeded the browser limit.",
+            browser_media_record_invalid: "The desktop media stream was refused. Reconnect to start a fresh session.",
+            browser_media_cleanup_incomplete: "The browser has not confirmed decoder cleanup. Reload this page before reconnecting.",
+            browser_video_too_large: "The host media record exceeded the negotiated limit.",
+            browser_transport_congested: "The browser control connection could not remain responsive.",
+            browser_canvas_unavailable: "The desktop canvas is unavailable.",
         };
         const error = new Error(descriptions[code] || "Browser session refused (" + code + ").");
         error.code = code;
@@ -42,6 +47,11 @@
             this.createAdapter = config.createAdapter || ((signal) => global.FrankenRust.createAdapter(signal));
             this.nowMs = config.nowMs || (() => global.performance.now());
             this.controlSocket = null;
+            this.videoSocket = null;
+            this.retiredAttempt = null;
+            this.canvas = config.canvas || null;
+            this.createPlayer = config.createPlayer || ((canvas, callbacks, media) =>
+                new global.FrankenHevc.WebCodecsHevcPlayer(canvas, callbacks, media, { nowMs: this.nowMs }));
             this.closed = true;
             this.connectionAttempt = null;
             this.visible = true;
@@ -115,6 +125,8 @@
 
         async connect(role) {
             this.disconnect();
+            if (this.retiredAttempt) this._cleanupAttempt(this.retiredAttempt);
+            if (this.retiredAttempt) throw failure("browser_media_cleanup_incomplete");
             const attempt = {
                 abort: new global.AbortController(),
                 binding: null,
@@ -125,6 +137,7 @@
                 rejectOpen: null,
                 failure: null,
                 startedMs: this.nowMs(),
+                player: null, configuring: false, pumping: false, cleaning: false, videoStarted: false,
             };
             this.connectionAttempt = attempt;
             this.closed = false;
@@ -152,6 +165,8 @@
                     if (!this._owns(attempt)) return;
                     try {
                         binding.core.tick(attempt.token, this.nowMs());
+                        this._pump(attempt);
+                        this._state(attempt);
                     } catch (error) {
                         this._end(attempt, failure(error, "browser_handshake_expired"), true);
                     }
@@ -194,7 +209,7 @@
                     if (!ownsSocket()) return;
                     try {
                         const hello = attempt.binding.core.clientHello(attempt.token, this.nowMs());
-                        socket.send(hello);
+                        this._send(socket, hello);
                         this._state(attempt);
                     } catch (error) {
                         this._end(attempt, failure(error, "browser_handshake_failed"), true);
@@ -218,6 +233,7 @@
                         );
                         this._state(attempt);
                         if (reason) this._end(attempt, failure(reason, "browser_host_refused"), true);
+                        else this._pump(attempt);
                     } catch (error) {
                         this._end(attempt, failure(error, "browser_control_invalid"), true);
                     }
@@ -229,6 +245,169 @@
                     if (ownsSocket()) this._end(attempt, failure("browser_transport_closed"), false);
                 };
             });
+        }
+
+        _send(socket, bytes) {
+            // This is only local transport admission, never receiver credit.
+            // Cumulative credit comes exclusively from Rust after original
+            // receive/native resource disposal.
+            if (!socket || socket.readyState !== 1
+                || !(bytes instanceof Uint8Array) || bytes.byteLength > 4096
+                || Number(socket.bufferedAmount || 0) + bytes.byteLength > 32768) {
+                throw failure("browser_transport_congested");
+            }
+            socket.send(bytes);
+        }
+
+        _pump(attempt) {
+            if (!this._owns(attempt) || !attempt.binding || attempt.pumping) return;
+            attempt.pumping = true;
+            try {
+                const core = attempt.binding.core;
+                if (this.controlSocket && this.controlSocket.readyState === 1) {
+                    for (let i = 0; i < 8 && this._owns(attempt); ++i) {
+                        const bytes = core.takeControl(attempt.token, this.nowMs());
+                        if (!bytes) break;
+                        this._send(this.controlSocket, bytes);
+                        core.controlQueued(attempt.token, this.nowMs());
+                    }
+                }
+                if (!this._owns(attempt)) return;
+                if (core.needsVideo() && !attempt.videoStarted) this._openVideo(attempt);
+                if (core.configurationReady() && !attempt.configuring && !attempt.player) this._configurePlayer(attempt);
+                if (this.videoSocket && this.videoSocket.readyState === 1) {
+                    for (let i = 0; i < 2 && this._owns(attempt); ++i) {
+                        const bytes = core.takeVideoFeedback(attempt.token, this.nowMs());
+                        if (!bytes) break;
+                        this._send(this.videoSocket, bytes);
+                    }
+                }
+                if (this._owns(attempt) && attempt.player && attempt.player.configured && !attempt.configuring) {
+                    const chunk = core.takeVideoChunk(attempt.token, this.nowMs());
+                    if (chunk) {
+                        const result = attempt.player.submitPreparedChunk(chunk);
+                        if (!result.admitted) throw failure(result.reason, "browser_media_record_invalid");
+                    }
+                }
+            } catch (error) {
+                this._end(attempt, failure(error, "browser_media_record_invalid"), true);
+            } finally {
+                attempt.pumping = false;
+            }
+        }
+
+        _openVideo(attempt) {
+            if (!this._owns(attempt) || attempt.videoStarted) return;
+            attempt.videoStarted = true;
+            const socket = new global.WebSocket("wss://" + global.location.host + "/ws/video");
+            socket.binaryType = "arraybuffer";
+            this.videoSocket = socket;
+            const owns = () => this._owns(attempt) && this.videoSocket === socket;
+            socket.onopen = () => {
+                if (!owns()) return;
+                try {
+                    const bytes = attempt.binding.core.videoAttach(attempt.token, this.nowMs());
+                    this._send(socket, bytes);
+                } catch (error) { this._end(attempt, failure(error, "browser_media_record_invalid"), true); }
+            };
+            socket.onmessage = (event) => {
+                if (!owns()) return;
+                if (!(event.data instanceof ArrayBuffer)
+                    || event.data.byteLength > attempt.binding.maxVideoRecordBytes) {
+                    this._end(attempt, failure("browser_video_too_large"), true);
+                    return;
+                }
+                try {
+                    const action = attempt.binding.core.receiveVideo(attempt.token,
+                        new Uint8Array(event.data), this.nowMs());
+                    if (action === "configuration") this._configurePlayer(attempt);
+                    this._pump(attempt);
+                    this._state(attempt);
+                } catch (error) { this._end(attempt, failure(error, "browser_media_record_invalid"), true); }
+            };
+            socket.onerror = () => { if (owns()) this._end(attempt, failure("browser_transport_failed"), false); };
+            socket.onclose = () => { if (owns()) this._end(attempt, failure("browser_transport_closed"), false); };
+        }
+
+        _configurePlayer(attempt) {
+            if (!this._owns(attempt) || attempt.configuring || attempt.player || !this.canvas) {
+                throw failure("browser_canvas_unavailable");
+            }
+            const core = attempt.binding.core;
+            // The original Rust session is also the media owner. The local HEVC
+            // probe's independent MediaAdapter is never used for remote frames.
+            const media = {
+                maxConfigurationBytes: () => attempt.binding.maxVideoRecordBytes,
+                prepareConfiguration: () => core.prepareDesktopConfiguration(),
+                decoderConfigured: (decoder) => core.desktopConfigured(decoder, this.nowMs()),
+                output: (decoder, callback) => core.desktopOutput(decoder, callback, this.nowMs()),
+                presented: (decoder, callback, now, visible) => core.desktopPresented(decoder, callback, now, visible),
+                frameClosed: (decoder, callback) => core.desktopFrameClosed(decoder, callback, this.nowMs()),
+                decoderClosed: (decoder) => core.desktopDecoderClosed(decoder),
+                reclaim: (decoder) => core.desktopReclaim(decoder, this.nowMs()),
+                retire: () => core.desktopRetire(),
+                quarantine: () => core.desktopQuarantine(),
+                snapshot: () => core.desktopSnapshot(),
+            };
+            const progress = () => {
+                if (this._owns(attempt)) {
+                    this._pump(attempt);
+                    this._state(attempt);
+                } else this._cleanupAttempt(attempt);
+            };
+            attempt.player = this.createPlayer(this.canvas, {
+                onConfigured: progress,
+                onFirstFrameDecoded: progress,
+                onFramePresented: progress,
+                onFrameClosed: progress,
+                onDecoderReclaimed: (code) => {
+                    if (this._owns(attempt)) this._end(attempt, failure(code, "browser_media_record_invalid"), true);
+                },
+            }, media);
+            attempt.player.setVisible(this.visible);
+            const parameters = JSON.parse(core.configurationParameters());
+            parameters.hvcc = Uint8Array.from(parameters.hvcc);
+            attempt.configuring = true;
+            // A native isConfigSupported promise cannot be aborted. Its actual
+            // decoder owner stays retained until this original promise settles.
+            const player = attempt.player;
+            Promise.resolve().then(() => {
+                if (!this._owns(attempt)) return { supported: false, cancelled: true };
+                return player.configure(parameters);
+            }).then((result) => {
+                if (!this._owns(attempt)) return;
+                if (!result.supported) {
+                    this._end(attempt, failure(result.code, "browser_media_record_invalid"), true);
+                }
+            }, (error) => {
+                if (this._owns(attempt)) this._end(attempt, failure(error, "browser_media_record_invalid"), true);
+            }).finally(() => {
+                attempt.configuring = false;
+                if (this._owns(attempt)) {
+                    this._pump(attempt);
+                    this._state(attempt);
+                } else this._cleanupAttempt(attempt);
+            });
+        }
+
+        _cleanupAttempt(attempt) {
+            if (!attempt || !attempt.binding || attempt.cleaning || this._owns(attempt)) return;
+            attempt.cleaning = true;
+            let clean = false;
+            try {
+                const nativeClosed = !attempt.player || attempt.player.reset();
+                const snapshot = JSON.parse(attempt.binding.core.desktopSnapshot());
+                clean = nativeClosed && !attempt.configuring && !snapshot.quarantined
+                    && snapshot.retainedDecoders === 0 && snapshot.inflightFrames === 0;
+                if (clean) {
+                    attempt.binding.core.free();
+                    attempt.binding = null;
+                    attempt.player = null;
+                }
+            } catch (_) {}
+            finally { attempt.cleaning = false; }
+            if (clean && this.retiredAttempt === attempt) this.retiredAttempt = null;
+            else if (!clean) this.retiredAttempt = attempt;
         }
 
         _end(attempt, error, refusal) {
@@ -249,6 +428,7 @@
             if (event === "focus_lost") this.focused = false;
             if (event === "focus_gained") this.focused = true;
             const attempt = this.connectionAttempt;
+            if (attempt && attempt.player) attempt.player.setVisible(this.visible);
             const terminal = event === "pagehide" || event === "bfcache_restore";
             if (!this._owns(attempt)) return;
             if (!attempt.binding || attempt.token === null) {
@@ -266,9 +446,10 @@
 
         disconnect() {
             const attempt = this.connectionAttempt;
-            const socket = this.controlSocket;
+            const sockets = [this.controlSocket, this.videoSocket];
             this.connectionAttempt = null;
             this.controlSocket = null;
+            this.videoSocket = null;
             this.closed = true;
             if (attempt) {
                 attempt.abort.abort();
@@ -282,11 +463,13 @@
                     try {
                         if (attempt.token !== null) attempt.binding.core.disconnect(attempt.token);
                     } catch (_) {}
-                    try { attempt.binding.core.free(); } catch (_) {}
-                    attempt.binding = null;
+                    this.retiredAttempt = attempt;
+                    this._cleanupAttempt(attempt);
                 }
             }
-            if (socket) {
+            for (const socket of sockets) {
+                if (!socket) continue;
+                socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
                 try { socket.close(1000, "connection_retired"); } catch (_) {}
             }
         }

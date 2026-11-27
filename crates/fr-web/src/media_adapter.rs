@@ -213,64 +213,7 @@ impl MediaAdapter {
         declaration
             .validate(&ProtocolLimits::ABSOLUTE)
             .map_err(|_| MediaAdapterError::Configuration)?;
-        // This browser lane admits a bounded low-delay four-picture DPB. It
-        // does not promise that a native implementation's hidden pools qualify.
-        if meta.decoded_pictures > 4 {
-            return Err(MediaAdapterError::Bounds);
-        }
-        let geometry = CodedGeometry::new(
-            &ProtocolLimits::ABSOLUTE,
-            meta.coded_width,
-            meta.coded_height,
-            meta.crop_width,
-            meta.crop_height,
-            2,
-        )
-        .map_err(|_| MediaAdapterError::Configuration)?;
-        let color = ColorInfo {
-            primaries: if meta.primaries == 1 {
-                ColorPrimaries::Bt709
-            } else {
-                ColorPrimaries::Bt2020
-            },
-            transfer: if meta.transfer == 1 {
-                TransferFunction::Bt709
-            } else {
-                TransferFunction::Srgb
-            },
-            matrix: if meta.matrix == 1 {
-                ColorMatrix::Bt709
-            } else {
-                ColorMatrix::Bt2020Ncl
-            },
-            range: if meta.full_range {
-                ColorRange::Full
-            } else {
-                ColorRange::Limited
-            },
-        };
-        let config = CodecConfiguration::new_baseline(
-            CodecConfigurationGeneration::from_raw(generation),
-            geometry,
-            color,
-            GopPolicy::baseline_for_frame_rate(u32::from(meta.fps))
-                .map_err(|_| MediaAdapterError::Configuration)?,
-        )
-        .map_err(|_| MediaAdapterError::Configuration)?;
-        // Validate the advertised codec string before mutating the live owner.
-        let guard = HevcGuard::from_decoder_record(
-            config,
-            ProtocolLimits::ABSOLUTE,
-            meta.decoded_pictures,
-            hvcc,
-        )
-        .map_err(|_| MediaAdapterError::Configuration)?;
-        let record = guard
-            .decoder_record()
-            .map_err(|_| MediaAdapterError::Configuration)?;
-        if meta.codec.strip_prefix("hev1.") != record.codec().strip_prefix("hvc1.") {
-            return Err(MediaAdapterError::Configuration);
-        }
+        let config = checked_configuration(declaration, generation, ProtocolLimits::ABSOLUTE)?;
         let prepared = self.pipeline.admit_decoder_configuration(
             config,
             ProtocolLimits::ABSOLUTE,
@@ -495,4 +438,76 @@ fn decimal(value: &str) -> Result<u64, MediaAdapterError> {
         return Err(MediaAdapterError::Configuration);
     }
     value.parse().map_err(|_| MediaAdapterError::Configuration)
+}
+
+/// Shared declaration/SPS validation for the local probe and authenticated
+/// browser session. JavaScript never chooses a codec string independently.
+pub(crate) fn checked_configuration(
+    declaration: fr_wire::decoder::Configuration<'_>,
+    generation: u64,
+    limits: ProtocolLimits,
+) -> Result<CodecConfiguration, MediaAdapterError> {
+    declaration
+        .validate(&limits)
+        .map_err(|_| MediaAdapterError::Configuration)?;
+    // This browser lane admits a bounded low-delay four-picture DPB. It
+    // does not promise that a native implementation's hidden pools qualify.
+    if declaration.decoded_pictures > 4 {
+        return Err(MediaAdapterError::Bounds);
+    }
+    let geometry = CodedGeometry::new(
+        &limits,
+        declaration.coded_width,
+        declaration.coded_height,
+        declaration.crop_width,
+        declaration.crop_height,
+        2,
+    )
+    .map_err(|_| MediaAdapterError::Configuration)?;
+    let color = ColorInfo {
+        primaries: if declaration.primaries == 1 {
+            ColorPrimaries::Bt709
+        } else {
+            ColorPrimaries::Bt2020
+        },
+        transfer: if declaration.transfer == 1 {
+            TransferFunction::Bt709
+        } else {
+            TransferFunction::Srgb
+        },
+        matrix: if declaration.matrix == 1 {
+            ColorMatrix::Bt709
+        } else {
+            ColorMatrix::Bt2020Ncl
+        },
+        range: if declaration.full_range {
+            ColorRange::Full
+        } else {
+            ColorRange::Limited
+        },
+    };
+    let config = CodecConfiguration::new_baseline(
+        CodecConfigurationGeneration::from_raw(generation),
+        geometry,
+        color,
+        GopPolicy::baseline_for_frame_rate(u32::from(declaration.fps))
+            .map_err(|_| MediaAdapterError::Configuration)?,
+    )
+    .map_err(|_| MediaAdapterError::Configuration)?;
+    // Validate the advertised codec string before mutating the live owner.
+    let guard = HevcGuard::from_decoder_record(
+        config,
+        limits,
+        declaration.decoded_pictures,
+        declaration.hvcc,
+    )
+    .map_err(|_| MediaAdapterError::Configuration)?;
+    let record = guard
+        .decoder_record()
+        .map_err(|_| MediaAdapterError::Configuration)?;
+    if declaration.codec.strip_prefix("hev1.") != record.codec().strip_prefix("hvc1.") {
+        return Err(MediaAdapterError::Configuration);
+    }
+
+    Ok(config)
 }

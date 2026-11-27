@@ -81,6 +81,13 @@ struct ChannelCredit {
     generation: ChannelGeneration,
     tracker: BrowserCreditTracker,
 }
+/// One original frame reservation, admitted before reassembly allocation.
+struct ReceivedCredit {
+    channel: ChannelGeneration,
+    frame: u64,
+    charged: u64,
+    decoder: Option<DecoderInstance>,
+}
 struct DecoderCredit {
     decoder: DecoderInstance,
     channel: ChannelGeneration,
@@ -98,6 +105,7 @@ pub struct BrowserSessionCore {
     video_supervisor: ChannelSupervisor,
     credits: Vec<ChannelCredit>,
     decoder_credits: Vec<DecoderCredit>,
+    received_credits: Vec<ReceivedCredit>,
     active_credit: Option<ChannelGeneration>,
     clock: Option<ClockExchange>,
     binding: Option<ControlBinding>,
@@ -126,6 +134,7 @@ impl BrowserSessionCore {
             video_supervisor: ChannelSupervisor::new(WssChannelRole::Video, 4),
             credits: Vec::new(),
             decoder_credits: Vec::new(),
+            received_credits: Vec::new(),
             active_credit: None,
             clock: None,
             binding: None,
@@ -162,6 +171,7 @@ impl BrowserSessionCore {
         self.video_supervisor = ChannelSupervisor::new(WssChannelRole::Video, 4);
         self.credits.clear();
         self.decoder_credits.clear();
+        self.received_credits.clear();
         self.active_credit = None;
         self.clock = None;
         self.binding = None;
@@ -190,28 +200,47 @@ impl BrowserSessionCore {
             credit_epoch,
             self.limits,
         )?;
-        let clock = ClockExchange::new(
-            binding,
-            self.limits,
-            ClockPolicy::default(),
-            ClientInstant(now_us),
-        )
-        .map_err(|_| BrowserCreditError::InvalidBindingOrEpoch)?;
-        if now_us < self.last_now_us {
-            return Err(BrowserCreditError::InvalidBindingOrEpoch);
-        }
-        self.session
-            .on_session_opened(binding, ClientInstant(now_us))
-            .map_err(|_| BrowserCreditError::InvalidBindingOrEpoch)?;
+        self.on_admitted_session(binding, self.limits, now_us)?;
         let generation = self.active_video_generation();
         self.credits.push(ChannelCredit {
             generation,
             tracker,
         });
         self.active_credit = Some(generation);
+        self.last_credit_epoch = credit_epoch;
+        self.last_now_us = now_us;
+        Ok(())
+    }
+
+    /// Install an authenticated, locally approved SessionOpened before its
+    /// independently attached media channel. Transport admission is insufficient.
+    pub(crate) fn on_admitted_session(
+        &mut self,
+        binding: ControlBinding,
+        limits: ProtocolLimits,
+        now_us: u64,
+    ) -> Result<(), BrowserCreditError> {
+        if self.binding.is_some()
+            || self.hevc.retained_decoders() != 0
+            || now_us < self.last_now_us
+            || limits.negotiated(&self.limits) != limits
+        {
+            return Err(BrowserCreditError::InvalidBindingOrEpoch);
+        }
+        let clock = ClockExchange::new(
+            binding,
+            limits,
+            ClockPolicy::default(),
+            ClientInstant(now_us),
+        )
+        .map_err(|_| BrowserCreditError::InvalidBindingOrEpoch)?;
+        self.session
+            .on_session_opened(binding, ClientInstant(now_us))
+            .map_err(|_| BrowserCreditError::InvalidBindingOrEpoch)?;
+        self.limits = limits;
+        self.hevc = BrowserHevcPipeline::new(4, limits.per_viewer_compressed_bytes());
         self.clock = Some(clock);
         self.binding = Some(binding);
-        self.last_credit_epoch = credit_epoch;
         self.last_now_us = now_us;
         Ok(())
     }
@@ -269,7 +298,7 @@ impl BrowserSessionCore {
         self.presented_source_us = None;
         self.presentation_floor = self.last_admitted;
     }
-    fn correlation(&mut self, now_us: u64) -> Option<ClockCorrelation> {
+    pub(crate) fn correlation(&mut self, now_us: u64) -> Option<ClockCorrelation> {
         self.clock
             .as_mut()?
             .correlation(ClientInstant(now_us))
@@ -414,9 +443,153 @@ impl BrowserSessionCore {
             .record_received(chunk.charged_bytes)
             .map_err(BrowserHevcError::Credit)?;
         decoder_owner.frames += 1;
+        self.received_credits.push(ReceivedCredit {
+            channel: channel_gen,
+            frame: frame_id,
+            charged: chunk.charged_bytes,
+            decoder: Some(decoder),
+        });
         self.last_admitted = Some((decoder.serial, frame_id));
         Ok(chunk)
     }
+    /// Reserve the full declared picture, metadata and native-input copy before
+    /// the receive pipeline allocates its first fragment. This is not decoding.
+    pub(crate) fn reserve_video_frame(
+        &mut self,
+        channel: ChannelGeneration,
+        frame: u64,
+        charged: u64,
+    ) -> Result<(), BrowserHevcError> {
+        if !self.observing()
+            || self.active_credit != Some(channel)
+            || self.video_supervisor.check_admission(channel).is_err()
+            || self
+                .received_credits
+                .iter()
+                .any(|r| r.channel == channel && r.frame == frame)
+            || self.received_credits.len() >= 4
+            || self
+                .received_credits
+                .iter()
+                .map(|r| r.charged)
+                .sum::<u64>()
+                .checked_add(charged)
+                .is_none_or(|bytes| bytes > self.limits.per_viewer_compressed_bytes())
+        {
+            return Err(BrowserHevcError::DecodeQueueFull);
+        }
+        let tracker = &mut self
+            .credits
+            .iter_mut()
+            .find(|owner| owner.generation == channel)
+            .ok_or(BrowserHevcError::NotConfigured)?
+            .tracker;
+        tracker
+            .record_received(charged)
+            .map_err(BrowserHevcError::Credit)?;
+        self.received_credits.push(ReceivedCredit {
+            channel,
+            frame,
+            charged,
+            decoder: None,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn admit_reserved_video_chunk(
+        &mut self,
+        channel: ChannelGeneration,
+        decoder: DecoderInstance,
+        frame: u64,
+        source: u64,
+        declared_idr: bool,
+        bytes: &[u8],
+    ) -> Result<PreparedWebCodecsChunk, BrowserHevcError> {
+        if !self.observing()
+            || self.active_credit != Some(channel)
+            || self.video_supervisor.check_admission(channel).is_err()
+        {
+            return Err(BrowserHevcError::StaleGeneration);
+        }
+        let reservation = self
+            .received_credits
+            .iter_mut()
+            .find(|r| r.channel == channel && r.frame == frame && r.decoder.is_none())
+            .ok_or(BrowserHevcError::UnknownFrameId)?;
+        if reservation.charged < bytes.len() as u64 {
+            return Err(BrowserHevcError::DecodeQueueFull);
+        }
+        let owner = self
+            .decoder_credits
+            .iter_mut()
+            .find(|r| r.channel == channel && r.decoder == decoder)
+            .ok_or(BrowserHevcError::StaleGeneration)?;
+        let chunk = self
+            .hevc
+            .admit_access_unit(decoder, frame, source, declared_idr, bytes)?;
+        reservation.decoder = Some(decoder);
+        owner.frames += 1;
+        self.last_admitted = Some((decoder.serial, frame));
+        Ok(chunk)
+    }
+
+    /// Called after the original reassembly allocation was positively discarded
+    /// without submitting a decoder. JavaScript cannot forge this transition.
+    pub(crate) fn discard_received_frame(
+        &mut self,
+        channel: ChannelGeneration,
+        frame: u64,
+    ) -> Result<Option<[u8; RECEIVER_PRESSURE_BYTES]>, BrowserHevcError> {
+        let position = self
+            .received_credits
+            .iter()
+            .position(|r| r.channel == channel && r.frame == frame && r.decoder.is_none())
+            .ok_or(BrowserHevcError::UnknownFrameId)?;
+        let reservation = self.received_credits.remove(position);
+        self.release_charge(channel, reservation.charged)
+    }
+
+    fn release_charge(
+        &mut self,
+        channel: ChannelGeneration,
+        charged: u64,
+    ) -> Result<Option<[u8; RECEIVER_PRESSURE_BYTES]>, BrowserHevcError> {
+        let credit = self
+            .credits
+            .iter_mut()
+            .find(|owner| owner.generation == channel)
+            .ok_or(BrowserHevcError::UnknownFrameId)?;
+        let record = credit
+            .tracker
+            .record_freed_and_encode(
+                charged,
+                credit.tracker.outstanding_bytes().saturating_sub(charged),
+                u32::try_from(credit.tracker.outstanding_frames().saturating_sub(1))
+                    .unwrap_or(u32::MAX),
+            )
+            .map_err(BrowserHevcError::Credit)?;
+        self.credits.retain(|owner| {
+            Some(owner.generation) == self.active_credit || owner.tracker.outstanding_frames() != 0
+        });
+        Ok(self.observing().then_some(record))
+    }
+
+    pub(crate) fn retain_video_output(
+        &mut self,
+        decoder: DecoderInstance,
+        frame: u64,
+    ) -> Result<(), BrowserHevcError> {
+        self.hevc.retain_output(decoder, frame)
+    }
+
+    pub(crate) fn media_owner_counts(&self) -> (usize, usize, u64) {
+        (
+            self.hevc.retained_decoders(),
+            self.hevc.inflight_frames(),
+            self.hevc.inflight_bytes(),
+        )
+    }
+
     pub fn on_frame_decoded(
         &mut self,
         decoder: DecoderInstance,
@@ -424,6 +597,39 @@ impl BrowserSessionCore {
     ) -> Result<(), BrowserHevcError> {
         self.hevc.on_frame_decoded(decoder, frame_id)
     }
+    /// Only the canonical receiver-bound ViewTracker can supply this sample.
+    /// No sample means the rendered image remains unqualified, even when its
+    /// host capture timestamp alone falls inside the source-age bound.
+    pub(crate) fn apply_view_sample(
+        &mut self,
+        sample: Option<fr_wire::presented::Sample>,
+        now_us: u64,
+    ) -> Result<(), SessionError> {
+        self.presented_source_us = None;
+        if let (
+            Some(sample),
+            BrowserDecoderStage::Presented {
+                last_frame_id,
+                last_source_us,
+                ..
+            },
+        ) = (sample, self.hevc.stage())
+        {
+            if sample.stamp.frame == last_frame_id
+                && sample.stamp.captured_us == last_source_us
+                && sample.stamp.observed_us >= last_source_us
+                && sample.stamp.source != fr_wire::SourceObservation::Unknown
+            {
+                self.presented_source_us = Some(sample.stamp.observed_us);
+            }
+        }
+        if self.presented_source_us.is_none() {
+            self.session.invalidate_control();
+            self.control_until_us = None;
+        }
+        self.tick(now_us)
+    }
+
     pub fn on_frame_presented(
         &mut self,
         decoder: DecoderInstance,
@@ -463,33 +669,24 @@ impl BrowserSessionCore {
             .iter_mut()
             .find(|owner| owner.decoder == release.decoder)
             .ok_or(BrowserHevcError::UnknownFrameId)?;
-        let credit = self
-            .credits
-            .iter_mut()
-            .find(|owner| owner.generation == decoder.channel)
+        let position = self
+            .received_credits
+            .iter()
+            .position(|r| {
+                r.channel == decoder.channel
+                    && r.frame == release.frame_id
+                    && r.decoder == Some(release.decoder)
+            })
             .ok_or(BrowserHevcError::UnknownFrameId)?;
-        let record = credit
-            .tracker
-            .record_freed_and_encode(
-                release.freed_bytes,
-                credit
-                    .tracker
-                    .outstanding_bytes()
-                    .saturating_sub(release.freed_bytes),
-                u32::try_from(credit.tracker.outstanding_frames().saturating_sub(1))
-                    .unwrap_or(u32::MAX),
-            )
-            .map_err(BrowserHevcError::Credit)?;
+        let reservation = self.received_credits.remove(position);
         decoder.frames = decoder
             .frames
             .checked_sub(1)
             .ok_or(BrowserHevcError::UnknownFrameId)?;
-        self.credits.retain(|owner| {
-            Some(owner.generation) == self.active_credit || owner.tracker.outstanding_frames() != 0
-        });
+        let record = self.release_charge(reservation.channel, reservation.charged)?;
         self.decoder_credits
             .retain(|owner| owner.frames != 0 || self.hevc.contains_decoder(owner.decoder));
-        Ok(self.observing().then_some(record))
+        Ok(record)
     }
     pub fn on_video_frame_closed(
         &mut self,

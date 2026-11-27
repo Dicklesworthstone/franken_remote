@@ -73,6 +73,13 @@ function ioFixture(response = available(), options = {}) {
         }
         disconnect(token) { this.calls.push(["disconnect", token]); this.token = null; this.phase = "closed"; }
         free() { this.freed += 1; assert.equal(this.freed, 1, "original adapter freed exactly once"); }
+        takeControl() { return undefined; }
+        controlQueued() {}
+        needsVideo() { return false; }
+        configurationReady() { return false; }
+        desktopSnapshot() {
+            return JSON.stringify({ retainedDecoders: 0, inflightFrames: 0, quarantined: false });
+        }
         snapshot() {
             return JSON.stringify({
                 attempt: this.token, state_label: this.phase,
@@ -83,7 +90,7 @@ function ioFixture(response = available(), options = {}) {
         }
     }
     const createAdapter = options.createAdapter || (async () => ({
-        core: new AdapterStub(), maxBootstrapBytes: 4096, maxControlRecordBytes: 4096,
+        core: new AdapterStub(), maxBootstrapBytes: 4096, maxControlRecordBytes: 4096, maxVideoRecordBytes: 65536,
     }));
     const window = {
         location: { protocol: options.protocol || "https:", host: "host.fixture.ts.net:8443" },

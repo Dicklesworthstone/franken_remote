@@ -386,6 +386,23 @@ impl<'a> Record<'a> {
             payload: &payload[..fixed_len],
         })
     }
+    /// Inspect a mixed WSS role without weakening any channel-specific decoder.
+    /// The kind is only a hint for the existing full canonical envelope parser;
+    /// callers still decode the exact schema before accepting a record.
+    pub(crate) fn inspect_bounded(
+        bytes: &'a [u8],
+        maximum: usize,
+        binding: u32,
+    ) -> Result<Kind, WireError> {
+        if bytes.len() > maximum {
+            return Err(WireError::ResourceLimit);
+        }
+        let mut header = Reader::new(bytes);
+        header.take(6)?;
+        let kind = Kind::parse(header.u16()?)?;
+        Ok(Self::decode_bounded(bytes, maximum, binding, kind.channel())?.kind())
+    }
+
     pub const fn kind(&self) -> Kind {
         self.kind
     }

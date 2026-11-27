@@ -1,5 +1,6 @@
-//! Portable adapter tests. Desktop availability is synthetic; no socket,
-//! browser decoder, installed tailnet, or observing session is qualified here.
+//! Portable canonical negotiation and ownership tests. Synthetic admitted host
+//! records exercise client state; these tests do not qualify a live tailnet,
+//! browser decoder, capture backend or actual desktop presentation.
 
 use fr_web::adapter::{
     BrowserAdapterError as Error, BrowserAttempt, BrowserConnectionAdapter, MAX_BOOTSTRAP_BYTES,
@@ -359,4 +360,246 @@ fn lifecycle_reaches_shared_core_and_pagehide_cannot_be_revived_by_late_work() {
     );
     assert_eq!(adapter.snapshot().attempt, Some(replacement.get()));
     assert_no_authority(&adapter);
+}
+
+fn negotiation_record(message: &fr_wire::negotiation::Message) -> Vec<u8> {
+    let mut out = [0; browser::MAX_RECORD];
+    let n = browser::encode(message, out.len(), &mut out).unwrap();
+    out[..n].to_vec()
+}
+fn desktop_binding() -> fr_wire::negotiation::ControlBinding {
+    fr_wire::negotiation::ControlBinding {
+        id: 7,
+        host_boot: fr_core::ids::HostBootId::from_raw(11),
+        os_session: fr_core::ids::OsSessionId::from_raw(12),
+        remote_session: fr_core::ids::RemoteSessionId::from_raw(13),
+    }
+}
+fn opened_desktop() -> (BrowserConnectionAdapter, BrowserAttempt) {
+    use fr_wire::negotiation::Message;
+    let (mut adapter, attempt) = awaiting_host();
+    let host = browser::offer(fr_core::limits::ProtocolLimits::ABSOLUTE);
+    adapter
+        .receive_control(
+            attempt,
+            &negotiation_record(&Message::HostCapabilities(host.clone())),
+            4000,
+        )
+        .unwrap();
+    let selected_bytes = adapter.take_control(attempt, 4001).unwrap().unwrap();
+    let Message::SelectedConfiguration(selected) =
+        browser::decode(&selected_bytes, browser::MAX_RECORD, 0).unwrap()
+    else {
+        panic!("client must select the actual host intersection")
+    };
+    browser::check_selection(&selected, &host).unwrap();
+    adapter.control_queued(attempt, 4002).unwrap();
+    adapter
+        .receive_control(
+            attempt,
+            &negotiation_record(&Message::SessionOpened {
+                binding: desktop_binding(),
+                selection: selected,
+                observation_until_us: 500_000,
+            }),
+            5000,
+        )
+        .unwrap();
+    let accepted = adapter.take_control(attempt, 5001).unwrap().unwrap();
+    assert_eq!(
+        browser::decode(&accepted, browser::MAX_RECORD, 7).unwrap(),
+        Message::BindingAccepted { binding: 7 }
+    );
+    adapter.control_queued(attempt, 5002).unwrap();
+    let clock = adapter.take_control(attempt, 5003).unwrap().unwrap();
+    assert_eq!(
+        browser::record_kind(&clock, browser::MAX_RECORD, 7).unwrap(),
+        fr_wire::Kind::ClockProbe
+    );
+    adapter.control_queued(attempt, 5004).unwrap();
+    assert_eq!(adapter.snapshot().state_label, "awaiting_media");
+    assert_no_authority(&adapter);
+    (adapter, attempt)
+}
+fn desktop_grant() -> browser::attachment::Grant {
+    use fr_core::ids::{
+        CodecConfigurationGeneration, DisplayGeometryGeneration, RecoveryGeneration,
+        ViewportMappingGeneration,
+    };
+    browser::attachment::Grant {
+        descriptor: browser::attachment::Descriptor {
+            binding: fr_wire::decoder::Binding {
+                parent: fr_wire::negotiation::ControlBinding {
+                    id: 19,
+                    ..desktop_binding()
+                },
+                display: 21,
+                geometry: DisplayGeometryGeneration::INITIAL,
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: RecoveryGeneration::INITIAL,
+                viewport: ViewportMappingGeneration::INITIAL,
+            },
+        },
+        ticket: browser::attachment::Ticket([42; 32]),
+        deadline_us: 500_000,
+        byte_allowance: browser::MAX_VIDEO_CREDIT_BYTES,
+        picture_allowance: browser::MAX_VIDEO_CREDIT_FRAMES,
+        credit_epoch: 8,
+    }
+}
+fn attachment_record(message: browser::attachment::Message) -> Vec<u8> {
+    use fr_wire::input::InputDirection::HostToViewer;
+    let mut out = [0; browser::attachment::GRANT_RECORD_BYTES];
+    let n = browser::attachment::encode(
+        message,
+        desktop_binding(),
+        &browser::limits(),
+        &mut out,
+        HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    out[..n].to_vec()
+}
+fn ticketed_desktop() -> (BrowserConnectionAdapter, BrowserAttempt) {
+    use browser::attachment::Message;
+    let (mut adapter, attempt) = opened_desktop();
+    adapter
+        .receive_control(
+            attempt,
+            &attachment_record(Message::Binding(desktop_grant().descriptor)),
+            6000,
+        )
+        .unwrap();
+    let accepted = adapter.take_control(attempt, 6001).unwrap().unwrap();
+    assert_eq!(
+        browser::attachment::decode(
+            &accepted,
+            desktop_binding(),
+            7,
+            &browser::limits(),
+            fr_wire::input::InputDirection::ViewerToHost,
+            InputDelivery::Reliable
+        )
+        .unwrap(),
+        Message::Accepted(19)
+    );
+    adapter.control_queued(attempt, 6002).unwrap();
+    adapter
+        .receive_control(
+            attempt,
+            &attachment_record(Message::Ticket(desktop_grant())),
+            7000,
+        )
+        .unwrap();
+    assert!(adapter.needs_video());
+    (adapter, attempt)
+}
+#[test]
+fn desktop_open_and_attachment_do_not_fabricate_decoder_or_input_readiness() {
+    let (mut adapter, attempt) = ticketed_desktop();
+    let attach = adapter.video_attach(attempt, 8000).unwrap();
+    assert_eq!(
+        browser::attachment::decode(
+            &attach,
+            desktop_binding(),
+            19,
+            &browser::limits(),
+            fr_wire::input::InputDirection::ViewerToHost,
+            InputDelivery::Reliable
+        )
+        .unwrap(),
+        browser::attachment::Message::Attach(desktop_grant())
+    );
+    assert!(!adapter.needs_video());
+    adapter
+        .receive_video(
+            attempt,
+            &attachment_record(browser::attachment::Message::Attached(desktop_grant())),
+            9000,
+        )
+        .unwrap();
+    assert_eq!(adapter.snapshot().state_label, "awaiting_media");
+    assert_no_authority(&adapter);
+    assert_eq!(adapter.desktop_snapshot().retained_decoders, 0);
+    assert!(adapter.take_video_chunk(attempt, 10_000).unwrap().is_none());
+}
+#[test]
+fn observation_renewal_is_serviced_while_video_is_still_unattached() {
+    use fr_wire::authority::{self, Message, Scope};
+    let (mut adapter, attempt) = opened_desktop();
+    let binding = authority::Binding {
+        channel: 7,
+        session: desktop_binding().remote_session,
+    };
+    let mut bytes = [0; authority::OBSERVATION_CHALLENGE_BYTES];
+    let n = authority::encode(
+        Message::Challenge {
+            scope: Scope::Observation,
+            nonce: 923,
+            deadline_micros: 600_000,
+        },
+        binding,
+        &browser::limits(),
+        &mut bytes,
+        fr_wire::input::InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    adapter.receive_control(attempt, &bytes[..n], 6000).unwrap();
+    let response = adapter.take_control(attempt, 6001).unwrap().unwrap();
+    assert_eq!(
+        authority::decode(
+            &response,
+            binding,
+            &browser::limits(),
+            fr_wire::input::InputDirection::ViewerToHost,
+            InputDelivery::Reliable
+        )
+        .unwrap(),
+        Message::Response {
+            scope: Scope::Observation,
+            nonce: 923
+        }
+    );
+    adapter.control_queued(attempt, 6002).unwrap();
+    assert_no_authority(&adapter);
+}
+#[test]
+fn media_attachment_must_echo_the_entire_original_ticket_and_credit_epoch() {
+    let (mut adapter, attempt) = ticketed_desktop();
+    adapter.video_attach(attempt, 8000).unwrap();
+    let mut changed = desktop_grant();
+    changed.ticket.0[31] ^= 1;
+    assert_eq!(
+        adapter.receive_video(
+            attempt,
+            &attachment_record(browser::attachment::Message::Attached(changed)),
+            9000
+        ),
+        Err(Error::InvalidMedia)
+    );
+    assert_eq!(adapter.snapshot().state_label, "refused");
+    assert_no_authority(&adapter);
+}
+#[test]
+fn media_ticket_replay_and_retired_auxiliary_callbacks_are_terminal() {
+    let (mut adapter, attempt) = ticketed_desktop();
+    assert!(
+        adapter
+            .receive_control(
+                attempt,
+                &attachment_record(browser::attachment::Message::Ticket(desktop_grant())),
+                8000
+            )
+            .is_err()
+    );
+    let replacement = adapter.begin("observer", 9000).unwrap();
+    let snapshot = adapter.snapshot();
+    assert_eq!(
+        adapter.receive_video(attempt, b"bad", 0),
+        Err(Error::Cancelled)
+    );
+    assert_eq!(adapter.snapshot(), snapshot);
+    assert_eq!(adapter.snapshot().attempt, Some(replacement.get()));
 }
