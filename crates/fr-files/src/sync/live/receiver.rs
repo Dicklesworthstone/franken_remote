@@ -1,6 +1,6 @@
 //! Explicit acceptance and real publication accounting on one original receiver.
 use super::{
-    ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, JobBudget, JobStatus, LiveError, SyncLimits, state,
+    ACCEPT_LIFETIME_US, JobBudget, JobStatus, LiveError, SyncLimits, state, state_deadline,
 };
 use crate::{
     quic::{FileAdmission, Receiver, State},
@@ -28,6 +28,23 @@ enum Phase {
     Refusing(LiveError),
     Stopped,
 }
+impl Phase {
+    fn check_acceptance(self, now: u64, advertised_until: u64) -> Result<(), LiveError> {
+        if matches!(
+            self,
+            Self::Advertise
+                | Self::Advertising
+                | Self::Acceptance
+                | Self::Advertisement
+                | Self::Accepting
+        ) && now >= advertised_until
+        {
+            return Err(LiveError::Expired);
+        }
+        Ok(())
+    }
+}
+
 struct Pending {
     state: SyncJobState,
     deadline: u64,
@@ -212,6 +229,7 @@ impl ControllerJob {
                     0,
                 ),
                 now,
+                receiver,
             )?;
             self.phase = Phase::Advertising;
         }
@@ -255,6 +273,11 @@ impl ControllerJob {
         }
         self.observe(receiver.last_result())?;
         if let Some(record) = incoming {
+            let after_dispatch = receiver.sync_clock(q).map_err(LiveError::Receive)?;
+            self.check_time(after_dispatch)?;
+            if receiver.sync_round().elapsed(after_dispatch) {
+                return Err(LiveError::Expired);
+            }
             self.received(record, now, receiver)?;
         }
         if receiver_state != State::Active {
@@ -266,12 +289,7 @@ impl ControllerJob {
             }
             if !pending.admitted {
                 pending.admitted = receiver
-                    .send_sync(
-                        q,
-                        &pending.state,
-                        pending.deadline.min(receiver.sync_round().until()),
-                        authorize,
-                    )
+                    .send_sync(q, &pending.state, pending.deadline, authorize)
                     .map_err(LiveError::Receive)?;
             }
         }
@@ -316,6 +334,11 @@ impl ControllerJob {
         if self.phase == Phase::Stopped {
             return Err(self.status.failure.unwrap_or(LiveError::Cancelled));
         }
+        self.check_time(now)?;
+        Ok(now)
+    }
+
+    fn check_time(&mut self, now: u64) -> Result<(), LiveError> {
         if self.last_now.is_some_and(|last| now < last) {
             return Err(LiveError::Clock);
         }
@@ -329,14 +352,7 @@ impl ControllerJob {
             self.advertised_until = Some(until);
             until
         };
-        if matches!(
-            self.phase,
-            Phase::Advertise | Phase::Advertising | Phase::Acceptance | Phase::Advertisement
-        ) && now >= advertised_until
-        {
-            return Err(LiveError::Expired);
-        }
-        Ok(now)
+        self.phase.check_acceptance(now, advertised_until)
     }
 
     fn finish_pending(
@@ -354,14 +370,18 @@ impl ControllerJob {
         if !pending.admitted || !receiver.sync_idle(q).map_err(LiveError::Receive)? {
             return Ok(());
         }
+        let completed_at = receiver.sync_clock(q).map_err(LiveError::Receive)?;
+        if completed_at >= pending.deadline {
+            return Err(LiveError::Expired);
+        }
+        self.check_time(completed_at)?;
         self.pending = None;
         if self.phase == Phase::Advertising {
             self.phase = Phase::Acceptance;
             return Ok(());
         }
         if self.phase == Phase::Acknowledging {
-            let now = receiver.sync_clock(q).map_err(LiveError::Receive)?;
-            if !receiver.sync_round().finish(now) {
+            if !receiver.sync_round().finish(completed_at) {
                 return Err(LiveError::Expired);
             }
             self.status.rounds_settled = self
@@ -403,7 +423,7 @@ impl ControllerJob {
                     return Err(LiveError::WrongPhase);
                 }
                 let acceptance = state(record.job_id, self.direction, SyncPhase::Accepted, 0);
-                self.queue(acceptance, now)?;
+                self.queue(acceptance, now, receiver)?;
                 self.phase = Phase::Accepting;
             }
             Phase::Acceptance => {
@@ -450,7 +470,7 @@ impl ControllerJob {
                 self.status.state = record;
                 self.phase = Phase::Files;
                 if self.entries == 0 {
-                    self.acknowledge(now)?;
+                    self.acknowledge(now, receiver)?;
                 }
             }
             Phase::Files => {
@@ -463,7 +483,7 @@ impl ControllerJob {
                 {
                     return Err(LiveError::WrongPhase);
                 }
-                self.acknowledge(now)?;
+                self.acknowledge(now, receiver)?;
             }
             _ => return Err(LiveError::WrongPhase),
         }
@@ -549,7 +569,7 @@ impl ControllerJob {
         Ok(())
     }
 
-    fn acknowledge(&mut self, now: u64) -> Result<(), LiveError> {
+    fn acknowledge(&mut self, now: u64, receiver: &Receiver) -> Result<(), LiveError> {
         if self.active.is_some()
             || self.completed != self.entries
             || self.published_bytes != self.bytes
@@ -568,18 +588,26 @@ impl ControllerJob {
             conflicts_kept: conflicts,
             ..self.status.state
         };
-        self.queue(reply, now)?;
+        self.queue(reply, now, receiver)?;
         self.phase = Phase::Acknowledging;
         Ok(())
     }
 
-    fn queue(&mut self, record: SyncJobState, now: u64) -> Result<(), LiveError> {
+    fn queue(
+        &mut self,
+        record: SyncJobState,
+        now: u64,
+        receiver: &Receiver,
+    ) -> Result<(), LiveError> {
         if self.pending.is_some() {
             return Err(LiveError::WrongPhase);
         }
-        let deadline = now
-            .checked_add(CONTROL_LIFETIME_US)
-            .ok_or(LiveError::Clock)?;
+        let deadline = state_deadline(
+            record.phase,
+            now,
+            self.advertised_until.ok_or(LiveError::WrongPhase)?,
+            receiver.sync_round().until(),
+        )?;
         self.status.state = record;
         self.pending = Some(Pending {
             state: record,
@@ -587,5 +615,26 @@ impl ControllerJob {
             admitted: false,
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepting_a_late_advertisement_does_not_restart_the_handshake_timer() {
+        for phase in [
+            Phase::Advertisement,
+            Phase::Accepting,
+            Phase::Advertise,
+            Phase::Advertising,
+            Phase::Acceptance,
+        ] {
+            assert_eq!(phase.check_acceptance(99, 100), Ok(()));
+            assert_eq!(phase.check_acceptance(100, 100), Err(LiveError::Expired));
+        }
+        // A completed startup permits later rounds under their own deadline.
+        assert_eq!(Phase::Scan.check_acceptance(101, 100), Ok(()));
     }
 }

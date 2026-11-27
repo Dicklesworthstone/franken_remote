@@ -42,6 +42,30 @@ pub(super) const ROUND_LIFETIME_US: u64 = 300_000_000;
 pub(super) const CONTROL_LIFETIME_US: u64 = 1_000_000;
 pub(super) const ACCEPT_LIFETIME_US: u64 = 5_000_000;
 
+/// This deadline travels with the record into QUIC, which may drive sends and
+/// retransmissions independently of the next folder-owner turn.
+fn state_deadline(
+    phase: SyncPhase,
+    now: u64,
+    acceptance_until: u64,
+    round_until: u64,
+) -> Result<u64, LiveError> {
+    let until = match phase {
+        SyncPhase::Advertised | SyncPhase::Accepted => acceptance_until,
+        SyncPhase::Scanning
+        | SyncPhase::Transferring
+        | SyncPhase::Settled
+        | SyncPhase::ConflictRecorded => round_until,
+        SyncPhase::Cancelled | SyncPhase::Failed => return Err(LiveError::WrongPhase),
+    };
+    if now >= until {
+        return Err(LiveError::Expired);
+    }
+    now.checked_add(CONTROL_LIFETIME_US)
+        .map(|deadline| deadline.min(until))
+        .ok_or(LiveError::Clock)
+}
+
 /// Each endpoint charges the declared round once, before admitting any of its
 /// files. Empty, settled rounds can continue after a budget is exhausted.
 #[derive(Default)]
@@ -289,6 +313,30 @@ impl HostConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_queued_state_keeps_its_own_scope_in_the_transport() {
+        for phase in [SyncPhase::Advertised, SyncPhase::Accepted] {
+            assert_eq!(state_deadline(phase, 19, 20, 0), Ok(20));
+            for late in [20, 21] {
+                assert_eq!(state_deadline(phase, late, 20, 0), Err(LiveError::Expired));
+            }
+        }
+        for phase in [
+            SyncPhase::Scanning,
+            SyncPhase::Transferring,
+            SyncPhase::Settled,
+            SyncPhase::ConflictRecorded,
+        ] {
+            assert_eq!(state_deadline(phase, 99, 20, 100), Ok(100));
+            assert_eq!(state_deadline(phase, 100, 20, 100), Err(LiveError::Expired));
+            assert_eq!(state_deadline(phase, 101, 20, 100), Err(LiveError::Expired));
+            assert_eq!(
+                state_deadline(phase, 101, 20, u64::MAX),
+                Ok(101 + CONTROL_LIFETIME_US)
+            );
+        }
+    }
 
     #[test]
     fn round_reservations_are_bounded_and_rejections_spend_nothing() {

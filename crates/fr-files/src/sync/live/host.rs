@@ -1,9 +1,9 @@
 //! Source-version delivery on one original, explicitly accepted file lane.
 use super::{
-    ACCEPT_LIFETIME_US, CONTROL_LIFETIME_US, HostConfig, JobBudget, JobStatus, LiveError,
+    ACCEPT_LIFETIME_US, HostConfig, JobBudget, JobStatus, LiveError,
     paging::Cursor,
     scan::{PreparedRound, Scan, ScanCache, ScanScope, Version},
-    state,
+    state, state_deadline,
 };
 use crate::{
     sender::{Outcome, Sender, SourceScope, batch},
@@ -612,9 +612,7 @@ impl HostJob {
             state,
             next,
             sent: false,
-            deadline: now
-                .checked_add(CONTROL_LIFETIME_US)
-                .ok_or(LiveError::Clock)?,
+            deadline: state_deadline(state.phase, now, self.acceptance_until, self.round_until)?,
         });
         self.status.state = state;
         Ok(())
@@ -653,13 +651,21 @@ impl HostJob {
             .send_drained(q)
             .map_err(LiveError::Transport)?
         {
+            let completed_at = self.clock.now().as_nanos() / 1000;
+            if completed_at < self.last {
+                return Err(LiveError::Clock);
+            }
+            if completed_at >= pending.deadline {
+                return Err(LiveError::Expired);
+            }
+            self.last = completed_at;
             self.step = pending.next;
             self.pending = None;
         }
         Ok(())
     }
     fn receive_state(
-        &self,
+        &mut self,
         sender: &Sender<'_>,
         q: &mut QuicRecords,
         authorize: &mut impl FnMut() -> bool,
@@ -675,10 +681,26 @@ impl HostJob {
             Ok(Disposition::Consumed)
         })
         .map_err(LiveError::Transport)?;
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(received),
+        if let Some(error) = failure {
+            return Err(error);
         }
+        if received.is_some() {
+            // Dispatch can wait or run a caller's authorization callback.
+            // A late acceptance or settlement cannot advance this owner.
+            let now = self.clock.now().as_nanos() / 1000;
+            if now < self.last {
+                return Err(LiveError::Clock);
+            }
+            self.last = now;
+            match self.step {
+                Step::Accept | Step::Advertisement if now >= self.acceptance_until => {
+                    return Err(LiveError::Expired);
+                }
+                Step::Settlement if now >= self.round_until => return Err(LiveError::Expired),
+                _ => {}
+            }
+        }
+        Ok(received)
     }
     fn check_peer(&self, value: SyncJobState) -> Result<(), LiveError> {
         if value.job_id != self.config.job_id {
