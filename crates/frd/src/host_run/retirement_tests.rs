@@ -406,8 +406,32 @@ fn cleanup_failures_and_other_listener_faults_remain_terminal() {
                 Some(Error::Cleanup(stage))
             );
         }
+        for fault in [
+            ingress::Error::Identity(fr_tailnet::Error::Timeout),
+            ingress::Error::Identity(fr_tailnet::Error::Expired),
+            ingress::Error::CommandUncertain,
+        ] {
+            let end = LinuxError::Ingress(fault);
+            assert_eq!(
+                retryable(share.after_cleanup(End::Listener(Err(end)), Ok(()), None)),
+                Error::Listener(Box::new(end))
+            );
+            assert_eq!(
+                share
+                    .after_cleanup(
+                        End::Listener(Err(end)),
+                        Err(Error::Cleanup("ingress")),
+                        None,
+                    )
+                    .err(),
+                Some(Error::Cleanup("ingress"))
+            );
+        }
         for failure in [
             LinuxError::Ingress(ingress::Error::FirewallMismatch),
+            LinuxError::Ingress(ingress::Error::InterfaceChanged),
+            LinuxError::Ingress(ingress::Error::Identity(fr_tailnet::Error::IdentityChanged)),
+            LinuxError::Ingress(ingress::Error::HelperUnavailable),
             LinuxError::Host(HostError::IngressUnavailable),
             LinuxError::Serial(serial::Error::Clock),
             LinuxError::Serial(serial::Error::IdentityReuse),
@@ -436,13 +460,15 @@ fn one_shot_retirement_failure_keeps_its_typed_outcome() {
 }
 
 #[test]
-fn source_and_retirement_failures_share_one_bounded_restart_budget() {
+fn ingress_source_and_retirement_failures_share_one_bounded_restart_budget() {
     let mut failures = 0;
     for attempt in 1..=MAX_CONSECUTIVE_FAILURES {
-        let failure = if attempt.is_multiple_of(2) {
-            Error::Desktop(dispatch::Error::Clock)
-        } else {
-            Error::Listener(Box::new(retained_error()))
+        let failure = match attempt % 3 {
+            0 => Error::Desktop(dispatch::Error::Clock),
+            1 => Error::Listener(Box::new(retained_error())),
+            _ => Error::Listener(Box::new(LinuxError::Ingress(
+                ingress::Error::CommandUncertain,
+            ))),
         };
         let result = record_share_failure(false, &mut failures, failure.clone());
         assert_eq!(failures, attempt);

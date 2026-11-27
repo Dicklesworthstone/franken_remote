@@ -971,8 +971,21 @@ fn capture_interval(fps: u16) -> Option<Duration> {
         .map(video::Profile::capture_interval)
 }
 
-/// One shared restart allowance for source failures and cleanup-confirmed
-/// transport-retirement timeouts. Neither kind can bypass the other's budget.
+/// These failures end the original listener. Only a fresh bind after verified
+/// teardown may recover them. Unknown errors and changed identity, interface
+/// or firewall evidence stay terminal.
+fn recoverable_listener_failure(error: LinuxError) -> bool {
+    use fr_tailnet::Error::{Expired, Timeout};
+    matches!(
+        error,
+        LinuxError::Serial(serial::Error::RetainedTransport)
+            | LinuxError::Ingress(
+                ingress::Error::CommandUncertain | ingress::Error::Identity(Timeout | Expired)
+            )
+    )
+}
+
+/// One shared restart allowance for all cleanup-confirmed host failures.
 fn record_share_failure(once: bool, failures: &mut u32, error: Error) -> Result<(), Error> {
     if once {
         return Err(error);
@@ -2013,10 +2026,9 @@ impl Share<'_> {
             }
         }
         match end {
-            End::Listener(Err(error @ LinuxError::Serial(serial::Error::RetainedTransport))) => {
-                // The serial listener still ended on its unchanged hard bound.
-                // Full original cleanup has now proved every transport retired;
-                // a persistent run may start a fresh share with new identities.
+            End::Listener(Err(error)) if recoverable_listener_failure(error) => {
+                // The original share is fully retired. The new listener must
+                // establish its own identity and ingress evidence before use.
                 Ok(Ended::Failed(Error::Listener(Box::new(error))))
             }
             End::Listener(Err(error)) => Err(Error::Listener(Box::new(error))),

@@ -123,7 +123,15 @@ This recovered timeout counts against the same five-consecutive-host-failure
 limit and increasing backoff used for source failures. Alternating source and
 transport failures cannot reset that budget. `--once` returns the original typed
 listener failure after cleanup; it does not retry or relabel the failed share as
-successful. Other listener failures and any failed cleanup remain fatal.
+successful.
+
+During an established share, an expired node snapshot, a timed-out identity
+lookup, or an uncertain ingress command also retires the listener. After
+confirmed cleanup a persistent host spends the same restart budget to bind
+again. The new listener obtains a fresh node snapshot, installs and verifies
+its own ingress protection, and admits viewers from scratch. Existing viewers
+lose their session. A firewall mismatch, changed interface or identity, or
+failed cleanup still ends the host run. Initial bind errors remain terminal.
 Selected-session and live-policy outcomes keep precedence over recovery, so a
 restart never revives a retired grant.
 
