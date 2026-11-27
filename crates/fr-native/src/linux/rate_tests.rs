@@ -43,6 +43,57 @@ fn software_rates_reuse_exact_original_decoder_configuration_and_frame_identity(
 }
 
 #[test]
+fn fitted_encoder_keeps_the_entire_source_and_its_geometry_after_rate_changes() {
+    let limits = ProtocolLimits::ABSOLUTE;
+    let config = configuration(64, 64);
+    let open = |size| {
+        HevcEncoder::for_display(
+            config,
+            limits,
+            EncodeBackend::SoftwareExplicit,
+            30,
+            8_000_000,
+            size,
+        )
+    };
+    assert_eq!(open((128, 96)).err(), Some(NativeError::GeometryChanged));
+    let mut encoder = open((128, 128)).unwrap();
+    // The display's right and bottom halves must survive fitting. Cropping
+    // the top-left picture or reading at picture stride gives different bars.
+    let mut bytes = Vec::with_capacity(128 * 128 * 4);
+    for y in 0..128 {
+        for x in 0..128 {
+            let value = if (x < 64) == (y < 64) { 32 } else { 224 };
+            bytes.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    let source = BgraFrame::new(128, 128, bytes, &limits).unwrap();
+    let wrong_size = BgraFrame::new(64, 256, vec![0; 128 * 128 * 4], &limits).unwrap();
+    let mut decoder = None;
+    for n in 0..2 {
+        if n == 1 {
+            assert_eq!(encoder.reopen_bitrate(4_000_000), Ok(true));
+        }
+        assert_eq!(
+            encoder.submit(&wrong_size, FrameId::from_raw(n), n, true),
+            Err(NativeError::GeometryChanged)
+        );
+        let unit = submit(&mut encoder, n, &source);
+        assert!(unit.is_idr());
+        let decoder = decoder.get_or_insert_with(|| {
+            let record = encoder.admission.decoder_record().unwrap();
+            HevcDecoder::new(config, limits, record.bytes()).unwrap()
+        });
+        decoder.submit(&unit).unwrap();
+        let (_, decoded) = decoder.poll_output().unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (64, 64));
+        for (x, y, expected) in [(8, 8, 32), (56, 8, 224), (8, 56, 224), (56, 56, 32)] {
+            assert!(decoded.pixels()[4 * (y * 64 + x)].abs_diff(expected) < 12);
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires a working NVIDIA HEVC encoder and driver"]
 fn nvenc_rates_reuse_exact_original_decoder_configuration_and_frame_identity() {
     check_rate_transitions(EncodeBackend::Nvenc, busy_desktop(0));

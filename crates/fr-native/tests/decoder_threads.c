@@ -230,7 +230,7 @@ static void roundtrip(int w,int h,int count,int noise) {
     assert(pixels && one_allocation && four_allocation);
     uint8_t *one=one_allocation+PIXEL_CANARY,*four=four_allocation+PIXEL_CANARY;
     FrEncoder *encoder=NULL;
-    assert(fr_encoder_new(2,w,h,30,8000000,8000000,60,0,&encoder)==FR_OK);
+    assert(fr_encoder_new(2,w,h,w,h,30,8000000,8000000,60,0,&encoder)==FR_OK);
     uint32_t random=123;
     for (int i=0;i<count;i++) {
         for (int y=0;y<h;y++) for (int x=0;x<w;x++) {

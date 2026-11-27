@@ -709,12 +709,13 @@ mod linux {
                             return Err(Error::Unsupported);
                         }
                     };
-                    let codec = HevcEncoder::new(
+                    let codec = HevcEncoder::for_display(
                         c.codec()?,
                         c.limits()?,
                         backend,
                         u32::from(c.fps),
                         c.bitrate,
+                        (selected.pixel_width, selected.pixel_height),
                     )
                     .map_err(native)?;
                     let mut capture = ChangeAwareCapture::selected(surface, codec);

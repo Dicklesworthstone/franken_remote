@@ -45,6 +45,7 @@ typedef struct {
     struct SwsContext *scale;
     AVBufferRef *device, *frames;
     int have_packet, draining, hardware;
+    int source_w, source_h;
 } FrEncoder;
 void fr_encoder_free(FrEncoder *e) {
     if (!e) return;
@@ -54,14 +55,14 @@ void fr_encoder_free(FrEncoder *e) {
 }
 /* Four slice threads (they apply to sws_scale_frame only): a 1080p
  * BGRA->YUV420P conversion took 9.6 ms on ts2 single-threaded, 3.4 with four. */
-static struct SwsContext *bgra_scaler(int w,int h,enum AVPixelFormat dst) {
+static struct SwsContext *bgra_scaler(int source_w,int source_h,int w,int h,enum AVPixelFormat dst) {
     struct SwsContext *s=sws_alloc_context();
     if (!s) return NULL;
-    if (av_opt_set_int(s,"srcw",w,0)<0 || av_opt_set_int(s,"srch",h,0)<0 ||
+    if (av_opt_set_int(s,"srcw",source_w,0)<0 || av_opt_set_int(s,"srch",source_h,0)<0 ||
         av_opt_set_int(s,"src_format",AV_PIX_FMT_BGRA,0)<0 ||
         av_opt_set_int(s,"dstw",w,0)<0 || av_opt_set_int(s,"dsth",h,0)<0 ||
         av_opt_set_int(s,"dst_format",dst,0)<0 ||
-        av_opt_set_int(s,"sws_flags",SWS_FAST_BILINEAR,0)<0 ||
+        av_opt_set_int(s,"sws_flags",(w==source_w && h==source_h)?SWS_FAST_BILINEAR:SWS_AREA,0)<0 ||
         av_opt_set_int(s,"threads",4,0)<0 || sws_init_context(s,NULL,NULL)<0) {
         sws_freeContext(s); return NULL;
     }
@@ -87,8 +88,9 @@ static void configure_rate(AVCodecContext *c,int backend,int bitrate,int opening
         c->rc_buffer_size=peak/5;
     }
 }
-int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int opening_bitrate,int gop,int level_idc,FrEncoder **out) {
+int fr_encoder_new(int backend,int source_w,int source_h,int w,int h,int fps,int bitrate,int opening_bitrate,int gop,int level_idc,FrEncoder **out) {
     if (!out) return FR_INVALID; *out=NULL;
+    if (!geometry(source_w,source_h) || w>source_w || h>source_h) return FR_INVALID;
     if (!geometry(w,h) || fps<1 || fps>240 || bitrate<10000 || bitrate>opening_bitrate || opening_bitrate>200000000 || gop<1 || gop>14400) return FR_INVALID;
     if (!qualified_level(level_idc) || (level_idc && backend!=0 && backend!=2)) return FR_INVALID;
     const char *name = backend==0?"hevc_nvenc":backend==1?"hevc_vaapi":backend==2?"libx265":NULL;
@@ -167,26 +169,47 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int opening_bitra
     e->input->color_primaries=c->color_primaries; e->input->color_trc=c->color_trc;
     e->input->colorspace=c->colorspace; e->input->color_range=c->color_range;
     if (av_frame_get_buffer(e->input,32)<0) { fr_encoder_free(e); return FR_MEMORY; }
-    e->scale=bgra_scaler(w,h,sw);
+    /* Fit during the required BGRA -> YUV conversion, preserving the full
+     * selected monitor in the caller for exact damage/unchanged checks. */
+    e->source_w=source_w; e->source_h=source_h;
+    if (source_w!=w || source_h!=h) {
+        /* A packed Rust frame ends at its last pixel. The resampling kernels
+         * may read padding beyond the source plane. Keep one aligned, padded
+         * source frame for this encoder, including across ordinary sends. */
+        e->source->format=AV_PIX_FMT_BGRA;
+        e->source->width=source_w; e->source->height=source_h;
+        if (av_frame_get_buffer(e->source,32)<0) { fr_encoder_free(e); return FR_MEMORY; }
+        memset(e->source->buf[0]->data,0,e->source->buf[0]->size);
+    }
+    e->scale=bgra_scaler(source_w,source_h,w,h,sw);
     if (!e->scale || sws_setColorspaceDetails(e->scale,sws_getCoefficients(SWS_CS_ITU709),1,sws_getCoefficients(SWS_CS_ITU709),0,0,1<<16,1<<16)<0) { fr_encoder_free(e); return FR_CODEC; }
     *out=e; return FR_OK;
 }
 int fr_encoder_send(FrEncoder *e,const uint8_t *bgra,size_t len,int64_t pts,int idr,int refine) {
-    if (!e || !bgra || pts<0 || e->draining || !bgra_buffer(e->ctx->width,e->ctx->height,len)) return FR_INVALID;
+    if (!e || !bgra || pts<0 || e->draining || !bgra_buffer(e->source_w,e->source_h,len)) return FR_INVALID;
     if ((refine!=0 && refine!=1) || (refine && (idr || e->hardware))) return FR_INVALID;
     if (av_frame_make_writable(e->input)<0) return FR_MEMORY;
-    /* A no-op-free reference: sws_scale_frame refs its source, and a frame
-     * without one would make it copy all 8 MB first. Released before return. */
     AVFrame *src=e->source;
-    src->format=AV_PIX_FMT_BGRA; src->width=e->ctx->width; src->height=e->ctx->height;
-    src->buf[0]=av_buffer_create((uint8_t *)bgra,len,borrowed,NULL,AV_BUFFER_FLAG_READONLY);
-    if (!src->buf[0]) return FR_MEMORY;
-    src->data[0]=(uint8_t *)bgra; src->linesize[0]=e->ctx->width*4;
+    int fitted=e->source_w!=e->ctx->width || e->source_h!=e->ctx->height;
+    if (fitted) {
+        /* Only this synchronous scaler sees src. sws_frame_end releases its
+         * reference before the next call, so the owned buffer is reusable. */
+        if (!av_frame_is_writable(src)) return FR_CODEC;
+        size_t row=(size_t)e->source_w*4;
+        for (int y=0;y<e->source_h;y++)
+            memcpy(src->data[0]+(size_t)y*src->linesize[0],bgra+(size_t)y*row,row);
+    } else {
+        /* Preserve the native-size conversion's borrowed source. */
+        src->format=AV_PIX_FMT_BGRA; src->width=e->source_w; src->height=e->source_h;
+        src->buf[0]=av_buffer_create((uint8_t *)bgra,len,borrowed,NULL,AV_BUFFER_FLAG_READONLY);
+        if (!src->buf[0]) return FR_MEMORY;
+        src->data[0]=(uint8_t *)bgra; src->linesize[0]=e->source_w*4;
+    }
     int scaled=sws_scale_frame(e->scale,e->input,src);
     /* A failed frame_start may already retain this caller's source. End even
        partial setup before the borrowed BGRA lifetime returns to Rust. */
     sws_frame_end(e->scale);
-    av_frame_unref(src);
+    if (!fitted) av_frame_unref(src);
     if (scaled<0) return FR_CODEC;
     e->input->pts=pts; e->input->pict_type=idr?AV_PICTURE_TYPE_I:AV_PICTURE_TYPE_NONE;
     if (!e->hardware) {

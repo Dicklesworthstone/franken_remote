@@ -25,6 +25,14 @@ capability list has no room keep their native pictures; smaller local fit boxes
 also retain native pictures. This does not grant control or auxiliary access,
 and the experimental transport opt-in still applies.
 
+On a Linux X11 host, the selected RandR monitor is captured and compared at its
+original pixel size. The FFmpeg worker fits the entire monitor during the BGRA
+to YUV conversion that precedes encoding, using one reusable aligned source
+buffer for the scaler. The HEVC encoder and the viewer's
+decoder process the negotiated picture size. X11 readback, topology checks and
+cursor coordinates still use the original monitor. Bitrate changes retain both
+sizes for the life of the session. The legacy root capture uses native size.
+
 The worker derives one centered image rectangle from the **original display** and
 the original UI-owned window. Rendering, input and cursor positions all use that
 rectangle. The decoded picture dimensions select samples only. For example,

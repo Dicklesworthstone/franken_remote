@@ -51,6 +51,8 @@ unsafe extern "C" {
     fn fr_native_compiled_avcodec_version() -> u32;
     fn fr_encoder_new(
         backend: c_int,
+        source_width: c_int,
+        source_height: c_int,
         w: c_int,
         h: c_int,
         fps: c_int,
@@ -233,6 +235,7 @@ pub struct HevcEncoder {
     config: CodecConfiguration,
     limits: ProtocolLimits,
     admission: HevcGuard,
+    source_size: (u32, u32),
     backend: EncodeBackend,
     fps: u32,
     initial_bitrate: u32,
@@ -255,8 +258,33 @@ impl HevcEncoder {
         fps: u32,
         bitrate: u32,
     ) -> Result<Self, NativeError> {
-        initialize()?;
         let g = config.geometry();
+        Self::for_display(
+            config,
+            limits,
+            backend,
+            fps,
+            bitrate,
+            (g.crop_width(), g.crop_height()),
+        )
+    }
+
+    /// Encode the selected X11 display into its native or canonical fitted
+    /// picture. Bind source geometry once, including across rate changes.
+    pub fn for_display(
+        config: CodecConfiguration,
+        limits: ProtocolLimits,
+        backend: EncodeBackend,
+        fps: u32,
+        bitrate: u32,
+        source_size: (u32, u32),
+    ) -> Result<Self, NativeError> {
+        let g = config.geometry();
+        frame_len(source_size.0, source_size.1, &limits)?;
+        if !fr_wire::display::picture::is_picture(source_size, (g.crop_width(), g.crop_height())) {
+            return Err(NativeError::GeometryChanged);
+        }
+        initialize()?;
         frame_len(g.coded_width(), g.coded_height(), &limits)?;
         frame_len(g.crop_width(), g.crop_height(), &limits)?;
         if config.color() != ColorInfo::sdr_bt709()
@@ -268,12 +296,13 @@ impl HevcEncoder {
         }
         let admission =
             HevcGuard::new(config, limits, 4).map_err(|_| NativeError::InvalidConfiguration)?;
-        let raw = Self::open(config, backend, fps, bitrate, bitrate, 0)?;
+        let raw = Self::open(config, source_size, backend, fps, bitrate, bitrate, 0)?;
         Ok(Self {
             raw: Some(raw),
             config,
             limits,
             admission,
+            source_size,
             backend,
             fps,
             initial_bitrate: bitrate,
@@ -291,6 +320,7 @@ impl HevcEncoder {
     }
     fn open(
         config: CodecConfiguration,
+        source_size: (u32, u32),
         backend: EncodeBackend,
         fps: u32,
         bitrate: u32,
@@ -304,6 +334,8 @@ impl HevcEncoder {
         status(unsafe {
             fr_encoder_new(
                 backend as c_int,
+                c_int::try_from(source_size.0).map_err(|_| NativeError::InvalidConfiguration)?,
+                c_int::try_from(source_size.1).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(g.crop_width()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(g.crop_height()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(fps).map_err(|_| NativeError::InvalidConfiguration)?,
@@ -357,6 +389,7 @@ impl HevcEncoder {
         unsafe { fr_encoder_free(raw.as_ptr()) };
         let replacement = Self::open(
             self.config,
+            self.source_size,
             self.backend,
             self.fps,
             bitrate,
@@ -414,8 +447,7 @@ impl HevcEncoder {
         if self.closed || self.draining {
             return Err(NativeError::Closed);
         }
-        let g = self.config.geometry();
-        if frame.width != g.crop_width() || frame.height != g.crop_height() {
+        if (frame.width, frame.height) != self.source_size {
             return Err(NativeError::GeometryChanged);
         }
         if self.last_submitted.is_some_and(|last| id <= last) || id.as_raw() > i64::MAX as u64 {

@@ -45,10 +45,23 @@ fn run<F: FnOnce(Cx) -> Fut, Fut: Future<Output = ()>>(f: F) {
             .unwrap();
     });
 }
-// Keep the complete single-worker ordering/effect assertions together.
-#[allow(clippy::too_many_lines)]
 #[test]
 fn supervised_discovery_choice_hevc_and_idle_checks_keep_one_native_worker() {
+    check_selected_picture(config());
+}
+
+#[test]
+fn selected_worker_encodes_a_fitted_picture_from_only_the_original_monitor() {
+    check_selected_picture(Configuration {
+        width: 160,
+        height: 240,
+        ..config()
+    });
+}
+
+// Keep the complete single-worker ordering/effect assertions together.
+#[allow(clippy::too_many_lines)]
+fn check_selected_picture(picture: Configuration) {
     run(|cx| async move {
         let screen = Screen::start();
         screen.monitor("fr-right", 320, 0, 320, 480);
@@ -63,12 +76,7 @@ fn supervised_discovery_choice_hevc_and_idle_checks_keep_one_native_worker() {
         let d = cat.displays().iter().find(|d| d.x == 320).unwrap();
         discovered.check_display(&cx, deadline(&cx)).await.unwrap();
         discovered
-            .configure(
-                &cx,
-                cat.selection(d.handle).unwrap(),
-                config(),
-                deadline(&cx),
-            )
+            .configure(&cx, cat.selection(d.handle).unwrap(), picture, deadline(&cx))
             .await
             .unwrap();
         let mut worker = discovered.into_worker().unwrap();
@@ -99,23 +107,23 @@ fn supervised_discovery_choice_hevc_and_idle_checks_keep_one_native_worker() {
                 .unwrap();
         }
         assert_eq!(reply.header.kind, Kind::Unit);
-        let unit = worker::parse_unit(reply.into_body(), &config().limits().unwrap()).unwrap();
-        let mut guard = fr_media::hevc::HevcGuard::new(
-            config().codec().unwrap(),
-            config().limits().unwrap(),
-            4,
-        )
-        .unwrap();
+        let unit = worker::parse_unit(reply.into_body(), &picture.limits().unwrap()).unwrap();
+        let mut guard =
+            fr_media::hevc::HevcGuard::new(picture.codec().unwrap(), picture.limits().unwrap(), 4)
+                .unwrap();
         guard.validate_length_prefixed(unit.bytes(), true).unwrap();
         let mut decoder = fr_native::HevcDecoder::new(
-            config().codec().unwrap(),
-            config().limits().unwrap(),
+            picture.codec().unwrap(),
+            picture.limits().unwrap(),
             guard.decoder_record().unwrap().bytes(),
         )
         .unwrap();
         decoder.submit(&unit).unwrap();
         let (_, pixels) = decoder.poll_output().unwrap();
-        assert_eq!((pixels.width(), pixels.height()), (320, 480));
+        assert_eq!(
+            (pixels.width(), pixels.height()),
+            (picture.width, picture.height)
+        );
         assert!(
             pixels
                 .pixels()
@@ -152,7 +160,7 @@ fn supervised_discovery_choice_hevc_and_idle_checks_keep_one_native_worker() {
             .await
             .unwrap();
         assert_eq!(reply.header.kind, Kind::Unit);
-        let next = worker::parse_unit(reply.into_body(), &config().limits().unwrap()).unwrap();
+        let next = worker::parse_unit(reply.into_body(), &picture.limits().unwrap()).unwrap();
         assert!(!next.is_idr());
         decoder.submit(&next).unwrap();
         let (_, pixels) = decoder.poll_output().unwrap();

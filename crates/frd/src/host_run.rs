@@ -1914,8 +1914,7 @@ impl Share<'_> {
             .files
             .as_ref()
             .and_then(|directory| directory.sync_job_mode());
-        // ScreenCaptureKit scales in hardware, so a VideoToolbox host can send
-        // a viewer pictures sized for its screen. Other captures stay native.
+        // Preserve the capability slots of the established hardware profiles.
         let scales = scales_pictures(encoder);
         let report = self.report.clone();
         let stop = self.stop.clone();
@@ -1950,6 +1949,16 @@ impl Share<'_> {
                             folder_sync,
                             folder_sync_upload,
                         )?;
+                        // X11 can fit the selected monitor during color conversion.
+                        // Preserve every feature already offered by full profiles.
+                        #[cfg(target_os = "linux")]
+                        if request.session.offer.capabilities.len()
+                            < fr_wire::negotiation::MAX_CAPABILITIES
+                        {
+                            request.session.offer =
+                                fr_wire::display::picture::with_capability(request.session.offer)
+                                    .map_err(|_| serial::Error::Configuration)?;
+                        }
                         Ok(request)
                     },
                     approval: move |original, role| notify.submit(&original, role),
