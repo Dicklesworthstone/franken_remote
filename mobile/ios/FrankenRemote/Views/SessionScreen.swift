@@ -176,12 +176,11 @@ struct SessionScreen: View {
     }
 
     private func retry() {
-        let host = model.store.host(session.host.id) ?? session.host
-        model.connect(host, control: session.controlCapable)
+        model.retryEndedSession(session)
     }
 
     private func close() {
-        model.disconnect()
+        model.disconnect(session)
     }
 
     private func chooseFile() {
@@ -241,11 +240,11 @@ private struct StatusCard: View {
                     }
                     HStack {
                         if end.canRetry {
-                            Button("Try again", action: retry).buttonStyle(.borderedProminent)
+                            Button("Retry viewing", action: retry).buttonStyle(.borderedProminent)
                         }
                         if end == .hostRefused, session.controlCapable {
                             Button("View only") {
-                                model.connect(model.store.host(session.host.id) ?? session.host, control: false)
+                                model.retryEndedSession(session, viewOnly: true)
                             }
                             .buttonStyle(.bordered)
                         }

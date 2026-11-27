@@ -688,11 +688,19 @@ continues to request line scrolling only.
   control, edge swipes need a second swipe (deferred system gestures), and a
   session on screen keeps the device awake. A view-only session survives a
   hide.
-- Going to the background closes the session; returning offers to reconnect
-  with the same capability, using the saved host as it is now. No session
-  ever runs unseen.
-- Network path changes are reported in the session; frd's supervisor retries
-  a lost connection up to three times before the session ends.
+- Backgrounding, loss of connectivity and changes in active network interface
+  types close the original session. The picker offers **Resume viewing** when
+  online. Resume keeps the original destination and pin, waits for successful
+  original cleanup and opens a fresh authenticated observation. Control-capable
+  sessions require a new Control tap even with **Ask for control on connect**
+  enabled. The original receive-folder choice and clipboard permission expire.
+- The picker collects the closed service in the background. After a failed
+  close, choose the machine explicitly to start fresh admission. A picker
+  connection waits for the original service to finish and for any file receiver
+  to confirm cleanup, including after dismissing the resume offer.
+- The ended-session card's **Retry viewing** action uses the same destination
+  and opens observation first. Automatic control and clipboard preferences
+  apply to a new picker connection. Request control explicitly after a retry.
 - Rotation and safe-area changes keep the zoom and the centred picture point.
 
 ## Building and testing

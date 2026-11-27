@@ -170,7 +170,9 @@ final class AppModel: ObservableObject {
         connect(host, control: control, receiveFiles: receiveFiles, after: nil)
     }
 
-    private func connect(_ host: SavedHost, control: Bool, receiveFiles: Bool, after offer: ReconnectOffer?) {
+    private func connect(_ host: SavedHost, control: Bool, receiveFiles: Bool, after offer: ReconnectOffer?,
+                         retryViewing: Bool = false) {
+        let observeFirst = offer != nil || retryViewing
         cancelDisplaySwitch()
         reconnectOffer = nil
         startError = nil
@@ -189,7 +191,7 @@ final class AppModel: ObservableObject {
         }
         let retirement = offer?.retirement ?? retiringInterruption
         guard listingFrom == host.name || receiveFiles || retiredReceiver != nil || offer != nil || retirement != nil else {
-            start(host, control: control)
+            start(host, control: control, requestControl: observeFirst ? false : nil, clipboard: !observeFirst)
             return
         }
         starting = SessionStart(host: host, control: control, receiveFiles: receiveFiles)
@@ -259,8 +261,8 @@ final class AppModel: ObservableObject {
             self.starting = nil
             self.resuming = nil
             self.retiringInterruption = nil
-            self.start(host, control: control, requestControl: offer == nil ? nil : false,
-                       download: download, clipboard: offer == nil)
+            self.start(host, control: control, requestControl: observeFirst ? false : nil,
+                       download: download, clipboard: !observeFirst)
         }
     }
 
@@ -452,6 +454,31 @@ final class AppModel: ObservableObject {
         connect(offer.host, control: offer.controlCapable, receiveFiles: false, after: offer)
     }
 
+    @discardableResult
+    private func trackRetirement(_ original: RemoteSession) -> InterruptedRetirement {
+        let retirement = InterruptedRetirement(original)
+        retiringInterruption = retirement
+        retirementTask?.cancel()
+        retirementTask = Task { @MainActor [weak self, retirement] in
+            while !Task.isCancelled, self?.retiringInterruption === retirement {
+                guard retirement.status() == FR_PENDING else { return }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        return retirement
+    }
+
+    /// Only the terminal card that is still on screen can request another
+    /// attempt. Its tap authorizes fresh viewing of that same destination.
+    func retryEndedSession(_ original: RemoteSession, viewOnly: Bool = false) {
+        guard session === original, online, sceneAllowsResume,
+              case .ended(let end) = original.phase, end.canRetry else { return }
+        let host = original.displaySwitchHost() ?? original.host
+        trackRetirement(original)
+        connect(host, control: original.controlCapable && !viewOnly, receiveFiles: false,
+                after: nil, retryViewing: true)
+    }
+
     private func interruptViewing(reason: String) {
         cancelDisplaySwitch()
         if let previous = resuming {
@@ -467,15 +494,7 @@ final class AppModel: ObservableObject {
             let host = original.displaySwitchHost()
             original.close()
             original.setVisible(false)
-            let retirement = InterruptedRetirement(original)
-            retiringInterruption = retirement
-            retirementTask?.cancel()
-            retirementTask = Task { @MainActor [weak self, retirement] in
-                while !Task.isCancelled, self?.retiringInterruption === retirement {
-                    guard retirement.status() == FR_PENDING else { return }
-                    try? await Task.sleep(for: .milliseconds(250))
-                }
-            }
+            let retirement = trackRetirement(original)
             if let host {
                 reconnectOffer = ReconnectOffer(host: host, controlCapable: original.controlCapable,
                                                 retirement: retirement, reason: reason)
@@ -513,6 +532,10 @@ final class AppModel: ObservableObject {
     /// The saved host a listed machine is, by its exact name.
     nonisolated static func savedMatch(for machine: DirectoryMachine, in hosts: [SavedHost]) -> SavedHost? {
         hosts.first { $0.name == machine.name.lowercased() }
+    }
+
+    func disconnect(_ original: RemoteSession) {
+        if session === original { disconnect() }
     }
 
     func disconnect() {

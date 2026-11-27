@@ -16,7 +16,9 @@ struct FrankenRemoteApp: App {
                 #endif
                 .fullScreenCover(item: Binding(
                     get: { model.session.map(ActiveSession.init) },
-                    set: { if $0 == nil { model.disconnect() } })
+                    set: { [original = model.session] value in
+                        if value == nil, let original { model.disconnect(original) }
+                    })
                 ) { active in
                     SessionScreen(session: active.session)
                         .id(active.session.handle)

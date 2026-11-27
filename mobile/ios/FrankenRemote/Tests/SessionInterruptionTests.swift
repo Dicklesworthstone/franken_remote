@@ -145,6 +145,10 @@ final class SessionInterruptionTests: XCTestCase {
         let next = try XCTUnwrap(model.session)
         XCTAssertFalse(session === next)
         XCTAssertFalse(next.controlCapable)
+        model.retryEndedSession(session)
+        model.retryEndedSession(session, viewOnly: true)
+        model.disconnect(session)
+        XCTAssertTrue(model.session === next, "retired card gestures cannot change the new session")
     }
 
     @MainActor
