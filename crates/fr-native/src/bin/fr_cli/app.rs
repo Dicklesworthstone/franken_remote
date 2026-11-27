@@ -32,8 +32,16 @@ use child::Finished;
 #[path = "app/receiving.rs"]
 mod receiving;
 use receiving::Receiving;
+#[path = "app/sending.rs"]
+mod sending;
+use sending::Sending;
+#[path = "app/folder_completion.rs"]
+mod folder_completion;
 #[path = "app/microphone.rs"]
 mod microphone;
+#[cfg(test)]
+#[path = "app/sending_tests.rs"]
+mod sending_tests;
 use microphone::Microphone;
 #[cfg(test)]
 #[path = "app/microphone_app_tests.rs"]
@@ -52,7 +60,8 @@ mod shortcut_tests;
 #[path = "app/upload_completion.rs"]
 mod upload_completion;
 
-const USAGE: &str = "fr app [--probe] [--port PORT] [--receive DIR [RECEIVE_OPTIONS]] | --install | --uninstall\n\n\
+const USAGE: &str = "fr app [--probe] [--port PORT] [--receive DIR [RECEIVE_OPTIONS]]\n\
+       [--sync-source DIR --sync-job ID|--sync-tree-job ID] | --install | --uninstall\n\n\
 Without options, opens the machine picker: choose a machine on your tailnet,\n\
 View only or View and control, Share clipboard text, Ask which display to\n\
 show and Play host audio, then Connect. Audio starts off; enabling it never\n\
@@ -82,11 +91,20 @@ hour unused, fr app quits.\n\n\
 --receive-max-file-bytes N     optional positive per-file receive limit.\n\
 --receive-max-session-bytes N  optional positive total receive limit.\n\
 --receive-conflict POLICY      reject (default) or keep-both; never overwrite.\n\
+--sync-source DIR  upload new versions from this existing private source folder\n\
+               throughout the next selected controlling connection. Requires\n\
+               --sync-job ID (flat files) or --sync-tree-job ID (nested trees).\n\
+               The picker identifies the job: choose Send files (Linux) or Allow\n\
+               file drops (macOS) to accept it; leave that choice off to decline.\n\
+               File drops and Choose files now are excluded. The source and\n\
+               consent are consumed by that choice and never saved or replayed.\n\
+               Receive files may independently accept ordinary host downloads.\n\
 --sync-tree-job ID  accept nested directories as atomic versions for this job.\n\
---sync-job ID  accept this host-configured folder job on the next controlling\n\
-               connection only. Requires --receive DIR and --receive-conflict\n\
-               keep-both. Choose Receive files to accept new source versions\n\
-               for this connection; a later connection needs a new choice.\n\
+--sync-job ID  without --sync-source, accept this host-configured download job\n\
+               on the next controlling connection. Requires --receive DIR and\n\
+               --receive-conflict keep-both. Choose Receive files to accept it.\n\
+               With --sync-source, the ID always names the upload job; receiving\n\
+               then remains ordinary file receiving, with its own consent.\n\
 --microphone-source NAME  use this explicit local source on the next selected\n\
                connection only; choose Show microphone controls, then Allow and Talk.\n\
                Linux requires a named PulseAudio source. macOS can pin default.\n\
@@ -117,9 +135,10 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
         AppCommand::Open {
             port,
             receiving,
+            sending,
             microphone,
             probe,
-        } => application(port, receiving, microphone, probe),
+        } => application(port, receiving, sending, microphone, probe),
         AppCommand::Help => Ok(USAGE.to_owned()),
         AppCommand::Install => install(),
         AppCommand::Uninstall => uninstall(),
@@ -131,6 +150,7 @@ enum AppCommand {
     Open {
         port: u16,
         receiving: Option<Receiving>,
+        sending: Option<Sending>,
         microphone: Option<Microphone>,
         probe: bool,
     },
@@ -155,6 +175,9 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
     let mut port = None;
     let mut action = None;
     let mut receive_args = Vec::new();
+    let mut source_args = Vec::new();
+    let mut job_args = Vec::new();
+    let mut source_seen = false;
     let mut microphone_args = Vec::new();
     let mut microphone_source = false;
     let mut microphone_server = false;
@@ -187,12 +210,19 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
                 microphone_args.push(arg.clone());
                 microphone_args.push(rest.next().ok_or_else(invalid)?.clone());
             }
+            "--sync-source" if !source_seen => {
+                source_seen = true;
+                source_args.push(arg.clone());
+                source_args.push(rest.next().ok_or_else(invalid)?.clone());
+            }
+            "--sync-job" | "--sync-tree-job" => {
+                job_args.push(arg.clone());
+                job_args.push(rest.next().ok_or_else(invalid)?.clone());
+            }
             "--receive"
             | "--receive-max-file-bytes"
             | "--receive-max-session-bytes"
-            | "--receive-conflict"
-            | "--sync-job"
-            | "--sync-tree-job" => {
+            | "--receive-conflict" => {
                 receive_args.push(arg.clone());
                 receive_args.push(rest.next().ok_or_else(invalid)?.clone());
             }
@@ -202,15 +232,30 @@ fn app_command(args: &[String]) -> Result<AppCommand, Failure> {
             _ => return Err(invalid()),
         }
     }
-    if action.is_some() && (!receive_args.is_empty() || !microphone_args.is_empty() || probe) {
+    if action.is_some()
+        && (!receive_args.is_empty()
+            || !source_args.is_empty()
+            || !job_args.is_empty()
+            || !microphone_args.is_empty()
+            || probe)
+    {
         return Err(invalid());
     }
+    // The job marker belongs to the explicit source when present. Receiving
+    // then remains ordinary independent file consent, never a second job.
+    if source_seen {
+        source_args.extend(job_args);
+    } else {
+        receive_args.extend(job_args);
+    }
+    let sending = Sending::parse(source_args)?;
     let receiving = Receiving::parse(receive_args)?;
     let microphone = Microphone::parse(microphone_args)?;
     match (action, port) {
         (None, port) => Ok(AppCommand::Open {
             port: port.unwrap_or(DEFAULT_SERVICE_PORT),
             receiving,
+            sending,
             microphone,
             probe,
         }),
@@ -785,6 +830,13 @@ fn session_notice_with_transfers(
     )
 }
 
+#[derive(Default)]
+struct FolderJobs {
+    upload: Option<u64>,
+    download: Option<u64>,
+}
+
+#[cfg(test)]
 fn session_notice_with_job(
     stdout: &CompletionCapture,
     name: &str,
@@ -793,13 +845,34 @@ fn session_notice_with_job(
     receive_expected: bool,
     expected_job: Option<u64>,
 ) -> Result<String, Failure> {
+    session_notice_with_jobs(
+        stdout,
+        name,
+        success,
+        uploads,
+        receive_expected,
+        FolderJobs {
+            upload: None,
+            download: expected_job,
+        },
+    )
+}
+
+fn session_notice_with_jobs(
+    stdout: &CompletionCapture,
+    name: &str,
+    success: bool,
+    uploads: UploadChoices,
+    receive_expected: bool,
+    jobs: FolderJobs,
+) -> Result<String, Failure> {
     let report = last_report(stdout);
     // Inspect both directions even if either fails. Their original committed
     // effects survive independently; an upload failure must not erase a known
     // download, and a receiver failure must not erase host publication proof.
-    let upload = upload_completion::inspect(stdout, uploads, report.as_ref());
+    let upload = upload_completion::inspect_job(stdout, uploads, jobs.upload, report.as_ref());
     let receive =
-        receive_completion::inspect_job(stdout, receive_expected, expected_job, report.as_ref());
+        receive_completion::inspect_job(stdout, receive_expected, jobs.download, report.as_ref());
     let upload = upload.map_err(|mut failure| {
         match &receive {
             Ok(receive) => receive.preserve(&mut failure),
@@ -983,9 +1056,60 @@ fn retry_picker(
     }
 }
 
+/// The picker reports one original selection. Only viewing preferences enter
+/// settings; the independently selected capabilities remain local to this turn.
+struct SelectedChoice {
+    node: String,
+    name: String,
+    uploads: UploadChoices,
+    receive_files: bool,
+    microphone_controls: bool,
+    capture_system_shortcuts: bool,
+}
+
+fn selected_choice(
+    report: Option<Report>,
+    settings: &mut Settings,
+) -> Result<SelectedChoice, Option<Report>> {
+    let Some(Report::Selected {
+        node,
+        name,
+        control,
+        clipboard,
+        choose_display,
+        playback_audio,
+        send_files,
+        choose_files,
+        receive_files,
+        microphone_controls,
+        capture_system_shortcuts,
+        ..
+    }) = report
+    else {
+        return Err(report);
+    };
+    settings.control = control;
+    settings.clipboard = clipboard;
+    settings.choose_display = choose_display;
+    settings.playback_audio = playback_audio;
+    settings.last_machine = Some(node.clone());
+    Ok(SelectedChoice {
+        node,
+        name,
+        uploads: UploadChoices {
+            choose_files,
+            file_drop: send_files,
+        },
+        receive_files,
+        microphone_controls,
+        capture_system_shortcuts,
+    })
+}
+
 fn application(
     port: u16,
     mut receiving: Option<Receiving>,
+    mut sending: Option<Sending>,
     mut microphone: Option<Microphone>,
     probe: bool,
 ) -> Result<String, Failure> {
@@ -997,12 +1121,19 @@ fn application(
     loop {
         let mut settings = load(&path);
         let receiving_notice = receiving::notice(receiving.as_ref(), notice.as_deref());
+        let source_notice = sending::notice(
+            sending.as_ref(),
+            receiving_notice.as_deref().or(notice.as_deref()),
+        );
         // A picker reopened only because the last one expired unused stays
         // behind whatever the user is doing.
         let picked = launcher.run(
             &probed_pick_args(
                 &settings,
-                receiving_notice.as_deref().or(notice.as_deref()),
+                source_notice
+                    .as_deref()
+                    .or(receiving_notice.as_deref())
+                    .or(notice.as_deref()),
                 port,
                 receiving::available(receiving.as_ref()),
                 probe,
@@ -1017,53 +1148,34 @@ fn application(
             microphone::available(microphone.as_ref()),
         );
         refuse_uncertain_report(report.as_ref())?;
-        let (node, name, uploads, receive_files, microphone_controls, capture_system_shortcuts) =
-            match report {
-                Some(Report::Selected {
-                    node,
-                    name,
-                    control,
-                    clipboard,
-                    choose_display,
-                    playback_audio,
-                    send_files,
-                    choose_files,
-                    receive_files,
-                    microphone_controls,
-                    capture_system_shortcuts,
-                    ..
-                }) => {
-                    settings.control = control;
-                    settings.clipboard = clipboard;
-                    settings.choose_display = choose_display;
-                    settings.playback_audio = playback_audio;
-                    settings.last_machine = Some(node.clone());
-                    save(&path, &settings);
-                    (
-                        node,
-                        name,
-                        UploadChoices {
-                            choose_files,
-                            file_drop: send_files,
-                        },
-                        receive_files,
-                        microphone_controls,
-                        capture_system_shortcuts,
-                    )
+        let SelectedChoice {
+            node,
+            name,
+            uploads,
+            receive_files,
+            microphone_controls,
+            capture_system_shortcuts,
+        } = match selected_choice(report, &mut settings) {
+            Ok(choice) => {
+                save(&path, &settings);
+                choice
+            }
+            Err(other) => {
+                if retry_picker(other, &mut notice, &mut picker_failures, &mut idle_expiries)? {
+                    continue;
                 }
-                other => {
-                    if retry_picker(other, &mut notice, &mut picker_failures, &mut idle_expiries)? {
-                        continue;
-                    }
-                    return Ok(String::new());
-                }
-            };
+                return Ok(String::new());
+            }
+        };
         picker_failures = 0;
         idle_expiries = 0;
         // Consume the original local choice before validating or launching the
         // selected viewer, including an explicit decline. No next picker or
         // failed launch can recover this one-use destination.
         let receive_expected = receive_files;
+        let mut child_uploads = uploads;
+        let source = sending::take_for_choice(&mut sending, &mut child_uploads)?;
+        let upload_job = source.as_ref().map(Sending::job_id);
         let expected_job = receiving
             .as_ref()
             .filter(|_| receive_files)
@@ -1077,21 +1189,25 @@ fn application(
                     &name,
                     &settings,
                     port,
-                    uploads,
+                    child_uploads,
                     capture_system_shortcuts,
-                )?,
+                )
+                .and_then(|arguments| sending::apply(source, arguments))?,
                 microphone_controls,
             )?,
             receive_files,
         )?;
         let session = launcher.run(&arguments, true)?;
-        notice = Some(session_notice_with_job(
+        notice = Some(session_notice_with_jobs(
             &session.stdout,
             short_name(&name),
             session.status.success(),
             uploads,
             receive_expected,
-            expected_job,
+            FolderJobs {
+                upload: upload_job,
+                download: expected_job,
+            },
         )?);
     }
 }
@@ -1276,6 +1392,7 @@ mod tests {
             AppCommand::Open {
                 port: 9443,
                 receiving: None,
+                sending: None,
                 microphone: None,
                 probe: true
             }
@@ -1368,6 +1485,7 @@ mod tests {
             AppCommand::Open {
                 port: DEFAULT_SERVICE_PORT,
                 receiving: None,
+                sending: None,
                 microphone: None,
                 probe: false,
             }
@@ -1379,6 +1497,7 @@ mod tests {
                 AppCommand::Open {
                     port,
                     receiving: None,
+                    sending: None,
                     microphone: None,
                     probe: false,
                 }
@@ -1388,6 +1507,7 @@ mod tests {
                 AppCommand::Open {
                     port,
                     receiving: None,
+                    sending: None,
                     microphone: None,
                     probe: false,
                 }
@@ -1438,6 +1558,7 @@ mod tests {
             AppCommand::Open {
                 port: DEFAULT_SERVICE_PORT,
                 receiving: None,
+                sending: None,
                 microphone: None,
                 probe: false,
             }

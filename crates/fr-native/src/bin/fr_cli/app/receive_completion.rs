@@ -3,7 +3,13 @@
 //! The application consumes only the final complete child document. Publication,
 //! durability, cancellation, and owner cleanup keep their producer meanings.
 //! No destination, file name, or unvalidated producer string reaches notices.
-use super::{CompletionCapture, Failure, Report, notice_text};
+#[cfg(test)]
+use super::folder_completion::MAX_FOLDER_PUBLICATIONS;
+use super::{
+    CompletionCapture, Failure, Report,
+    folder_completion::{FolderJob, MAX_FOLDER_RESULTS},
+    notice_text,
+};
 use crate::FileReceiveReport;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt::Write as _};
@@ -13,8 +19,6 @@ use std::{collections::BTreeSet, fmt::Write as _};
 /// retain 512 plus one refusal. Only validated job metadata selects that bound.
 /// Default client builds do not expose the platform receive-owner module.
 const MAX_RESULTS: usize = 65;
-const MAX_FOLDER_PUBLICATIONS: u64 = 512;
-const MAX_FOLDER_RESULTS: usize = 513;
 
 #[derive(Default)]
 pub(super) struct Inspection {
@@ -170,6 +174,8 @@ fn pre_start_refusal(value: &Value, report: Option<&Report>) -> bool {
             | "files_directory_not_directory" | "files_directory_symlink"
             | "files_directory_not_owned" | "files_directory_writable_by_others"
             | "files_directory_unsafe" | "files_directory_unavailable"
+            | "files_sync_source_invalid" | "files_sync_selection_conflict"
+            | "files_sync_job_required" | "files_sync_platform_unavailable"
             | "invalid_trust_store" | "invalid_native_configuration"
             | "app_unavailable" | "gui_unavailable"))
 }
@@ -247,132 +253,14 @@ impl Refused {
     }
 }
 
-/// Job observations supplement the publication receipts; they never replace
-/// proof of publication or the original disk worker's cleanup result.
-struct FolderJob {
-    id: u64,
-    phase: &'static str,
-    revision: u64,
-    rounds_settled: u64,
-    confirmed_publications: u64,
-    confirmed_conflicts: Option<u64>,
-    failure: Option<&'static str>,
-    cleanup: Cleanup,
-}
-
-impl FolderJob {
-    fn parse(value: Option<&Value>) -> Result<Option<Self>, ()> {
-        let Some(value) = value else {
-            return Ok(None);
-        };
-        let phase = value.get("phase").and_then(Value::as_str).ok_or(())?;
-        let phase = [
-            "advertised",
-            "accepted",
-            "scanning",
-            "transferring",
-            "settled",
-            "conflict_recorded",
-            "cancelled",
-            "failed",
-        ]
-        .into_iter()
-        .find(|known| *known == phase)
-        .ok_or(())?;
-        let failure = match value.get("failure") {
-            Some(Value::Null) => None,
-            Some(Value::String(code)) => Some(sync_failure(code).ok_or(())?),
-            _ => return Err(()),
-        };
-        let job = Self {
-            id: value.get("id").and_then(Value::as_u64).ok_or(())?,
-            phase,
-            revision: value.get("revision").and_then(Value::as_u64).ok_or(())?,
-            rounds_settled: value
-                .get("rounds_settled")
-                .and_then(Value::as_u64)
-                .ok_or(())?,
-            confirmed_publications: value
-                .get("confirmed_publications")
-                .and_then(Value::as_u64)
-                .ok_or(())?,
-            confirmed_conflicts: value
-                .get("confirmed_conflicts")
-                .map(|count| count.as_u64().ok_or(()))
-                .transpose()?,
-            failure,
-            cleanup: Cleanup::parse(value.get("cleanup"))?,
-        };
-        if job.id == 0
-            || job.rounds_settled > job.revision
-            || job
-                .confirmed_conflicts
-                .is_some_and(|n| n > job.confirmed_publications)
-            || job.confirmed_publications > MAX_FOLDER_PUBLICATIONS
-            || matches!(job.cleanup, Cleanup::NotStarted)
-            || match job.phase {
-                "cancelled" => job.failure != Some("sync_cancelled"),
-                "failed" => job.failure.is_none() || job.failure == Some("sync_cancelled"),
-                _ => job.failure.is_some(),
-            }
-        {
-            return Err(());
-        }
-        Ok(Some(job))
-    }
-
-    fn json(&self) -> Value {
-        let mut value = json!({
-            "id": self.id,
-            "phase": self.phase,
-            "revision": self.revision,
-            "rounds_settled": self.rounds_settled,
-            "confirmed_publications": self.confirmed_publications,
-            "failure": self.failure,
-            "cleanup": self.cleanup.code(),
-        });
-        if let Some(count) = self.confirmed_conflicts {
-            value["confirmed_conflicts"] = json!(count);
-        }
-        value
-    }
-}
-
-/// Parsing establishes the typed job identity and bounded counters first.
-/// This changes receipt retention only; the expected original job is still
-/// checked by `Record::consistent` before another connection can be offered.
+/// Typed folder metadata selects the larger receipt bound; the expected
+/// original job is checked independently before another connection can open.
 const fn result_capacity(job: Option<&FolderJob>) -> usize {
     if job.is_some() {
         MAX_FOLDER_RESULTS
     } else {
         MAX_RESULTS
     }
-}
-
-fn sync_failure(value: &str) -> Option<&'static str> {
-    [
-        "sync_invalid_config",
-        "sync_keep_both_required",
-        "sync_not_negotiated",
-        "sync_reconnect_refused",
-        "sync_job_mismatch",
-        "sync_direction_unsupported",
-        "sync_state_refused",
-        "sync_clock",
-        "sync_expired",
-        "sync_cancelled",
-        "sync_resource_limit",
-        "sync_source_refused",
-        "sync_transfer_failed",
-        "sync_worker_failed",
-        "sync_cleanup_unconfirmed",
-        "sync_publication_unknown",
-        "sync_durability_unconfirmed",
-        "sync_transfer_stopped",
-        "sync_peer_failed",
-    ]
-    .into_iter()
-    .find(|known| *known == value)
 }
 
 struct Record {
@@ -457,7 +345,7 @@ impl Record {
             && self.folder_job.is_none();
         match (&self.folder_job, expected_job) {
             (Some(job), Some(expected)) => {
-                if job.id != expected || job.cleanup != self.cleanup || !self.requested {
+                if job.id != expected || job.cleanup != self.cleanup.code() || !self.requested {
                     return false;
                 }
                 if matches!(self.cleanup, Cleanup::Finished)

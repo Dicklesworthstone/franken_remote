@@ -693,8 +693,8 @@ mod tests {
             assert!(!files.folder_sync_available());
             assert_eq!(files.download_status(), Some(Status::NotStarted));
             for clipboard in [false, true] {
-                let offer = fr_client::native::with_folder_sync_upload(files.offer(clipboard))
-                    .unwrap();
+                let offer =
+                    fr_client::native::with_folder_sync_upload(files.offer(clipboard)).unwrap();
                 assert!(has(&offer, fr_wire::files::DUPLEX_CAPABILITY));
                 assert!(has(&offer, fr_wire::sync_job_state::UPLOAD_CAPABILITY));
                 assert!(!has(&offer, fr_wire::sync_job_state::CAPABILITY));
@@ -704,16 +704,28 @@ mod tests {
                 files.cancel_upload();
                 assert!(!files.folder_upload_available());
                 assert_eq!(files.download_status(), Some(Status::NotStarted));
-                assert!(has(&files.offer(false), fr_wire::files::DOWNLOAD_CAPABILITY));
+                assert!(has(
+                    &files.offer(false),
+                    fr_wire::files::DOWNLOAD_CAPABILITY
+                ));
             } else {
                 files.cancel_download();
                 assert!(files.folder_upload_available());
                 assert_eq!(files.upload_status(), Some(Status::NotStarted));
-                assert!(!has(&files.offer(false), fr_wire::files::DOWNLOAD_CAPABILITY));
-                assert!(has(&files.offer(false), fr_wire::files::CHANNEL_SCOPE_CAPABILITY));
+                assert!(!has(
+                    &files.offer(false),
+                    fr_wire::files::DOWNLOAD_CAPABILITY
+                ));
+                assert!(has(
+                    &files.offer(false),
+                    fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+                ));
             }
             assert!(!has(&files.offer(false), fr_wire::files::DUPLEX_CAPABILITY));
-            assert!(selection.is_available(), "configuration has not consumed the source");
+            assert!(
+                selection.is_available(),
+                "configuration has not consumed the source"
+            );
             assert!(files.upload_folder_job_status().is_none());
         }
     }

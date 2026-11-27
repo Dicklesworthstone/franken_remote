@@ -14,14 +14,7 @@ fn selected(disk: &Disk, name: &str, bytes: &[u8]) -> Selection {
     batch
 }
 
-async fn publications(
-    state: &mut Fixture,
-    c: &Cx,
-    h: &Cx,
-    count: u32,
-    n: &mut u128,
-    t: &mut u128,
-) {
+async fn publications(state: &mut Fixture, c: &Cx, h: &Cx, count: u32, n: &mut u128, t: &mut u128) {
     let until = now(c).unwrap() + 5_000_000;
     loop {
         assert!(now(c).unwrap() < until, "bounded standing-job publication");
@@ -36,8 +29,7 @@ async fn publications(
             s.confirmed_publications >= count && s.rounds_settled >= u64::from(count)
         }) && viewer.is_some_and(|s| {
             s.confirmed_publications >= count && s.rounds_settled >= u64::from(count)
-        })
-            && state.viewer.pending_actions() == 0
+        }) && state.viewer.pending_actions() == 0
         {
             break;
         }
@@ -131,17 +123,19 @@ fn standing_upload_and_download_keep_independent_authority_after_either_directio
                             bytes: download.len() as u64,
                             publication: Publication::Durable,
                         }));
-                    assert_eq!(fs::read(viewer_dest.0.join("download-one")).unwrap(), download);
+                    assert_eq!(
+                        fs::read(viewer_dest.0.join("download-one")).unwrap(),
+                        download
+                    );
                     assert_eq!(receive.status().results.len(), 1);
                     let original_receipt = receive.status().results[0];
                     fs::write(source.0.join("document"), b"controller second").unwrap();
                     let _ = state.viewer.action(key(false)).unwrap();
                     publications(&mut state, &c, &h, 2, &mut n, &mut t).await;
                     assert_eq!(
-                        state.viewer.send_file(
-                            File::open(source.0.join("document")).unwrap(),
-                            "unrelated"
-                        ),
+                        state
+                            .viewer
+                            .send_file(File::open(source.0.join("document")).unwrap(), "unrelated"),
                         Err(SendError::Busy)
                     );
                     let _ = state.viewer.action(key(true)).unwrap();
@@ -200,10 +194,7 @@ fn standing_upload_and_download_keep_independent_authority_after_either_directio
                             assert!(now(&c).unwrap() < until, "original download cleanup");
                             drive(&mut state, &c, &h, &mut n, &mut t).await;
                         }
-                        assert_eq!(
-                            state.viewer.try_finish_file_receive_cleanup(),
-                            Some(Ok(()))
-                        );
+                        assert_eq!(state.viewer.try_finish_file_receive_cleanup(), Some(Ok(())));
                         assert_eq!(receive.status().results.len(), 1);
                     }
                     assert_eq!(receive.status().results[0], original_receipt);
@@ -232,7 +223,10 @@ fn standing_upload_and_download_keep_independent_authority_after_either_directio
                     }
                     assert_eq!(state.viewer.input.binding().lease, lease);
                     assert!(state.viewer.session.transport.is_bound_to(&connection));
-                    assert_eq!(state.effects.lock().unwrap().keys, [true, false, true, false]);
+                    assert_eq!(
+                        state.effects.lock().unwrap().keys,
+                        [true, false, true, false]
+                    );
                     assert!(!state.viewer.is_closed() && !state.host.control().is_stopped());
                     super::super::download::retire(&mut state, &cleanup).await;
                     assert_eq!(receive.status().results[0], original_receipt);

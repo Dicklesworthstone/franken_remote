@@ -679,13 +679,9 @@ impl StreamingViewer {
     ) -> Result<crate::native_files::ReceiveControl, crate::native_files::Absence> {
         use crate::native_files::Absence;
         if self.served
-            || self
-                .files
-                .as_ref()
-                .is_some_and(|lane| {
-                    lane.has_receive()
-                        || (request.sync_job_id().is_some() && lane.has_folder_upload())
-                })
+            || self.files.as_ref().is_some_and(|lane| {
+                lane.has_receive() || (request.sync_job_id().is_some() && lane.has_folder_upload())
+            })
         {
             return Err(Absence::Unavailable);
         }

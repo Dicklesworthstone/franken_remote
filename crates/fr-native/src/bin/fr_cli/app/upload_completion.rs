@@ -3,7 +3,11 @@
 //! Progress is never publication. A single source may report its own cleanup;
 //! aggregate drop histories deliberately omit that field and keep the original
 //! viewer's cleanup obligation. Neither form permits replay or a new selection.
-use super::{CompletionCapture, Failure, Report, UploadChoices, notice_text};
+use super::{
+    CompletionCapture, Failure, Report, UploadChoices,
+    folder_completion::{FolderJob, MAX_FOLDER_RESULTS},
+    notice_text,
+};
 use crate::ControlHistory;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt::Write as _};
@@ -11,6 +15,9 @@ use std::{collections::BTreeSet, fmt::Write as _};
 /// Native drops allow eight later batches of eight, independent of the initial picker batch.
 /// It never enables the separately bounded local file-command endpoint.
 const MAX_RESULTS: usize = 64;
+/// The active source snapshot describes one round, not the cumulative job.
+/// This is the existing fr-files sync/batch ceiling, also on app-only builds.
+const MAX_FOLDER_ROUND: u64 = 32;
 const SOURCE_FIELDS: [&str; 5] = [
     "files_upload_started",
     "files_upload_complete",
@@ -58,12 +65,22 @@ fn preserve(evidence: &ControlHistory, failure: &mut Failure) {
     failure.control_history = Some(Box::leak(Box::new(ControlHistory { json, text })));
 }
 
+#[cfg(test)]
 pub(super) fn inspect(
     stdout: &CompletionCapture,
     uploads: UploadChoices,
     report: Option<&Report>,
 ) -> Result<Inspection, Failure> {
-    let expected = uploads.requested();
+    inspect_job(stdout, uploads, None, report)
+}
+
+pub(super) fn inspect_job(
+    stdout: &CompletionCapture,
+    uploads: UploadChoices,
+    expected_job: Option<u64>,
+    report: Option<&Report>,
+) -> Result<Inspection, Failure> {
+    let expected = uploads.requested() || expected_job.is_some();
     let limit = match (uploads.choose_files, uploads.file_drop) {
         (true, true) => MAX_RESULTS + 8,
         (true, false) => 8,
@@ -94,7 +111,9 @@ pub(super) fn inspect(
         };
     };
     if !has_metadata(&value) {
-        return if expected && !pre_start_refusal(&value, report, uploads.choose_files) {
+        return if expected
+            && !pre_start_refusal(&value, report, uploads.choose_files, expected_job.is_some())
+        {
             Err(unknown(None))
         } else {
             Ok(Inspection::default())
@@ -103,13 +122,17 @@ pub(super) fn inspect(
     let record =
         Record::parse(&value, limit).map_err(|()| unknown(Some(incomplete(&value, limit))))?;
     let evidence = record.evidence();
-    if !record.consistent(expected) {
+    if !record.consistent(expected, expected_job) {
         return Err(unknown(Some(evidence)));
     }
     if record
         .source
         .as_ref()
         .is_some_and(|source| matches!(source.cleanup, "pending" | "failed"))
+        || record
+            .folder_job
+            .as_ref()
+            .is_some_and(|job| job.cleanup != "finished")
     {
         let mut failure = Failure::new(
             "app_upload_cleanup_unconfirmed",
@@ -121,6 +144,12 @@ pub(super) fn inspect(
         return Err(failure);
     }
     if record.absence == Some("files_results_incomplete")
+        || record.folder_job.as_ref().is_some_and(|job| {
+            matches!(
+                job.failure,
+                Some("sync_publication_unknown" | "sync_cleanup_unconfirmed")
+            )
+        })
         || record
             .refused
             .iter()
@@ -130,7 +159,13 @@ pub(super) fn inspect(
     }
     Ok(if expected {
         Inspection {
-            notice: Some(record.notice()),
+            notice: Some(match (record.folder_job.as_ref(), expected_job) {
+                (None, Some(id)) => format!(
+                    "Folder upload job {id} did not start ({}).",
+                    record.absence.unwrap_or("unavailable"),
+                ),
+                _ => record.notice(),
+            }),
             evidence: Some(evidence),
         }
     } else {
@@ -148,6 +183,7 @@ fn has_metadata(value: &Value) -> bool {
                     | "files_refused"
                     | "files_absence"
                     | "files_commands"
+                    | "upload_folder_job"
             ) || key.starts_with("files_upload_")
         })
     })
@@ -155,7 +191,12 @@ fn has_metadata(value: &Value) -> bool {
 
 /// Only exact, local preflight failures establish that no source owner exists.
 /// A generic transport/cancellation failure does not prove that nothing was sent.
-fn pre_start_refusal(value: &Value, report: Option<&Report>, choose_files: bool) -> bool {
+fn pre_start_refusal(
+    value: &Value,
+    report: Option<&Report>,
+    choose_files: bool,
+    folder_source: bool,
+) -> bool {
     matches!(
         value.get("outcome").and_then(Value::as_str),
         Some("refused" | "cancelled")
@@ -190,7 +231,10 @@ fn pre_start_refusal(value: &Value, report: Option<&Report>, choose_files: bool)
                     | "file_choice_event_overflow" | "file_picker_unavailable"
                     | "send_too_many" | "send_missing" | "send_symlink" | "send_directory"
                     | "send_special_file" | "send_name_not_portable" | "send_duplicate_name"
-                    | "send_unreadable" | "send_changed")))
+                    | "send_unreadable" | "send_changed"))
+                || (folder_source && matches!(code.as_str(),
+                    "files_sync_source_invalid" | "files_sync_selection_conflict"
+                    | "files_sync_job_required" | "files_sync_platform_unavailable")))
 }
 
 fn unknown(evidence: Option<ControlHistory>) -> Failure {
@@ -305,9 +349,23 @@ struct Record {
     refused: Vec<Refused>,
     absence: Option<&'static str>,
     source: Option<Source>,
+    folder_job: Option<FolderJob>,
 }
 impl Record {
     fn parse(value: &Value, limit: usize) -> Result<Self, ()> {
+        let folder_job = FolderJob::parse(value.get("upload_folder_job"))?;
+        if folder_job.as_ref().is_some_and(|job| {
+            !matches!(job.cleanup, "finished" | "unconfirmed") || job.confirmed_conflicts.is_none()
+        }) {
+            return Err(());
+        }
+        // A typed job allows larger bounded retained receipts; its original
+        // identity and consent are checked independently below.
+        let limit = if folder_job.is_some() {
+            MAX_FOLDER_RESULTS
+        } else {
+            limit
+        };
         // fr app has no file-command endpoint. Do not silently project its
         // unrelated request identities into a native-drop completion.
         if value.get("files_commands").is_some()
@@ -355,10 +413,53 @@ impl Record {
             refused,
             absence,
             source: Source::parse(value)?,
+            folder_job,
         })
     }
 
-    fn consistent(&self, expected: bool) -> bool {
+    fn consistent(&self, expected: bool, expected_job: Option<u64>) -> bool {
+        match (&self.folder_job, expected_job) {
+            (Some(job), Some(id)) => {
+                if job.id != id
+                    || self.absence.is_some()
+                    || (job.cleanup == "finished" && !matches!(job.phase, "cancelled" | "failed"))
+                {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+            (None, Some(_)) => {
+                // Before a job owner exists, a typed empty setup result can
+                // explain why no source scan or transfer started. Generic
+                // success or an omitted job after publication cannot.
+                if self.requested != 0
+                    || !self.sent.is_empty()
+                    || !self.refused.is_empty()
+                    || !matches!(
+                        self.absence,
+                        Some(
+                            "files_not_started"
+                                | "control_not_granted"
+                                | "host_files_unavailable"
+                                | "files_setup_incomplete"
+                                | "files_setup_failed"
+                                | "files_unavailable"
+                                | "files_refused_locally"
+                                | "files_cancelled"
+                                | "local_selection_unavailable"
+                        )
+                    )
+                    || self.source.as_ref().is_some_and(|source| {
+                        source.started.is_some_and(|started| started != 0)
+                            || !source.progress.is_null()
+                            || !matches!(source.cleanup, "not_started" | "finished")
+                    })
+                {
+                    return false;
+                }
+            }
+            (None, None) => {}
+        }
         let indices: BTreeSet<_> = self
             .sent
             .iter()
@@ -388,6 +489,16 @@ impl Record {
             return false;
         }
         self.source.as_ref().is_none_or(|source| {
+            // A folder has no initial per-file selection. Its cumulative
+            // publication ledger is separate from this last bounded round;
+            // the round's started count must never be compared with zero
+            // initial paths or presented as cumulative delivered files.
+            if self.folder_job.is_some() && self.requested == 0 {
+                return source.cleanup != "not_started"
+                    && source
+                        .started
+                        .is_none_or(|started| started <= MAX_FOLDER_ROUND);
+            }
             (source.started.is_some() || self.sent.is_empty())
                 && source.started.is_none_or(|started| {
                     // A stopped batch clears its remaining selections before
@@ -400,6 +511,24 @@ impl Record {
     }
 
     fn notice(&self) -> String {
+        if let Some(job) = &self.folder_job {
+            let mut notice = format!(
+                "Folder upload job {}: {}, {} confirmed publications, {} conflict copies, {} rounds settled; source cleanup {}.",
+                job.id,
+                job.phase,
+                job.confirmed_publications,
+                job.confirmed_conflicts.unwrap_or(0),
+                job.rounds_settled,
+                job.cleanup,
+            );
+            if let Some(failure) = job.failure {
+                let _ = write!(notice, " Job ended: {failure}.");
+            }
+            if job.failure == Some("sync_durability_unconfirmed") {
+                notice.push_str(" A publication has unconfirmed durability.");
+            }
+            return notice;
+        }
         if self.requested == 0 {
             return match self.absence {
                 Some("no_files_selected" | "not_requested") | None => {
@@ -450,6 +579,9 @@ impl Record {
         if let Some(source) = &self.source {
             source.append(&mut value);
         }
+        if let Some(job) = &self.folder_job {
+            value["upload_folder_job"] = job.json();
+        }
         evidence(&value, &self.notice())
     }
 }
@@ -463,6 +595,14 @@ fn evidence(value: &Value, notice: &str) -> ControlHistory {
 }
 
 fn incomplete(value: &Value, limit: usize) -> ControlHistory {
+    let folder_job = FolderJob::parse(value.get("upload_folder_job"))
+        .ok()
+        .flatten();
+    let limit = if folder_job.is_some() {
+        MAX_FOLDER_RESULTS
+    } else {
+        limit
+    };
     let sent: Vec<_> = value
         .get("files_sent")
         .and_then(Value::as_array)
@@ -481,10 +621,16 @@ fn incomplete(value: &Value, limit: usize) -> ControlHistory {
         .filter_map(Refused::parse)
         .map(|receipt| receipt.json())
         .collect();
+    let mut retained = json!({
+        "app_upload_evidence_incomplete":true,"files_sent":sent,"files_refused":refused,
+    });
+    if let Some(job) = folder_job {
+        retained["upload_folder_job"] = job.json();
+    } else if let Some(partial) = FolderJob::partial(value.get("upload_folder_job")) {
+        retained["upload_folder_job"] = partial;
+    }
     evidence(
-        &json!({
-            "app_upload_evidence_incomplete":true,"files_sent":sent,"files_refused":refused,
-        }),
+        &retained,
         "Original upload evidence is incomplete; well-typed receipt fragments are retained. Do not infer no publication.",
     )
 }
@@ -586,3 +732,7 @@ fn refusal_code(value: &str) -> Option<&'static str> {
 #[cfg(test)]
 #[path = "upload_completion_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "upload_folder_completion_tests.rs"]
+mod folder_tests;

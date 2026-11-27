@@ -95,6 +95,34 @@ excludes another `--files` directory or `--sync-source` job.
 Directory clones share one-use job consent, and a consumed job cannot fall back
 to ordinary receiving on another session.
 
+### Send a folder from the desktop app
+
+The Linux and macOS application can accept the same host-configured upload job:
+
+```sh
+fr app --sync-source /private/controller-source --sync-job 41
+```
+
+The picker notice names the ongoing job. Choose **View and control**, then
+**Send files** on Linux or **Allow file drops** on macOS. For this explicit
+source invocation, that choice authorizes new source versions for the selected
+connection; ordinary file drops stay disabled. **Choose files now** cannot be
+combined with accepting the source. Leave file sending off to decline.
+
+Use `--sync-tree-job 41` instead of `--sync-job 41` for nested trees.
+The source is consumed by the next confirmed machine choice, including a
+decline, view-only choice or failed launch. It survives only an unused picker
+refresh, never another connection or saved preference. The picker receives no
+source path and opens no directory. The selected viewer pins the original
+source before connecting.
+
+The app can receive ordinary host files at the same time through **Receive
+files**, a fresh native destination chooser, or explicit `--receive` options.
+The one job flag still names only the upload. Completion retains the original
+job's cumulative publications, conflict copies, settled rounds and cleanup
+separately from per-file receipts and the independent download. Unknown effects
+or unconfirmed cleanup stop the app before another viewer starts.
+
 ### Upload a folder while receiving selected host files
 
 A standing controller upload can share its original controlled connection with

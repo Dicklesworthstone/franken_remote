@@ -187,6 +187,44 @@ you explicitly drop files into the connected viewer. Host support and transfer
 policy still apply. Reconnects do not replay a selection or restore the old
 controller's file-transfer authority.
 
+To upload new versions from one local folder throughout the selected
+connection, explicitly configure a source and accept the host's existing job:
+
+```sh
+fr app --sync-source /private/controller-source --sync-job 41
+```
+
+The host must already have configured job 41 with `--sync-destination` and
+keep-both publication. Use `--sync-tree-job 41` instead to include nested
+directories as atomic subtree versions. See [folder synchronization](folder-sync.md)
+for both host and client commands, scope, limits and publication semantics.
+
+The picker notice names the job and explains its ongoing upload scope. Choose
+**View and control**, then **Send files** on Linux or **Allow file drops** on
+macOS to accept that specific folder job. In this invocation, the confirmed
+choice starts the standing source; generic file drops remain disabled.
+**Choose files now** cannot be combined with accepting the folder job. Leaving
+file sending off declines it.
+
+The source and job are consumed by the next confirmed machine choice, including
+a decline, view-only selection or failed launch. An unused picker refresh
+retains the pending choice. The picker opens no source and receives no source
+path; the actual viewer pins it before remote connection. Neither the source
+nor its consent is saved in preferences or repeated after reconnect.
+
+Ordinary host downloads can accompany this source: select **Receive files** for
+a fresh directory chooser, or pass an explicit `--receive DIR` and receive
+policy to `fr app`. With `--sync-source`, the job flag always belongs to
+the upload; it never creates a standing download job. The source and download
+keep separate local consent and results on the negotiated duplex connection.
+
+After a folder-upload session, the app reports its original job ID, settled
+rounds, cumulative confirmed publications, conflict copies and source cleanup.
+These counters are separate from any current-batch or ordinary-file receipts.
+An unknown publication, wrong job identity, incomplete result or unconfirmed
+cleanup stops the app before another viewer opens while retaining the known
+effects in its terminal output. A new session needs a new source choice.
+
 After a file-sending session, the app carries the original host-publication
 receipts into the next picker. The notice distinguishes files published by the
 host, selections that were not published, and publication with unconfirmed

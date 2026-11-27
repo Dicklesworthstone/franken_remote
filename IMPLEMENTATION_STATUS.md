@@ -1,5 +1,38 @@
 # Implementation status
 
+## One-use folder uploads in the native application (2026-11-27)
+
+The Linux/macOS `fr app` now accepts an explicit `--sync-source` together with
+`--sync-job` or `--sync-tree-job`. Its picker names the ongoing job and requests
+fresh sending consent for the selected controlling connection. This choice
+starts the original folder source, disables ordinary file drops and refuses a
+competing initial upload. A separately accepted ordinary host download can
+share the same duplex connection; the single job ID always belongs to the
+upload when a source is present.
+
+The source remains local and is consumed by the next selected connection,
+including decline, view-only refusal or failed launch. Only an unused picker
+refresh preserves it. Source paths and consent are neither passed to the
+picker nor saved in preferences, and no later connection replays the choice.
+
+Completion now validates the original upload job, terminal state and source
+cleanup. Bounded cumulative publications, conflict copies and settled rounds
+remain separate from initial paths, current-round starts and per-file receipts.
+Unknown effects or cleanup stop the app while retaining known evidence from
+both directions. The shared folder-result decoder preserves the existing
+receiver cleanup requirements.
+
+Eleven new app regressions cover selection ownership, flat/recursive grammar,
+independent receive consent, platform report shapes, identity, bounded evidence
+and uncertain cleanup. The implementation and tests have been independently
+source-reviewed, and pinned full-workspace formatting passed. The new tests and
+full native build remain unverified. Hosted verification is pending after local
+executor interruptions. No live native, tailnet or performance qualification is
+claimed.
+Tracking remains open in `fr-app-folder-upload-p7r2`; see
+[the native client CLI](docs/native-client-cli.md) and
+[folder synchronization](docs/folder-sync.md).
+
 ## Standing folder uploads beside ordinary downloads (2026-11-27)
 
 One explicitly accepted controller folder upload can now share its original
