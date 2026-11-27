@@ -1759,13 +1759,12 @@ impl QuicRecords {
             return Ok(0);
         }
         let s = &mut self.inbound[which];
-        if let Some(bytes) = s.framing.frame(current)? {
-            if handler(Route::Stream(s.route), bytes).map_err(|()| Error::Handler)?
+        if let Some(bytes) = s.framing.frame(current)?
+            && handler(Route::Stream(s.route), bytes).map_err(|()| Error::Handler)?
                 == Disposition::Consumed
-            {
-                s.framing.consume(current)?;
-                count += 1;
-            }
+        {
+            s.framing.consume(current)?;
+            count += 1;
         }
         if s.remainder.is_empty()
             && s.framing.frame(current)?.is_none()

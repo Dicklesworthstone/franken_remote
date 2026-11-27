@@ -101,6 +101,19 @@ impl Authority {
             AuthoritySource::Controller(_) => fr_wire::files::Direction::ToController,
         }
     }
+    /// Check ongoing source work under the original grant without consuming a
+    /// disk publication sample. Source workers and their session supervisor may
+    /// check concurrently; publication keeps its separately ordered clock.
+    pub(crate) fn check(&self, local_us: u64) -> Result<(), Refusal> {
+        match &self.source {
+            AuthoritySource::Host(monitor) => {
+                standing(monitor, HostInstant::from_micros(local_us)).map(|_| ())
+            }
+            AuthoritySource::Controller(authority) => {
+                authority.check(fr_client::input::ClientInstant(local_us))
+            }
+        }
+    }
     /// Sample the recipient's trusted local monotonic microseconds. A viewer
     /// sample is conservatively projected by its original grant, not compared
     /// directly with a host deadline or replaced with a wire clock.

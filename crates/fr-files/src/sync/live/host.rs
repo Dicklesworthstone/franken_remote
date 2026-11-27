@@ -308,8 +308,7 @@ impl HostJob {
         }
         self.last = now;
         self.authority
-            .sample(now)
-            .and_then(|at| self.authority.deadline(at))
+            .check(now)
             .map_err(|_| LiveError::Cancelled)?;
         sender.sync_lane().check(q).map_err(LiveError::Transport)?;
         if matches!(

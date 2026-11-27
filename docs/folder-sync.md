@@ -154,6 +154,13 @@ record. That deadline also fences its disk worker at publication and remains
 active until the settlement acknowledgment drains. A round does not start while prior ATP,
 publication proof, source cleanup or job-state custody remains outstanding.
 
+Source scans and the session supervisor can check the original controller
+authority concurrently. Their readiness checks retain the greatest observed
+trusted local time on a separate cursor; they cannot invalidate the disk
+owner's exact publication sample or renew the original control grant. Disk
+publication retains its ordered clock checks, and expiry, revocation or loss
+of the original owner remains terminal for both paths.
+
 A source edited or removed during the pre-transfer scan can be scanned again
 within the same round. Premature EOF while hashing a selected file or recursive
 tree is classified as a changed source; permission and other I/O errors retain

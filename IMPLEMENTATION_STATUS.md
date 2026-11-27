@@ -1,5 +1,27 @@
 # Implementation status
 
+## Concurrent controller folder-source checks (2026-11-27)
+
+Controller folder scans and their session supervisor now check the original
+file authority through a separate readiness cursor. Concurrent checks retain
+the conservative maximum trusted local time instead of treating an overtaken
+sample as clock regression. They no longer overwrite a disk owner's exact
+publication sample between its sample and deadline checks. The original weak
+owner lifetime, revocation flag and grant deadlines remain terminal; the
+ordered and nonblocking publication APIs retain their existing strict rules.
+
+The pinned compiler passed all four file-authority unit tests, including three
+new concurrency/lifetime regressions, and the complete client/wire suites:
+991 tests passed with no failures or ignored tests. Strict `fr-client --lib`
+Clippy also passed. The transport's existing collapsible conditional was
+simplified to clear the lint that blocked the hosted folder-sync verifier.
+
+The original large-upload legacy/duplex regression remains unchanged. Its
+end-to-end execution and the full workspace gates are still unverified for
+this change: local file-package test and metadata-check attempts stopped when
+the compiler was killed in pinned Asupersync, before reaching `fr-files`.
+Tracking: `fr-sync-source-authority-afj9`.
+
 ## Verified Linux focus-loss recovery (2026-11-25)
 
 The ordinary interactive Linux `fr connect --control` path now enables bounded

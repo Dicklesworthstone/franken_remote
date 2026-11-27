@@ -71,13 +71,7 @@ impl Scan {
                         return Err(SyncError::AuthorityRevoked);
                     }
                     let now = clock.now().as_nanos() / 1000;
-                    if now >= scope.until
-                        || scope
-                            .authority
-                            .sample(now)
-                            .and_then(|at| scope.authority.deadline(at))
-                            .is_err()
-                    {
+                    if now >= scope.until || scope.authority.check(now).is_err() {
                         return Err(SyncError::AuthorityRevoked);
                     }
                     Ok(())

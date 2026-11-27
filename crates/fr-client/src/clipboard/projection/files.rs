@@ -13,12 +13,13 @@ use fr_wire::negotiation::ControlBinding;
 use std::sync::{Arc, Mutex, Weak, atomic::Ordering};
 
 /// Read-only, revocation-aware handoff from the original accepted controller.
-/// Cloning retains only a weak lifetime and the same clock consumer; it cannot
+/// Cloning retains only a weak lifetime and the same clock consumers; it cannot
 /// keep the controller alive, renew a grant or reopen its one-use Files lane.
 #[derive(Clone)]
 pub struct ControllerAuthority {
     state: Weak<State>,
     cursor: Arc<Mutex<Cursor>>,
+    checks: Arc<Mutex<Cursor>>,
     parent: ControlBinding,
     lease: InputLeaseId,
     channel: u32,
@@ -53,6 +54,34 @@ impl ControllerAuthority {
         self.state
             .upgrade()
             .is_none_or(|state| state.stopped.load(Ordering::Acquire))
+    }
+    /// Check ongoing file work without producing a native publication sample.
+    /// Source scans and their supervising session can run concurrently: their
+    /// trusted local samples may arrive out of order. Keep their conservative
+    /// maximum on a separate cursor, so neither reader can invalidate the disk
+    /// owner's exact publication sample or misclassify another reader as a
+    /// regressed clock. This never renews the original grant or its deadline.
+    pub fn check(&self, now: ClientInstant) -> Result<(), Refusal> {
+        let state = self.state.upgrade().ok_or(Refusal::Revoked)?;
+        let mut cursor = self
+            .checks
+            .lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
+        let mut metadata = state
+            .inner
+            .lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
+        let (host, local) = state
+            .sample_cursor_locked(now, &mut cursor, &mut metadata, false, true)
+            .map_err(|_| {
+                state.stopped.store(true, Ordering::Release);
+                Refusal::Revoked
+            })?;
+        if local.0 >= metadata.local_until || host.as_micros() >= metadata.host_until {
+            state.stopped.store(true, Ordering::Release);
+            return Err(Refusal::Authority(AuthorityError::LeaseExpired));
+        }
+        Ok(())
     }
     /// Sample a trusted CLIENT monotonic clock in the original host's domain.
     /// The disk owner calls this before every external stage, including the
@@ -167,6 +196,11 @@ impl Owner {
                 client: now.0,
                 host: m.last_host,
             })),
+            checks: Arc::new(Mutex::new(Cursor {
+                sampled_client: now.0,
+                client: now.0,
+                host: m.last_host,
+            })),
             parent: self.state.parent,
             lease: self.state.binding.lease,
             channel,
@@ -231,6 +265,73 @@ mod tests {
                     reference_recovery: false,
                 }),
             }),
+        }
+    }
+
+    #[test]
+    fn concurrent_source_checks_preserve_the_original_publication_sample() {
+        let mut owner = owner();
+        let authority = owner.attach_files(5, ClientInstant(100)).unwrap();
+        let publication = authority.sample(ClientInstant(101)).unwrap();
+        let source = authority.clone();
+
+        source.check(ClientInstant(300)).unwrap();
+        authority.check(ClientInstant(200)).unwrap();
+        source.check(ClientInstant(299)).unwrap();
+        assert_eq!(
+            authority.deadline(publication),
+            Ok(HostInstant::from_micros(1_000_000))
+        );
+        assert!(!authority.is_revoked());
+
+        // The separate readiness cursor cannot relax the disk owner's ordered
+        // clock, including its final nonblocking publication sample.
+        authority.try_sample(ClientInstant(301)).unwrap();
+        assert!(authority.sample(ClientInstant(300)).is_err());
+        assert!(source.check(ClientInstant(302)).is_err());
+        owner.check_files(ClientInstant(302)).unwrap_err();
+    }
+
+    #[test]
+    fn concurrent_source_readers_do_not_revoke_each_other() {
+        let mut owner = owner();
+        let authority = owner.attach_files(5, ClientInstant(100)).unwrap();
+        let next = std::sync::atomic::AtomicU64::new(101);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let reader = authority.clone();
+                let next = &next;
+                scope.spawn(move || {
+                    for _ in 0..256 {
+                        // Samples are monotonic at capture, but the threads
+                        // can enter the shared check in a different order.
+                        let now = next.fetch_add(1, Ordering::Relaxed);
+                        std::thread::yield_now();
+                        reader.check(ClientInstant(now)).unwrap();
+                    }
+                });
+            }
+        });
+        assert!(!authority.is_revoked());
+        let publication = authority.try_sample(ClientInstant(2_000)).unwrap();
+        authority.deadline(publication).unwrap();
+    }
+
+    #[test]
+    fn source_checks_keep_expiry_revocation_and_original_owner_terminal() {
+        for failure in 0..3 {
+            let mut owner = owner();
+            let authority = owner.attach_files(5, ClientInstant(100)).unwrap();
+            authority.check(ClientInstant(999_999)).unwrap();
+            match failure {
+                0 => assert!(authority.check(ClientInstant(1_000_000)).is_err()),
+                1 => authority.revoke(),
+                _ => drop(owner),
+            }
+            // An overtaken clock is allowed only while the SAME grant lives.
+            assert!(authority.check(ClientInstant(100)).is_err());
+            assert!(authority.sample(ClientInstant(1_000_001)).is_err());
+            assert!(authority.is_revoked());
         }
     }
 
