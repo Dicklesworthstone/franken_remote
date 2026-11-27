@@ -69,6 +69,7 @@ pub enum Mode {
     Unverifiable,
     ChangeAfterWhoIs,
     ChangeAfterTwoSnapshots,
+    DelayNextStatus,
 }
 fn metadata(mode: Mode, changed: bool, dual_stack: bool) -> (Value, Value) {
     let key = format!("nodekey:{}", "2".repeat(64));
@@ -176,6 +177,10 @@ impl Api {
                     paths.push(path.to_string());
                 }
                 let mode = *state.lock().unwrap();
+                if mode == Mode::DelayNextStatus && path.starts_with("/localapi/v0/status?") {
+                    *state.lock().unwrap() = Mode::Allowed;
+                    thread::sleep(Duration::from_millis(1_250));
+                }
                 if mode == Mode::ChangeAfterTwoSnapshots && path.starts_with("/localapi/v0/status?")
                 {
                     // Two complete status/status snapshots agree, then a new

@@ -377,6 +377,29 @@ impl NativeServerIdentity {
         state.check(now(cx)?, wall_now()?)?;
         Ok(state.status.clone())
     }
+    /// Check the listener's planned node against the installed credential before
+    /// installing ingress rules. A fresh node using the same IPs can still have
+    /// a different key, daemon, or tailnet.
+    pub fn check_bind_node(&self, cx: &Cx, node: &NodeIdentity) -> Result<(), Error> {
+        self.api.check_node(cx, node)?;
+        let _state = self.checked_node_state(cx, node)?;
+        self.api.check_node(cx, node)
+    }
+
+    fn checked_node_state(
+        &self,
+        cx: &Cx,
+        node: &NodeIdentity,
+    ) -> Result<MutexGuard<'_, State>, Error> {
+        let mut state = self.state()?;
+        state.check(now(cx)?, wall_now()?)?;
+        if !state.anchor.same_node(node) {
+            state.active = None;
+            return Err(Error::IdentityChanged);
+        }
+        Ok(state)
+    }
+
     /// Return the history of recent certificate lifecycle events.
     pub fn events(&self) -> Result<Vec<CertificateEvent>, Error> {
         let state = self.state()?;
@@ -418,12 +441,7 @@ impl NativeServerIdentity {
         if transport_parameters.len() > PARAMETER_LIMIT {
             return Err(Error::InvalidPolicy);
         }
-        let mut state = self.state()?;
-        state.check(now(cx)?, wall_now()?)?;
-        if !state.anchor.same_node(node) {
-            state.active = None;
-            return Err(Error::IdentityChanged);
-        }
+        let mut state = self.checked_node_state(cx, node)?;
         let pair = state.active.as_ref().ok_or(Error::Revoked)?;
         pair.verify(&self.verifier, node.certificate_name())?;
         let driver =

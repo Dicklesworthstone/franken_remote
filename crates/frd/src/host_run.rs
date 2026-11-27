@@ -1673,7 +1673,10 @@ impl Share<'_> {
         Ok((ingress::Enforcement::StrongHost, protected, interface))
     }
 
-    async fn bind(&self, broker: &Cx) -> Result<LinuxServer, Error> {
+    async fn prepare_bind(
+        &self,
+        broker: &Cx,
+    ) -> Result<(fr_tailnet::NodeIdentity, Vec<ingress::Configuration>), Error> {
         if let Some(cause) = session_ended(self.lifetime) {
             return Err(Error::SessionEnded(cause));
         }
@@ -1708,14 +1711,25 @@ impl Share<'_> {
                     .map_err(Error::Ingress)?,
             );
         }
+        self.api.check_node(broker, &node).map_err(Error::Tailnet)?;
+        Ok((node, configurations))
+    }
+
+    async fn bind_prepared(
+        &self,
+        broker: &Cx,
+        node: fr_tailnet::NodeIdentity,
+        configurations: Vec<ingress::Configuration>,
+    ) -> Result<LinuxServer, Error> {
         let mut server = Server::new(self.api.clone(), self.identity.clone())
             .with_directory(self.options.directory);
         if let Some(policy) = self.policy {
             server = server.with_live_policy(policy.clone());
         }
         server
-            .bind_linux_addresses(
+            .bind_node_addresses(
                 broker,
+                Some(node),
                 configurations,
                 native_accept::Configuration::default(),
             )
@@ -1955,13 +1969,31 @@ impl Share<'_> {
         epoch: Option<crate::host_policy::live::Lease>,
         consent: &mut approval::Owner,
     ) -> Result<Ended, Error> {
+        use fr_tailnet::Error::{Busy, Expired, Timeout};
+
         if let Some(cause) = session_ended(self.lifetime) {
             return Ok(Ended::Session(cause));
         }
         if self.stop.is_requested() {
             return Ok(Ended::Served);
         }
-        let mut linux = self.bind(broker).await?;
+        // Planning owns no sockets or ingress rules. A slow or busy LocalAPI can
+        // therefore spend the normal restart allowance without replaying setup.
+        let plan = self.prepare_bind(broker).await;
+        if let Some(cause) = session_ended(self.lifetime) {
+            return Ok(Ended::Session(cause));
+        }
+        if self.stop.is_requested() {
+            return Ok(Ended::Served);
+        }
+        let (node, configurations) = match plan {
+            Ok(plan) => plan,
+            Err(error @ Error::Tailnet(Busy | Expired | Timeout)) => {
+                return Ok(Ended::Failed(error));
+            }
+            Err(error) => return Err(error),
+        };
+        let mut linux = self.bind_prepared(broker, node, configurations).await?;
         // Binding itself awaits native ingress work. Retire it before reporting
         // Listening if the original login or local run ended during that wait.
         let ended = session_ended(self.lifetime)

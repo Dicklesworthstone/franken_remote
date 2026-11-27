@@ -64,8 +64,21 @@ impl Server {
     /// unused sockets close before TLS, and the next serial attempt binds the
     /// same protected set again. This does not admit concurrent peers.
     pub async fn bind_linux_addresses(
+        self,
+        broker: &Cx,
+        configurations: Vec<ingress::Configuration>,
+        transport: native_accept::Configuration,
+    ) -> Result<LinuxServer, Error> {
+        self.bind_node_addresses(broker, None, configurations, transport)
+            .await
+    }
+
+    /// Host-run passes the original daemon snapshot used to select the tunnel
+    /// and its addresses. Keep its identity and expiry across that planning work.
+    pub(crate) async fn bind_node_addresses(
         mut self,
         broker: &Cx,
+        planned_node: Option<fr_tailnet::NodeIdentity>,
         configurations: Vec<ingress::Configuration>,
         transport: native_accept::Configuration,
     ) -> Result<LinuxServer, Error> {
@@ -91,10 +104,16 @@ impl Server {
             .collect();
         let mut boundary = Boundaries(Vec::with_capacity(configurations.len()));
         let installed = async {
-            let node = self
-                .api
-                .node_identity(broker)
-                .await
+            let node = match planned_node {
+                Some(node) => node,
+                None => self
+                    .api
+                    .node_identity(broker)
+                    .await
+                    .map_err(|e| Error::Host(super::Error::Tailnet(e)))?,
+            };
+            self.identity
+                .check_bind_node(broker, &node)
                 .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
             if !addresses
                 .iter()

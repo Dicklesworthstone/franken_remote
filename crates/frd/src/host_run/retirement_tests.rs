@@ -135,6 +135,14 @@ fn run(body: impl AsyncFnOnce(Cx, RuntimeHandle)) {
     });
 }
 
+async fn bind(share: &Share<'_>, broker: &Cx) -> LinuxServer {
+    let (node, configurations) = share.prepare_bind(broker).await.unwrap();
+    share
+        .bind_prepared(broker, node, configurations)
+        .await
+        .unwrap()
+}
+
 fn request_for(share: &Share<'_>) -> Request {
     let mut request = request(
         1,
@@ -269,6 +277,55 @@ fn retryable(result: Result<Ended, Error>) -> Error {
 
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress"]
+fn delayed_metadata_retries_before_creating_any_ingress_or_socket() {
+    run(async |broker, runtime| {
+        let api = fixture::Api::new();
+        let identity = api.identity(&broker).await;
+        let tools = Tools::new();
+        let host = LocalHost::new(&api, &tools);
+        // The host credential renewer shares the metadata slot. Its lookup
+        // must retain ownership while the new share backs off.
+        *api.mode.lock().unwrap() = fixture::Mode::DelayNextStatus;
+        let mut other = pin!(api.client.node_identity(&broker));
+        assert!(poll_fn(|cx| Poll::Ready(other.as_mut().poll(cx).is_pending())).await);
+        let busy = retryable(
+            host.share(&runtime, &api.client, &identity)
+                .serve(&broker)
+                .await,
+        );
+        assert_eq!(busy, Error::Tailnet(fr_tailnet::Error::Busy));
+        assert!(matches!(other.await, Err(fr_tailnet::Error::Timeout)));
+
+        *api.mode.lock().unwrap() = fixture::Mode::DelayNextStatus;
+        let error = retryable(
+            host.share(&runtime, &api.client, &identity)
+                .serve(&broker)
+                .await,
+        );
+        assert_eq!(error, Error::Tailnet(fr_tailnet::Error::Timeout));
+        assert!(!tools.0.join("state.json").exists());
+        assert!(UdpSocket::bind(address()).is_ok());
+        let mut failures = 0;
+        assert_eq!(
+            record_share_failure(true, &mut failures, error.clone()),
+            Err(error.clone())
+        );
+        record_share_failure(false, &mut failures, error).unwrap();
+        backoff(&broker, &host.stop, failures).await;
+        let share = host.share(&runtime, &api.client, &identity);
+        let before = api.calls.load(Ordering::Acquire);
+        let mut server = bind(&share, &broker).await;
+        // One status pair to plan and one to read back the installed boundary.
+        assert_eq!(api.calls.load(Ordering::Acquire) - before, 4);
+        assert!(UdpSocket::bind(address()).is_err());
+        assert_eq!(tools.state()["created"], 1);
+        server.stop(&broker).await.unwrap();
+        assert_eq!(tools.state()["deleted"], 1);
+    });
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress"]
 fn delayed_original_transport_recovers_after_cleanup_into_a_fresh_session() {
     run(async |broker, runtime| {
         let tools = Tools::new();
@@ -276,7 +333,7 @@ fn delayed_original_transport_recovers_after_cleanup_into_a_fresh_session() {
         let identity = api.identity(&broker).await;
         let host = LocalHost::new(&api, &tools);
         let share = host.share(&runtime, &api.client, &identity);
-        let mut server = share.bind(&broker).await.unwrap();
+        let mut server = bind(&share, &broker).await;
         let first = request_for(&share);
         let old_binding = first.session.binding;
         let old_connection = first.connection_id;
@@ -300,7 +357,7 @@ fn delayed_original_transport_recovers_after_cleanup_into_a_fresh_session() {
         backoff(&broker, &host.stop, failures).await;
 
         let fresh_share = host.share(&runtime, &api.client, &identity);
-        let mut fresh_server = fresh_share.bind(&broker).await.unwrap();
+        let mut fresh_server = bind(&fresh_share, &broker).await;
         let fresh = request_for(&fresh_share);
         assert_eq!(fresh.session.binding.host_boot, old_binding.host_boot);
         assert_ne!(fresh.session.binding.os_session, old_binding.os_session);
@@ -334,7 +391,7 @@ fn still_retained_transport_prevents_cleanup_and_any_restart() {
         let identity = api.identity(&broker).await;
         let host = LocalHost::new(&api, &tools);
         let share = host.share(&runtime, &api.client, &identity);
-        let mut server = share.bind(&broker).await.unwrap();
+        let mut server = bind(&share, &broker).await;
         let (end, mut peer, viewer) =
             exchange(&mut server, &runtime, request_for(&share), true).await;
         assert_eq!(end, Err(retained_error()));
@@ -363,7 +420,7 @@ fn failed_rule_cleanup_cannot_turn_a_retirement_timeout_into_a_restart() {
         let identity = api.identity(&broker).await;
         let host = LocalHost::new(&api, &tools);
         let share = host.share(&runtime, &api.client, &identity);
-        let mut server = share.bind(&broker).await.unwrap();
+        let mut server = bind(&share, &broker).await;
         let (end, mut peer, viewer) =
             exchange(&mut server, &runtime, request_for(&share), true).await;
         assert_eq!(end, Err(retained_error()));

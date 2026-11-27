@@ -480,6 +480,29 @@ fn fresh_host_metadata_and_original_origin_are_required_for_every_handshake() {
     });
 }
 #[test]
+fn a_listener_must_use_the_credentials_original_node_even_if_addresses_match() {
+    let fixture = Fixture::new();
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let identity = fixture.identity(&cx).await;
+        let original = fixture.api.node_identity(&cx).await.unwrap();
+        identity.check_bind_node(&cx, &original).unwrap();
+        fixture.status.lock().unwrap()["Self"]["PublicKey"] =
+            json!(format!("nodekey:{}", "9".repeat(64)));
+        let replacement = fixture.api.node_identity(&cx).await.unwrap();
+        assert_eq!(original.addresses(), replacement.addresses());
+        assert_eq!(
+            identity.check_bind_node(&cx, &replacement),
+            Err(Error::IdentityChanged)
+        );
+        assert_eq!(
+            identity.check_bind_node(&cx, &original),
+            Err(Error::Revoked)
+        );
+    });
+}
+
+#[test]
 fn root_credentials_are_checked_before_any_http_request() {
     let mut fixture = Fixture::new();
     fixture.api.daemon_uid = fixture.api.daemon_uid.wrapping_add(1);
