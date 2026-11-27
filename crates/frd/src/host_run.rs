@@ -19,6 +19,8 @@
 use fr_wire::sync_job_state::JobMode;
 pub mod approval;
 pub mod audio;
+#[cfg(target_os = "linux")]
+pub mod browser;
 pub mod encoder;
 pub mod microphone;
 pub use encoder::{Encoder, Selection as EncoderSelection};
@@ -164,6 +166,8 @@ pub enum Error {
     /// budget; an unstable display cannot reconfigure workers indefinitely.
     GeometryUnstable,
     NoTailnetAddress,
+    /// The opted-in HTTPS/WSS listener failed at a bounded transport stage.
+    BrowserTransport(&'static str),
     /// The session monitor never produced fresh evidence; nothing was bound.
     SessionMonitor(session_monitor::Error),
     /// The selected session's evidence ended (lock, logout, switch, suspend,
@@ -207,6 +211,7 @@ impl Error {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Runtime => "runtime_unavailable",
+            Self::BrowserTransport(_) => "browser_transport_unavailable",
             Self::Entropy => "entropy_unavailable",
             Self::Configuration => "invalid_configuration",
             Self::MicrophoneCapabilities => "microphone_capability_limit",
@@ -321,6 +326,11 @@ pub enum Event {
     },
     Listening {
         address: SocketAddr,
+    },
+    /// An explicitly selected view-only browser listener, with its certified URL.
+    BrowserListening {
+        address: SocketAddr,
+        url: String,
     },
     /// This node's IPv4 or IPv6 address is not served: the kernel would also
     /// deliver packets for it that did not arrive through the tunnel (macOS

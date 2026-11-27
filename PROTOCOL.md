@@ -65,6 +65,12 @@ second wire encoding. WebTransport compatibility is recorded independently;
 WSS fallback retains all identity, Origin, attachment, limits, and expiry rules.
 A profile change requires a newly authenticated bound channel/session transition.
 
+The implemented view-only `browser-video-wss` v1 subset uses separate control
+and video WSS sockets with canonical media records and original receiver credit;
+its exact attachment and bounds are in
+[PROTOCOL_BROWSER_WSS.md](PROTOCOL_BROWSER_WSS.md). It does not select or qualify
+HTTP/3 WebTransport, browser input, or audio.
+
 ## 2. Framing and primitive representation
 
 Application integers are fixed-width **big-endian**; no application varints or

@@ -25,7 +25,8 @@ pub struct Effective {
 #[derive(Debug, Default)]
 pub struct RunOptions {
     pub port: Option<u16>,
-    /// Optional opt-in HTTPS/WSS browser workstation ingress port (degraded TCP head-of-line profile).
+    /// Opt in to a browser-only, view-only HTTPS/WSS listener on Linux.
+    /// Requires a bundled WASM client, monitored login and visible Stop sharing.
     pub browser_port: Option<u16>,
     pub socket: Option<PathBuf>,
     pub config: Option<PathBuf>,
@@ -403,6 +404,69 @@ impl RunOptions {
         })
     }
 
+    /// The first browser-profile refusal, before opening files, the desktop,
+    /// LocalAPI, or a listener. This first installed profile is Linux view-only.
+    /// Each requested effect must have an owner; options are never ignored.
+    #[must_use]
+    pub fn browser_refusal(
+        &self,
+        approval: Approval,
+        bundled: bool,
+    ) -> Option<(&'static str, &'static str)> {
+        self.browser_port?;
+        let refusals = [
+            (
+                !cfg!(target_os = "linux"),
+                "browser_host_unsupported",
+                "The installed browser desktop currently requires a Linux X11 host.",
+            ),
+            (
+                self.port.is_some(),
+                "browser_profile_conflict",
+                "--browser-port selects a browser-only listener; omit the native --port.",
+            ),
+            (
+                self.input_agent.is_some()
+                    || self.control
+                    || self.clipboard
+                    || self.audio
+                    || self.microphone
+                    || self.files.is_some()
+                    || !self.send.is_empty()
+                    || self.send_control.is_some()
+                    || self.sync_source.is_some()
+                    || self.sync_destination.is_some()
+                    || self.directory
+                    || self.adaptive_capture,
+                "browser_feature_unsupported",
+                "The browser desktop is view-only; control, clipboard, audio, files, directory and adaptive-capture options are unavailable in this profile.",
+            ),
+            (
+                approval != Approval::None,
+                "browser_local_approval_unavailable",
+                "The browser desktop has no local approval dialog yet; its effective host policy must have approval=none.",
+            ),
+            (
+                self.headless || self.logind_session.is_none(),
+                "browser_session_monitor_required",
+                "The browser desktop requires the selected active X11 login session: supply --logind-session and omit --headless.",
+            ),
+            (
+                self.observation_indicator.is_none(),
+                "browser_indicator_required",
+                "Supply --observation-indicator /absolute/path/fr-observation-indicator so Stop sharing remains visible.",
+            ),
+            (
+                !bundled,
+                "browser_client_unavailable",
+                "This frd build has no Rust/WASM browser client; build web/ with the pinned wasm-bindgen toolchain and build frd with FR_WEB_ASSET_DIR naming its generated pkg directory.",
+            ),
+        ];
+        refusals
+            .into_iter()
+            .find_map(|(refused, code, detail)| refused.then_some((code, detail)))
+    }
+
     /// The first requested capability `frd run` cannot provide on macOS yet,
     /// as a typed refusal `(code, detail)`. `frd run` refuses it before any
     /// I/O, and `frd install` before writing a `LaunchAgent` that would only
@@ -565,6 +629,8 @@ fn value<'a>(iter: &mut std::slice::Iter<'a, String>) -> Result<&'a str, Error> 
         .ok_or(Error::InvalidArgument)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod browser_tests;
 #[cfg(test)]
 mod download_tests;
 #[cfg(test)]

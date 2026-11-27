@@ -6,7 +6,7 @@ use fr_tailnet::ingress;
 use fr_transport::native_accept::{self, Listener};
 use std::{fmt, future::Future, net::SocketAddr};
 
-mod boundaries;
+pub(super) mod boundaries;
 use boundaries::Boundaries;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

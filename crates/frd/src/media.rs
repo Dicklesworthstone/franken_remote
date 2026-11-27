@@ -153,6 +153,39 @@ impl ObservationControl {
         control.check()?;
         Ok(control)
     }
+    /// Reserve the original observation-renewal owner for the dedicated WSS
+    /// control socket. This cannot borrow a native renewer, a control grant,
+    /// or another accepted TCP connection's authority. Reservation is sticky:
+    /// closing this socket requires a new admitted observation session.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn claim_browser_renewal(
+        &self,
+        session: fr_core::ids::RemoteSessionId,
+        peer: &fr_tailnet::Lease,
+    ) -> Result<(), Error> {
+        use std::sync::atomic::Ordering;
+        let now = self.check()?;
+        let admission = self.admission.as_ref().ok_or(Error::InvalidFrame)?;
+        let original = admission.addresses();
+        let accepted = peer.addresses();
+        if !self.belongs_to_session(session)
+            || original.local != accepted.local
+            || original.peer != accepted.peer
+            || !admission.same_peer(peer).map_err(Error::Admission)?
+            || self.control_grant_attached.load(Ordering::Acquire)
+            || self
+                .authority
+                .lock()
+                .map_err(|_| Error::Poisoned)?
+                .has_live_control(now)
+        {
+            return Err(Error::InvalidFrame);
+        }
+        self.renewal_attached
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::InvalidFrame)?;
+        Ok(())
+    }
     fn admission_deadline(&self) -> Result<Option<u64>, Error> {
         let Some(admission) = &self.admission else {
             return Ok(None);

@@ -2,9 +2,10 @@
 
 This specifies the browser startup record implemented by
 `fr_wire::negotiation::browser`, under [PROTOCOL.md](PROTOCOL.md).
-The daemon listener and Rust/WASM browser adapter that consume this record
-remain integration work. Parsing a hello establishes no observation, media
-readiness or input authority.
+The installed Linux HTTPS/WSS listener and Rust/WASM browser adapter consume
+this record. Their view-only desktop composition is specified separately in
+[PROTOCOL_BROWSER_WSS.md](PROTOCOL_BROWSER_WSS.md). Parsing a hello establishes
+no observation, media readiness or input authority.
 
 ## Profile and envelope
 

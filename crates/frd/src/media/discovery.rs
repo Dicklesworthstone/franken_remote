@@ -138,6 +138,33 @@ impl DiscoveredSource {
         }
         self.configure_choice(choice, configuration)
     }
+    /// Configure this original peer-bound browser source from a LOCAL catalog
+    /// choice. The WSS service has already negotiated Observe and owns the
+    /// exact admitted session; no network crop or native display name enters
+    /// this path. Independent shared sources still use configure_local.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn configure_browser(
+        self,
+        original: &ObservationControl,
+        session: fr_core::ids::RemoteSessionId,
+        choice: Select,
+        configuration: Configuration,
+    ) -> Result<impl Future<Output = Result<CaptureSource, Error>> + use<>, Error> {
+        if !self.control.same_owner(original)
+            || !original.belongs_to_session(session)
+            || original.admission.is_none()
+            || !original
+                .renewal_attached
+                .load(std::sync::atomic::Ordering::Acquire)
+            || original
+                .control_grant_attached
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(Error::InvalidFrame);
+        }
+        original.check()?;
+        self.configure_choice(choice, configuration)
+    }
     fn configure_choice(
         self,
         choice: Select,

@@ -10,7 +10,7 @@ use std::{
     task::Poll,
 };
 
-pub(super) struct Boundaries(pub(super) Vec<ingress::Boundary>);
+pub(crate) struct Boundaries(pub(crate) Vec<ingress::Boundary>);
 
 // Keep the whole ingress fence ahead of application destruction on EVERY exit,
 // including an unpolled future drop or a caught panic during a poll. An async
@@ -27,11 +27,11 @@ impl<F, W> Drop for Protected<F, W> {
 }
 
 impl Boundaries {
-    pub(super) fn addresses(&self) -> Vec<SocketAddr> {
+    pub(crate) fn addresses(&self) -> Vec<SocketAddr> {
         self.0.iter().map(ingress::Boundary::address).collect()
     }
 
-    pub(super) fn check(&self) -> Result<IngressCheck, ingress::Error> {
+    pub(crate) fn check(&self) -> Result<IngressCheck, ingress::Error> {
         let leases: Vec<_> = self
             .0
             .iter()
@@ -45,7 +45,7 @@ impl Boundaries {
         }))
     }
 
-    pub(super) fn close(&self) {
+    pub(crate) fn close(&self) {
         for boundary in &self.0 {
             boundary.close();
         }
@@ -55,7 +55,7 @@ impl Boundaries {
     /// checks. These watchdogs supervise ONE pinned application; they do not run that
     /// application once per address. A failed/abandoned layer fences the whole
     /// set before pending work is dropped, including unselected addresses.
-    pub(super) fn supervise<'a, F: Future + 'a>(
+    pub(crate) fn supervise<'a, F: Future + 'a>(
         &'a mut self,
         operation: F,
     ) -> impl Future<Output = Result<F::Output, ingress::Error>> + 'a {
@@ -109,7 +109,7 @@ impl Boundaries {
     /// Fence all addresses at CALL time. Failure on one cleanup cannot skip
     /// cleanup of another. Original transports must release ALL their retained
     /// leases before any rule is removed; a failed removal remains retryable.
-    pub(super) fn stop<'a>(
+    pub(crate) fn stop<'a>(
         &'a mut self,
         cleanup: &'a Cx,
     ) -> impl Future<Output = Result<(), ingress::Error>> + 'a {

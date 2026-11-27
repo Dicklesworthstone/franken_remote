@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 //! Asupersync HTTPS/WSS browser workstation ingress (`frd`).
 //!
-//! Serves self-hosted assets and canonical, explicitly unavailable startup.
-//! No HTTP bootstrap or authenticated WebSocket creates desktop authority.
+//! Serves self-hosted assets and optional approved view-only desktop sessions.
+//! An unregistered ingress remains explicitly unavailable. HTTP bootstrap and
+//! authenticated WebSockets never create desktop authority on their own.
 //! Wires together the existing security and transport layers:
 //! - [`crate::broker::browser_security::BrowserSecurityPolicy`] (exact `Origin`,
 //!   `Host`/SNI DNS-rebinding defense, Fetch Metadata, URL query safety,
@@ -16,15 +17,17 @@
 //! Pure safe Rust (`#![forbid(unsafe_code)]`), Asupersync-only (no Tokio, no
 //! third-party web server frameworks).
 
+#[cfg(target_os = "linux")]
+pub mod desktop;
 pub mod http;
 pub mod websocket;
 
 use crate::broker::{
     browser_assets::BrowserAssets,
     browser_security::{
-        AuxiliaryChannelRole, BROWSER_API_CSP, BROWSER_UI_CSP, BrowserSecurityPolicy,
-        BrowserSessionRole, ExpectedHostOrigin, FIRST_MESSAGE_AUTH_TIMEOUT, FetchMetadata,
-        check_url_query_safety,
+        AuxiliaryChannelRole, BROWSER_API_CSP, BROWSER_UI_CSP, BootstrapRequest,
+        BrowserSecurityPolicy, BrowserSessionRole, ExpectedHostOrigin, FIRST_MESSAGE_AUTH_TIMEOUT,
+        FetchMetadata, check_url_query_safety,
     },
 };
 use asupersync::{
@@ -155,6 +158,8 @@ pub struct BrowserIngress {
     config: BrowserIngressConfig,
     policy: BrowserSecurityPolicy,
     sessions: Mutex<HashMap<RemoteSessionId, ActiveBrowserSession>>,
+    #[cfg(target_os = "linux")]
+    desktop: Option<desktop::Service>,
 }
 
 impl BrowserIngress {
@@ -166,7 +171,57 @@ impl BrowserIngress {
             config,
             policy,
             sessions: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            desktop: None,
         }
+    }
+
+    /// Register the installed host's real admission, local consent and capture
+    /// factory. The caller retains its protected listener and original guards.
+    /// The first profile is one Observe session with one dedicated media socket.
+    #[must_use]
+    #[cfg(target_os = "linux")]
+    pub fn with_desktop(mut self, factory: desktop::Factory) -> Self {
+        self.config.limits = self.config.limits.negotiated(&browser::limits());
+        self.desktop = Some(desktop::Service::new(factory));
+        self
+    }
+
+    /// Fence desktop delivery synchronously, before aborting TCP task owners.
+    #[cfg(target_os = "linux")]
+    pub fn close_desktop(&self) {
+        if let Some(desktop) = &self.desktop {
+            desktop.close();
+        }
+    }
+
+    /// A closed original source whose receipt needs listener-owned retirement.
+    /// The listener keeps driving all socket owners while this cleanup runs.
+    #[cfg(target_os = "linux")]
+    pub fn has_closed_desktop(&self) -> bool {
+        self.desktop
+            .as_ref()
+            .is_some_and(desktop::Service::has_closed)
+    }
+
+    /// Retire only a closed exact original session. Unlike final shutdown,
+    /// this leaves admission open after confirmed exit for the next viewer.
+    #[cfg(target_os = "linux")]
+    pub async fn retire_closed_desktop(&self, cleanup: &asupersync::cx::Cx) -> std::io::Result<()> {
+        if let Some(desktop) = &self.desktop {
+            desktop.retire_closed(cleanup).await?;
+        }
+        Ok(())
+    }
+
+    /// Drain the retained ORIGINAL child after both connection owners ended.
+    /// Failure retains custody and keeps the single session slot occupied.
+    #[cfg(target_os = "linux")]
+    pub async fn retire_desktop(&self, cleanup: &asupersync::cx::Cx) -> std::io::Result<()> {
+        if let Some(desktop) = &self.desktop {
+            desktop.retire(cleanup).await?;
+        }
+        Ok(())
     }
 
     /// Reference to the underlying [`BrowserSecurityPolicy`].
@@ -186,6 +241,14 @@ impl BrowserIngress {
         &self,
         session_id: RemoteSessionId,
     ) -> Result<Option<BrowserSessionMetrics>, BrowserIngressError> {
+        #[cfg(target_os = "linux")]
+        if let Some(metrics) = self
+            .desktop
+            .as_ref()
+            .and_then(|desktop| desktop.metrics(session_id))
+        {
+            return Ok(Some(metrics));
+        }
         let guard = self
             .sessions
             .lock()
@@ -300,7 +363,8 @@ impl BrowserIngress {
         Ok(*secret.as_bytes())
     }
 
-    /// Accept one TLS-wrapped TCP connection, extract real TLS SNI, and serve HTTPS/WSS.
+    /// Legacy generic TLS entry. It does not carry installed-daemon authority;
+    /// only serve_verified_stream can activate a registered desktop factory.
     pub async fn serve_tls_connection(
         &self,
         acceptor: &TlsAcceptor,
@@ -308,23 +372,20 @@ impl BrowserIngress {
         peer_ip: IpAddr,
         now_fn: impl Fn() -> HostInstant,
     ) -> std::io::Result<()> {
-        bounded_startup(self.startup_budget(), async {
-            let tls = acceptor
+        let tls = bounded_startup(self.startup_budget(), async {
+            acceptor
                 .accept(tcp)
                 .await
-                .map_err(|_| std::io::Error::other("TLS handshake failed"))?;
-            let sni = tls.sni_hostname().map(str::to_owned);
-            self.serve_stream_inner(tls, peer_ip, sni.as_deref(), now_fn)
-                .await
+                .map_err(|_| std::io::Error::other("TLS handshake failed"))
         })
-        .await
+        .await?;
+        let sni = tls.sni_hostname().map(str::to_owned);
+        self.serve_stream_inner(tls, peer_ip, sni.as_deref(), now_fn, None)
+            .await
     }
 
-    /// Serve one HTTP/1.1 or RFC 6455 WSS connection over any Asupersync stream.
-    ///
-    /// Production callers MUST pass a TLS stream via [`Self::serve_tls_connection`];
-    /// passing a plain stream is for loopback tests and enforces identical origin,
-    /// Host/SNI, Fetch Metadata, nonce, ticket, and credit checks.
+    /// Serve an unavailable/test ingress without claiming verified peer identity.
+    /// Installing a desktop factory alone cannot turn a plain stream into one.
     pub async fn serve_stream<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         stream: S,
@@ -332,11 +393,31 @@ impl BrowserIngress {
         sni: Option<&str>,
         now_fn: impl Fn() -> HostInstant,
     ) -> std::io::Result<()> {
-        bounded_startup(
-            self.startup_budget(),
-            self.serve_stream_inner(stream, peer_ip, sni, now_fn),
-        )
-        .await
+        self.serve_stream_inner(stream, peer_ip, sni, now_fn, None)
+            .await
+    }
+
+    /// Serve the original accepted HTTPS connection AFTER the installed
+    /// NativeServerIdentity verified TLS and LocalAPI authenticated its exact
+    /// endpoints. The caller retains and refreshes this original Admission.
+    ///
+    /// Every resumed transport poll checks that socket lease. The desktop adds
+    /// original observation and local-supervisor gates, including on media.
+    #[cfg(target_os = "linux")]
+    pub async fn serve_verified_stream<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: S,
+        peer: fr_tailnet::Lease,
+        cx: asupersync::cx::Cx,
+        sni: Option<&str>,
+        now_fn: impl Fn() -> HostInstant,
+    ) -> std::io::Result<()> {
+        peer.observe()
+            .map_err(|_| std::io::Error::other("browser peer unavailable"))?;
+        let peer_ip = peer.addresses().peer.ip();
+        let stream = desktop::GuardedIo::ingress(stream, peer.clone(), cx.clone());
+        self.serve_stream_inner(stream, peer_ip, sni, now_fn, Some((peer, cx)))
+            .await
     }
 
     fn startup_budget(&self) -> Duration {
@@ -349,8 +430,15 @@ impl BrowserIngress {
         peer_ip: IpAddr,
         sni: Option<&str>,
         now_fn: impl Fn() -> HostInstant,
+        verified: Option<(fr_tailnet::Lease, asupersync::cx::Cx)>,
     ) -> std::io::Result<()> {
-        let req = match http::read_http_request(&mut stream).await {
+        // The HTTP/authentication budget ends before any live desktop owner is
+        // created. Never wrap capture or its cleanup in a future-drop timeout.
+        let parsed = bounded_startup(self.startup_budget(), async {
+            Ok(http::read_http_request(&mut stream).await)
+        })
+        .await?;
+        let req = match parsed {
             Ok(req) => req,
             Err(http::HttpParseError::Eof) => return Ok(()),
             Err(err) => {
@@ -360,48 +448,101 @@ impl BrowserIngress {
                     http::HttpParseError::BodyTooLarge => 413,
                     _ => 400,
                 };
-                let _ = http::write_http_response(
-                    &mut stream,
-                    status,
-                    "Bad Request",
-                    "application/json",
-                    BROWSER_API_CSP,
-                    b"{\"error\":\"malformed_http_request\"}",
+                return bounded_startup(
+                    self.startup_budget(),
+                    http::write_http_response(
+                        &mut stream,
+                        status,
+                        "Bad Request",
+                        "application/json",
+                        BROWSER_API_CSP,
+                        b"{\"error\":\"malformed_http_request\"}",
+                    ),
                 )
                 .await;
-                return Ok(());
             }
         };
-
         let metadata = FetchMetadata::new(
             req.sec_fetch_site.as_deref(),
             req.sec_fetch_mode.as_deref(),
             req.sec_fetch_dest.as_deref(),
         );
-
         match req.path() {
             "/api/session/bootstrap" => {
-                self.handle_bootstrap(&mut stream, &req, &metadata, sni)
-                    .await
+                bounded_startup(
+                    self.startup_budget(),
+                    self.handle_bootstrap(
+                        &mut stream,
+                        &req,
+                        &metadata,
+                        sni,
+                        verified.as_ref().map(|(peer, _)| peer),
+                        now_fn(),
+                    ),
+                )
+                .await
             }
             "/ws/control" => {
+                #[cfg(target_os = "linux")]
+                if self.desktop.is_some()
+                    && let Some((peer, cx)) = verified
+                {
+                    return desktop::serve_control(
+                        self,
+                        &mut stream,
+                        &req,
+                        &metadata,
+                        peer,
+                        cx,
+                        sni,
+                    )
+                    .await;
+                }
                 bounded_startup(
-                    first_message_auth_duration(),
+                    first_message_auth_duration().min(self.startup_budget()),
                     self.handle_ws_control(&mut stream, &req, &metadata, peer_ip, sni, &now_fn),
                 )
                 .await
             }
             "/ws/video" => {
-                self.handle_ws_auxiliary(&mut stream, &req, &metadata, sni, WssChannelRole::Video)
-                    .await
+                #[cfg(target_os = "linux")]
+                if self.desktop.is_some()
+                    && let Some((peer, _)) = verified
+                {
+                    return desktop::serve_video(self, &mut stream, &req, &metadata, peer, sni)
+                        .await;
+                }
+                bounded_startup(
+                    first_message_auth_duration().min(self.startup_budget()),
+                    self.handle_ws_auxiliary(
+                        &mut stream,
+                        &req,
+                        &metadata,
+                        sni,
+                        WssChannelRole::Video,
+                    ),
+                )
+                .await
             }
             "/ws/audio" => {
-                self.handle_ws_auxiliary(&mut stream, &req, &metadata, sni, WssChannelRole::Audio)
-                    .await
+                bounded_startup(
+                    first_message_auth_duration().min(self.startup_budget()),
+                    self.handle_ws_auxiliary(
+                        &mut stream,
+                        &req,
+                        &metadata,
+                        sni,
+                        WssChannelRole::Audio,
+                    ),
+                )
+                .await
             }
             _ => {
-                self.handle_static_get(&mut stream, &req, &metadata, sni)
-                    .await
+                bounded_startup(
+                    self.startup_budget(),
+                    self.handle_static_get(&mut stream, &req, &metadata, sni),
+                )
+                .await
             }
         }
     }
@@ -476,6 +617,8 @@ impl BrowserIngress {
         req: &http::HttpRequest,
         metadata: &FetchMetadata<'_>,
         sni: Option<&str>,
+        verified: Option<&fr_tailnet::Lease>,
+        now: HostInstant,
     ) -> std::io::Result<()> {
         if req.method != "POST" {
             return http::write_http_response(
@@ -513,8 +656,56 @@ impl BrowserIngress {
             .await;
         };
 
-        // Exactly the Rust/WASM bootstrap schema. In particular, no caller-
-        // constructed binding, nonce, ticket or invented observation is sent.
+        // A nonce is only transport bootstrap. The installed host factory
+        // still performs local observation admission before SessionOpened or
+        // creating a capture child. No query string ever carries this secret.
+        #[cfg(target_os = "linux")]
+        let available = role == BrowserSessionRole::Observer
+            && verified.is_some()
+            && self
+                .desktop
+                .as_ref()
+                .is_some_and(desktop::Service::available);
+        #[cfg(target_os = "linux")]
+        let body = if available {
+            let peer = verified.ok_or_else(|| std::io::Error::other("missing browser peer"))?;
+            peer.observe()
+                .map_err(|_| std::io::Error::other("browser peer unavailable"))?;
+            let secret = self
+                .policy
+                .handle_bootstrap_post(&BootstrapRequest {
+                    uri: &req.target,
+                    host_header: req.host.as_deref(),
+                    origin_header: req.origin.as_deref(),
+                    sni,
+                    metadata,
+                    peer_ip: peer.addresses().peer.ip(),
+                    session_id: RemoteSessionId::from_raw(desktop::random_id()?),
+                    role,
+                    now,
+                })
+                .map_err(|_| std::io::Error::other("browser bootstrap unavailable"))?;
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut nonce = String::with_capacity(64);
+            for byte in secret.as_bytes() {
+                nonce.push(char::from(HEX[usize::from(byte >> 4)]));
+                nonce.push(char::from(HEX[usize::from(byte & 15)]));
+            }
+            format!(
+                "{{\"transport_profile\":\"{}\",\"profile_id\":{},\"profile_version\":{},\"role\":\"{role}\",\"desktop_available\":true,\"nonce_hex\":\"{nonce}\",\"expires_in_ms\":15000}}",
+                self.transport_profile().diagnostic_label(),
+                browser::WSS_PROFILE,
+                browser::PROFILE_VERSION,
+            )
+        } else {
+            format!(
+                "{{\"transport_profile\":\"{}\",\"profile_id\":{},\"profile_version\":{},\"role\":\"{role}\",\"desktop_available\":false,\"refusal_code\":\"browser_session_unavailable\"}}",
+                self.transport_profile().diagnostic_label(),
+                browser::WSS_PROFILE,
+                browser::PROFILE_VERSION,
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
         let body = format!(
             "{{\"transport_profile\":\"{}\",\"profile_id\":{},\"profile_version\":{},\"role\":\"{role}\",\"desktop_available\":false,\"refusal_code\":\"browser_session_unavailable\"}}",
             self.transport_profile().diagnostic_label(),
@@ -684,7 +875,14 @@ impl BrowserIngress {
         if !hello.offer.versions.contains(&0) {
             return Reason::UnsupportedVersion;
         }
-        if hello.offer.capabilities.iter().any(|cap| cap.required) {
+        let supported = browser::offer(browser::limits());
+        if hello.offer.capabilities.iter().any(|cap| {
+            cap.required
+                && !supported
+                    .capabilities
+                    .iter()
+                    .any(|host| host.name == cap.name && host.version == cap.version)
+        }) {
             return Reason::RequiredCapability;
         }
         Reason::HostUnavailable

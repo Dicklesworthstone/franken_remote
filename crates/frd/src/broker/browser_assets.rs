@@ -60,6 +60,13 @@ impl std::error::Error for AssetError {}
 pub struct BrowserAssets;
 
 impl BrowserAssets {
+    /// A complete locally built Rust/WASM connection client is embedded.
+    /// The shell alone is never evidence that desktop connections can run.
+    #[must_use]
+    pub const fn bundled() -> bool {
+        cfg!(browser_wasm_bundle)
+    }
+
     /// Check path safety: reject traversal (`..`), backslashes, null bytes.
     pub fn sanitize_path(raw_path: &str) -> Result<&str, AssetError> {
         if !raw_path.starts_with('/') {

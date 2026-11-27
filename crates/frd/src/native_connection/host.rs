@@ -515,6 +515,7 @@ impl<F> Drop for Scoped<F> {
 }
 
 mod linux;
+pub(crate) use linux::boundaries::Boundaries;
 pub use linux::{Error as LinuxError, LinuxServer};
 
 pub mod serial;

@@ -119,7 +119,9 @@ impl Clock {
             .origin
             .checked_add(Duration::from_micros(us))
             .ok_or(Error::Clock)?;
-        Ok(local.min(crate::clock::capture_local_instant(self.raw_deadline(until)?).ok_or(Error::Clock)?))
+        Ok(local.min(
+            crate::clock::capture_local_instant(self.raw_deadline(until)?).ok_or(Error::Clock)?,
+        ))
     }
     fn raw_deadline(self, until: ClientInstant) -> Result<u64, Error> {
         self.raw_origin
@@ -221,9 +223,9 @@ impl Egress {
     pub fn is_open(&self) -> bool {
         !self.control.is_stopped()
             && self.clock.permits(&self.permit)
-            && self
-                .packet_until_ns
-                .is_none_or(|until| crate::clock::suspend_inclusive_ns().is_some_and(|now| now < until))
+            && self.packet_until_ns.is_none_or(|until| {
+                crate::clock::suspend_inclusive_ns().is_some_and(|now| now < until)
+            })
     }
     /// Preserve a packet's original same-boot custody through native egress.
     /// This derives from the immutable original anchor, never current time.

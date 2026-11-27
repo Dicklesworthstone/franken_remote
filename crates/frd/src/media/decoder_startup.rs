@@ -252,7 +252,7 @@ impl Bound {
         Ok(n)
     }
 }
-fn codec_identifier(record: &DecoderRecord) -> Result<String, Error> {
+pub(crate) fn codec_identifier(record: &DecoderRecord) -> Result<String, Error> {
     let suffix = record
         .codec()
         .strip_prefix("hvc1.")
@@ -265,7 +265,7 @@ fn codec_identifier(record: &DecoderRecord) -> Result<String, Error> {
     result.push_str(suffix);
     Ok(result)
 }
-fn declaration<'a>(
+pub(crate) fn declaration<'a>(
     cfg: Configuration,
     codec: &'a str,
     record: &'a DecoderRecord,

@@ -53,8 +53,13 @@ COMMANDS:
                     (config default /etc/frankenremote/ingress-helper.json)
 
 OPTIONS:
-    --port PORT     Ingress port for the native QUIC listener (default: 8443; no
-                    HTTPS/browser listener exists yet)
+    --port PORT     Ingress port for the native QUIC listener (default: 8443)
+    --browser-port PORT  Instead serve the view-only browser desktop over HTTPS/WSS
+                    on Linux. Requires --logind-session, --observation-indicator,
+                    approval=none, and a build containing the Rust/WASM browser
+                    bundle. Control, audio and files are not enabled in this profile.
+                    Uses separate control/video sockets; video has TCP head-of-line
+                    blocking. See docs/browser-desktop.md
     --socket PATH   Path to tailscaled.sock
     --approval MODE Process override: 'none' (unattended) or 'local' (one-use
                     device-attributed desktop consent before capture). Local
@@ -525,6 +530,14 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                     "monitored"
                 },
             }),
+            Event::BrowserListening { address, url } => serde_json::json!({
+                "event": "browser_listening", "address": address.to_string(),
+                "url": url, "transport": "wss", "role": "observe",
+                "tcp_head_of_line": true, "session_lifetime": "monitored",
+                "observation_indicator": true,
+                "encoder_selection": profile.encoder.as_str(),
+                "video_fps_limit": profile.video.fps(),
+            }),
             Event::FamilyNotServed { ipv6 } => serde_json::json!({
                 "event": "family_not_served",
                 "family": if *ipv6 { "ipv6" } else { "ipv4" },
@@ -561,6 +574,17 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
             Event::ObtainingCertificate => println!(
                 "frd: fetching this host's Tailscale HTTPS certificate (a first issuance can take a minute)"
             ),
+            Event::BrowserListening { address, url } => {
+                println!(
+                    "frd: view-only browser desktop at {url} (bound {address}); use this certified hostname"
+                );
+                println!(
+                    "frd: separate control/video WSS sockets; video is subject to TCP head-of-line blocking"
+                );
+                println!(
+                    "frd: locking, leaving or suspending the selected login, losing the Stop sharing window, or Ctrl-C ends sharing"
+                );
+            }
             Event::Listening { address } => {
                 let mode = if profile.control {
                     "a first viewer may request remote control under the current approval policy (--input-agent)"
@@ -740,6 +764,12 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(effective) => effective,
         Err(error) => return local_policy::refusal(error, json),
     };
+    if let Some((code, detail)) = options.browser_refusal(
+        effective.approval,
+        frd::broker::browser_assets::BrowserAssets::bundled(),
+    ) {
+        return run_refusal(json, code, detail, 2);
+    }
     // Tailscale first: without it nothing else matters (exit 1 = runtime refusal).
     #[cfg(target_os = "linux")]
     {
@@ -956,49 +986,79 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         },
         None => None,
     };
-    let result = match (local_ui.as_ref(), observation_indicator.as_deref()) {
-        (Some(approval), Some(image)) => {
-            frd::host_indicator::run_with_desktop_approval_and_quality(
+    let result = if let Some(port) = options.browser_port {
+        #[cfg(target_os = "linux")]
+        {
+            match observation_indicator.as_deref() {
+                Some(image) => frd::host_indicator::run_browser(
+                    &run_options,
+                    port,
+                    &report,
+                    &stop,
+                    policy,
+                    image,
+                    encoder,
+                )
+                .map_err(|error| (error.code(), error.to_string())),
+                None => Err((
+                    "browser_indicator_required",
+                    "A visible Stop sharing surface is required.".to_owned(),
+                )),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = port;
+            Err((
+                "browser_host_unsupported",
+                "The browser desktop currently requires a Linux host.".to_owned(),
+            ))
+        }
+    } else {
+        match (local_ui.as_ref(), observation_indicator.as_deref()) {
+            (Some(approval), Some(image)) => {
+                frd::host_indicator::run_with_desktop_approval_and_quality(
+                    &run_options,
+                    &report,
+                    &stop,
+                    policy,
+                    image,
+                    encoder,
+                    approval,
+                    quality,
+                )
+                .map_err(|error| (error.code(), error.to_string()))
+            }
+            (Some(approval), None) => host_run::run_with_desktop_approval_and_quality(
+                &run_options,
+                &report,
+                &stop,
+                policy,
+                encoder,
+                approval,
+                quality,
+            )
+            .map_err(|error| (error.code(), error.to_string())),
+            (None, Some(image)) => frd::host_indicator::run_with_policy_encoder_and_quality(
                 &run_options,
                 &report,
                 &stop,
                 policy,
                 image,
                 encoder,
-                approval,
                 quality,
             )
-            .map_err(|error| (error.code(), error.to_string()))
+            .map_err(|error| (error.code(), error.to_string())),
+            (None, None) => host_run::run_with_policy_encoder_and_quality(
+                &run_options,
+                &report,
+                &stop,
+                policy,
+                encoder,
+                quality,
+            )
+            .map_err(|error| (error.code(), error.to_string())),
         }
-        (Some(approval), None) => host_run::run_with_desktop_approval_and_quality(
-            &run_options,
-            &report,
-            &stop,
-            policy,
-            encoder,
-            approval,
-            quality,
-        )
-        .map_err(|error| (error.code(), error.to_string())),
-        (None, Some(image)) => frd::host_indicator::run_with_policy_encoder_and_quality(
-            &run_options,
-            &report,
-            &stop,
-            policy,
-            image,
-            encoder,
-            quality,
-        )
-        .map_err(|error| (error.code(), error.to_string())),
-        (None, None) => host_run::run_with_policy_encoder_and_quality(
-            &run_options,
-            &report,
-            &stop,
-            policy,
-            encoder,
-            quality,
-        )
-        .map_err(|error| (error.code(), error.to_string())),
     };
     #[cfg(unix)]
     let files_cleaned = file_commands_host::finish(file_owner.as_ref());

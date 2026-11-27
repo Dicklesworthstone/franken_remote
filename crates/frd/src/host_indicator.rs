@@ -138,6 +138,23 @@ pub fn run_with_policy_encoder_and_quality(
     })
 }
 
+/// Keep the actual Stop sharing surface alive through browser desktop cleanup.
+#[cfg(all(host_stack, target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub fn run_browser(
+    options: &Options,
+    port: u16,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    image: &Path,
+    encoder: host_run::EncoderSelection,
+) -> Result<(), Error> {
+    run_with_surface(options, stop, image, || {
+        host_run::browser::run(options, port, report, stop, policy, encoder)
+    })
+}
+
 /// A host with local approval still keeps its independent Stop Sharing
 /// surface before listening, while prompting, and through final cleanup.
 #[cfg(host_stack)]

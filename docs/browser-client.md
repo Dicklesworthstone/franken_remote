@@ -6,12 +6,14 @@ connection deadlines, lifecycle state, and the distinction between transport,
 observation, and input authority. The JavaScript boundary performs bounded
 same-origin fetch/WebSocket I/O and projects the Rust snapshot into the page.
 
-The current adapter implements connection startup and typed refusal. The host
-continues to report `desktop_available: false` until the authenticated browser
-connection is joined to a real desktop session. Receiving a WebSocket `open`
-event, a heartbeat, or arbitrary media bytes never enables observation or
-control. Browser desktop use, WebCodecs presentation through this adapter, and
-live tailnet interoperability remain unqualified. The separate **Test video
+The adapter now composes authenticated view-only desktop startup, canonical
+media reception and the same Rust-owned HEVC pipeline. The installed Linux
+`frd run --browser-port` path registers the real capture owner; see
+[browser desktop setup and scope](browser-desktop.md). Generic ingress callers
+without that owner continue to report `desktop_available: false`. Receiving a
+WebSocket `open` event, a heartbeat, or arbitrary media bytes never enables
+observation or control. Live browser/OS/GPU and tailnet qualification remain
+open. The separate **Test video
 decoding** action runs a bounded public HEVC sample through the production
 Rust media owner and native WebCodecs/canvas boundary. Its result describes
 only this local sample; see [scope and reproduction](browser-probe.md).
@@ -74,9 +76,10 @@ startup. Diagnostics are static and do not include peer text or credentials.
 
 ## Native HTTPS/WSS startup boundary
 
-The native ingress now emits the same bootstrap schema that the Rust adapter
-validates: WSS profile and version, the requested role, and the explicit
-`desktop_available: false` capability. An unavailable bootstrap allocates no
+The native ingress emits the same bootstrap schema that the Rust adapter
+validates: WSS profile and version, the requested role, and explicit desktop
+availability. Only a verified admitted socket with a registered, available
+desktop owner can obtain the available path. An unavailable bootstrap allocates no
 nonce, session, control binding, media queue, or attachment ticket. The server
 retains exact Origin, Host/SNI, Fetch Metadata, and credential-in-URL checks.
 
@@ -86,27 +89,31 @@ even when the repeated values agree. Field names must be HTTP tokens, policy-fie
 lengths must contain only decimal digits, and control bytes are rejected
 before optional space/tab trimming. The parser retains the 8 KiB header,
 48-field and 4 KiB body ceilings; ordinary header casing and optional whitespace
-remain accepted. These checks do not enable browser desktop sessions.
+remain accepted. These checks alone do not enable browser desktop sessions.
 
 The control socket accepts a bounded canonical `FRD0` browser ClientHello. A
 policy-issued nonce is single-use and bound to its original peer and role; even
-a valid hello receives a canonical `HostUnavailable` refusal until a real host
-session is attached. Legacy `FRBA` authentication and `FRAT`/`FRTK` attachment
-messages cannot construct a session. Auxiliary sockets close immediately.
+a valid hello receives a canonical `HostUnavailable` refusal when no real host
+owner is registered. The installed path negotiates `browser-video-wss` v1 and
+opens its original observation before issuing a one-use video ticket. Legacy
+`FRBA` authentication and `FRAT`/`FRTK` attachment messages cannot construct a
+session. See the [exact video attachment](../PROTOCOL_BROWSER_WSS.md).
 
-TLS setup, HTTP headers and body, the WebSocket upgrade, and the first control
-message share the configured original startup deadline. The first-message
-authentication budget is also enforced while no bytes arrive. Progress cannot
-restart either deadline, and a peer's terminal refusal is never answered by
-another refusal.
+The installed listener gives membership admission and HTTPS setup one original
+three-second opening budget. HTTP parsing has its own bounded startup budget.
+Control startup then retains one original deadline through the WebSocket
+upgrade, first-message authentication, negotiation and native source setup.
+The first-message authentication budget is also enforced while no bytes arrive.
+Progress cannot restart the deadline within any phase, and a peer's terminal
+refusal is never answered by another refusal.
 
 `cargo test -p frd --test browser_ingress --locked` covers these paths with
 actual TCP sockets and the real Rust browser adapter. Its TLS cases use a
 fresh test CA and normal certificate/hostname verification, including an
 otherwise valid certificate whose SNI violates the configured host policy.
-These are local ingress tests: `frd run` still needs installed-tailnet listener
-composition and authenticated host-session/media integration before browser
-viewing is available.
+These are local ingress tests. The installed Linux listener and authenticated
+host-session/media integration are now wired by `frd run --browser-port`; the
+new native integration and real tailnet/browser qualification remain unrun.
 
 ## Rust-owned WebCodecs media boundary
 
@@ -154,7 +161,7 @@ the generated JavaScript and binary, checks the exported ABI and linear memory,
 and compares canonical hello/refusal bytes against independent fixtures. The
 combined transport suite uses the real Rust module with simulated browser I/O;
 its bootstrap responses that set `desktop_available: true` are test fixtures.
-They do not change the shipping host capability.
+They do not establish live browser or tailnet qualification.
 
 ```sh
 node --test web/tests/*.test.cjs
@@ -165,11 +172,11 @@ FR_WEB_WASM_PACKAGE="$PWD/target/browser-wasm" node --test \
   web/tests/wasm_playback_probe.cjs
 ```
 
-The remaining browser path must connect authenticated native HTTPS/WSS ingress
-to `SessionOpened` and the real host session, then compose the implemented media
-owner with original-channel receiver credit, presentation freshness, and control
-leases through the Rust boundary. The media tests execute the actual Rust/WASM
+The installed path now joins authenticated HTTPS/WSS ingress to SessionOpened,
+the real host capture owner, original-channel receiver credit and presentation
+freshness through the Rust boundary. Remote control is not part of this
+view-only profile. The media tests execute the actual Rust/WASM
 owner with simulated native WebCodecs handles; they do not qualify browser/OS/GPU
 HEVC support or physical presentation. H3/WebTransport and real-browser/tailnet qualification are
-separate outstanding gates. The current page keeps desktop controls disabled
-while those capabilities are unavailable.
+separate outstanding gates. The page keeps input controls disabled and reports
+desktop availability and freshness from the original Rust owner.

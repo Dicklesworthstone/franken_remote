@@ -1,5 +1,53 @@
 # Implementation status
 
+## Authenticated view-only browser desktop (2026-11-27)
+
+The opt-in Linux `frd run --browser-port` path now connects the actual protected
+HTTPS/WSS listener to installed-Tailscale admission, the existing supervised
+capture worker, and the Rust/WASM browser owner. It requires an embedded ABI-2
+browser package, the selected logind session, the live Stop sharing indicator,
+and effective approval=none. Native-only effects and unsupported host platforms
+receive explicit refusals before startup. The default native listener is unchanged.
+
+The host retains the original control and video socket admissions, exact peer
+identity, observation authority, selected display and encoder, and worker cleanup
+receipt. HTTPS uses TLS 1.3/HTTP/1.1 and canonical installed SNI through the existing
+rotating credential owner. Each video attachment consumes a full one-use role
+capability after checking both live peers. Separate WSS control/video connections
+are explicitly labeled for TCP head-of-line blocking.
+
+The selected `browser-video-wss` v1 profile reuses canonical negotiation, clock,
+observation, decoder and media records. The browser reuses ReceivePipeline,
+ViewTracker and the original BrowserSessionCore HEVC owner. Every whole picture
+reserves three overlapping compressed copies plus bounded metadata before its
+first fragment; at most 2 MiB and four pictures may remain outstanding. Decoder
+output, actual presentation, and positive resource closure remain separate.
+Original display deadlines survive delayed decode and animation-frame callbacks;
+queue pruning returns credit even without a subsequent network packet.
+
+Continuous service reaps closed sources independently of their expired sockets,
+without letting late cleanup select a replacement. Source cleanup remains retained
+when either connection future is dropped. Resumed TLS writes retain the original
+packet deadline; video reads cannot flush ciphertext behind that write gate.
+
+Validation: the exact nightly release WASM build and wasm-bindgen 0.2.128 package
+passed all 117 generated-WASM tests, including four new complete desktop cases
+with real admitted HEVC bytes and explicitly simulated native callbacks. The
+portable JavaScript suite passed 55 tests. Wire/profile regressions cover exact
+attachment echoes, positive negotiation and native-profile isolation. New native
+TLS/admission and host-source tests are present but have not run: rustc was
+SIGKILLed inside the exact pinned Asupersync dependency before project diagnostics,
+including a bounded-thread metadata-only attempt. Actual X11/XCB SDK headers were
+installed in an isolated build directory and passed a genuine C syntax check;
+that does not establish native Rust or desktop qualification.
+
+This profile provides one view-only desktop. Browser control, local approval
+dialogs, audio, clipboard, files, channel replacement, shared viewers and H3
+remain outside this implementation. Real browser/OS/GPU, second-machine tailnet
+and physical presentation qualification remain open. No Phase 3 gate or browser
+qualification bead is closed. See [setup and scope](docs/browser-desktop.md) and
+[the wire contract](PROTOCOL_BROWSER_WSS.md).
+
 ## Native host Text and Motion adaptation preferences (2026-11-27)
 
 `frd run --adaptive-capture --quality auto|text|motion` now carries an immutable
