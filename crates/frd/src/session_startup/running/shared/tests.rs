@@ -71,16 +71,13 @@ async fn source_with_mode(
     ] {
         write!(payload, "{:08x}{nal}", nal.len() / 2).unwrap();
     }
+    let modes = if changing {
+        format!("{mode}+changing")
+    } else {
+        mode.to_owned()
+    };
     let script = include_str!("../../../../tests/support/recovery_worker_fixture.py")
-        .replace("@MODE@", mode)
-        .replace(
-            "if kind == 7 and not force and last is not None:",
-            if changing {
-                "if False:"
-            } else {
-                "if kind == 7 and not force and last is not None:"
-            },
-        )
+        .replace("@MODE@", &modes)
         .replace(
             "b\"test-only-unit\"",
             &format!("bytes.fromhex('{payload}')"),

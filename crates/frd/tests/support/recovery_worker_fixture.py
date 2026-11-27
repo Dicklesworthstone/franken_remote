@@ -4,7 +4,7 @@ import os
 import struct
 import time
 
-MODE = "@MODE@"
+MODES = set("@MODE@".split("+"))
 
 def read(n):
     data = b""
@@ -43,31 +43,37 @@ while True:
         if flags & ~3:
             raise SystemExit(8)
         force = bool(flags & 1)
+        only_if_changed = bool(flags & 2)
     elif kind in (2, 7) and len(b) == 17:
         frame, observed, force = struct.unpack(">QQB", b)
         target = bitrate
+        only_if_changed = kind == 7
     else:
         raise SystemExit(8)
-    if force and last is not None and MODE == "poll-forever":
+    if "delay-capture" in MODES:
+        time.sleep(0.05)
+    if force and last is not None and "poll-forever" in MODES:
         pending = True
         reply(h, 259, b"")
         continue
-    if kind == 7 and not force and last is not None:
-        if MODE == "delay-unchanged":
+    if only_if_changed and not force and last is not None and "changing" not in MODES:
+        if "delay-unchanged" in MODES:
             time.sleep(0.05)
-        reply(h, 265, struct.pack(">QQQ", frame, last, observed))
+        if "defer-unchanged" in MODES:
+            time.sleep(0.1)
+        proof = struct.pack(">QQQ", frame, last, observed)
+        if kind == 20:
+            # A static capture confirms the current rate, never the deferred target.
+            reply(h, 279, proof + struct.pack(">I", bitrate))
+        else:
+            reply(h, 265, proof)
         continue
-    if kind == 20 and flags & 2 and not force and last is not None:
-        # Static content defers the explicit rate on the original native owner.
-        # A later forced recovery picture must still carry that same target.
-        reply(h, 279, struct.pack(">QQQI", frame, last, observed, bitrate))
-        continue
-    if MODE == "delay-first-encoded" and last is not None and not delayed:
+    if "delay-first-encoded" in MODES and last is not None and not delayed:
         # A host stalled between capture and send: this picture reaches its
         # viewer after the test's reference horizon. Only once.
         delayed = True
         time.sleep(0.06)
-    idr = last is None or target != bitrate or (force and MODE != "ignore-force")
+    idr = last is None or target != bitrate or (force and "ignore-force" not in MODES)
     reference = 0 if idr else last
     bitrate = target
     prefix = struct.pack(">QQQQB", frame, observed, generation, reference, 0 if idr else 1)

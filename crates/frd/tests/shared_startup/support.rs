@@ -272,27 +272,17 @@ pub(super) async fn source_variant(
     // Canned parameter sets and a slice for real bounded host parsing, not a
     // live HEVC encoder. Subsequent decoder completion is explicitly synthetic.
     let payload = worker_support::hevc_payload();
-    let script = include_str!("../support/recovery_worker_fixture.py").replace("@MODE@", "healthy");
+    let mode = match (changing, delayed) {
+        (false, false) => "healthy",
+        (true, false) => "changing",
+        (false, true) => "delay-capture",
+        (true, true) => "changing+delay-capture",
+    };
+    let script = include_str!("../support/recovery_worker_fixture.py").replace("@MODE@", mode);
     let script = if valid {
         script.replace(
             "b\"test-only-unit\"",
             &format!("bytes.fromhex('{payload}')"),
-        )
-    } else {
-        script
-    };
-    let script = if changing {
-        script.replace(
-            "if kind == 7 and not force and last is not None:",
-            "if False:",
-        )
-    } else {
-        script
-    };
-    let script = if delayed {
-        script.replace(
-            "frame, observed, force = struct.unpack",
-            "time.sleep(0.05)\n    frame, observed, force = struct.unpack",
         )
     } else {
         script

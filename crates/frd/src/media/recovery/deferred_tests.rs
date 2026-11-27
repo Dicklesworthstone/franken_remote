@@ -65,7 +65,8 @@ async fn source(control: &super::super::ObservationControl) -> CaptureSource {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let script=include_str!("../../../tests/support/recovery_worker_fixture.py").replace("@MODE@","healthy").replace("    if kind == 7 and not force", "    if kind == 7 and not force and last is not None:\n        time.sleep(0.1)\n    if kind == 7 and not force");
+    let script = include_str!("../../../tests/support/recovery_worker_fixture.py")
+        .replace("@MODE@", "defer-unchanged");
     crate::executable::write(&path, script);
     CaptureSource::start(
         control,
