@@ -401,6 +401,17 @@ without `--adaptive-capture`. Each service turn passes the path sample to
   for each change, a floor of an eighth of the configured rate, and no encode
   just to apply a target.
 
+Before a delayed ACK arrives, the latest RTT may still describe an earlier
+fast packet. New ordinary captures wait once more than 4,800 bytes have stayed in
+flight without ACK progress for two round trips plus four RTT variations, with
+a 150 ms minimum. The round-trip estimate uses the larger of the latest and
+smoothed RTT when the flight first became busy or made ACK progress. A gap
+over 100 ms between samples starts a new observation interval. An ACK or drain
+releases the silence hold; independently observed queue pressure can still
+gate capture. Silence supplies no bitrate-cut evidence. Shared recovery IDR
+demand and a healthy sibling keep their existing eligibility. The transport
+continues to serve enqueued records and renewals throughout the wait.
+
 Native path observations expire after 100 ms if their viewer stops being
 serviced. The bitrate controller permits up to 250 ms between these independently
 validated observations, including the shared publisher's 200 ms slow-capture

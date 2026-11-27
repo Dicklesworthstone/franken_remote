@@ -354,7 +354,7 @@ impl Members {
                         healthy_credit |= credit
                             && !entry.path.queued()
                             && entry.starting.is_none()
-                            && (entry.join.is_none()
+                            && ((entry.join.is_none() && !entry.path.waiting_for_ack(self.last))
                                 || entry.recovery.is_some() && entry.waiting());
                         if credit && entry.waiting() {
                             let until = entry.join.as_ref().expect("waiting").until;

@@ -1225,6 +1225,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
             && (current >= self.next_capture || wake)
             && credit
             && !self.path.queued()
+            && !self.path.waiting_for_ack(current)
         {
             let capture = self
                 .bitrate

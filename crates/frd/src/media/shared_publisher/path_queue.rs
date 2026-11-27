@@ -22,6 +22,11 @@
 //! link), so the rate is what was delivered over the busy time of the last one
 //! to two seconds, each packet counted once whenever its ACK arrived.
 //!
+//! Until a delayed ACK arrives, the RTT still describes the old flight. Hold
+//! new dependent captures when a continuously sampled busy flight has made no
+//! ACK progress for two round trips plus four variations (at least the queue
+//! allowance). This alone cannot prove delivered throughput or reduce bitrate.
+//!
 //! A longer route (a relay instead of a direct path) also raises the round
 //! trip, but it does not drain. So once a path drains, the lowest round trip
 //! over the next two is its route: the first packets sent into an empty queue
@@ -85,6 +90,8 @@ pub(crate) struct PathQueue {
     /// The previous sample: when, packets acknowledged by then, and whether
     /// the path was busy.
     last: Option<(u64, u64, bool)>,
+    /// Original allowance for the current continuously busy, unacknowledged flight.
+    ack_deadline: Option<u64>,
     /// The last estimator snapshot. A new packet ACK is not necessarily a new
     /// RTT sample (reordered ACK ranges can acknowledge only older packets).
     rtt: Option<(u64, u64, u64)>,
@@ -108,6 +115,18 @@ impl PathQueue {
     pub(crate) const fn queued(&self) -> bool {
         self.queued
     }
+    /// Suppress ordinary capture until ACK progress or drain. Stale member
+    /// samples cannot keep suppressing a shared publisher after service stops.
+    pub(crate) fn waiting_for_ack(&self, now: u64) -> bool {
+        self.last
+            .zip(self.ack_deadline)
+            .is_some_and(|((at, _, _), until)| {
+                at >= until
+                    && now
+                        .checked_sub(at)
+                        .is_some_and(|age| age <= SAMPLE_EVIDENCE_US)
+            })
+    }
     /// What the path delivered while busy, in bits per second (0 unmeasured).
     /// Only a queued path's delivery measures the path rather than the sender.
     pub(crate) fn delivered_bits_per_second(&self) -> u64 {
@@ -130,6 +149,8 @@ impl PathQueue {
             PathEvidence::Queued {
                 delivered_bits_per_second: self.delivered_bits_per_second(),
             }
+        } else if self.waiting_for_ack(now) {
+            PathEvidence::Unknown
         } else if self.clear_at.is_some_and(|at| {
             now.checked_sub(at)
                 .is_some_and(|age| age <= HEADROOM_EVIDENCE_US)
@@ -173,6 +194,22 @@ impl PathQueue {
         let progressed = self
             .last
             .is_some_and(|(_, acked, _)| load.packets_acked > acked);
+        if !busy {
+            self.ack_deadline = None;
+        } else if progressed
+            || self
+                .last
+                .is_none_or(|(at, _, was_busy)| !was_busy || now - at > SAMPLE_EVIDENCE_US)
+        {
+            // Start on the first observed busy flight, including after a gap.
+            // Neither idle time nor time before a later ACK consumes its budget.
+            let allowance = rtt
+                .max(load.smoothed_rtt_us)
+                .saturating_mul(2)
+                .saturating_add(load.rtt_variation_us.saturating_mul(4))
+                .max(QUEUE_LIMIT_US);
+            self.ack_deadline = now.checked_add(allowance);
+        }
         let estimator = (rtt, load.smoothed_rtt_us, load.rtt_variation_us);
         let sampled_rtt = progressed && self.rtt != Some(estimator);
         let rtt_gap = self.rtt_at.zip(self.rtt).is_some_and(|(at, previous)| {
@@ -369,6 +406,72 @@ mod tests {
 
     fn current(path: &PathQueue) -> PathEvidence {
         path.evidence(path.last.map_or(0, |(at, _, _)| at))
+    }
+
+    #[test]
+    fn an_unacknowledged_busy_flight_holds_capture_before_the_rtt_rises() {
+        let mut path = PathQueue::default();
+        let mut load = busy_progress(acked(5_000, FULL, 17), 0);
+        path.observe(Some(load), 0);
+        assert_eq!(current(&path), PathEvidence::Clear);
+        // The last RTT is still 5 ms while more pictures enter this flight.
+        for at in [75_000, 149_999, 150_000, 200_000] {
+            load.bytes_in_flight += 12_000;
+            path.observe(Some(load), at);
+            assert!(!path.queued(), "no measured standing queue yet");
+            assert_eq!(path.waiting_for_ack(at), at >= 150_000);
+        }
+        assert_eq!(current(&path), PathEvidence::Unknown);
+        // A single ACK releases only the silence hold. An actual RTT rise
+        // still blocks capture and supplies the real queue evidence for a cut.
+        load.packets_acked += 1;
+        load.latest_rtt_us = 180_000;
+        path.observe(Some(load), 210_000);
+        assert!(!path.waiting_for_ack(210_000));
+        assert!(path.queued());
+        assert!(matches!(current(&path), PathEvidence::Queued { .. }));
+    }
+
+    #[test]
+    fn a_normal_high_latency_flight_keeps_its_rtt_and_variance_allowance() {
+        let mut path = PathQueue::default();
+        let mut load = acked(110_000, FULL, 21);
+        load.smoothed_rtt_us = 120_000;
+        load.rtt_variation_us = 30_000;
+        // 2 * 120 ms + 4 * 30 ms. A high-latency route keeps its capture
+        // opportunity past the 150 ms floor even without intervening ACKs.
+        for at in [0, 100_000, 200_000, 300_000, 359_999, 360_000] {
+            path.observe(Some(load), at);
+            assert_eq!(path.waiting_for_ack(at), at == 360_000);
+        }
+        load.packets_acked += 1;
+        path.observe(Some(load), 361_000);
+        assert!(!path.waiting_for_ack(361_000));
+        assert!(!path.queued());
+    }
+
+    #[test]
+    fn service_gaps_idle_flights_and_replaced_counters_cannot_age_an_ack_hold() {
+        let mut path = PathQueue::default();
+        let load = acked(1_000, FULL, 20);
+        for at in [0, 100_000, 150_000] {
+            path.observe(Some(load), at);
+        }
+        assert!(path.waiting_for_ack(150_000));
+        assert!(!path.waiting_for_ack(250_001), "stale shared-member sample");
+        path.observe(Some(load), 250_001);
+        assert!(!path.waiting_for_ack(250_001), "service gap");
+        path.observe(Some(acked(1_000, DRAINED_BYTES, 20)), 300_000);
+        path.observe(Some(load), 350_000);
+        path.observe(Some(load), 450_000);
+        assert!(!path.waiting_for_ack(450_000), "idle time is not busy time");
+        path.observe(Some(load), 500_000);
+        assert!(path.waiting_for_ack(500_000));
+        path.observe(Some(acked(1_000, FULL, 0)), 510_000);
+        assert!(!path.waiting_for_ack(510_000), "new counter lifetime");
+        path.observe(None, 520_000);
+        assert_eq!(current(&path), PathEvidence::Unknown);
+        assert!(!path.waiting_for_ack(520_000));
     }
 
     #[test]
