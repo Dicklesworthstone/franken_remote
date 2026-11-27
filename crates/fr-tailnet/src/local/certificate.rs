@@ -27,6 +27,9 @@ const PAIR_LIMIT: usize = 64 * 1024;
 const MAX_CERTIFICATES: usize = 8;
 const PARAMETER_LIMIT: usize = 4096;
 const ALPN: &[u8] = b"fr-remote/0";
+const HTTPS_ALPN: &[u8] = b"http/1.1";
+const HTTPS_HANDSHAKE_BUDGET: Duration = Duration::from_secs(3);
+mod https;
 /// Safety-net re-check of the renewal service's own status. Stop wakes it
 /// directly; this only bounds noticing a certificate's wall-clock expiry, and
 /// connection checks read the credential status themselves on every poll.
@@ -121,6 +124,7 @@ impl CredentialStatus {
 struct Pair {
     chain: CertificateChain,
     acceptor: TlsAcceptor,
+    https: TlsAcceptor,
     not_after_wall_us: u64,
 }
 impl Pair {
@@ -134,16 +138,26 @@ impl Pair {
         }
         let not_after_wall_us = parse_x509_not_after(certificates[0].as_der())?;
         let chain = CertificateChain::from(certificates);
-        let acceptor = TlsAcceptor::builder(chain.clone(), key)
+        let acceptor = TlsAcceptor::builder(chain.clone(), key.clone())
             .alpn_protocols_required(vec![ALPN.to_vec()])
             .disable_early_data()
             .min_protocol_version(0x0304u16.into())
             .max_protocol_version(0x0304u16.into())
             .build()
             .map_err(|_| Error::CertificateRejected)?;
+        let https = TlsAcceptor::builder(chain.clone(), key)
+            .alpn_protocols_required(vec![HTTPS_ALPN.to_vec()])
+            .require_sni()
+            .disable_early_data()
+            .min_protocol_version(0x0304u16.into())
+            .max_protocol_version(0x0304u16.into())
+            .handshake_timeout(HTTPS_HANDSHAKE_BUDGET)
+            .build()
+            .map_err(|_| Error::CertificateRejected)?;
         Ok(Self {
             chain,
             acceptor,
+            https,
             not_after_wall_us,
         })
     }

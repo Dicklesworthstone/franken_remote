@@ -73,6 +73,38 @@ impl Lease {
         let mut s = self.state.lock().map_err(|_| Error::Revoked)?;
         self.live(&mut s)
     }
+    /// Match two currently live admissions to the same original tailnet peer.
+    /// Auxiliary browser sockets have distinct ephemeral peer ports, so only
+    /// that port is excluded. The installed authority, daemon, complete host and
+    /// peer identities, policy, profile, permissions, local endpoint and peer IP
+    /// must agree. Display labels, IP addresses or a session ticket alone cannot
+    /// establish this relationship.
+    ///
+    /// This comparison grants no new authority and extends neither lifetime.
+    /// Check the retained admissions again immediately before every effect.
+    pub fn same_peer(&self, other: &Self) -> Result<bool, Error> {
+        let ours = self.checked_proof()?;
+        let theirs = other.checked_proof()?;
+        let same = Arc::ptr_eq(&ours.origin, &theirs.origin)
+            && ours.daemon_pid == theirs.daemon_pid
+            && ours.identity == theirs.identity
+            && ours.profile == theirs.profile
+            && ours.policy == theirs.policy
+            && ours.permissions == theirs.permissions
+            && ours.addresses.local == theirs.addresses.local
+            && ours.addresses.peer.ip() == theirs.addresses.peer.ip();
+        // Each snapshot is checked under its own gate, never with two locks.
+        // Refresh cannot replace a live admission's identity or permissions;
+        // any expiry, cancellation or revocation during comparison still wins.
+        self.check()?;
+        other.check()?;
+        Ok(same)
+    }
+    fn checked_proof(&self) -> Result<Arc<Authorization>, Error> {
+        let mut s = self.state.lock().map_err(|_| Error::Revoked)?;
+        self.live(&mut s)?;
+        Ok(s.proof.clone())
+    }
     pub fn observe(&self) -> Result<u64, Error> {
         let mut s = self.state.lock().map_err(|_| Error::Revoked)?;
         if !self.live(&mut s)?.observe() {

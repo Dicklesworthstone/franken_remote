@@ -1420,6 +1420,7 @@ mod directory;
 mod macos_socket;
 #[cfg(target_os = "linux")]
 mod outbound;
+mod peer;
 
 /// frd ends a session whose admission renewal fails, and every viewer of one
 /// host shares this lookup credit: another viewer's admission in flight must

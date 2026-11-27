@@ -686,3 +686,5 @@ fn events_recorded_and_expiry_countdown_computable() {
         assert_eq!(events[3].kind, CertificateEventKind::Stopped);
     });
 }
+
+mod https;

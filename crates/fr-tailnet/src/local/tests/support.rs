@@ -199,7 +199,7 @@ impl Server {
             check_write,
         )
     }
-    fn start(
+    pub(super) fn start(
         path: &Path,
         replies: Vec<Vec<u8>>,
         mut before_reply: impl FnMut(usize) + Send + 'static,

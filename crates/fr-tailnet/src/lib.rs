@@ -100,6 +100,9 @@ pub enum Error {
     /// endpoint, OS diagnostic or peer-supplied text is retained.
     NativeRouteIo,
     NativeHandshake,
+    /// The protected HTTPS listener could not complete its TLS 1.3, exact-SNI,
+    /// HTTP/1.1 handshake. No peer-controlled TLS detail is retained.
+    HttpsHandshake,
     /// The dial deadline passed before the host completed the QUIC/TLS
     /// handshake (distinct from a local `LocalAPI` lookup `Timeout`).
     HandshakeTimeout,
