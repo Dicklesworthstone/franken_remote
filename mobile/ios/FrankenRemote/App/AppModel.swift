@@ -75,15 +75,41 @@ final class AppModel: ObservableObject {
     /// confirmed. Closing the screen never silently permits a replacement.
     private var retiredReceiver: RemoteSession?
     private var receiverCleanupTask: Task<Void, Never>?
+    /// Keep one original handle until the native service reaches a terminal
+    /// state. A terminal receipt can be retained without its decoder, file
+    /// resources or display. No user gesture is needed to collect it.
+    @MainActor
+    final class InterruptedRetirement {
+        private(set) var original: RemoteSession?
+        private var terminal: Int32?
+
+        init(_ original: RemoteSession) { self.original = original }
+
+        func status() -> Int32 {
+            if let terminal { return terminal }
+            guard let original else { return FR_STALE }
+            original.pump()
+            let status = original.reopenStatus
+            if status == FR_OK || status == FR_CLOSED {
+                terminal = status
+                self.original = nil
+            }
+            return status
+        }
+    }
+
+    private var retiringInterruption: InterruptedRetirement?
+    private var retirementTask: Task<Void, Never>?
+
     struct ReconnectOffer: Identifiable {
         let id = UUID()
         let host: SavedHost
         let controlCapable: Bool
-        let original: RemoteSession?
+        let retirement: InterruptedRetirement?
         let reason: String
 
         func renewed(reason: String) -> Self {
-            Self(host: host, controlCapable: controlCapable, original: original, reason: reason)
+            Self(host: host, controlCapable: controlCapable, retirement: retirement, reason: reason)
         }
     }
 
@@ -161,18 +187,30 @@ final class AppModel: ObservableObject {
             startError = "This device is offline. Connect to the network before opening a session."
             return
         }
-        guard listingFrom == host.name || receiveFiles || retiredReceiver != nil || offer != nil else {
+        let retirement = offer?.retirement ?? retiringInterruption
+        guard listingFrom == host.name || receiveFiles || retiredReceiver != nil || offer != nil || retirement != nil else {
             start(host, control: control)
             return
         }
         starting = SessionStart(host: host, control: control, receiveFiles: receiveFiles)
         resuming = offer
         connectTask = Task { @MainActor [weak self] in
-            if let original = offer?.original, !(await Self.confirmedClose(original)) {
+            if let retirement {
+                let ready = await Self.confirmedClose {
+                    let status = retirement.status()
+                    // An explicit picker choice starts independent admission
+                    // after the original service exits. An offer requires
+                    // successful original cleanup in addition to termination.
+                    return offer == nil && status == FR_CLOSED ? FR_OK : status
+                }
                 guard !Task.isCancelled else { return }
-                self?.cancelStart()
-                self?.startError = "The previous session did not confirm a clean close. Choose a machine to start again."
-                return
+                guard ready else {
+                    self?.cancelStart()
+                    self?.startError = offer == nil
+                        ? "The previous session is still closing. Try again after it finishes."
+                        : "The previous session did not confirm a clean close. Choose a machine to start again."
+                    return
+                }
             }
             guard !Task.isCancelled else { return }
             if let previous = self?.retiredReceiver {
@@ -220,6 +258,7 @@ final class AppModel: ObservableObject {
             self.connectTask = nil
             self.starting = nil
             self.resuming = nil
+            self.retiringInterruption = nil
             self.start(host, control: control, requestControl: offer == nil ? nil : false,
                        download: download, clipboard: offer == nil)
         }
@@ -319,7 +358,10 @@ final class AppModel: ObservableObject {
         original.close()
         original.setVisible(false)
         displaySwitchTask = Task { @MainActor [weak self, original] in
-            let clean = await Self.confirmedClose(original)
+            let clean = await Self.confirmedClose {
+                original.pump()
+                return original.reopenStatus
+            }
             guard !Task.isCancelled, let self, self.session === original, self.switchingDisplay else { return }
             self.displaySwitchTask = nil
             self.switchingDisplay = false
@@ -334,13 +376,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private static func confirmedClose(_ original: RemoteSession) async -> Bool {
+    private static func confirmedClose(_ status: () -> Int32) async -> Bool {
         let clock = ContinuousClock()
         let began = clock.now
         var cleanup = DisplayReopen()
         while !Task.isCancelled {
-            original.pump()
-            switch cleanup.poll(status: original.reopenStatus, elapsed: began.duration(to: clock.now)) {
+            switch cleanup.poll(status: status(), elapsed: began.duration(to: clock.now)) {
             case .ready: return true
             case .refused: return false
             case .waiting: try? await Task.sleep(for: .milliseconds(50))
@@ -418,7 +459,7 @@ final class AppModel: ObservableObject {
         } else if let starting {
             // The queued start has not opened a service. Drop all one-use choices.
             reconnectOffer = ReconnectOffer(host: starting.host, controlCapable: starting.control,
-                                            original: nil, reason: reason)
+                                            retirement: retiringInterruption, reason: reason)
         }
         cancelStart()
         guard let original = session else { return }
@@ -426,9 +467,18 @@ final class AppModel: ObservableObject {
             let host = original.displaySwitchHost()
             original.close()
             original.setVisible(false)
+            let retirement = InterruptedRetirement(original)
+            retiringInterruption = retirement
+            retirementTask?.cancel()
+            retirementTask = Task { @MainActor [weak self, retirement] in
+                while !Task.isCancelled, self?.retiringInterruption === retirement {
+                    guard retirement.status() == FR_PENDING else { return }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
             if let host {
                 reconnectOffer = ReconnectOffer(host: host, controlCapable: original.controlCapable,
-                                                original: original, reason: reason)
+                                                retirement: retirement, reason: reason)
             } else {
                 startError = reason + " Select the machine again to verify its identity."
             }

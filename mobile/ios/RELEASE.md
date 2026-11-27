@@ -59,7 +59,11 @@ Backgrounding the app, losing connectivity, or changing the active interface
 types closes the original session. The machine picker offers **Resume viewing**
 when the device is online. An interrupted live session needs its original pin
 and a successful close report before the app can reopen it. A failed or
-unverified close returns the user to machine selection. A cancelled start
+unverified close returns the user to machine selection. While the picker is
+open, the app collects terminal service status and releases the retired
+handle. Choosing a machine independently waits for termination of the
+previous service and its separate file receiver before fresh admission.
+Dismissing the offer keeps that wait in force. A cancelled start
 that never opened a service can be offered directly.
 
 Resume uses the original destination and performs a new authenticated dial.

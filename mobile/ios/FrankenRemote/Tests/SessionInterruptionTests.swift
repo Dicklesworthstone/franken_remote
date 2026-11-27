@@ -33,7 +33,7 @@ final class SessionInterruptionTests: XCTestCase {
         let original = try XCTUnwrap(model.reconnectOffer)
         XCTAssertNil(model.starting)
         XCTAssertNil(model.session)
-        XCTAssertNil(original.original)
+        XCTAssertNil(original.retirement)
         model.reconnect(original)
         XCTAssertNil(model.starting, "offline taps cannot consume an offer")
 
@@ -117,7 +117,7 @@ final class SessionInterruptionTests: XCTestCase {
         model.pathChanged(offline)
         XCTAssertNil(model.session)
         let offer = try XCTUnwrap(model.reconnectOffer)
-        XCTAssertTrue(offer.original === session)
+        XCTAssertTrue(offer.retirement?.original === session)
         XCTAssertEqual(offer.host, host)
         XCTAssertEqual(session.phase, .closing)
         model.pathChanged(wifi)
@@ -131,5 +131,39 @@ final class SessionInterruptionTests: XCTestCase {
         }
         XCTAssertNil(model.session)
         XCTAssertNotNil(model.startError)
+
+        // The picker remains usable after an unsuccessful dial terminates.
+        // It still waits on the original service, then performs cold admission.
+        XCTAssertNil(offer.retirement?.original, "the receipt must release the original resources")
+        model.connect(host, control: false)
+        XCTAssertNil(model.session)
+        XCTAssertNotNil(model.starting)
+        let fresh = ContinuousClock.now + .seconds(2)
+        while model.starting != nil, ContinuousClock.now < fresh {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let next = try XCTUnwrap(model.session)
+        XCTAssertFalse(session === next)
+        XCTAssertFalse(next.controlCapable)
+    }
+
+    @MainActor
+    func testDismissingOfferDoesNotBypassOriginalRetirementForPickerStart() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        let model = AppModel(store: HostStore(defaults: defaults, isValidName: { _ in true }),
+                             settings: AppSettings(defaults: defaults), monitor: nil)
+        let name = "fr-ios-interruption.tail00000.ts.net"
+        let host = SavedHost(id: UUID(), name: name, port: 18443,
+                             pin: "fr-pin-v1 \(name) 100.64.0.9")
+        model.pathChanged(wifi)
+        model.connect(host, control: false)
+        let original = try XCTUnwrap(model.session)
+        model.pathChanged(cellular)
+        XCTAssertTrue(model.reconnectOffer?.retirement?.original === original)
+        model.reconnectOffer = nil
+        model.connect(host, control: false)
+        XCTAssertNil(model.session)
+        XCTAssertNotNil(model.starting)
+        model.disconnect()
     }
 }
