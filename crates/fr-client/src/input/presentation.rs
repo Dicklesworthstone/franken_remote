@@ -90,6 +90,7 @@ impl PresentedInput {
         for owner in [
             &input.clipboard_projection,
             &input.files_projection,
+            &input.file_source_projection,
             &input.microphone_projection,
         ]
         .into_iter()
@@ -140,6 +141,7 @@ impl PresentedInput {
         for owner in [
             &input.clipboard_projection,
             &input.files_projection,
+            &input.file_source_projection,
             &input.microphone_projection,
         ]
         .into_iter()
@@ -165,6 +167,7 @@ impl PresentedInput {
         for owner in [
             &self.input.clipboard_projection,
             &self.input.files_projection,
+            &self.input.file_source_projection,
             &self.input.microphone_projection,
         ]
         .into_iter()
@@ -209,6 +212,7 @@ impl PresentedInput {
         for owner in [
             &self.input.clipboard_projection,
             &self.input.files_projection,
+            &self.input.file_source_projection,
             &self.input.microphone_projection,
         ]
         .into_iter()
@@ -303,6 +307,23 @@ impl PresentedInput {
         }
         self.input
             .file_receive_authority(parent, channel, lease, now)
+            .map_err(Error::Files)
+    }
+    /// Hand the original grant to its independently admitted upload source.
+    /// The source and receive lanes have separate one-use authority; stopping
+    /// either direction cannot keep or revoke the other's disk work.
+    pub fn file_send_authority(
+        &mut self,
+        parent: fr_wire::negotiation::ControlBinding,
+        channel: u32,
+        lease: fr_core::ids::InputLeaseId,
+        now: ClientInstant,
+    ) -> Result<crate::files::ControllerAuthority, Error> {
+        if !self.tick(now)? && !self.active {
+            return Err(self.not_ready());
+        }
+        self.input
+            .file_send_authority(parent, channel, lease, now)
             .map_err(Error::Files)
     }
     /// Validate the exact receiver underlying the input's presentation evidence.
@@ -570,6 +591,7 @@ impl PresentedInput {
         for projection in [
             &mut self.input.clipboard_projection,
             &mut self.input.files_projection,
+            &mut self.input.file_source_projection,
             &mut self.input.microphone_projection,
         ] {
             if projection

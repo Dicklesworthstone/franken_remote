@@ -1,7 +1,7 @@
-//! Original-controller authority for an explicitly approved file receive lane.
+//! Original-controller authority for explicitly approved file lanes.
 //!
 //! This module performs no filesystem work. Numeric wire IDs cannot create its
-//! opaque handoff: only the accepted control owner can issue it, exactly once.
+//! opaque handoff: only the accepted control owner can issue it, once per direction.
 pub use crate::clipboard::projection::files::ControllerAuthority;
 use crate::input::{ClientInstant, InputClient};
 use fr_core::ids::InputLeaseId;
@@ -31,6 +31,25 @@ impl From<crate::clipboard::Error> for Error {
     }
 }
 impl InputClient {
+    /// Join the completed upload route to this original accepted grant. This
+    /// independent handoff lets hashing and payload workers observe expiry or
+    /// revocation even while their parent reactor is not being serviced. It
+    /// does not approve a source or replace the route's negotiation checks.
+    pub fn file_send_authority(
+        &mut self,
+        parent: ControlBinding,
+        channel: u32,
+        lease: InputLeaseId,
+        now: ClientInstant,
+    ) -> Result<ControllerAuthority, Error> {
+        self.tick(now).map_err(|_| Error::Stopped)?;
+        let projection = self
+            .file_source_projection
+            .as_mut()
+            .ok_or(Error::NotGranted)?;
+        attach(projection, parent, channel, lease, now)
+    }
+
     /// Join the completed Files route to the exact accepted grant. Callers must
     /// separately retain/check that authenticated route, positive download
     /// selection and local destination approval. This handoff cannot grant them.
@@ -44,9 +63,19 @@ impl InputClient {
     ) -> Result<ControllerAuthority, Error> {
         self.tick(now).map_err(|_| Error::Stopped)?;
         let projection = self.files_projection.as_mut().ok_or(Error::NotGranted)?;
-        if parent != projection.parent() || lease != projection.binding().lease {
-            return Err(Error::WrongChannel);
-        }
-        projection.attach_files(channel, now).map_err(Into::into)
+        attach(projection, parent, channel, lease, now)
     }
+}
+
+fn attach(
+    projection: &mut crate::clipboard::Owner,
+    parent: ControlBinding,
+    channel: u32,
+    lease: InputLeaseId,
+    now: ClientInstant,
+) -> Result<ControllerAuthority, Error> {
+    if parent != projection.parent() || lease != projection.binding().lease {
+        return Err(Error::WrongChannel);
+    }
+    projection.attach_files(channel, now).map_err(Into::into)
 }

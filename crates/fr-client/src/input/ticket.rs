@@ -232,6 +232,7 @@ impl InputClient {
         for projection in [
             &mut self.clipboard_projection,
             &mut self.files_projection,
+            &mut self.file_source_projection,
             &mut self.microphone_projection,
         ] {
             if projection.as_ref().is_some_and(|owner| {

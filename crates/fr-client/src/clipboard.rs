@@ -336,6 +336,7 @@ impl InputClient {
         for owner in [
             &self.clipboard_projection,
             &self.files_projection,
+            &self.file_source_projection,
             &self.microphone_projection,
         ]
         .into_iter()

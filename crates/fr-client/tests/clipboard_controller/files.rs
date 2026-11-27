@@ -184,3 +184,172 @@ fn publication_clock_never_extends_suspended_or_dropped_file_authority() {
     assert!(authority.is_revoked());
     assert_eq!(authority.try_sample(client(1)), Err(Refusal::Revoked));
 }
+
+fn source(input: &mut InputClient, elapsed: u64) -> Result<ControllerAuthority, FileError> {
+    input.file_send_authority(grant().request.parent, 79, grant().lease, client(elapsed))
+}
+
+#[test]
+fn source_handoff_requires_the_original_mapped_grant_and_one_exact_attachment() {
+    let g = grant();
+    let mut fabricated = InputClient::new(
+        g.credentials(),
+        9,
+        g.request.target.bounds,
+        g.request.target.capabilities,
+        L,
+        policy(),
+        client(0),
+    )
+    .unwrap();
+    ready(&mut fabricated, 0, 0);
+    assert_eq!(
+        source(&mut fabricated, 0).unwrap_err(),
+        FileError::NotGranted
+    );
+    let mut input = accepted();
+    assert_eq!(source(&mut input, 0).unwrap_err(), FileError::NotReady);
+    ready(&mut input, 0, 0);
+    for channel in [0, 7, 8, 9] {
+        assert_eq!(
+            input
+                .file_send_authority(g.request.parent, channel, g.lease, client(0))
+                .unwrap_err(),
+            FileError::WrongChannel
+        );
+    }
+    let foreign = ControlBinding {
+        os_session: OsSessionId::from_raw(99),
+        ..g.request.parent
+    };
+    assert_eq!(
+        input
+            .file_send_authority(foreign, 79, g.lease, client(0))
+            .unwrap_err(),
+        FileError::WrongChannel
+    );
+    assert_eq!(
+        input
+            .file_send_authority(g.request.parent, 79, InputLeaseId::from_raw(99), client(0))
+            .unwrap_err(),
+        FileError::WrongChannel
+    );
+    let authority = source(&mut input, 0).unwrap();
+    assert_eq!(authority.parent(), g.request.parent);
+    assert_eq!(authority.channel(), 79);
+    assert_eq!(authority.lease(), g.lease);
+    drop(authority);
+    assert_eq!(
+        source(&mut input, 1).unwrap_err(),
+        FileError::AlreadyAttached
+    );
+}
+
+#[test]
+fn duplex_file_authority_cancellation_is_independent_in_both_attachment_orders() {
+    for source_first in [false, true] {
+        for revoke_source in [false, true] {
+            let (mut input, mut clipboard) = attached();
+            let (upload, download) = if source_first {
+                (
+                    source(&mut input, 0).unwrap(),
+                    receive(&mut input, 0).unwrap(),
+                )
+            } else {
+                let download = receive(&mut input, 0).unwrap();
+                (source(&mut input, 0).unwrap(), download)
+            };
+            let (cancelled, live) = if revoke_source {
+                (&upload, &download)
+            } else {
+                (&download, &upload)
+            };
+            cancelled.revoke();
+            assert_eq!(cancelled.check(client(1)), Err(Refusal::Revoked));
+            live.check(client(1)).unwrap();
+            input.tick(client(2)).unwrap();
+            live.check(client(3)).unwrap();
+            clipboard
+                .offer(1, "independent clipboard", None, client(3))
+                .unwrap();
+            assert!(input.stopped().is_none());
+            let failed = if revoke_source {
+                source(&mut input, 4)
+            } else {
+                receive(&mut input, 4)
+            };
+            assert_eq!(failed.unwrap_err(), FileError::NotGranted);
+        }
+    }
+}
+
+#[test]
+fn both_file_directions_follow_valid_tickets_but_expired_sources_never_revive() {
+    let mut input = accepted();
+    ready(&mut input, 0, 0);
+    let upload = source(&mut input, 0).unwrap();
+    let download = receive(&mut input, 0).unwrap();
+    ready(&mut input, 1, 2_000_000);
+    input
+        .accept_ticket(
+            &ticket(1, H + 2_000_000, H + 3_500_000),
+            correlation(2_000_000),
+            client(2_000_000),
+        )
+        .unwrap();
+    for authority in [&upload, &download] {
+        // This is later than the initial lease proof: only the original
+        // validated ticket update can keep either worker authorized.
+        authority.check(client(3_000_100)).unwrap();
+        assert!(authority.check(client(3_900_001)).is_err());
+        assert!(authority.is_revoked());
+    }
+    input
+        .accept_ticket(
+            &ticket(2, H + 4_000_000, H + 5_000_000),
+            correlation(4_000_000),
+            client(4_000_000),
+        )
+        .unwrap();
+    assert!(upload.check(client(4_000_001)).is_err());
+    assert!(download.check(client(4_000_001)).is_err());
+    assert_eq!(
+        source(&mut input, 4_000_002).unwrap_err(),
+        FileError::NotGranted
+    );
+    assert_eq!(
+        receive(&mut input, 4_000_002).unwrap_err(),
+        FileError::NotGranted
+    );
+}
+
+#[test]
+fn original_source_stops_without_owner_ticks_on_drop_focus_loss_or_expiry() {
+    for failure in 0..3 {
+        let mut input = accepted();
+        ready(&mut input, 0, 0);
+        let upload = source(&mut input, 0).unwrap();
+        let download = receive(&mut input, 0).unwrap();
+        let at = match failure {
+            0 => {
+                input.stop(StopReason::FocusLost);
+                client(1)
+            }
+            1 => {
+                drop(input);
+                client(1)
+            }
+            _ => client(3_000_001),
+        };
+        let mut replacement = accepted();
+        ready(&mut replacement, 0, 0);
+        source(&mut replacement, 0)
+            .unwrap()
+            .check(client(1))
+            .unwrap();
+        for authority in [&upload, &download] {
+            assert!(authority.check(at).is_err());
+            assert!(authority.is_revoked());
+        }
+    }
+}

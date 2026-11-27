@@ -170,6 +170,7 @@ impl RequestControl {
         for projection in [
             &mut input.clipboard_projection,
             &mut input.files_projection,
+            &mut input.file_source_projection,
             &mut input.microphone_projection,
         ] {
             *projection = Some(crate::clipboard::Owner::new(grant, clock, now).map_err(
