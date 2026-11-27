@@ -323,7 +323,7 @@ pub use parent::{ParentUnbound, bind_parent};
         any(
             feature = "linux-input",
             feature = "linux-audio",
-            feature = "linux-microphone-process",
+            feature = "linux-microphone-capture",
             feature = "linux-microphone-playout"
         )
     ),

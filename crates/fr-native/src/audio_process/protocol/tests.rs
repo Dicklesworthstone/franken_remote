@@ -87,7 +87,7 @@ fn private_source_discriminant_never_falls_back_to_another_platform() {
 #[test]
 fn oversized_or_misdirected_headers_are_refused_before_body_read() {
     let base = encoded_header(header(PULL), &[], false);
-    for (offset, value) in [(4, 2), (5, 0), (6, 1), (7, 1), (44, 1), (47, 1)] {
+    for (offset, value) in [(4, 255), (5, 0), (6, 1), (7, 1), (44, 1), (47, 1)] {
         let mut bytes = base.clone();
         bytes[offset] = value;
         assert_eq!(
@@ -258,4 +258,18 @@ fn renewal_requires_the_original_serial_generation_and_unexpired_predecessor_bou
         }
         .matches_reply(renewal)
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_rejects_awake_only_requests_and_replies_before_reading_audio() {
+    for reply in [false, true] {
+        let mut record = encoded_header(header(PULL), &[], reply);
+        assert_eq!(record[4], 2);
+        record[4] = 1;
+        assert_eq!(
+            Header::read(&mut record.as_slice(), reply),
+            Err(Error::Protocol)
+        );
+    }
 }

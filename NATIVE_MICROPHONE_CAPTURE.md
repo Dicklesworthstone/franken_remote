@@ -10,6 +10,17 @@ with an explicit source and a local Talk/Mute panel. The host's independent
 enable and Stop microphone surface are described in
 [NATIVE_MICROPHONE_UPLINK.md](NATIVE_MICROPHONE_UPLINK.md).
 
+## Linux system sleep
+
+Linux records the original microphone authorization, pull and partial-frame
+deadlines on `CLOCK_BOOTTIME` as well as the local monotonic timer. A suspended
+laptop can therefore exhaust the original custody or grant while the recorder,
+client and network loop are all paused. A later pull, permission renewal, or
+delayed socket write still checks the original deadline. An expired capture
+generation is fenced. Private Linux recorder commands and replies use version
+2 so an older worker rejects the clock mismatch before opening a device.
+Install the matching client and recorder together.
+
 ## Public client command
 
 Build the native client with `linux-desktop,linux-microphone` in addition to

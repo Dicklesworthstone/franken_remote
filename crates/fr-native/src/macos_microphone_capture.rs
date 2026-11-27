@@ -274,7 +274,7 @@ impl MicrophoneSource {
             if now < captured || now >= native_until {
                 return Err(Error::Expired);
             }
-            until = until.min(clock::local_instant(native_until).ok_or(Error::Clock)?);
+            until = until.min(clock::capture_local_instant(native_until).ok_or(Error::Clock)?);
             if !permitted() || Instant::now() >= until {
                 return Err(Error::Expired);
             }

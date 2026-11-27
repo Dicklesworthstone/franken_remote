@@ -8,6 +8,10 @@ use std::io::{Read, Write};
 pub(super) const CONFIGURE: u8 = 1;
 pub(super) const PULL: u8 = 2;
 pub(super) const RENEW: u8 = 3;
+// V1 Linux used CLOCK_MONOTONIC, which pauses while suspended. A worker
+// from either release must reject requests expressed in the other domain.
+// Darwin's original CLOCK_MONOTONIC already includes sleep.
+const VERSION: u8 = if cfg!(target_os = "linux") { 2 } else { 1 };
 const HEADER_BYTES: usize = 48;
 const CONFIG_BYTES: usize = 16;
 const BATCH_BYTES: usize = 12;
@@ -30,7 +34,7 @@ impl Header {
         let mut b = [0; HEADER_BYTES];
         input.read_exact(&mut b).map_err(|_| Error::Native)?;
         if &b[..4] != (if reply { b"FRMR" } else { b"FRMC" })
-            || b[4] != 1
+            || b[4] != VERSION
             || !matches!(b[5], CONFIGURE | PULL | RENEW)
             || b[44..] != [0; 4]
         {
@@ -89,7 +93,7 @@ impl Header {
         }
         let mut b = [0; HEADER_BYTES];
         b[..4].copy_from_slice(if reply { b"FRMR" } else { b"FRMC" });
-        b[4] = 1;
+        b[4] = VERSION;
         b[5] = self.kind;
         b[6..8].copy_from_slice(&self.error.map_or(0, |error| error as u16).to_be_bytes());
         for (index, value) in [

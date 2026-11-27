@@ -25,7 +25,7 @@ struct Guard {
 impl Guard {
     fn permitted(&mut self, expires_ns: u64) -> bool {
         if self.denied
-            || crate::clock::monotonic_ns()
+            || crate::clock::suspend_inclusive_ns()
                 .is_none_or(|now| now >= self.authorization_ns.min(expires_ns))
         {
             self.denied = true;
@@ -164,16 +164,18 @@ fn serve(input: &mut impl Read, output: &mut impl Write, channel: UnixStream) ->
             if !guard.permitted(request.expires_ns) {
                 return Err(Error::Denied);
             }
-            let expires = crate::clock::local_instant(request.expires_ns).ok_or(Error::Clock)?;
+            let expires =
+                crate::clock::capture_local_instant(request.expires_ns).ok_or(Error::Clock)?;
             if Instant::now() >= expires {
                 return Err(Error::Expired);
             }
-            let batch = source.pull(expires, || guard.permitted(request.expires_ns))?;
             #[cfg(target_os = "linux")]
-            let original = crate::clock::stamp_ns(batch.expires()).ok_or(Error::Clock)?;
-            // Darwin Instant pauses during suspend: preserve the native
-            // sample's ORIGINAL sleep-inclusive cap through the private reply.
+            let batch = source.pull_before(expires, request.expires_ns, || {
+                guard.permitted(request.expires_ns)
+            })?;
             #[cfg(target_os = "macos")]
+            let batch = source.pull(expires, || guard.permitted(request.expires_ns))?;
+            // A surviving partial frame keeps its first absolute expiry.
             let original = batch.expires_ns();
             let counters = batch.counters();
             let units = batch.consume(|| guard.permitted(request.expires_ns))?;

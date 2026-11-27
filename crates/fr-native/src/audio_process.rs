@@ -19,6 +19,7 @@ mod protocol;
 mod supervisor;
 pub mod transmit;
 
+use crate::clock::CaptureDeadline as Deadline;
 pub use crate::microphone_selection::Selection;
 #[cfg(target_os = "linux")]
 use crate::pulse::Error as PulseError;
@@ -166,17 +167,9 @@ impl Packets {
         }
     }
 }
-/// Both clock bounds belong to the original operation. Darwin's `Instant`
-/// pauses in suspend, so converting it again after enqueue would renew the
-/// child's sleep-inclusive cap. Moving or narrowing this pair never does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Deadline {
-    until: Instant,
-    ns: u64,
-}
 impl Deadline {
     fn after(duration: Duration) -> Result<Self, Error> {
-        let raw = crate::clock::monotonic_ns().ok_or(Error::Clock)?;
+        let raw = crate::clock::suspend_inclusive_ns().ok_or(Error::Clock)?;
         Self::after_at(Instant::now(), raw, duration)
     }
     fn after_at(now: Instant, raw: u64, duration: Duration) -> Result<Self, Error> {
@@ -187,28 +180,14 @@ impl Deadline {
                 .ok_or(Error::Clock)?,
         })
     }
-    fn narrow(self, other: Self) -> Self {
-        Self {
-            until: self.until.min(other.until),
-            ns: self.ns.min(other.ns),
-        }
-    }
     fn remaining(self) -> Result<Duration, Error> {
         self.remaining_at(
             Instant::now(),
-            crate::clock::monotonic_ns().ok_or(Error::Clock)?,
+            crate::clock::suspend_inclusive_ns().ok_or(Error::Clock)?,
         )
     }
     fn remaining_at(self, now: Instant, raw: u64) -> Result<Duration, Error> {
-        let local = self
-            .until
-            .checked_duration_since(now)
-            .ok_or(Error::Expired)?;
-        let native = self.ns.checked_sub(raw).ok_or(Error::Expired)?;
-        let remaining = local.min(Duration::from_nanos(native));
-        (!remaining.is_zero())
-            .then_some(remaining)
-            .ok_or(Error::Expired)
+        self.duration_at(now, raw).ok_or(Error::Expired)
     }
     fn live(self) -> bool {
         self.remaining().is_ok()

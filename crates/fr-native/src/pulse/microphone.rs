@@ -11,6 +11,7 @@
 //! physical-device qualification, default microphone, or automatic resume is
 //! implied by this API.
 use super::{Error, capture::CaptureSelection, source::RecordSource};
+use crate::clock::{self, CaptureDeadline};
 use fr_core::audio::{AudioDirection, AudioStreamConfig};
 use fr_media::{audio::AudioAccessUnit, worker::audio::CaptureCounters};
 use std::{
@@ -54,12 +55,16 @@ impl std::fmt::Debug for Control {
 pub struct Batch {
     packets: Vec<AudioAccessUnit>,
     counters: CaptureCounters,
-    expires: Instant,
+    expires: CaptureDeadline,
     control: Control,
 }
 impl Batch {
     pub const fn expires(&self) -> Instant {
-        self.expires
+        self.expires.until
+    }
+    /// Original same-boot capture expiry, including any system suspend.
+    pub const fn expires_ns(&self) -> u64 {
+        self.expires.ns
     }
     pub const fn counters(&self) -> CaptureCounters {
         self.counters
@@ -91,9 +96,9 @@ pub struct MicrophoneSource {
     source: Option<RecordSource>,
     config: AudioStreamConfig,
     control: Control,
-    origin: Instant,
+    origin_ns: u64,
     ready: bool,
-    partial: Option<(u64, Instant)>,
+    partial: Option<(u64, CaptureDeadline)>,
     next: Option<(u64, u64)>,
 }
 impl std::fmt::Debug for MicrophoneSource {
@@ -130,14 +135,19 @@ impl MicrophoneSource {
         let selection = CaptureSelection::microphone(server, source)?;
         let control = Control(Arc::new(AtomicBool::new(false)));
         check(&control, None, &mut permitted)?;
-        let origin = Instant::now();
-        let startup_until = origin.checked_add(STARTUP).ok_or(Error::Clock)?;
+        let origin_ns = clock::suspend_inclusive_ns().ok_or(Error::Clock)?;
+        let startup_until = CaptureDeadline {
+            until: Instant::now().checked_add(STARTUP).ok_or(Error::Clock)?,
+            ns: origin_ns
+                .checked_add(u64::try_from(STARTUP.as_nanos()).map_err(|_| Error::Clock)?)
+                .ok_or(Error::Clock)?,
+        };
         let source = RecordSource::connect(selection, config, bitrate, max_packet_bytes, 0)?;
         let owner = Self {
             source: Some(source),
             config,
             control,
-            origin,
+            origin_ns,
             ready: false,
             partial: None,
             next: None,
@@ -161,7 +171,7 @@ impl MicrophoneSource {
         let source = self.source.as_mut().ok_or(Error::Closed)?;
         let mut now = || {
             check(&self.control, None, &mut permitted)?;
-            elapsed(self.origin)
+            elapsed(self.origin_ns)
         };
         let result = source.poll_ready(&mut now).and_then(|ready| {
             now()?;
@@ -186,22 +196,34 @@ impl MicrophoneSource {
     pub fn pull(
         &mut self,
         expires: Instant,
+        permitted: impl FnMut() -> bool,
+    ) -> Result<Batch, Error> {
+        self.pull_before(expires, u64::MAX, permitted)
+    }
+    pub(crate) fn pull_before(
+        &mut self,
+        local_until: Instant,
+        original_ns: u64,
         mut permitted: impl FnMut() -> bool,
     ) -> Result<Batch, Error> {
         let source = self.source.as_mut().ok_or(Error::Closed)?;
         let result = (|| {
+            let expires = CaptureDeadline {
+                until: local_until,
+                ns: original_ns.min(clock::stamp_ns(local_until).ok_or(Error::Clock)?),
+            };
             check(&self.control, Some(expires), &mut permitted)?;
-            if expires
+            if local_until
                 > Instant::now()
                     .checked_add(MAX_CAPTURE_CUSTODY)
                     .ok_or(Error::Clock)?
             {
                 return Err(Error::Configuration);
             }
-            let until = self.partial.map_or(expires, |(_, old)| old.min(expires));
+            let until = self.partial.map_or(expires, |(_, old)| old.narrow(expires));
             let mut now = || {
                 check(&self.control, Some(until), &mut permitted)?;
-                elapsed(self.origin)
+                elapsed(self.origin_ns)
             };
             let (packets, counters) = source.pull_contiguous(&mut now)?;
             now()?;
@@ -211,7 +233,7 @@ impl MicrophoneSource {
                     timestamp,
                     self.partial
                         .filter(|(old, _)| *old == timestamp)
-                        .map_or(expires, |(_, original)| original),
+                        .map_or(expires, |(_, original)| original.narrow(expires)),
                 )
             });
             Ok(Batch {
@@ -242,7 +264,7 @@ impl Drop for MicrophoneSource {
 }
 fn check(
     control: &Control,
-    until: Option<Instant>,
+    until: Option<CaptureDeadline>,
     permitted: &mut impl FnMut() -> bool,
 ) -> Result<(), Error> {
     // A caller may catch Rust unwinding and retain this owner. Turn an uncertain
@@ -255,13 +277,19 @@ fn check(
         control.stop();
         return Err(Error::Denied);
     }
-    if until.is_some_and(|until| Instant::now() >= until) {
-        return Err(Error::Expired);
+    if let Some(until) = until {
+        let raw = clock::suspend_inclusive_ns().ok_or(Error::Clock)?;
+        until
+            .duration_at(Instant::now(), raw)
+            .ok_or(Error::Expired)?;
     }
     Ok(())
 }
-fn elapsed(origin: Instant) -> Result<u64, Error> {
-    u64::try_from(origin.elapsed().as_micros()).map_err(|_| Error::Clock)
+fn elapsed(origin_ns: u64) -> Result<u64, Error> {
+    clock::suspend_inclusive_ns()
+        .and_then(|now| now.checked_sub(origin_ns))
+        .map(|ns| ns / 1000)
+        .ok_or(Error::Clock)
 }
 fn sequence(
     config: AudioStreamConfig,

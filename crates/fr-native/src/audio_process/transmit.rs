@@ -85,7 +85,7 @@ struct Clock {
 impl Clock {
     fn bind(now: impl FnOnce() -> ClientInstant) -> Self {
         let origin = Instant::now();
-        let raw_origin = crate::clock::monotonic_ns();
+        let raw_origin = crate::clock::suspend_inclusive_ns();
         Self {
             origin,
             raw_origin,
@@ -95,7 +95,7 @@ impl Clock {
     fn now(self) -> Result<ClientInstant, Error> {
         self.now_at(
             Instant::now(),
-            crate::clock::monotonic_ns().ok_or(Error::Clock)?,
+            crate::clock::suspend_inclusive_ns().ok_or(Error::Clock)?,
         )
     }
     fn now_at(self, local: Instant, raw: u64) -> Result<ClientInstant, Error> {
@@ -119,7 +119,7 @@ impl Clock {
             .origin
             .checked_add(Duration::from_micros(us))
             .ok_or(Error::Clock)?;
-        Ok(local.min(crate::clock::local_instant(self.raw_deadline(until)?).ok_or(Error::Clock)?))
+        Ok(local.min(crate::clock::capture_local_instant(self.raw_deadline(until)?).ok_or(Error::Clock)?))
     }
     fn raw_deadline(self, until: ClientInstant) -> Result<u64, Error> {
         self.raw_origin
@@ -223,7 +223,7 @@ impl Egress {
             && self.clock.permits(&self.permit)
             && self
                 .packet_until_ns
-                .is_none_or(|until| crate::clock::monotonic_ns().is_some_and(|now| now < until))
+                .is_none_or(|until| crate::clock::suspend_inclusive_ns().is_some_and(|now| now < until))
     }
     /// Preserve a packet's original same-boot custody through native egress.
     /// This derives from the immutable original anchor, never current time.

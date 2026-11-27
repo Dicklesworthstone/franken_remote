@@ -272,7 +272,7 @@ fn session(
             shared.reply(Reply::Renewed, exchange.deadline)?;
             continue;
         }
-        let expires = crate::clock::local_instant(received.expires_ns)
+        let expires = crate::clock::capture_local_instant(received.expires_ns)
             .ok_or(Error::Clock)?
             .min(until.until);
         let deadline = Deadline {
