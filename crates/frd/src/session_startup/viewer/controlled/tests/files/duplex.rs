@@ -108,7 +108,9 @@ fn both_directions_publish_and_keep_input_on_the_original_controller() {
         let upload = vec![0x36; 1_000_007];
         let download = vec![0x87; 1_000_019];
         let mut host_lane = HostLane::default();
-        host_lane.add_upload(&Directory::open(&host_dest.0, Limits::default()).unwrap());
+        host_lane
+            .add_upload(&Directory::open(&host_dest.0, Limits::default()).unwrap())
+            .unwrap();
         host_lane.add_download(SendRequest {
             selection: selected(&host_source, &download, "download"),
             policy: fr_files::sender::Policy::default(),

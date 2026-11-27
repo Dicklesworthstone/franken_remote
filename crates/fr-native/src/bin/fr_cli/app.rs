@@ -1845,8 +1845,8 @@ mod tests {
                 let crate::options::Command::Connect(connection) =
                     crate::options::parse(&args.unwrap()).unwrap().command
                 else {
-                        panic!("viewer");
-                    };
+                    panic!("viewer");
+                };
                 assert!(connection.upload.choose_files && connection.control);
                 assert!(connection.upload.paths.is_empty());
                 assert_eq!(connection.upload.file_drop, drop_files);
@@ -1870,8 +1870,10 @@ mod tests {
             let completion = |code, exit| {
                 let mut failure = Failure::new(code, "Choose files again.", exit);
                 if receiving {
-                    crate::file_reports::download::Summary::unavailable("files_receive_not_started")
-                        .preserve(&mut failure);
+                    crate::file_reports::download::Summary::unavailable(
+                        "files_receive_not_started",
+                    )
+                    .preserve(&mut failure);
                 }
                 let json = crate::terminal::output(failure, true);
                 fr_client::completion::capture_completion(json.as_bytes())
@@ -1883,14 +1885,18 @@ mod tests {
                         .unwrap();
                 assert!(notice.contains("Choose files again."));
                 // A drop-only viewer never offered this dialog.
-                assert!(session_notice_with_transfers(&result, "original", false, true, receiving)
-                    .unwrap_err()
-                    .unknown_effect);
+                assert!(
+                    session_notice_with_transfers(&result, "original", false, true, receiving)
+                        .unwrap_err()
+                        .unknown_effect
+                );
             }
             let unfinished = completion("file_picker_cleanup_incomplete", 1);
-            assert!(session_notice_with_job(&unfinished, "original", false, uploads, receiving, None)
-                .unwrap_err()
-                .unknown_effect);
+            assert!(
+                session_notice_with_job(&unfinished, "original", false, uploads, receiving, None)
+                    .unwrap_err()
+                    .unknown_effect
+            );
         }
     }
 

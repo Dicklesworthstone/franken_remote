@@ -238,7 +238,10 @@ fn folder_completion_retains_every_page_and_checks_the_original_job() {
     inspection.preserve(&mut failure);
     let report = retained(failure);
     assert_eq!(report["files_received"], value["files_received"]);
-    assert_eq!(report["files_receive_refused"], value["files_receive_refused"]);
+    assert_eq!(
+        report["files_receive_refused"],
+        value["files_receive_refused"]
+    );
     assert_eq!(report["folder_job"], value["folder_job"]);
 
     for expected in [None, Some(42)] {
@@ -253,18 +256,27 @@ fn folder_completion_retains_every_page_and_checks_the_original_job() {
     assert_eq!(failure.code, "app_receive_outcome_unknown");
     let report = retained(failure);
     assert_eq!(report["files_received"], unknown["files_received"]);
-    assert_eq!(report["files_receive_refused"], unknown["files_receive_refused"]);
+    assert_eq!(
+        report["files_receive_refused"],
+        unknown["files_receive_refused"]
+    );
 }
 
 #[test]
 fn incomplete_valid_folder_reports_preserve_all_bounded_publications() {
     let mut value = paged_folder_completion();
-    value.as_object_mut().unwrap().remove("files_receive_cleanup");
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("files_receive_cleanup");
     let failure = check_job(&value, Some(41)).unwrap_err();
     let report = retained(failure);
     assert_eq!(report["app_receive_evidence_incomplete"], true);
     assert_eq!(report["files_received"], value["files_received"]);
-    assert_eq!(report["files_receive_refused"], value["files_receive_refused"]);
+    assert_eq!(
+        report["files_receive_refused"],
+        value["files_receive_refused"]
+    );
     assert_eq!(report["folder_job"], value["folder_job"]);
 
     let mut oversized = paged_folder_completion();
@@ -295,7 +307,10 @@ fn missing_or_malformed_job_metadata_never_broadens_receipt_retention() {
         assert_eq!(failure.code, "app_receive_outcome_unknown");
         let report = retained(failure);
         assert_eq!(report["app_receive_evidence_incomplete"], true);
-        assert_eq!(report["files_received"].as_array().unwrap().len(), MAX_RESULTS);
+        assert_eq!(
+            report["files_received"].as_array().unwrap().len(),
+            MAX_RESULTS
+        );
         assert!(report.get("folder_job").is_none());
         assert!(!report.to_string().contains("/private/untrusted"));
     }
@@ -303,7 +318,10 @@ fn missing_or_malformed_job_metadata_never_broadens_receipt_retention() {
     let mut ordinary = paged_folder_completion();
     ordinary.as_object_mut().unwrap().remove("folder_job");
     let report = retained(check(&ordinary, true, true).unwrap_err());
-    assert_eq!(report["files_received"].as_array().unwrap().len(), MAX_RESULTS);
+    assert_eq!(
+        report["files_received"].as_array().unwrap().len(),
+        MAX_RESULTS
+    );
     assert!(report.get("folder_job").is_none());
 }
 

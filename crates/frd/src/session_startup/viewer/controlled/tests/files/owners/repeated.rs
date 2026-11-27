@@ -37,7 +37,7 @@ fn selections_on_the_original_lane(deferred: bool) {
         }
         viewer.set_intake(intake.clone());
         let mut host = HostLane::default();
-        host.add_upload(&directory);
+        host.add_upload(&directory).unwrap();
         let view = state.host_media.binding();
         let lease = state.viewer.input.binding().lease;
         let mut tickets = 700_000_u128;

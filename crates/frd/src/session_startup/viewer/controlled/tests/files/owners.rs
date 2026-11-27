@@ -81,7 +81,7 @@ fn selected_objects_through_original_owners(directory_source: bool) {
             }
         );
         let mut host = HostLane::default();
-        host.add_upload(&directory);
+        host.add_upload(&directory).unwrap();
         let control = SendControl::new();
         let mut viewer = ViewerLane::default();
         viewer

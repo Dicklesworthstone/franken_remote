@@ -52,7 +52,9 @@ impl Selection {
         if !crate::microphone_selection::Selection::valid_mac_uid(uid) {
             return Err(Error::Selection);
         }
-        CString::new(uid).map(|uid| Self(Some(uid))).map_err(|_| Error::Selection)
+        CString::new(uid)
+            .map(|uid| Self(Some(uid)))
+            .map_err(|_| Error::Selection)
     }
 }
 
@@ -533,8 +535,11 @@ mod selection_tests {
             20,
         )
         .unwrap();
-        let (device, retirement) =
-            PlaybackDevice::connect_retained(Selection::named(uid).unwrap(), config, ClientInstant(0));
+        let (device, retirement) = PlaybackDevice::connect_retained(
+            Selection::named(uid).unwrap(),
+            config,
+            ClientInstant(0),
+        );
         assert_eq!(device.unwrap_err(), Error::Selection);
         assert!(retirement.is_complete());
     }

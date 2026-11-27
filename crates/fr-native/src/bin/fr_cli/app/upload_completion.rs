@@ -331,8 +331,7 @@ impl Record {
             .get("files_refused")
             .and_then(Value::as_array)
             .ok_or(())?;
-        if requested > limit as u64 || sent.len().saturating_add(refused.len()) > limit
-        {
+        if requested > limit as u64 || sent.len().saturating_add(refused.len()) > limit {
             return Err(());
         }
         let sent = sent

@@ -239,7 +239,10 @@ impl ViewerAudioOutput for Output {
             offer.jitter_target_ms,
         )
         .map_err(|_| ViewerAudioRefused)?;
-        let selection = self.selected.open().map_err(|error| self.refuse(PlayoutError::Device(error)))?;
+        let selection = self
+            .selected
+            .open()
+            .map_err(|error| self.refuse(PlayoutError::Device(error)))?;
         #[cfg(target_os = "linux")]
         let device =
             PlaybackDevice::connect(selection, config, now()).map_err(|_| ViewerAudioRefused)?;

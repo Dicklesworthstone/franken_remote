@@ -34,7 +34,8 @@ fn input_owner(now: u64) -> InputSession {
         },
     };
     let now = HostInstant::from_micros(now);
-    let mut authority = SessionAuthority::new(credentials.session, AuthorityPolicy::plan_defaults());
+    let mut authority =
+        SessionAuthority::new(credentials.session, AuthorityPolicy::plan_defaults());
     authority.mark_capabilities_checked().unwrap();
     authority.authorize_observation(now).unwrap();
     authority.mark_view_ready(now).unwrap();
@@ -183,7 +184,10 @@ fn permission_revocation_discards_a_payload_read_while_its_owner_is_stalled() {
         source.request(1).unwrap();
         let until = Instant::now() + Duration::from_secs(2);
         while witness.stream_position().unwrap() == 0 {
-            assert!(Instant::now() < until, "the source did not read its payload");
+            assert!(
+                Instant::now() < until,
+                "the source did not read its payload"
+            );
             thread::yield_now();
         }
         assert_eq!(witness.stream_position().unwrap(), 1);

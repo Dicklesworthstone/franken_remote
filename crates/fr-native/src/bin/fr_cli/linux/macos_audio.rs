@@ -29,9 +29,11 @@ pub(super) fn check(request: Option<&AudioRequest>, available: bool) -> Result<(
             2,
         ));
     }
-    if request.sink.as_deref().is_some_and(|uid| {
-        !fr_native::microphone_selection::Selection::valid_mac_uid(uid)
-    }) {
+    if request
+        .sink
+        .as_deref()
+        .is_some_and(|uid| !fr_native::microphone_selection::Selection::valid_mac_uid(uid))
+    {
         return Err(Failure::new(
             "audio_output_selection_invalid",
             "Use an exact local Core Audio output UID of 1 to 255 bytes, or omit --audio-sink for the default output.",

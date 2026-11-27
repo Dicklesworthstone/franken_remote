@@ -80,7 +80,7 @@ fn recovery_keeps_original_file_resume_pause_cancel_and_cleanup_live() {
             Selection::select(&[source.0.join("first.bin"), source.0.join("second.bin")]).unwrap();
         let directory = Directory::open(&dest.0, Limits::default()).unwrap();
         let mut host_files = HostFiles::default();
-        host_files.add_upload(&directory);
+        host_files.add_upload(&directory).unwrap();
         let view = f.host_media.binding();
         let binding = f.viewer.input_result_binding();
         let controller = f.viewer.control();

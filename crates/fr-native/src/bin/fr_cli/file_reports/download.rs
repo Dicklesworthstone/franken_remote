@@ -594,7 +594,10 @@ mod tests {
         assert_eq!(report["files_received"].as_array().unwrap().len(), 512);
         assert_eq!(report["files_receive_refused"].as_array().unwrap().len(), 1);
         assert_eq!(report["files_receive_refused"][0]["index"], 512);
-        assert_eq!(report["files_receive_refused"][0]["reason"], "receive_limit");
+        assert_eq!(
+            report["files_receive_refused"][0]["reason"],
+            "receive_limit"
+        );
         assert_eq!(report["files_receive_results_truncated"], false);
         assert_eq!(report["folder_job"]["confirmed_publications"], 512);
 
@@ -604,7 +607,10 @@ mod tests {
         });
         let oversized = json(&Summary::from_status(&state));
         assert_eq!(oversized["files_received"], report["files_received"]);
-        assert_eq!(oversized["files_receive_refused"], report["files_receive_refused"]);
+        assert_eq!(
+            oversized["files_receive_refused"],
+            report["files_receive_refused"]
+        );
         assert_eq!(oversized["files_receive_results_truncated"], true);
     }
 

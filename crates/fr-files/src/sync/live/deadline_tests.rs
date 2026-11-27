@@ -160,7 +160,14 @@ fn delayed_transport_cannot_deliver_original_folder_acceptance_or_round_start() 
             assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
             link.control_progress(&cx).await;
 
-            clean(&cx, &mut link, &mut host, &mut sender, &mut client, &mut disk);
+            clean(
+                &cx,
+                &mut link,
+                &mut host,
+                &mut sender,
+                &mut client,
+                &mut disk,
+            );
             drop((disk, client, sender, host));
             fs::remove_dir_all(root).unwrap();
         }

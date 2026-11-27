@@ -1101,11 +1101,11 @@ fn run_inner(
     let folder_sync = options
         .file_send
         .as_ref()
-        .and_then(|selection| selection.sync_job_mode());
+        .and_then(crate::native_files::HostSelection::sync_job_mode);
     let folder_sync_upload = options
         .files
         .as_ref()
-        .and_then(|directory| directory.sync_job_mode());
+        .and_then(crate::native_files::Directory::sync_job_mode);
     if options.microphone.is_some() || folder_sync.is_some() || folder_sync_upload.is_some() {
         let offer = selected_offer(
             (
@@ -1909,12 +1909,12 @@ impl Share<'_> {
             .options
             .file_send
             .as_ref()
-            .and_then(|selection| selection.sync_job_mode());
+            .and_then(crate::native_files::HostSelection::sync_job_mode);
         let folder_sync_upload = self
             .options
             .files
             .as_ref()
-            .and_then(|directory| directory.sync_job_mode());
+            .and_then(crate::native_files::Directory::sync_job_mode);
         // Preserve the capability slots of the established hardware profiles.
         let scales = scales_pictures(encoder);
         let report = self.report.clone();

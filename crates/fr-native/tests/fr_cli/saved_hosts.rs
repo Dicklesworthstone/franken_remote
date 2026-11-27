@@ -173,7 +173,10 @@ fn offline_link_shares_only_the_saved_magicdns_endpoint() {
     assert_eq!(std::fs::read_to_string(file).unwrap(), record);
     let missing = run_cli(&["hosts", "link", "absent", "--hosts-file", file, "--json"]);
     assert_eq!(missing.status.code(), Some(1));
-    json(&missing, "assert x['error']['code']=='saved_host_not_found'");
+    json(
+        &missing,
+        "assert x['error']['code']=='saved_host_not_found'",
+    );
     for (document, expected) in [
         (
             record.replace("desk.fixture.ts.net", "work.example.org"),
@@ -184,7 +187,10 @@ fn offline_link_shares_only_the_saved_magicdns_endpoint() {
         std::fs::write(file, &document).unwrap();
         let refused = run_cli(&["hosts", "link", "office", "--hosts-file", file, "--json"]);
         assert_eq!(refused.status.code(), Some(1));
-        json(&refused, &format!("assert x['error']['code']=='{expected}'"));
+        json(
+            &refused,
+            &format!("assert x['error']['code']=='{expected}'"),
+        );
         assert_eq!(std::fs::read_to_string(file).unwrap(), document);
     }
 }

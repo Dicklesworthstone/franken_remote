@@ -107,7 +107,7 @@ impl DirectoryRefusal {
 /// descriptor and its active-reservation budget (one staged file at a time).
 #[derive(Clone)]
 pub struct Directory {
-    directory: DropDirectory,
+    root: DropDirectory,
     limits: Limits,
     /// Shared one-use acceptance across every startup-profile clone.
     sync_job: Option<Arc<StandingJob>>,
@@ -163,7 +163,7 @@ impl Directory {
                 return Err(DirectoryRefusal::WritableByOthers);
             }
         }
-        let directory = DropDirectory::open(
+        let root = DropDirectory::open(
             path,
             DirectoryLimits {
                 max_file_bytes: limits.max_file_bytes,
@@ -189,7 +189,7 @@ impl Directory {
             _ => DirectoryRefusal::Unavailable,
         })?;
         Ok(Self {
-            directory,
+            root,
             limits,
             sync_job: None,
         })
@@ -199,7 +199,7 @@ impl Directory {
     /// changing this preference grants no new input or file authority.
     #[must_use]
     pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
-        self.directory = self.directory.with_conflict_policy(policy);
+        self.root = self.root.with_conflict_policy(policy);
         self
     }
     /// Configure one locally selected upload job. Reconnecting cannot reuse
@@ -216,7 +216,7 @@ impl Directory {
         if job_id == 0 || self.sync_job.is_some() {
             return Err(fr_files::sync::LiveError::InvalidConfig);
         }
-        if self.directory.conflict_policy() != ConflictPolicy::KeepBoth {
+        if self.root.conflict_policy() != ConflictPolicy::KeepBoth {
             return Err(fr_files::sync::LiveError::KeepBothRequired);
         }
         self.sync_job = Some(Arc::new(StandingJob {
@@ -247,7 +247,7 @@ impl Directory {
         let Some(job) = &self.sync_job else {
             return Ok(None);
         };
-        if self.directory.conflict_policy() != ConflictPolicy::KeepBoth {
+        if self.root.conflict_policy() != ConflictPolicy::KeepBoth {
             return Err(Absence::Unavailable);
         }
         job.id
@@ -266,7 +266,7 @@ impl Directory {
     /// still needs the controller's own selection and its live input lease).
     pub(crate) fn configuration(&self) -> fr_files::quic::Configuration {
         fr_files::quic::Configuration {
-            directory: self.directory.clone(),
+            directory: self.root.clone(),
             permission: Permission::new(true),
             policy: self.policy(),
             reply_lifetime: Duration::from_secs(1),

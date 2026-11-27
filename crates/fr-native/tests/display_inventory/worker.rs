@@ -76,7 +76,12 @@ fn check_selected_picture(picture: Configuration) {
         let d = cat.displays().iter().find(|d| d.x == 320).unwrap();
         discovered.check_display(&cx, deadline(&cx)).await.unwrap();
         discovered
-            .configure(&cx, cat.selection(d.handle).unwrap(), picture, deadline(&cx))
+            .configure(
+                &cx,
+                cat.selection(d.handle).unwrap(),
+                picture,
+                deadline(&cx),
+            )
             .await
             .unwrap();
         let mut worker = discovered.into_worker().unwrap();
