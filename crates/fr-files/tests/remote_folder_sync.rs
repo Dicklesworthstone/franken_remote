@@ -153,6 +153,7 @@ struct Running {
     client: ControllerJob,
     receiver: Receiver,
     input: InputSession,
+    source_permission: Permission,
     // The receiver's opaque authority must retain THIS accepted owner.
     _client_input: InputClient,
     cleaned: bool,
@@ -248,12 +249,13 @@ impl Running {
         // The existing fixture field names retain their source/receiver roles;
         // an upload moves that source to the controller without swapping who
         // is permitted to advertise and explicitly accept the original job.
+        let source_permission = Permission::new(true);
         let host = if upload {
             SourceJob::for_controller(
                 source,
                 cx.clone(),
                 source_authority,
-                Permission::new(true),
+                source_permission.clone(),
                 source_connection,
             )
         } else {
@@ -261,7 +263,7 @@ impl Running {
                 source,
                 cx.clone(),
                 source_authority,
-                Permission::new(true),
+                source_permission.clone(),
                 source_connection,
             )
         }
@@ -289,6 +291,7 @@ impl Running {
             client,
             receiver,
             input,
+            source_permission,
             _client_input: client_input,
             cleaned: false,
             upload,
@@ -1426,3 +1429,6 @@ fn oversized_source_directory_refuses_before_any_page_is_offered() {
 
 #[path = "remote_folder_sync/recursive.rs"]
 mod recursive;
+
+#[path = "remote_folder_sync/source_authority.rs"]
+mod source_authority;

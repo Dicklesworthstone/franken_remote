@@ -39,6 +39,7 @@ use fr_wire::{
 };
 use source::{Event, Source};
 use std::{fs::File, io, time::Duration};
+pub(crate) use sync::SourceScope;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
@@ -420,15 +421,22 @@ impl<'a> Sender<'a> {
             return Err(Error::Expired);
         }
         let next = self.next.checked_add(1).ok_or(Error::Limits)?;
-        let source = if expected_bytes.is_some() {
+        let scope = self.batch.as_ref().and_then(batch::Batch::source_scope);
+        if let Some(scope) = &scope {
+            scope.check(now)?;
+        }
+        let source = if expected_bytes.is_some() || scope.is_some() {
             Source::spawn_selected(
                 self.cx.clone(),
-                file,
-                name.into(),
+                source::SelectedSource {
+                    file,
+                    name: name.into(),
+                    directory,
+                    expected_bytes,
+                },
                 self.policy,
                 deadline,
-                directory,
-                expected_bytes,
+                scope,
             )?
         } else if directory {
             Source::spawn_directory(self.cx.clone(), file, name.into(), self.policy, deadline)?

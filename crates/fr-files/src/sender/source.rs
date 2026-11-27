@@ -3,13 +3,15 @@
 #[cfg(all(test, target_os = "linux"))]
 mod cleanup_tests;
 #[cfg(all(test, unix))]
+mod scope_tests;
+#[cfg(all(test, unix))]
 mod snapshot_tests;
 #[cfg(test)]
 mod tests;
 mod tree;
 #[cfg(unix)]
 use super::ExpectedSource;
-use super::{Error, Policy};
+use super::{Error, Policy, SourceScope};
 use crate::receive::MAX_CHUNK_BYTES;
 use crate::rx::MetadataExt;
 use asupersync::{
@@ -28,7 +30,7 @@ use std::{
     io::{Read, Seek},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
@@ -50,11 +52,19 @@ struct Gate {
     cx: Cx,
     clock: TimerDriverHandle,
     deadline: u64,
+    scope: Option<SourceScope>,
 }
 impl Gate {
     fn check(&self) -> Result<(), Error> {
         if self.stop.load(Ordering::Acquire) || self.cx.is_cancel_requested() {
             return Err(Error::Cancelled);
+        }
+        let now = self.clock.now().as_nanos() / 1000;
+        if now >= self.deadline {
+            return Err(Error::Expired);
+        }
+        if let Some(scope) = &self.scope {
+            scope.check(now)?;
         }
         if self.clock.now().as_nanos() / 1000 >= self.deadline {
             return Err(Error::Expired);
@@ -67,6 +77,7 @@ pub(super) struct Source {
     command: SyncSender<usize>,
     result: Receiver<Result<Event, Error>>,
     stop: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<Error>>>,
     thread: Option<JoinHandle<()>>,
     pending: bool,
 }
@@ -78,7 +89,18 @@ impl Source {
         policy: Policy,
         deadline: u64,
     ) -> Result<Self, Error> {
-        Self::spawn_selected(cx, file, name, policy, deadline, false, None)
+        Self::spawn_selected(
+            cx,
+            SelectedSource {
+                file,
+                name,
+                directory: false,
+                expected_bytes: None,
+            },
+            policy,
+            deadline,
+            None,
+        )
     }
     pub(super) fn spawn_directory(
         cx: Cx,
@@ -87,44 +109,54 @@ impl Source {
         policy: Policy,
         deadline: u64,
     ) -> Result<Self, Error> {
-        Self::spawn_selected(cx, file, name, policy, deadline, true, None)
+        Self::spawn_selected(
+            cx,
+            SelectedSource {
+                file,
+                name,
+                directory: true,
+                expected_bytes: None,
+            },
+            policy,
+            deadline,
+            None,
+        )
     }
     pub(super) fn spawn_selected(
         cx: Cx,
-        file: File,
-        name: String,
+        selected: SelectedSource,
         policy: Policy,
         deadline: u64,
-        directory: bool,
-        expected_bytes: Option<u64>,
+        scope: Option<SourceScope>,
     ) -> Result<Self, Error> {
-        if expected_bytes.is_some_and(|size| size > policy.max_file_bytes) {
+        if selected
+            .expected_bytes
+            .is_some_and(|size| size > policy.max_file_bytes)
+        {
             return Err(Error::Limits);
         }
         let clock = cx.timer_driver().ok_or(Error::Clock)?;
         let (send, command) = mpsc::sync_channel(1);
         let (reply, result) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
+        let failure = Arc::new(Mutex::new(None));
+        let worker_failure = failure.clone();
         let gate = Gate {
             stop: stop.clone(),
             cx,
             clock,
             deadline,
+            scope,
         };
         let thread = thread::Builder::new()
             .name("fr-file-source".into())
             .spawn(move || {
-                let selected = SelectedSource {
-                    file,
-                    name,
-                    directory,
-                    expected_bytes,
-                };
                 if let Err(error) = run(selected, policy, &gate, &command, &reply) {
-                    // There cannot be a second unread result: request admission is
-                    // exclusive until the previous result is taken. Never block on
-                    // the abandoned network owner, including during cancellation.
-                    let _ = reply.try_send(Err(error));
+                    // Independent scope/deadline checks can end the source while
+                    // Prepared or Chunk still occupies its one result slot.
+                    // Retain the original failure separately: a stalled parent
+                    // must not turn it into stale data or a generic disconnect.
+                    record_failure(error, &worker_failure, &reply);
                 }
             })
             .map_err(|_| Error::Spawn)?;
@@ -132,33 +164,53 @@ impl Source {
             command: send,
             result,
             stop,
+            failure,
             thread: Some(thread),
             pending: true,
         })
     }
     pub(super) fn poll(&mut self) -> Result<Option<Event>, Error> {
+        if let Err(error) = self.check_failure() {
+            self.pending = false;
+            // At most one unpublished result is retained. A terminal source
+            // never hands that payload back to its original network owner.
+            let _ = self.result.try_recv();
+            return Err(error);
+        }
         if !self.pending {
             return Ok(None);
         }
         match self.result.try_recv() {
             Ok(event) => {
                 self.pending = false;
+                self.check_failure()?;
                 event.map(Some)
             }
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(Error::Worker),
+            Err(TryRecvError::Disconnected) => {
+                self.check_failure()?;
+                Err(Error::Worker)
+            }
         }
     }
     pub(super) fn request(&mut self, maximum: usize) -> Result<(), Error> {
+        self.check_failure()?;
         if self.pending {
             return Err(Error::Busy);
         }
         if !(1..=MAX_CHUNK_BYTES).contains(&maximum) {
             return Err(Error::Limits);
         }
-        self.command.try_send(maximum).map_err(|_| Error::Worker)?;
+        if self.command.try_send(maximum).is_err() {
+            self.check_failure()?;
+            return Err(Error::Worker);
+        }
         self.pending = true;
         Ok(())
+    }
+    fn check_failure(&self) -> Result<(), Error> {
+        let failure = self.failure.lock().map_err(|_| Error::Worker)?;
+        (*failure).map_or(Ok(()), Err)
     }
     pub(super) fn pending(&self) -> bool {
         self.pending
@@ -182,6 +234,17 @@ impl Drop for Source {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn record_failure(
+    error: Error,
+    failure: &Mutex<Option<Error>>,
+    reply: &SyncSender<Result<Event, Error>>,
+) {
+    if let Ok(mut failure) = failure.lock() {
+        failure.get_or_insert(error);
+    }
+    let _ = reply.try_send(Err(error));
 }
 
 #[derive(PartialEq, Eq)]
@@ -211,11 +274,11 @@ fn eof(file: &mut File) -> Result<(), Error> {
     }
     Ok(())
 }
-struct SelectedSource {
-    file: File,
-    name: String,
-    directory: bool,
-    expected_bytes: Option<u64>,
+pub(super) struct SelectedSource {
+    pub(super) file: File,
+    pub(super) name: String,
+    pub(super) directory: bool,
+    pub(super) expected_bytes: Option<u64>,
 }
 
 fn run(
@@ -335,6 +398,7 @@ fn prepare(
                             Error::from(error)
                         }
                     })?;
+                    check()?;
                     hash.update_with_chunk(&buffer[..n]);
                     offset += n as u64;
                 }

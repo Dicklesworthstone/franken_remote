@@ -6,7 +6,7 @@ use super::{
     state,
 };
 use crate::{
-    sender::{Outcome, Sender, batch},
+    sender::{Outcome, Sender, SourceScope, batch},
     session::{Authority, Permission},
     sync::SyncError,
 };
@@ -417,7 +417,16 @@ impl HostJob {
                 self.reported = 0;
                 self.recorded_ledger = false;
                 sender
-                    .begin_batch_before(q, prepared.selection, self.round_until)
+                    .begin_sync_batch_before(
+                        q,
+                        prepared.selection,
+                        self.round_until,
+                        SourceScope::new(
+                            self.authority.clone(),
+                            self.permission.clone(),
+                            self.stopped.clone(),
+                        ),
+                    )
                     .map_err(LiveError::Send)?;
                 self.step = Step::Transfer;
             }

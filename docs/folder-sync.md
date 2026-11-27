@@ -161,6 +161,17 @@ owner's exact publication sample or renew the original control grant. Disk
 publication retains its ordered clock checks, and expiry, revocation or loss
 of the original owner remains terminal for both paths.
 
+The same original job authority, file consent and stop flag follow each queued
+selection into its independent ATP source worker. Preparation and later payload
+reads check them at bounded read boundaries, including while the session loop
+is paused. Stopping the job or revoking source consent therefore retires the
+worker without another network turn. This does not renew the grant or round
+deadline or revoke otherwise live input merely because file consent ended.
+One retained terminal error takes precedence over an unread prepared manifest
+or chunk in the one-slot result mailbox; stale data is discarded and the
+original cancellation or expiry remains visible separately from thread cleanup.
+Previously confirmed publications and their receipts remain intact.
+
 A source edited or removed during the pre-transfer scan can be scanned again
 within the same round. Premature EOF while hashing a selected file or recursive
 tree is classified as a changed source; permission and other I/O errors retain

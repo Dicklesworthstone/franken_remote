@@ -1,5 +1,36 @@
 # Implementation status
 
+## Original folder authority inside independent source workers (2026-11-27)
+
+The ATP preparation and payload worker now retains the original folder job's
+control authority, file consent and stop flag after its initial scan. Queued
+sources and every bounded worker read check that same scope, even when the
+session loop is paused. The handoff validates the existing lane's direction,
+role, session, lease, channel and parent; it stays on the current batch and
+cannot authorize an ordinary later selection. Grant and round deadlines are
+unchanged, and hashing checks consent again after each bounded content read.
+
+A single retained terminal error now survives an unread prepared manifest or
+chunk in the worker's one-slot mailbox. Polling discards that stale result and
+reports the original cancellation or expiry. Thread cleanup remains a separate
+one-time join, and earlier confirmed publications retain their original receipts.
+
+Five new source tests cover fourteen scenarios across real file/tree hashing,
+independent permission/job/input revocation, lease expiry, fixed deadlines and
+controlled unread-result custody. Four new UDP/TLS integration regressions each
+cover host downloads and controller uploads, including preservation of an
+already published prefix while a subsequent source is revoked. They stop
+servicing the job, sender and network to expose missing worker authority.
+
+These tests are authored and independently reviewed, not yet executed. Pinned
+formatting passed for `fr-client`, `fr-files` and `fr-transport`; changed-line
+whitespace and documentation-link checks passed. A static UBS scan found no
+actionable new production issue. Local Cargo attempts were killed with SIGKILL
+while building pinned Asupersync before reaching `fr-files`. The exact cause of that
+external kill is not exposed by this environment. No full workspace, native
+desktop, tailnet or performance qualification is claimed. Tracking remains
+open in `fr-sync-source-authority-afj9` until the file-package gates run.
+
 ## Concurrent controller folder-source checks (2026-11-27)
 
 Controller folder scans and their session supervisor now check the original

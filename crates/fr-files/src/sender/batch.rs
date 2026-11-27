@@ -1,8 +1,8 @@
-//! Explicit local file/tree multi-selection on the original sender, never a sync job.
+//! A bounded local file/tree selection on the original sender.
 //! One source thread and one transfer at a time; no new wire profile or channel.
 #[cfg(unix)]
 use super::ExpectedSource;
-use super::{Error, Outcome, Receipt, Sender, Stage, micros};
+use super::{Error, Outcome, Receipt, Sender, SourceScope, Stage, micros};
 use crate::receive::Publication;
 use asupersync::atp::safety::validate_portable_path_component;
 use fr_transport::quic::QuicRecords;
@@ -158,12 +158,16 @@ impl Report {
 
 pub(super) struct Batch {
     selection: Selection,
+    source_scope: Option<SourceScope>,
     deadline: u64,
     last: u64,
     report: Report,
     recorded_current: bool,
 }
 impl Batch {
+    pub(super) fn source_scope(&self) -> Option<SourceScope> {
+        self.source_scope.clone()
+    }
     pub(super) fn report_complete(&self) -> bool {
         self.report.complete
     }
@@ -208,6 +212,15 @@ impl Sender<'_> {
         selection: Selection,
         deadline: u64,
     ) -> Result<(), Error> {
+        self.begin_scoped_batch_before(q, selection, deadline, None)
+    }
+    pub(super) fn begin_scoped_batch_before(
+        &mut self,
+        q: &QuicRecords,
+        selection: Selection,
+        deadline: u64,
+        source_scope: Option<SourceScope>,
+    ) -> Result<(), Error> {
         self.identity(q)?;
         if self.closed {
             return Err(Error::Closed);
@@ -231,6 +244,7 @@ impl Sender<'_> {
         }
         self.batch = Some(Batch {
             selection,
+            source_scope,
             deadline,
             last: now,
             report: Report {

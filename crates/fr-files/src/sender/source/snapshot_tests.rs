@@ -241,12 +241,15 @@ fn an_expected_version_cannot_hash_growth_under_the_ordinary_larger_limit() {
                 fs::write(&content, b"grown beyond the scanned version").unwrap();
                 let mut source = Source::spawn_selected(
                     cx.clone(),
-                    File::open(root).unwrap(),
-                    "selected".into(),
+                    SelectedSource {
+                        file: File::open(root).unwrap(),
+                        name: "selected".into(),
+                        directory,
+                        expected_bytes: Some(snapshot.version.size()),
+                    },
                     Policy::default(),
                     cx.timer_driver().unwrap().now().as_nanos() / 1000 + 2_000_000,
-                    directory,
-                    Some(snapshot.version.size()),
+                    None,
                 )
                 .unwrap();
                 assert!(matches!(event(&mut source), Err(Error::SourceChanged)));
