@@ -1,12 +1,50 @@
 # Implementation status
 
+## Host-local consent for browser desktops (2026-11-27)
+
+The Linux browser host now honors effective `approval=local` through the existing
+device-attributed native consent dialog. The mandatory installed observation
+indicator supplies separate consent and Stop Sharing surfaces for the same
+selected user, display and logind session. The original host policy requires a
+positively negotiated `browser-local-approval` v1 capability; an older client
+cannot bypass it. Consent grants observation only and does not enable input.
+
+The host sends one original request before waiting, retaining its strong owner
+while the native prompt holds only the existing weak, one-use decision. A
+positive answer is consumed only after prompt cleanup. No observation authority,
+source discovery, capture or media ticket exists while approval is pending.
+Disconnects, expiry, original admission loss, Stop, policy changes and selected
+session loss retire that request. The run retains prompt cleanup outside the
+cancelled socket, and a simultaneous positive answer and connection closure
+cannot authorize capture.
+
+Rust/WASM owns the waiting state and exact request binding. Initial negotiation
+still has its original ten-second limit; one timely consent notice selects a
+thirty-second total startup ceiling from the original attempt/control start.
+Repeated notices, delayed callbacks and media startup cannot reset that ceiling.
+Nonce expiry remains the separate one-use ClientHello issuance/consumption bound.
+
+Validation: the exact pinned release WASM package passed 127/127 actual-package
+tests, including ten new consent adapter and production DOM/transport cases.
+Portable JavaScript passed 55/55 and focused native wire regressions passed 19/19.
+Strict WASM Clippy passed for the library and both Rust browser adapter/approval
+test targets; pinned whole-workspace formatting and changed-line checks passed.
+Additional native owner/cancellation tests are authored. Full
+native compilation and those host tests remain blocked: two resource-bounded
+attempts were SIGKILLed inside the pinned Asupersync dependency before project
+diagnostics. Physical consent UI, live tailnet and browser/GPU qualification
+remain open; no broader approval or browser qualification bead is closed.
+See [local approval](docs/desktop-approval.md) and
+[browser setup](docs/browser-desktop.md).
+
 ## Authenticated view-only browser desktop (2026-11-27)
 
 The opt-in Linux `frd run --browser-port` path now connects the actual protected
 HTTPS/WSS listener to installed-Tailscale admission, the existing supervised
 capture worker, and the Rust/WASM browser owner. It requires an embedded ABI-2
-browser package, the selected logind session, the live Stop sharing indicator,
-and effective approval=none. Native-only effects and unsupported host platforms
+browser package, the selected logind session and the live Stop sharing indicator.
+Both unattended and local-consent policy modes are now available as described
+above. Native-only effects and unsupported host platforms
 receive explicit refusals before startup. The default native listener is unchanged.
 
 The host retains the original control and video socket admissions, exact peer
@@ -41,8 +79,8 @@ including a bounded-thread metadata-only attempt. Actual X11/XCB SDK headers wer
 installed in an isolated build directory and passed a genuine C syntax check;
 that does not establish native Rust or desktop qualification.
 
-This profile provides one view-only desktop. Browser control, local approval
-dialogs, audio, clipboard, files, channel replacement, shared viewers and H3
+This profile provides one view-only desktop. Browser control,
+audio, clipboard, files, channel replacement, shared viewers and H3
 remain outside this implementation. Real browser/OS/GPU, second-machine tailnet
 and physical presentation qualification remain open. No Phase 3 gate or browser
 qualification bead is closed. See [setup and scope](docs/browser-desktop.md) and

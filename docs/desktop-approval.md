@@ -46,11 +46,30 @@ clipboard, file reception, encoder, frame rate and bitrate remain independent
 local settings and negotiated capabilities; selecting local approval enables
 none of them.
 
-Headless mode, missing logind selection, a missing packaged UI image and the
-separate `--observation-indicator` wrapper refuse this consent profile with
+For native QUIC hosting, headless mode, missing logind selection, a missing
+packaged UI image and the separate `--observation-indicator` wrapper refuse
+this consent profile with
 `local_approval_unavailable`. There is no stdin/terminal fallback or automatic
 switch to unattended sharing. The long-lived observation-indicator window and
 the one-use consent window are not combined by this slice.
+
+## Linux: consent for browser viewing
+
+The browser host also accepts `--approval local`. Its mandatory
+`--observation-indicator /absolute/path/fr-observation-indicator` supplies the
+same installed image for two separate roles: the live Stop Sharing surface and
+the one-use, device-attributed consent dialog. The selected logind session,
+display and user must match. See [browser desktop setup](browser-desktop.md)
+for the embedded WASM build and complete command.
+
+The negotiated `browser-local-approval` v1 capability carries the original
+request through the Rust/WASM waiting state. The original browser attempt and
+host control startup each retain a thirty-second total ceiling when a consent
+notice arrives within the initial ten-second negotiation budget. A pending
+request grants no observation, starts no capture worker and issues no video
+ticket. Closing the browser or losing policy/session/admission retires that
+original request while the host retains native prompt cleanup. An old answer
+cannot approve a later connection.
 
 ## Linux: install the monitored host as a user service
 

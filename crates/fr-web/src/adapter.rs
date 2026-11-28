@@ -374,19 +374,17 @@ impl BrowserConnectionAdapter {
             .desktop
             .as_ref()
             .map_or(0, crate::desktop::DesktopSession::control_binding);
-        let kind = match browser::record_kind(bytes, MAX_CONTROL_RECORD_BYTES, binding) {
-            Ok(kind) => kind,
-            Err(_) => return self.fail(BrowserAdapterError::InvalidControl),
+        let Ok(kind) = browser::record_kind(bytes, MAX_CONTROL_RECORD_BYTES, binding) else {
+            return self.fail(BrowserAdapterError::InvalidControl);
         };
         if kind == Kind::Refused {
-            let message = match refusal::decode(
+            let Ok(message) = refusal::decode(
                 bytes,
                 binding,
                 MAX_CONTROL_RECORD_BYTES,
                 InputDelivery::Reliable,
-            ) {
-                Ok(message) => message,
-                Err(_) => return self.fail(BrowserAdapterError::InvalidControl),
+            ) else {
+                return self.fail(BrowserAdapterError::InvalidControl);
             };
             if message.operation.is_some() || message.stage.is_some() {
                 return self.fail(BrowserAdapterError::InvalidControl);
@@ -667,10 +665,9 @@ impl BrowserConnectionAdapter {
         if matches!(
             event,
             BrowserLifecycleEvent::TabHidden | BrowserLifecycleEvent::FocusLost
-        ) {
-            if let Some(desktop) = self.desktop.as_mut() {
-                desktop.hide();
-            }
+        ) && let Some(desktop) = self.desktop.as_mut()
+        {
+            desktop.hide();
         }
         if matches!(
             event,
@@ -764,12 +761,11 @@ impl BrowserConnectionAdapter {
         if self.core.tick(now_us).is_err() {
             return self.fail(BrowserAdapterError::InvalidClock);
         }
-        if let Some(desktop) = self.desktop.as_mut() {
-            if desktop.opened() {
-                if let Err(error) = desktop.tick(&mut self.core, now_us) {
-                    return self.fail(error);
-                }
-            }
+        if let Some(desktop) = self.desktop.as_mut()
+            && desktop.opened()
+            && let Err(error) = desktop.tick(&mut self.core, now_us)
+        {
+            return self.fail(error);
         }
         Ok(())
     }

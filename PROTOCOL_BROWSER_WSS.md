@@ -29,6 +29,40 @@ daemon, admission profile, policy, permissions, exact local endpoint and peer
 IP against the control owner. Only the remote ephemeral TCP port may differ.
 Both leases must remain independently live. A match grants no new lifetime.
 
+## Host-local approval
+
+`browser-local-approval` version **1** is optional in the client offer. A host
+whose original local policy requires consent marks it required in its offer.
+Peers without that capability cannot open an approval-required desktop. An
+optional capability alone does not require a prompt or enable approval on an
+unattended host.
+
+After verified node/origin/nonce admission and SelectedConfiguration, the host
+sends exactly one canonical ApprovalRequired before waiting on its existing
+native consent UI. Its request is the original remote-session ID; its role is
+Observe; its deadline is nonzero host-monotonic time. The native prompt shows
+the actual admitted device and negotiated effects. The prompt owns only a weak,
+one-use decision capability. The original pending owner must consume a positive
+decision after prompt cleanup before observation authority, discovery, capture,
+SessionOpened or video tickets can be created.
+
+Initial negotiation retains its original ten-second ceiling. A valid notice
+received before that ceiling selects a total consent/startup ceiling of thirty
+seconds from the **original** client attempt and host control start, respectively.
+Receiving the notice never starts a new thirty-second timer. Nonce expiry still
+bounds issuance and host consumption of the one-use ClientHello; consuming that
+nonce does not turn it into a reusable credential. The client does not compare
+the uncorrelated host timestamp with its local clock.
+
+Repeated notices, changed requests, changed roles, or a SessionOpened naming a
+different request are terminal. A required approval capability also requires
+the original notice before SessionOpened. The client displays a waiting state
+without media or input readiness. Denial and unanswered consent have distinct
+refusals. Socket closure, hidden-page retirement, original admission loss, local
+Stop, selected-session loss and policy change retire the pending capability;
+late native answers cannot authorize a replacement. The host retains native
+prompt cleanup independently of the cancelled socket.
+
 ## Video attachment
 
 After SessionOpened and its control BindingAccepted, the host sends a video

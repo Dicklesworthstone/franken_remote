@@ -57,6 +57,7 @@ pub struct Request {
     pub cx: Cx,
     pub binding: ControlBinding,
     pub selection: Selection,
+    pub(crate) approval: Option<crate::session_startup::PendingApproval>,
 }
 pub type SelectSource = Box<dyn FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send>;
 pub type Supervisor = Pin<Box<dyn Future<Output = Result<(), ()>> + Send>>;
@@ -76,6 +77,7 @@ pub type Factory = Arc<
 
 pub(super) struct Service {
     factory: Factory,
+    require_approval: bool,
     slot: Mutex<Slot>,
     closed: AtomicBool,
 }
@@ -93,9 +95,31 @@ impl Service {
     pub(super) fn new(factory: Factory) -> Self {
         Self {
             factory,
+            require_approval: false,
             slot: Mutex::new(Slot::default()),
             closed: AtomicBool::new(false),
         }
+    }
+    pub(super) fn require_approval(&mut self) {
+        self.require_approval = true;
+    }
+    fn offer(
+        &self,
+        limits: fr_core::limits::ProtocolLimits,
+    ) -> Result<fr_wire::negotiation::Offer, Reason> {
+        let mut offer = browser::offer(limits);
+        if self.require_approval {
+            let capability = offer
+                .capabilities
+                .iter_mut()
+                .find(|capability| {
+                    capability.name == browser::APPROVAL_CAPABILITY
+                        && capability.version == browser::APPROVAL_VERSION
+                })
+                .ok_or(Reason::RequiredCapability)?;
+            capability.required = true;
+        }
+        Ok(offer)
     }
     pub(super) fn available(&self) -> bool {
         !self.closed.load(Ordering::Acquire)
@@ -743,6 +767,23 @@ mod tests {
         assert!(!service.available());
         assert!(service.reserve().is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn original_host_policy_requires_positive_browser_approval_negotiation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut service = Service::new(unavailable_factory(calls));
+        let viewer = browser::offer(browser::limits());
+        let mut legacy = viewer.clone();
+        legacy
+            .capabilities
+            .retain(|capability| capability.name != browser::APPROVAL_CAPABILITY);
+        assert!(browser::intersect(&service.offer(browser::limits()).unwrap(), &legacy).is_ok());
+        service.require_approval();
+        let host = service.offer(browser::limits()).unwrap();
+        assert!(browser::intersect(&host, &legacy).is_err());
+        let selected = browser::select(&browser::intersect(&host, &viewer).unwrap()).unwrap();
+        assert!(browser::local_approval_required(&selected));
     }
 
     #[test]

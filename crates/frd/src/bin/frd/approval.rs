@@ -9,7 +9,7 @@ use frd::{
 use std::path::Path;
 
 #[cfg(not(any(target_os = "macos", windows)))]
-const REQUIRED: &str = "local approval requires --logind-session for the shared desktop and an installed fr-observation-indicator beside frd; headless sharing and the separate --observation-indicator wrapper cannot use this consent profile";
+const REQUIRED: &str = "local approval requires --logind-session for the shared desktop and an installed fr-observation-indicator beside frd, or the browser profile's explicit indicator path; headless sharing cannot use this consent profile";
 #[cfg(target_os = "macos")]
 const REQUIRED: &str = "local approval requires the installed fr-observation-indicator and the original monitored graphical login session; no unattended fallback is used";
 #[cfg(windows)]
@@ -24,7 +24,7 @@ pub fn configuration(
     // A host without lifecycle evidence must not even try an ambient UI.
     let image = eligible
         .then(|| {
-            let explicit = cfg!(target_os = "macos")
+            let explicit = (cfg!(target_os = "macos") || options.browser_port.is_some())
                 .then(|| options.observation_indicator.clone())
                 .flatten();
             explicit.or_else(|| {
@@ -72,7 +72,7 @@ fn eligible(options: &RunOptions) -> bool {
     } else {
         options.logind_session.is_some()
             && !options.headless
-            && options.observation_indicator.is_none()
+            && (options.observation_indicator.is_none() || options.browser_port.is_some())
     }
 }
 #[cfg(not(windows))]
@@ -159,6 +159,39 @@ mod tests {
             );
             assert!(configuration(&options, Approval::None).unwrap().is_none());
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn browser_consent_uses_its_explicit_monitored_indicator_without_native_fallback() {
+        let mut options = RunOptions {
+            browser_port: Some(8444),
+            logind_session: Some("c2".into()),
+            observation_indicator: Some("/installed/browser-indicator".into()),
+            ..RunOptions::default()
+        };
+        assert!(eligible(&options));
+        assert!(
+            selected(
+                Approval::Local,
+                eligible(&options),
+                options.observation_indicator.as_deref()
+            )
+            .unwrap()
+            .is_some()
+        );
+        options.browser_port = None;
+        assert!(
+            !eligible(&options),
+            "native wrapper restrictions remain unchanged"
+        );
+        options.browser_port = Some(8444);
+        options.logind_session = None;
+        assert!(!eligible(&options));
+        options.logind_session = Some("c2".into());
+        options.headless = true;
+        assert!(!eligible(&options));
+        assert!(selected(Approval::Local, true, None).is_err());
     }
 
     #[test]

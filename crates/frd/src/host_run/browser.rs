@@ -6,8 +6,8 @@ mod factory;
 mod listener;
 
 use super::{
-    Encoder, EncoderSelection, Error, Event, Options, Reporter, StopHandle, Watch, check, policy,
-    select_encoder, session_ended, session_monitor, session_opened, session_setup, signals,
+    Encoder, EncoderSelection, Error, Event, Options, Reporter, StopHandle, Watch, approval, check,
+    policy, select_encoder, session_ended, session_monitor, session_opened, session_setup, signals,
     unless_stopped,
 };
 use crate::{
@@ -58,6 +58,7 @@ fn check_profile(options: &Options, port: u16) -> Result<(), Error> {
 
 /// Enter through host_indicator::run_browser: the actual local Stop sharing
 /// surface must already be ready and remain alive through this run's cleanup.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     options: &Options,
     port: u16,
@@ -65,8 +66,12 @@ pub(crate) fn run(
     stop: &Arc<StopHandle>,
     configuration: policy::Configuration,
     selection: EncoderSelection,
+    approval: Option<&approval::Configuration>,
 ) -> Result<(), Error> {
     check_profile(options, port)?;
+    if let Some(approval) = approval {
+        approval.validate(options)?;
+    }
     if stop.is_requested() {
         return Ok(());
     }
@@ -92,6 +97,7 @@ pub(crate) fn run(
         configuration,
         encoder,
         &lifetime,
+        approval,
     );
     let ended = session_ended(Some(&lifetime));
     let cleaned = finish_monitor(monitor);
@@ -127,6 +133,7 @@ fn finish_monitor(mut monitor: Monitor) -> Result<(), Error> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // Keep credential, consent and policy cleanup under the original run owner.
 fn serve(
     options: &Options,
     port: u16,
@@ -135,6 +142,7 @@ fn serve(
     configuration: policy::Configuration,
     encoder: Encoder,
     lifetime: &session_monitor::Control,
+    approval: Option<&approval::Configuration>,
 ) -> Result<(), Error> {
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
@@ -162,7 +170,7 @@ fn serve(
                 session_setup(
                     &broker,
                     Some(lifetime),
-                    policy.ready_with_approval(&broker, false),
+                    policy.ready_with_approval(&broker, approval.is_some()),
                 ),
                 stop,
                 &mut signals,
@@ -173,8 +181,9 @@ fn serve(
                 return Ok(());
             };
             ready??;
-            let epoch =
-                policy::lease_with_approval(policy.handle(), false)?.ok_or(Error::Configuration)?;
+            let epoch = policy::lease_with_approval(policy.handle(), approval.is_some())?
+                .ok_or(Error::Configuration)?;
+            let required = approval::required(Some(&epoch))?;
             let gate = Gate {
                 cx: service,
                 stop: stop.clone(),
@@ -204,6 +213,9 @@ fn serve(
                 return Ok(());
             };
             let identity = identity?.map_err(Error::Tailnet)?;
+            // The run owns native prompt cleanup independently of the socket
+            // whose weak one-use decision it services.
+            let mut consent = approval::Owner::new(if required { approval } else { None }, options);
             let result = async {
                 gate.check()?;
                 let node = api.node_identity(&broker).await.map_err(Error::Tailnet)?;
@@ -214,18 +226,31 @@ fn serve(
                     OsSessionId::from_raw(super::random_nonzero_u128()?),
                     ProtocolLimits::ABSOLUTE,
                 );
-                let ingress = Arc::new(
-                    BrowserIngress::new(config)
-                        .with_desktop(factory::make(options, encoder, &handle, &gate)),
-                );
+                let factory = factory::make(options, encoder, &handle, &gate, consent.notify());
+                let ingress = BrowserIngress::new(config);
+                let ingress = Arc::new(if required {
+                    ingress.with_desktop_approval(factory)
+                } else {
+                    ingress.with_desktop(factory)
+                });
                 let renew = identity.serve_renewal(&renewal).map_err(Error::Tailnet)?;
                 // The supervisor fences the original service Cx on credential/local
                 // failure and keeps polling the listener through explicit cleanup.
                 super::supervise(
                     async { renew.await.map_err(Error::Tailnet) },
                     listener::serve(
-                        options, port, report, &handle, &api, &identity, node, ingress, gate,
-                        &broker, &cleanup,
+                        options,
+                        port,
+                        report,
+                        &handle,
+                        &api,
+                        &identity,
+                        node,
+                        ingress,
+                        gate,
+                        &broker,
+                        &cleanup,
+                        &mut consent,
                     ),
                     &active,
                     stop,
@@ -235,7 +260,11 @@ fn serve(
             }
             .await;
             identity.stop();
-            result
+            let finished = consent.finish(&cleanup).await;
+            if finished.is_err() {
+                report(Event::CleanupFailed { stage: "approval" });
+            }
+            finished.and(result)
         }
         .await;
         let cleaned = policy.finish(&cleanup).await;

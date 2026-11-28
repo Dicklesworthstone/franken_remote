@@ -410,7 +410,7 @@ impl RunOptions {
     #[must_use]
     pub fn browser_refusal(
         &self,
-        approval: Approval,
+        _approval: Approval,
         bundled: bool,
     ) -> Option<(&'static str, &'static str)> {
         self.browser_port?;
@@ -440,11 +440,6 @@ impl RunOptions {
                     || self.adaptive_capture,
                 "browser_feature_unsupported",
                 "The browser desktop is view-only; control, clipboard, audio, files, directory and adaptive-capture options are unavailable in this profile.",
-            ),
-            (
-                approval != Approval::None,
-                "browser_local_approval_unavailable",
-                "The browser desktop has no local approval dialog yet; its effective host policy must have approval=none.",
             ),
             (
                 self.headless || self.logind_session.is_none(),

@@ -14,21 +14,33 @@ pub(super) struct Attribution {
     local_request: u64,
 }
 impl Attribution {
+    pub(super) fn from_lease(
+        peer: &fr_tailnet::Lease,
+        selected: &Selection,
+    ) -> Result<Self, Error> {
+        let identity = peer.approval_identity().map_err(Error::Admission)?;
+        Self::from_identity(
+            identity.node_id().to_owned(),
+            identity.dns_name().map(str::to_owned),
+            selected,
+        )
+    }
     pub(super) fn new(peer: &Peer, selected: &Selection) -> Result<Self, Error> {
-        let (node_id, dns_name) = match peer {
-            Peer::Tailnet(owner) => {
-                let identity = owner
-                    .lease()
-                    .approval_identity()
-                    .map_err(Error::Admission)?;
-                (
-                    identity.node_id().to_owned(),
-                    identity.dns_name().map(str::to_owned),
-                )
-            }
+        match peer {
+            Peer::Tailnet(owner) => Self::from_lease(&owner.lease(), selected),
             #[cfg(test)]
-            Peer::Fixture { .. } => ("fixture-node".into(), Some("fixture.example".into())),
-        };
+            Peer::Fixture { .. } => Self::from_identity(
+                "fixture-node".into(),
+                Some("fixture.example".into()),
+                selected,
+            ),
+        }
+    }
+    fn from_identity(
+        node_id: String,
+        dns_name: Option<String>,
+        selected: &Selection,
+    ) -> Result<Self, Error> {
         let local_request = LOCAL_REQUEST
             .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)

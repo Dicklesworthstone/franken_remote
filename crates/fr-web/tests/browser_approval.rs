@@ -22,9 +22,9 @@ fn bootstrap(lifetime_ms: u32) -> String {
     })
     .to_string()
 }
-fn record(message: Message) -> Vec<u8> {
+fn record(message: &Message) -> Vec<u8> {
     let mut bytes = [0; browser::MAX_RECORD];
-    let n = browser::encode(&message, bytes.len(), &mut bytes).unwrap();
+    let n = browser::encode(message, bytes.len(), &mut bytes).unwrap();
     bytes[..n].to_vec()
 }
 fn offer(required: Option<bool>) -> Offer {
@@ -51,7 +51,7 @@ fn selected(required: Option<bool>) -> (BrowserConnectionAdapter, BrowserAttempt
     adapter
         .receive_control(
             attempt,
-            &record(Message::HostCapabilities(offer(required))),
+            &record(&Message::HostCapabilities(offer(required))),
             START + 3,
         )
         .unwrap();
@@ -65,14 +65,14 @@ fn selected(required: Option<bool>) -> (BrowserConnectionAdapter, BrowserAttempt
     (adapter, attempt, selection)
 }
 fn notice(request: u128, deadline_us: u64, role: Role) -> Vec<u8> {
-    record(Message::ApprovalRequired {
+    record(&Message::ApprovalRequired {
         request: RemoteSessionId::from_raw(request),
         deadline_us,
         role,
     })
 }
 fn opened(selection: Selection, request: u128) -> Vec<u8> {
-    record(Message::SessionOpened {
+    record(&Message::SessionOpened {
         binding: ControlBinding {
             id: 7,
             host_boot: HostBootId::from_raw(11),
@@ -254,7 +254,7 @@ fn invalid_notices_and_unqueued_selection_never_enter_approval() {
         adapter
             .receive_control(
                 attempt,
-                &record(Message::HostCapabilities(offer(Some(true)))),
+                &record(&Message::HostCapabilities(offer(Some(true)))),
                 START + 3,
             )
             .unwrap();

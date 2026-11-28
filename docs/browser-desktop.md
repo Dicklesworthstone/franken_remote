@@ -36,6 +36,24 @@ frd run \
 
 The host prints the certified HTTPS URL. Open that URL from an admitted tailnet machine and use the page's explicit connection action. The browser must pass the existing HEVC/WebCodecs qualification checks. The example's hardware-auto selection probes real backends; it does not silently switch to software. An operator can explicitly select the existing CPU developer profile with `--encoder software`.
 
+To require consent for each browser connection, select `--approval local`
+instead. The same explicitly selected `--observation-indicator` executable
+provides a separate, one-use native consent dialog while the original Stop
+Sharing window remains alive. The dialog names the actual admitted device and
+view-only scope. A positive decision is consumed only after that prompt's
+native worker has finished cleanup; source discovery and capture then begin.
+Missing UI or session prerequisites refuse the request without changing the
+saved approval policy.
+
+The browser displays **Waiting for approval on the host**. A single original
+consent request must arrive within the initial ten-second negotiation budget.
+It selects a thirty-second total startup budget measured from the original
+connection attempt, including consent and media startup. Progress and repeated
+messages do not restart that time. Disconnecting or hiding the page retires the
+request; a later click on its old native dialog cannot approve another session.
+Older browser packages lacking the negotiated `browser-local-approval` v1
+capability receive an explicit capability refusal when consent is required.
+
 `--browser-port` selects a browser-only listener. Do not combine it with native `--port`. The existing native listener remains the default when the browser flag is absent. `--once` ends the run after its first accepted desktop, including failed desktop startup. Ordinary asset and bootstrap requests do not consume that desktop lifetime.
 
 ## Authority and lifecycle
@@ -58,8 +76,19 @@ The Rust receiver uses the existing shared `ReceivePipeline` and the same `Brows
 
 ## Current scope and evidence
 
-The implemented profile is **one active, view-only Linux-hosted desktop**. Local approval dialogs, remote input, clipboard, audio, microphone, file transfer, browser channel replacement, shared multi-viewer hosting, and HTTP/3 WebTransport are not provided by this profile. Requested incompatible host flags receive explicit refusals before startup. Other host operating systems are refused by the browser entry point.
+The implemented profile is **one active, view-only Linux-hosted desktop**, with
+optional device-attributed local approval. Remote input, clipboard, audio,
+microphone, file transfer, browser channel replacement, shared multi-viewer
+hosting, and HTTP/3 WebTransport are not provided by this profile. Requested
+incompatible host flags receive explicit refusals before startup. Other host
+operating systems are refused by the browser entry point.
 
-The exact pinned release WASM package and matching generated glue pass all 117 package tests, including the new desktop handshake, real HEVC admission, delayed decode/presentation and original resource-credit cases. Portable JavaScript tests pass 55 cases. Native WebCodecs handles and browser I/O in those tests are explicitly simulated; these results do not establish real browser/OS/GPU or live tailnet qualification.
+The exact pinned release WASM package and matching generated glue pass all 127
+package tests, including desktop handshake, real HEVC admission, delayed
+decode/presentation, original resource credit and ten consent adapter/transport
+cases. Portable JavaScript tests pass 55 cases and focused native wire tests
+pass 19 cases. Native WebCodecs handles and browser I/O in those tests are
+explicitly simulated; these results do not establish real browser/OS/GPU,
+physical consent UI or live tailnet qualification.
 
 The new real TLS/admission tests and host session regressions remain unexecuted: native compilation was killed inside the pinned Asupersync dependency before project diagnostics, including a single-threaded metadata-only attempt. Chrome/Safari rows and a real second-machine tailnet session remain unqualified until their actual runs and evidence are recorded.

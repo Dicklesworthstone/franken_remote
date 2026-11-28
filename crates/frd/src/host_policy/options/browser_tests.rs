@@ -39,13 +39,10 @@ fn browser_port_requires_one_nonzero_value() {
 }
 
 #[test]
-fn complete_view_only_profile_requires_no_implicit_approval_or_bundle() {
+fn complete_view_only_profile_preserves_approval_and_requires_a_bundle() {
     let options = selected();
     assert_eq!(code(&options, Approval::None, true), None);
-    assert_eq!(
-        code(&options, Approval::Local, true),
-        Some("browser_local_approval_unavailable"),
-    );
+    assert_eq!(code(&options, Approval::Local, true), None);
     assert_eq!(
         code(&options, Approval::None, false),
         Some("browser_client_unavailable"),

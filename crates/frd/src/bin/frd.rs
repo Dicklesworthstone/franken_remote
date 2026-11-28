@@ -56,15 +56,17 @@ OPTIONS:
     --port PORT     Ingress port for the native QUIC listener (default: 8443)
     --browser-port PORT  Instead serve the view-only browser desktop over HTTPS/WSS
                     on Linux. Requires --logind-session, --observation-indicator,
-                    approval=none, and a build containing the Rust/WASM browser
-                    bundle. Control, audio and files are not enabled in this profile.
+                    and a build containing the Rust/WASM browser bundle. Local
+                    approval uses that same installed indicator before capture.
+                    Control, audio and files are not enabled in this profile.
                     Uses separate control/video sockets; video has TCP head-of-line
                     blocking. See docs/browser-desktop.md
     --socket PATH   Path to tailscaled.sock
     --approval MODE Process override: 'none' (unattended) or 'local' (one-use
                     device-attributed desktop consent before capture). Local
                     requires --logind-session and fr-observation-indicator next
-                    to frd; no terminal or unattended fallback. See docs/desktop-approval.md
+                    to frd, or the browser profile's explicit indicator path;
+                    no terminal or unattended fallback. See docs/desktop-approval.md
     --sharing SCOPE Process override: 'own-user' (default) or 'tailnet'
     --headless      Share a private headless Xvfb display (cookie-authenticated)
     --display :N    X11 display to share (default: $DISPLAY)
@@ -990,15 +992,27 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         #[cfg(target_os = "linux")]
         {
             match observation_indicator.as_deref() {
-                Some(image) => frd::host_indicator::run_browser(
-                    &run_options,
-                    port,
-                    &report,
-                    &stop,
-                    policy,
-                    image,
-                    encoder,
-                )
+                Some(image) => match local_ui.as_ref() {
+                    Some(approval) => frd::host_indicator::run_browser_with_desktop_approval(
+                        &run_options,
+                        port,
+                        &report,
+                        &stop,
+                        policy,
+                        image,
+                        encoder,
+                        approval,
+                    ),
+                    None => frd::host_indicator::run_browser(
+                        &run_options,
+                        port,
+                        &report,
+                        &stop,
+                        policy,
+                        image,
+                        encoder,
+                    ),
+                }
                 .map_err(|error| (error.code(), error.to_string())),
                 None => Err((
                     "browser_indicator_required",

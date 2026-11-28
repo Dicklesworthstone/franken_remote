@@ -233,7 +233,7 @@ impl BrowserSessionCore {
         Ok(())
     }
 
-    /// Install an authenticated, locally approved SessionOpened before its
+    /// Install an authenticated, locally approved `SessionOpened` before its
     /// independently attached media channel. Transport admission is insufficient.
     pub(crate) fn on_admitted_session(
         &mut self,
@@ -618,7 +618,7 @@ impl BrowserSessionCore {
     ) -> Result<(), BrowserHevcError> {
         self.hevc.on_frame_decoded(decoder, frame_id)
     }
-    /// Only the canonical receiver-bound ViewTracker can supply this sample.
+    /// Only the canonical receiver-bound `ViewTracker` can supply this sample.
     /// No sample means the rendered image remains unqualified, even when its
     /// host capture timestamp alone falls inside the source-age bound.
     pub(crate) fn apply_view_sample(
@@ -635,14 +635,12 @@ impl BrowserSessionCore {
                 ..
             },
         ) = (sample, self.hevc.stage())
+            && sample.stamp.frame == last_frame_id
+            && sample.stamp.captured_us == last_source_us
+            && sample.stamp.observed_us >= last_source_us
+            && sample.stamp.source != fr_wire::SourceObservation::Unknown
         {
-            if sample.stamp.frame == last_frame_id
-                && sample.stamp.captured_us == last_source_us
-                && sample.stamp.observed_us >= last_source_us
-                && sample.stamp.source != fr_wire::SourceObservation::Unknown
-            {
-                self.presented_source_us = Some(sample.stamp.observed_us);
-            }
+            self.presented_source_us = Some(sample.stamp.observed_us);
         }
         if self.presented_source_us.is_none() {
             self.session.invalidate_control();

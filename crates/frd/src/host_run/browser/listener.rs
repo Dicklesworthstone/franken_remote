@@ -3,7 +3,7 @@
 use super::{ContextGuard, Gate, connection, context};
 use crate::{
     browser_ingress::BrowserIngress,
-    host_run::{Error, Event, Options, Reporter},
+    host_run::{Error, Event, LocalAction, Options, Reporter, approval},
     native_connection::host::{Boundaries, IngressCheck},
 };
 use asupersync::{cx::Cx, net::TcpListener, runtime::RuntimeHandle, time::sleep};
@@ -37,6 +37,7 @@ pub(super) async fn serve(
     gate: Gate,
     broker: &Cx,
     cleanup: &Cx,
+    consent: &mut approval::Owner,
 ) -> Result<(), Error> {
     let url = format!("https://{}:{port}", node.certificate_name());
     let mut boundaries = Boundaries(Vec::new());
@@ -71,6 +72,7 @@ pub(super) async fn serve(
                             &gate,
                             check,
                             cleanup,
+                            consent,
                         )),
                         &browser,
                     )
@@ -83,6 +85,7 @@ pub(super) async fn serve(
     };
     // The protected future has released all socket owners. The capture child
     // receipt lives in browser independently of that future and must be reaped.
+    consent.close();
     browser.close_desktop();
     let capture = browser.retire_desktop(cleanup).await;
     drop(browser);
@@ -217,6 +220,7 @@ async fn accept(
     gate: &Gate,
     ingress: IngressCheck,
     cleanup: &Cx,
+    consent: &mut approval::Owner,
 ) -> Result<(), Error> {
     let mut sockets: Vec<Connection> = Vec::with_capacity(MAX_CONNECTIONS);
     // The control socket's own admission ends as soon as it revokes its
@@ -229,8 +233,13 @@ async fn accept(
     poll_fn(|task| {
         gate.register(task);
         if gate.stopped() {
+            consent.close();
             browser.close_desktop();
             return Poll::Ready(Ok(()));
+        }
+        gate.check()?;
+        if consent.turn(LocalAction::Continue) == LocalAction::Stop {
+            return Poll::Ready(Err(Error::Cleanup("approval")));
         }
         gate.check()?;
         if maintenance.is_none() && browser.has_closed_desktop() {

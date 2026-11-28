@@ -151,7 +151,26 @@ pub fn run_browser(
     encoder: host_run::EncoderSelection,
 ) -> Result<(), Error> {
     run_with_surface(options, stop, image, || {
-        host_run::browser::run(options, port, report, stop, policy, encoder)
+        host_run::browser::run(options, port, report, stop, policy, encoder, None)
+    })
+}
+
+/// Browser observation with the same original monitored consent surface as
+/// native sessions. The independent Stop Sharing window remains visible.
+#[cfg(all(host_stack, target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub fn run_browser_with_desktop_approval(
+    options: &Options,
+    port: u16,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    image: &Path,
+    encoder: host_run::EncoderSelection,
+    approval: &host_run::approval::Configuration,
+) -> Result<(), Error> {
+    run_with_surface(options, stop, image, || {
+        host_run::browser::run(options, port, report, stop, policy, encoder, Some(approval))
     })
 }
 

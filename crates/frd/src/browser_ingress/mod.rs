@@ -187,6 +187,17 @@ impl BrowserIngress {
         self
     }
 
+    /// The installed run's original policy requires device-attributed consent.
+    /// No peer/bootstrap field can select or weaken this requirement.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_desktop_approval(self, factory: desktop::Factory) -> Self {
+        let mut ingress = self.with_desktop(factory);
+        if let Some(desktop) = ingress.desktop.as_mut() {
+            desktop.require_approval();
+        }
+        ingress
+    }
+
     /// Fence desktop delivery synchronously, before aborting TCP task owners.
     #[cfg(target_os = "linux")]
     pub fn close_desktop(&self) {

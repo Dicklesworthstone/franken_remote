@@ -3,7 +3,10 @@
 use super::*;
 use asupersync::io::split_owned;
 use fr_wire::{authority, clock, receiver_pressure};
+#[cfg(test)]
+mod tests;
 
+#[allow(clippy::too_many_lines)] // Original admission, consent and capture custody transfer in one ordered startup.
 pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     ingress: &BrowserIngress,
     stream: &mut S,
@@ -63,7 +66,11 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         Ok(reservation) => reservation,
         Err(_) => return refuse(stream, Reason::ResourceLimit).await,
     };
-    let host = match browser::intersect(&browser::offer(ingress.config.limits), &hello.offer) {
+    let offer = match service.offer(ingress.config.limits) {
+        Ok(offer) => offer,
+        Err(reason) => return refuse(stream, reason).await,
+    };
+    let host = match browser::intersect(&offer, &hello.offer) {
         Ok(host) => host,
         Err(_) => return refuse(stream, Reason::RequiredCapability).await,
     };
@@ -95,22 +102,85 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             return Err(failed());
         };
         browser::check_selection(&selection, &host).map_err(|_| failed())?;
-        let authorized = match credit_limits(&ingress.config, &selection) {
-            Ok(allowance) => (service.factory)(Request {
-                peer: peer.clone(),
-                cx: cx.clone(),
-                binding,
-                selection: selection.clone(),
-            })
-            .await
-            .map(|authorized| (authorized, allowance)),
-            Err(reason) => Err(reason),
-        };
-        Ok((selection, authorized))
+        Ok(selection)
     })
     .await?;
-    let (selection, authorized) = negotiated;
-    let (authorized, (byte_allowance, picture_allowance)) = match authorized {
+    let selection = negotiated;
+    let (byte_allowance, picture_allowance) = match credit_limits(&ingress.config, &selection) {
+        Ok(allowance) => allowance,
+        Err(reason) => return refuse(stream, reason).await,
+    };
+    let initial_until_us = started
+        .checked_add(u64::from(selection.limits.max_handshake_duration_ms()) * 1000)
+        .ok_or_else(expired)?;
+    let startup_until_us = if service.require_approval {
+        if !browser::local_approval_required(&selection) {
+            return refuse(stream, Reason::RequiredCapability).await;
+        }
+        started
+            .checked_add(browser::APPROVAL_STARTUP_BUDGET_US)
+            .ok_or_else(expired)?
+    } else {
+        initial_until_us
+    };
+    let approval = if service.require_approval {
+        let pending = crate::session_startup::PendingApproval::browser(
+            cx.clone(),
+            &peer,
+            binding,
+            &selection,
+            startup_until_us,
+        )
+        .map_err(|_| failed())?;
+        // Announce this original request inside the original negotiation bound.
+        // Neither receiving selection nor writing the notice starts a new timer.
+        let now = host_now(&cx).map_err(|_| failed())?.as_micros();
+        let left = initial_until_us
+            .checked_sub(now)
+            .filter(|left| *left != 0)
+            .ok_or_else(expired)?;
+        let notice = encode_message(
+            &Message::ApprovalRequired {
+                request: binding.remote_session,
+                deadline_us: startup_until_us,
+                role: Role::Observe,
+            },
+            maximum,
+        )?;
+        bounded_startup(
+            Duration::from_micros(left),
+            websocket::write_server_binary(stream, &notice),
+        )
+        .await?;
+        Some(pending)
+    } else {
+        None
+    };
+    let now = host_now(&cx).map_err(|_| failed())?.as_micros();
+    let left = startup_until_us
+        .checked_sub(now)
+        .filter(|left| *left != 0)
+        .ok_or_else(expired)?;
+    let prepared = (service.factory)(Request {
+        peer: peer.clone(),
+        cx: cx.clone(),
+        binding,
+        selection: selection.clone(),
+        approval,
+    });
+    let authorized = bounded_startup(
+        Duration::from_micros(left),
+        authorize_while_connected(stream, &peer, &cx, prepared),
+    )
+    .await;
+    let authorized = match authorized {
+        Ok(authorized) => authorized,
+        Err(error) if service.require_approval && error.kind() == io::ErrorKind::TimedOut => {
+            return refuse(stream, Reason::ApprovalExpired).await;
+        }
+        Err(error) => return Err(error),
+    };
+    let authorized = match authorized {
         Ok(authorized) => authorized,
         Err(reason) => return refuse(stream, reason).await,
     };
@@ -128,9 +198,6 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     }
     let (launch, retirement) = launch.retain_cleanup().map_err(|_| failed())?;
     let now = control.check().map_err(|_| failed())?.as_micros();
-    let startup_until_us = started
-        .checked_add(u64::from(selection.limits.max_handshake_duration_ms()).saturating_mul(1000))
-        .ok_or_else(expired)?;
     if now >= startup_until_us {
         return Err(expired());
     }
@@ -172,6 +239,60 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     drop(guard); // fence before worker/transport cleanup
     let cleanup_result = service.retire_session(&session, &session.cleanup).await;
     result.and(cleanup_result)
+}
+
+/// Before `SessionOpened` there is no permitted application message. Observe
+/// EOF/early bytes while a real local prompt waits; a disconnected request
+/// cannot leave a consumable positive decision or start native capture later.
+async fn authorize_while_connected<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    peer: &Lease,
+    cx: &Cx,
+    work: impl Future<Output = Result<Authorized, Reason>>,
+) -> io::Result<Result<Authorized, Reason>> {
+    authorize_guarded(
+        stream,
+        || {
+            cx.checkpoint().map_err(|_| failed())?;
+            peer.observe().map(|_| ()).map_err(|_| failed())
+        },
+        work,
+    )
+    .await
+}
+
+async fn authorize_guarded<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    check: impl Fn() -> io::Result<()>,
+    work: impl Future<Output = Result<Authorized, Reason>>,
+) -> io::Result<Result<Authorized, Reason>> {
+    let mut work = pin!(work);
+    poll_fn(|task| {
+        check_waiting_transport(stream, &check, task)?;
+        let result = work.as_mut().poll(task);
+        if let Err(error) = check_waiting_transport(stream, &check, task) {
+            if let Poll::Ready(Ok(authorized)) = &result {
+                authorized.control.revoke();
+            }
+            return Poll::Ready(Err(error));
+        }
+        result.map(Ok)
+    })
+    .await
+}
+
+fn check_waiting_transport<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    check: &impl Fn() -> io::Result<()>,
+    task: &mut Context<'_>,
+) -> io::Result<()> {
+    check()?;
+    let mut byte = [0];
+    let mut buffer = ReadBuf::new(&mut byte);
+    match Pin::new(stream).poll_read(task, &mut buffer) {
+        Poll::Ready(_) => Err(failed()),
+        Poll::Pending => check(),
+    }
 }
 
 async fn active<S: AsyncRead + AsyncWrite + Unpin>(

@@ -1,5 +1,5 @@
 //! Authenticated WSS view-only desktop composition. This owns the original
-//! receive reservations and callback identities; BrowserSessionCore remains the
+//! receive reservations and callback identities; `BrowserSessionCore` remains the
 //! sole session, HEVC and cumulative-credit owner. JavaScript performs I/O only.
 use crate::{
     BrowserSessionCore,
@@ -97,6 +97,9 @@ pub struct ConfigurationParameters<'a> {
     hvcc: &'a [u8],
 }
 
+// Transport admission, decoder progress and original-resource retirement are
+// independent facts; a single phase enum would erase their allowed overlap.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct DesktopSession {
     offer: Offer,
     host: Option<Offer>,
@@ -205,11 +208,9 @@ impl DesktopSession {
         if bytes.len() > crate::adapter::MAX_CONTROL_RECORD_BYTES {
             return Err(Error::MessageTooLarge);
         }
-        if pressure {
-            if let Some(queued) = self.control.iter_mut().find(|queued| queued.pressure) {
-                queued.bytes = bytes;
-                return Ok(());
-            }
+        if pressure && let Some(queued) = self.control.iter_mut().find(|queued| queued.pressure) {
+            queued.bytes = bytes;
+            return Ok(());
         }
         if self.control.len() >= MAX_CONTROL_QUEUE {
             return Err(Error::QueueFull);
@@ -255,6 +256,8 @@ impl DesktopSession {
         Ok(())
     }
 
+    // Keep the canonical record dispatch and each original binding guard together.
+    #[allow(clippy::too_many_lines)]
     pub fn receive_control(
         &mut self,
         core: &mut BrowserSessionCore,
@@ -471,6 +474,8 @@ impl DesktopSession {
         Ok(self.video_feedback.pop_front())
     }
 
+    // One bounded dispatch owns frame reservation, configuration and delivery order.
+    #[allow(clippy::too_many_lines)]
     pub fn receive_video(
         &mut self,
         core: &mut BrowserSessionCore,
@@ -622,10 +627,10 @@ impl DesktopSession {
         &mut self,
         record: Option<[u8; fr_wire::receiver_pressure::RECORD_BYTES]>,
     ) -> Result<(), Error> {
-        if !self.closed {
-            if let Some(bytes) = record {
-                self.queue_control(bytes.to_vec(), false, true)?;
-            }
+        if !self.closed
+            && let Some(bytes) = record
+        {
+            self.queue_control(bytes.to_vec(), false, true)?;
         }
         Ok(())
     }
@@ -850,8 +855,8 @@ impl DesktopSession {
         let mut can_present = false;
         let mut first_decoded = false;
         if !self.closed {
-            let decoded = core.on_frame_decoded(decoder, descriptor.frame);
-            let receive = if decoded.is_ok() {
+            let accepted = core.on_frame_decoded(decoder, descriptor.frame);
+            let receive = if accepted.is_ok() {
                 self.receiver
                     .as_mut()
                     .ok_or(Error::InvalidState)?
@@ -924,7 +929,6 @@ impl DesktopSession {
         self.sync_view(core, now)
     }
     fn release_receipt(
-        &self,
         core: &BrowserSessionCore,
         decoder: DecoderInstance,
         callback: u64,
@@ -959,10 +963,10 @@ impl DesktopSession {
             .position(|f| f.decoder == decoder && f.callback == callback && f.escaped)
             .ok_or(Error::InvalidMedia)?;
         let mut frame = self.frames.remove(position);
-        if !self.closed {
-            if let (Some(view), Some(receipt)) = (self.view.as_mut(), frame.decoded.take()) {
-                let _ = view.decoded(receipt, false, now);
-            }
+        if !self.closed
+            && let (Some(view), Some(receipt)) = (self.view.as_mut(), frame.decoded.take())
+        {
+            let _ = view.decoded(receipt, false, now);
         }
         let number = frame.picture.descriptor().frame;
         let reservation = self
@@ -976,7 +980,9 @@ impl DesktopSession {
         drop(frame);
         let pressure = core.on_video_frame_closed(decoder, number)?;
         self.pressure(pressure)?;
-        Ok(self.release_receipt(core, decoder, callback, number, charge))
+        Ok(Self::release_receipt(
+            core, decoder, callback, number, charge,
+        ))
     }
     pub fn decoder_closed(
         &mut self,
@@ -1012,7 +1018,7 @@ impl DesktopSession {
         Ok(released
             .into_iter()
             .map(|(callback, frame, charge)| {
-                self.release_receipt(core, decoder, callback, frame, charge)
+                Self::release_receipt(core, decoder, callback, frame, charge)
             })
             .collect())
     }

@@ -31,6 +31,10 @@ use std::{
 
 mod admission_refresh;
 mod approval_context;
+#[cfg(target_os = "linux")]
+mod approval_pending;
+#[cfg(target_os = "linux")]
+pub(crate) use approval_pending::PendingApproval;
 mod clipboard;
 pub(crate) mod closure_reporting;
 mod native_control;
