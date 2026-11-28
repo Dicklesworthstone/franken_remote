@@ -56,6 +56,7 @@ fn upload_replacement_waits_for_terminal_work_and_owns_one_pending_slot() {
     let mut swap = UploadSwap {
         current: original.clone(),
         pending: None,
+        choice: None,
     };
     assert!(!swap.queue(&state, next.clone()));
     assert!(swap.pending.is_none());
@@ -99,6 +100,7 @@ fn hidden_failed_and_ended_panels_cannot_accept_or_install_successors() {
             let mut swap = UploadSwap {
                 current: Batch::new(1, true),
                 pending: None,
+                choice: None,
             };
             if already_queued {
                 assert!(swap.queue(&state, Batch::new(2, false)));

@@ -1,5 +1,46 @@
 # Implementation status
 
+## Connected Linux file chooser (2026-11-27)
+
+The running X11 controller now offers **Choose files...** in the original upload
+panel. `--control --file-drop` can make its first selection after connection;
+`--send` can make later selections after the original batch and source cleanup
+finish. The chooser uses the same bounded selection slot and worker as Copy
+drops, the same negotiated upload intake, and separate original receipts for
+each accepted batch. A standing folder upload keeps its exclusive source.
+
+The actual FileChooser portal is parented to the original viewer. Before opening
+it, the original input thread must enter an explicit no-input interval: held
+input or unfinished text composition refuses the request without mutating
+capture. Its owned system-shortcut grab is temporarily released. Portal keys,
+pointer events and text stay local; cancellation and the original control clock
+continue to run. Resume requires positive closure of that exact dialog and fresh
+checks of the same window's focus, mapping, dimensions, unobscured visibility,
+and actual held keys/XI2 buttons. Shortcut reacquisition requires another fresh
+probe. The original Source, Layout, control grant and file attachment survive a
+successful return; ordinary focus loss remains terminal outside this interval.
+
+An unfinished pause, expired return, native failure or unconfirmed dialog
+cleanup fences the original session. Declining a cleanly closed dialog creates
+no transfer. Original portal response age survives cleanup, input return, path
+preparation and the final intake lock, using the suspend-inclusive Linux clock;
+an expired selection is refused instead of sent later. One visible chooser stays
+disabled while its original slot or transfer is busy.
+
+Validation: the exact production portal/bus and shared chooser/drop modules
+passed 39 pinned-compiler tests and strict component Clippy; the exact input
+gate passed six tests and strict component Clippy. Strict shipping C compilation
+and 39 real Xvfb cases passed (11 new chooser, seven keyboard-map, 21 text).
+One complete native panel ABI/XTest driver passed visible button, real click,
+focus-preservation, disabled/stale/synthetic gesture checks. The new production
+Rust capture-loop and panel integration regressions are authored but unexecuted:
+normal pinned `cargo check -p frd --lib --locked` was SIGKILLed inside the unchanged
+Asupersync dependency before first-party diagnostics. Full native Rust/ATP,
+real desktop portal/window-manager, live-tailnet and physical-input qualification
+remain open. Pinned formatting and diff checks passed. See
+[NATIVE_FILE_SEND.md](NATIVE_FILE_SEND.md) and
+[NATIVE_FILE_PROGRESS.md](NATIVE_FILE_PROGRESS.md).
+
 ## Initial display choice in the browser client (2026-11-27)
 
 The Linux browser desktop now negotiates the existing `display-selection` v1

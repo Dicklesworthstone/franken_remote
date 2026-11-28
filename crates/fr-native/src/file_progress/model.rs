@@ -10,6 +10,7 @@ use std::fmt::{self, Write};
 
 pub(super) const ROWS: usize = 8;
 pub(super) const COLUMNS: usize = 104;
+const CHOICE_PRESENT: u32 = 256;
 /// Identical to `fr_upload_frame` at the narrow C drawing boundary. No pointers,
 /// paths, peer text, transfer IDs, callbacks or ownership cross this boundary.
 #[repr(C)]
@@ -30,6 +31,33 @@ impl Frame {
             Snapshot::Audio { volume, muted } => Self::audio(*volume, *muted),
             Snapshot::Clipboard(status) => Self::clipboard(status),
         }
+    }
+    pub(super) fn choice(&mut self, choice: crate::file_drop::ChoiceSnapshot) {
+        use crate::file_drop::ChoiceStatus;
+        // Separate presence from readiness so an active transfer keeps a
+        // visible, disabled chooser. Other panel directions never install it.
+        self.actions |= CHOICE_PRESENT;
+        if choice.ready {
+            self.actions |= Action::ChooseFiles as u32;
+        }
+        self.lines[7] = line(format_args!(
+            "{}",
+            match choice.status {
+                ChoiceStatus::Choosing =>
+                    "Choosing files locally; confirm or cancel in the file chooser.",
+                ChoiceStatus::Returning =>
+                    "Return to the remote desktop and release held keys/buttons to finish this selection.",
+                ChoiceStatus::Cancelled => "File selection cancelled. No new files were submitted.",
+                ChoiceStatus::Unavailable =>
+                    "File selection unavailable. No new files were submitted.",
+                ChoiceStatus::CleanupIncomplete =>
+                    "File chooser cleanup unconfirmed; new selections are disabled for this connection.",
+                ChoiceStatus::Idle if choice.ready =>
+                    "Choose files to send, or drop files and folders onto the remote desktop.",
+                ChoiceStatus::Idle =>
+                    "Choose files becomes available when this upload finishes and its source cleanup completes.",
+            }
+        ));
     }
     fn clipboard(status: &frd::native_clipboard::Status) -> Self {
         use frd::native_clipboard::Phase;
@@ -221,7 +249,7 @@ impl Frame {
         frame.lines[0] = line(format_args!(
             "{}",
             if s.cancel_requested {
-                "Stopping file drops; no file has been selected"
+                "Stopping file sharing; no file has been selected"
             } else if s.stage == Some(Stage::Idle) {
                 "Ready to send files"
             } else {
@@ -229,14 +257,16 @@ impl Frame {
             }
         ));
         frame.lines[1] = line(format_args!(
-            "Drag files or folders from your file manager into the remote desktop."
+            "Send a selection of files or folders from your local computer."
         ));
-        frame.lines[2] = line(format_args!("Only the items you drop will be sent."));
+        frame.lines[2] = line(format_args!(
+            "Only your explicitly selected items will be sent."
+        ));
         frame.lines[3] = line(format_args!(
-            "Up to 8 items per drop; wait for each transfer to finish."
+            "Up to 8 items per selection; wait for each transfer to finish."
         ));
         frame.lines[4] = line(format_args!(
-            "Close this panel to stop accepting new drops."
+            "Close this panel to stop accepting new selections."
         ));
         frame.lines[5] = line(format_args!(
             "Cancel stops file sharing; the remote desktop stays connected."

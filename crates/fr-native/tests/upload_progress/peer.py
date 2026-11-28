@@ -152,7 +152,7 @@ def point(name):
         return {"pause": (100, 24), "resume": (304, 24), "cancel": (200, 72),
                 "off": (508, 24), "outside": (200, 72)}[name]
     return {"pause": (100, 250), "resume": (304, 250), "cancel": (508, 250),
-            "off": (508, 250), "outside": (200, 220)}[name]
+            "off": (508, 250), "choose": (508, 24), "outside": (200, 220)}[name]
 
 for raw in sys.stdin:
     parts = raw.split()
@@ -230,6 +230,11 @@ for raw in sys.stdin:
         image = get_image(d, w, 18, 205, 602, 1, U(-1).value, 2)
         assert image
         try: result = str(sum(pixel(image, i, 0) == 0 for i in range(602)))
+        finally: destroy_image(image)
+    elif command == "choose_box":
+        image = get_image(d, w, 456, 8, 168, 1, U(-1).value, 2)
+        assert image
+        try: result = str(sum(pixel(image, i, 0) == 0 for i in range(168)))
         finally: destroy_image(image)
     elif command == "flood":
         for _ in range(80):

@@ -379,6 +379,7 @@ fn build_indicator() {
 fn build_viewer_input() {
     println!("cargo:rerun-if-changed=src/viewer_input.c");
     println!("cargo:rerun-if-changed=src/viewer_text.c");
+    println!("cargo:rerun-if-changed=src/viewer_input_choice.c");
     println!("cargo:rerun-if-changed=src/viewer_cursor.c");
     if env::var_os("CARGO_FEATURE_LINUX_VIEWER_INPUT").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")

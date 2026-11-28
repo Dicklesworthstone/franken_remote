@@ -5,6 +5,9 @@
  * structs, not a second library.
  * Input is logical X-server input; SendEvent cannot create positive evidence.
  * XTest and the selected user's X server remain explicit trust limits. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "x11_connection.h"
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
@@ -15,6 +18,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Fixed output only; no native allocation or names escape this boundary. */
 struct fr_viewer_held { uint8_t keys[32], buttons[32]; };
@@ -43,6 +47,11 @@ struct fr_viewer_input {
     int display_switch;
     uint32_t release_query;
     int release_state;
+    /* One explicit local file chooser. No field here is remote authority. */
+    int choice_mode, choice_failed, choice_changed, choice_probe_state, choice_result;
+    int unobscured;
+    uint32_t choice_focus, choice_geometry, choice_attributes, choice_keys, choice_pointer;
+    uint64_t choice_probe_at;
 };
 /* Matches Rust Raw; every consumed event (even ignored) counts toward its bound. */
 struct fr_viewer_event { uint32_t kind, time, detail; int32_t x, y; };
@@ -52,6 +61,7 @@ static void text_destroy(struct fr_viewer_input *h);
 static void text_filter(struct fr_viewer_input *h, const xcb_generic_event_t *event,
                         struct fr_viewer_event *out);
 static int text_poll(struct fr_viewer_input *h, struct fr_viewer_event *out);
+static int choice_fail(struct fr_viewer_input *h);
 static xcb_extension_t xkb = { "XKEYBOARD", 0 };
 static xcb_extension_t xi = { "XInputExtension", 0 };
 static uint32_t extension_request(struct fr_viewer_input *h, xcb_extension_t *ext,
@@ -153,12 +163,20 @@ int fr_viewer_input_release_poll(struct fr_viewer_input *h) {
 }
 enum { FR_GRAB_PREFLIGHT = 1, FR_GRAB_WAITING = 2, FR_GRAB_VERIFY_FOCUS = 3,
        FR_GRAB_ACQUIRED = 4 };
-/* Initialization only, after Rust validates the physical local escape keys.
+/* Initialization, or an explicit paused chooser's positively probed return,
+ * after Rust validates the physical local escape keys.
  * Four fixed preflight replies precede at most one grab. Every subsequent poll
  * stays inside Rust's original native-turn deadline; there is no retry, wait,
  * event dequeue or new authority in this boundary. */
 int fr_viewer_input_grab_begin(struct fr_viewer_input *h) {
     if (!h || h->grab_state || xcb_connection_has_error(h->c)) return 0;
+    if (h->choice_mode) {
+        if (h->choice_failed || h->choice_probe_state != 2 || h->choice_result != 1 ||
+            h->choice_changed || !h->unobscured) return 0;
+        /* Routing changes require a fresh final probe even if this server
+         * emits no NotifyGrab focus transition. Never reuse the old proof. */
+        h->choice_changed = 1;
+    }
     h->grab_state = FR_GRAB_PREFLIGHT;
     h->grab_focus = xcb_get_input_focus(h->c).sequence;
     h->grab_geometry = xcb_get_geometry(h->c, h->window).sequence;
@@ -551,6 +569,9 @@ struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t windo
     h->net_name = input_atom(h, "_NET_WM_NAME");
     h->utf8 = input_atom(h, "UTF8_STRING");
     if (!h->barrier || !h->net_name || !h->utf8 || !held_setup(h)) goto fail;
+    /* Initial capture admission and Rust's complete startup drain reject an
+     * obscuring event. Later eligibility changes only on actual visibility. */
+    h->unobscured = 1;
     return h;
 fail:
     fr_viewer_input_close(h); return NULL;
@@ -563,27 +584,34 @@ int fr_viewer_input_barrier(struct fr_viewer_input *h) {
     return xcb_flush(h->c) > 0;
 }
 int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out) {
-    if (!h || !out || xcb_connection_has_error(h->c)) return -1;
+    if (!h || !out) return -1;
+    if (xcb_connection_has_error(h->c)) return h->choice_mode ? choice_fail(h) : -1;
     memset(out, 0, sizeof(*out));
     /* XFilterEvent can queue an already-committed local IME result. Consume it
      * before a later physical Send; each event still counts toward Rust's
      * bounded batch, whose complete lifecycle/escape veto precedes admission. */
-    int text_event = text_poll(h, out);
+    int text_event = h->choice_mode ? 0 : text_poll(h, out);
     if (text_event) return text_event;
-    if (h->map_failed) { out->kind = KEYMAP_CHANGED; return 1; }
+    if (h->map_failed) {
+        if (h->choice_mode) (void)choice_fail(h);
+        out->kind = KEYMAP_CHANGED; return 1;
+    }
     if (h->map_query || h->names_query) {
         int verified = keyboard_unchanged(h);
         if (!verified) return 0;
         if (verified < 0) {
+            if (h->choice_mode) (void)choice_fail(h);
             h->map_failed = 1; out->kind = KEYMAP_CHANGED; return 1;
         }
     }
     xcb_generic_event_t *e = xcb_poll_for_event(h->c);
-    if (!e) return xcb_connection_has_error(h->c) ? -1 : 0;
+    if (!e) return xcb_connection_has_error(h->c) ?
+        (h->choice_mode ? choice_fail(h) : -1) : 0;
     memset(out, 0, sizeof(*out));
     uint8_t kind = e->response_type & 0x7f;
-    if (!kind) { free(e); return -1; }
+    if (!kind) { free(e); return h->choice_mode ? choice_fail(h) : -1; }
     if (kind == h->xkb_event || kind == XCB_MAPPING_NOTIFY) {
+        if (h->choice_mode) h->choice_changed = 1;
         if (kind != h->xkb_event || !recheck_keyboard(h, (const void*)e)) {
             h->map_failed = 1; out->kind = KEYMAP_CHANGED;
         }
@@ -614,9 +642,20 @@ int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out)
         out->time = v->time; out->detail = v->detail;
         out->x = v->event_x; out->y = v->event_y; break;
     }
+    case XCB_FOCUS_IN:
+        if (h->choice_mode && ((xcb_focus_in_event_t*)e)->event == h->window) {
+            h->choice_changed = 1;
+            if (e->response_type & 0x80) out->kind = SYNTHETIC;
+        }
+        break;
     case XCB_FOCUS_OUT:
-        if (((xcb_focus_out_event_t*)e)->event == h->window &&
-            !acquisition_focus_out(h, e)) out->kind = FOCUS_LOST;
+        if (((xcb_focus_out_event_t*)e)->event == h->window) {
+            if (h->choice_mode) {
+                h->choice_changed = 1;
+                if (e->response_type & 0x80) out->kind = SYNTHETIC;
+                else (void)acquisition_focus_out(h, e);
+            } else if (!acquisition_focus_out(h, e)) out->kind = FOCUS_LOST;
+        }
         break;
     case XCB_UNMAP_NOTIFY:
         if (((xcb_unmap_notify_event_t*)e)->window == h->window) out->kind = WINDOW_LOST;
@@ -634,13 +673,29 @@ int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out)
         break;
     }
     case XCB_VISIBILITY_NOTIFY:
-        if (((xcb_visibility_notify_event_t*)e)->window == h->window &&
-            ((xcb_visibility_notify_event_t*)e)->state != XCB_VISIBILITY_UNOBSCURED) out->kind = WINDOW_LOST;
+        if (((xcb_visibility_notify_event_t*)e)->window == h->window) {
+            if (h->choice_mode && (e->response_type & 0x80)) out->kind = SYNTHETIC;
+            else {
+                int clear = ((xcb_visibility_notify_event_t*)e)->state == XCB_VISIBILITY_UNOBSCURED;
+                if (!(e->response_type & 0x80)) h->unobscured = clear;
+                if (h->choice_mode) h->choice_changed = 1;
+                else if (!clear) out->kind = WINDOW_LOST;
+            }
+        }
         break;
     default: break;
     }
-    text_filter(h, e, out);
+    if (h->choice_mode) {
+        /* The original Rust owner discards the WHOLE paused batch and can
+         * still inspect its physical Escape keys. No local IME runs here. */
+        if ((out->kind >= KEY_DOWN && out->kind <= MOTION) || out->kind == GEOMETRY)
+            h->choice_changed = 1;
+        if ((out->kind >= FOCUS_LOST && out->kind <= DEVICES_CHANGED && out->kind != GEOMETRY) ||
+            (out->kind == GEOMETRY && (out->x != (int32_t)h->width || out->y != (int32_t)h->height)))
+            (void)choice_fail(h);
+    } else text_filter(h, e, out);
     free(e); return 1;
 }
 
 #include "viewer_text.c"
+#include "viewer_input_choice.c"

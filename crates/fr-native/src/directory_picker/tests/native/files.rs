@@ -42,6 +42,7 @@ fn real_portal_upload_requests_multiple_files_and_consumes_the_original_selectio
     let mut picker = portal.files();
     portal.wait_files(&mut picker);
     let opening = portal.state().opening.unwrap();
+    assert_eq!(opening.parent, "");
     assert!(!opening.directory);
     assert!(opening.multiple);
     portal.reply(false);
@@ -267,4 +268,94 @@ fn unacknowledged_upload_cleanup_remains_terminal() {
     assert_eq!(picker.poll(), Err(Error::CleanupIncomplete));
     assert!(picker.0.bus.is_none());
     assert_eq!(portal.state().close_paths.len(), 1);
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+#[test]
+fn connected_choice_keeps_its_original_parent_and_response_age_after_cleanup() {
+    let portal = Portal::start(1, true);
+    let mut picker = portal.files();
+    picker.0.parent = super::super::super::x11_parent(0x1234_abcd).unwrap();
+    portal.wait_files(&mut picker);
+    assert_eq!(portal.state().opening.unwrap().parent, "x11:1234abcd");
+    portal.chosen(vec!["file:///tmp/original-choice"]);
+    files_pending(&mut picker, |owner| owner.response_received);
+    // Model delayed delivery of the exact OpenFile reply without extending the
+    // earlier Response's lifetime. No scheduler delay or fake native clock.
+    picker.0.response_at = Some(bus::now().unwrap().checked_sub(500_000).unwrap());
+    portal.reply(false);
+    let until = Instant::now() + TEST_TIMEOUT;
+    let mut choice = loop {
+        assert!(Instant::now() < until);
+        if let Some(choice) = picker.poll_choice().unwrap() {
+            break choice;
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(picker.close(), Ok(()));
+    assert!(picker.0.bus.is_none());
+    assert_eq!(
+        choice.dropped.paths,
+        [PathBuf::from("/tmp/original-choice")]
+    );
+    assert!(choice.dropped.captured.elapsed() >= Duration::from_millis(500));
+    assert!(choice.fresh());
+    // A suspend/native delay after the picker returned still expires this
+    // original choice, even while its portable Instant appears recent.
+    choice.captured = bus::now().unwrap().checked_sub(2_000_000).unwrap();
+    assert!(!choice.fresh());
+    assert!(matches!(picker.poll_choice(), Err(Error::AlreadyUsed)));
+    assert_eq!(portal.state().close_paths, Vec::<String>::new());
+    assert!(super::super::super::x11_parent(0).is_err());
+    assert!(matches!(
+        FilePicker::open_parented(0),
+        Err(Error::Unavailable)
+    ));
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+#[test]
+fn connected_portal_cancel_releases_only_the_chooser_reservation_after_positive_cleanup() {
+    use crate::file_drop::{ChoiceStatus, Inbox};
+    let inbox = Inbox::default();
+    assert!(inbox.enable_choice());
+    inbox.set_ready(true);
+    assert!(inbox.request_choice());
+    assert!(inbox.take_choice());
+    let portal = Portal::start(1, true);
+    let mut picker = portal.files();
+    portal.wait_files(&mut picker);
+    portal.reply(false);
+    portal
+        .actions
+        .send(Action::Response {
+            uris: vec!["file:///tmp/not-consented".to_owned()],
+            code: 1,
+            foreign: false,
+            wrong_path: false,
+        })
+        .unwrap();
+    let until = Instant::now() + TEST_TIMEOUT;
+    loop {
+        assert!(Instant::now() < until);
+        match picker.poll_choice() {
+            Ok(None) => thread::sleep(Duration::from_millis(1)),
+            Err(Error::Cancelled) => break,
+            _ => panic!("cancelled native dialog must not release files"),
+        }
+    }
+    // No second click, drop or fabricated retirement can bypass the original
+    // owner, even though its native Response has arrived.
+    inbox.set_ready(true);
+    assert!(!inbox.request_choice());
+    assert!(inbox.take().is_none());
+    assert!(inbox.take_retired().is_none());
+    assert_eq!(picker.close(), Ok(()));
+    inbox.finish_choice(ChoiceStatus::Cancelled);
+    assert!(!inbox.is_closed());
+    assert!(inbox.take().is_none());
+    assert!(inbox.take_retired().is_none());
+    inbox.set_ready(true);
+    assert!(inbox.request_choice());
+    assert_eq!(portal.state().close_paths, Vec::<String>::new());
 }

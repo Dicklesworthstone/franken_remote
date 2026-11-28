@@ -22,6 +22,10 @@ pub(super) struct Gate {
     stopped: AtomicBool,
 }
 impl Gate {
+    #[cfg(feature = "linux-desktop")]
+    pub(super) fn enabled(&self) -> bool {
+        self.requested.get().is_some()
+    }
     pub(super) fn enable(&self, now: Instant) -> bool {
         !self.stopped.load(Ordering::Acquire)
             && self.requested.set(now).is_ok()

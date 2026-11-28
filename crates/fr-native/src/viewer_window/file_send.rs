@@ -9,6 +9,8 @@
 use crate::file_drop::{Dropped, Inbox, MAX_AGE};
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
 use crate::{
+    directory_picker::{Error as PickerError, FileChoice, FilePicker},
+    file_drop::ChoiceStatus,
     file_progress::{Control as PanelControl, Status as PanelStatus},
     viewer_window::{Status as WindowStatus, WindowControl},
 };
@@ -33,6 +35,10 @@ const MAX_BATCHES: usize = 8;
 pub(crate) trait Surface: Send + 'static {
     fn live(&self) -> bool;
     fn ready(&self) -> bool;
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    fn pause_choice(&self) -> Result<(u32, crate::viewer_input::file_choice::Pause), ()> {
+        Err(())
+    }
     /// Admit and retain the exact cancellation handle as one local operation.
     /// A native stop cannot fall between intake admission and handle retention.
     fn submit(
@@ -40,6 +46,7 @@ pub(crate) trait Surface: Send + 'static {
         intake: &SendIntake,
         request: SendRequest,
         captured: Instant,
+        fresh: &dyn Fn() -> bool,
     ) -> Result<(SendControl, bool), &'static str>;
 }
 
@@ -57,17 +64,30 @@ impl Surface for X11Surface {
     fn ready(&self) -> bool {
         self.live() && self.panel.status() == PanelStatus::Running
     }
+    fn pause_choice(&self) -> Result<(u32, crate::viewer_input::file_choice::Pause), ()> {
+        let parent = self.window.input_window().map_err(|_| ())?.id;
+        self.window.pause_file_choice().map(|pause| (parent, pause))
+    }
     fn submit(
         &self,
         intake: &SendIntake,
         request: SendRequest,
         captured: Instant,
+        fresh: &dyn Fn() -> bool,
     ) -> Result<(SendControl, bool), &'static str> {
-        if captured.elapsed() >= MAX_AGE {
+        // Window status may fence/wake its owner, so check it BEFORE taking
+        // the intake lock. The admission callback below has only scalar clock
+        // and atomic panel-state reads; it cannot reenter session cleanup.
+        let current = || {
+            captured.elapsed() < MAX_AGE && self.panel.status() == PanelStatus::Running && fresh()
+        };
+        if !self.live() || !current() {
             return Err("file_selection_expired");
         }
+        // Recheck AFTER the original intake lock. Waiting for that lock (or
+        // suspending this machine) cannot renew the local chooser/drop age.
         let source = intake
-            .submit(request)
+            .submit_if(request, current)
             .map_err(|_| "file_selection_unavailable")?;
         let live = self.panel.replace_upload(source.clone());
         Ok((source, live))
@@ -192,7 +212,20 @@ impl Manager {
         panel: PanelControl,
     ) -> Result<Self, Error> {
         let inbox = window.file_drop_inbox();
-        Self::start_on(inbox, intake, X11Surface { window, panel })
+        let owner = Self::start_on(
+            inbox.clone(),
+            intake,
+            X11Surface {
+                window,
+                panel: panel.clone(),
+            },
+        )?;
+        if !panel.enable_choice(inbox) {
+            owner.stop();
+            // Keep the actual worker owned until its ordinary cleanup poll.
+            // A racing hidden panel is a terminal owner, never a new chooser.
+        }
+        Ok(owner)
     }
     pub(crate) fn start_on(
         inbox: Inbox,
@@ -274,7 +307,11 @@ impl Worker {
             // Preparation rechecks the original lane; a stale/closed selection
             // gets its own result instead of being silently replaced.
             if let Some(dropped) = self.inbox.take() {
-                self.prepare(&dropped);
+                self.prepare(&dropped, || true);
+            }
+            #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+            if self.inbox.take_choice() {
+                self.choose();
             }
             self.shared.record_retired(&self.inbox);
             // Eligibility comes from the original lane and panel, NOT from
@@ -283,11 +320,11 @@ impl Worker {
             thread::sleep(TURN);
         }
     }
-    fn prepare(&self, dropped: &Dropped) {
+    fn prepare(&self, dropped: &Dropped, fresh: impl Fn() -> bool) -> bool {
         let index = {
             let mut batches = self.shared.batches();
             if batches.len() >= MAX_BATCHES {
-                return;
+                return false;
             }
             let index = batches.len();
             batches.push(Batch {
@@ -296,28 +333,115 @@ impl Worker {
             });
             index
         };
-        let outcome = self.select(dropped, index);
+        let outcome = self.select(dropped, index, fresh);
+        let submitted = matches!(outcome, Outcome::Submitted(_));
         self.shared.batches()[index].outcome = outcome;
+        submitted
     }
-    fn select(&self, dropped: &Dropped, index: usize) -> Outcome {
+    fn select(&self, dropped: &Dropped, index: usize, fresh: impl Fn() -> bool) -> Outcome {
         let (sizes, request) = prepare_selection(dropped, || {
-            self.live() && self.intake.ready() && self.surface.ready()
+            fresh() && self.live() && self.intake.ready() && self.surface.ready()
         });
         self.shared.batches()[index].sizes = sizes;
         let request = match request {
             Ok(request) => request,
             Err(code) => return Outcome::Refused(code),
         };
-        let (source, live) = match self.surface.submit(&self.intake, request, dropped.captured) {
-            Ok(admitted) => admitted,
-            Err(code) => return Outcome::Refused(code),
-        };
+        let (source, live) =
+            match self
+                .surface
+                .submit(&self.intake, request, dropped.captured, &fresh)
+            {
+                Ok(admitted) => admitted,
+                Err(code) => return Outcome::Refused(code),
+            };
         // The surface has retained this actual control before a concurrent
         // local stop can finish. Keep its receipt even when the surface closes.
         if !live {
             self.inbox.close();
         }
         Outcome::Submitted(source)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    fn choose(&self) {
+        if !self.ready() {
+            self.inbox.finish_choice(ChoiceStatus::Unavailable);
+            return;
+        }
+        let Ok((parent, pause)) = self.surface.pause_choice() else {
+            self.inbox.finish_choice(ChoiceStatus::Unavailable);
+            return;
+        };
+        if !choice_ready(|| pause.suspended()) {
+            self.inbox.finish_choice(ChoiceStatus::Unavailable);
+            return;
+        }
+        let result = if self.ready() {
+            self.pick(parent)
+        } else {
+            Err(PickerError::Cancelled)
+        };
+        if matches!(result, Err(PickerError::CleanupIncomplete)) {
+            self.inbox.finish_choice(ChoiceStatus::CleanupIncomplete);
+            // Dropping the unfinished input pause also fences the original
+            // desktop. Unknown native UI cleanup must never resume capture.
+            return;
+        }
+        self.inbox.returning_choice();
+        if pause.resume().is_err() || !choice_ready(|| pause.resumed()) {
+            self.inbox.finish_choice(ChoiceStatus::Unavailable);
+            self.inbox.close();
+            return;
+        }
+        let outcome = match result {
+            Ok(choice) => {
+                if self.prepare(&choice.dropped, || choice.fresh()) {
+                    ChoiceStatus::Idle
+                } else {
+                    ChoiceStatus::Unavailable
+                }
+            }
+            Err(PickerError::Cancelled) => ChoiceStatus::Cancelled,
+            Err(_) => ChoiceStatus::Unavailable,
+        };
+        self.inbox.finish_choice(outcome);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    fn pick(&self, parent: u32) -> Result<FileChoice, PickerError> {
+        let mut picker = FilePicker::open_parented(parent)?;
+        let result = loop {
+            if !self.ready() {
+                break Err(PickerError::Cancelled);
+            }
+            match picker.poll_choice() {
+                Ok(None) => thread::sleep(TURN),
+                Ok(Some(choice)) => break Ok(choice),
+                Err(error) => break Err(error),
+            }
+        };
+        // Native cleanup runs on this SAME retained selection worker. No path
+        // is opened, no new slot is admitted, and no intake handoff is possible
+        // until the original portal acknowledges Response or exact Close.
+        let closed = picker.close();
+        drop(picker);
+        closed?;
+        result
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+fn choice_ready(poll: impl Fn() -> Result<bool, ()>) -> bool {
+    // The original pause owner enforces its own immutable native deadlines.
+    // Continue to a positive answer even if file-only cancellation races the
+    // rendezvous: a known pause must be resumed before releasing its slot.
+    loop {
+        match poll() {
+            Ok(true) => return true,
+            Ok(false) => thread::sleep(TURN),
+            Err(()) => return false,
+        }
     }
 }
 

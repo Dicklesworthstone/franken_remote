@@ -8,12 +8,17 @@
 //! Native work has one thread/connection owner, separate from codecs and QUIC.
 //! Requires XI2 and exactly one enabled master pointer/keyboard pair. Held input
 //! is sampled at most four times per second, never adopted from another device.
-//! No native queries are issued while nothing is held and no events arrive.
+//! Ordinary capture issues no queries while nothing is held and no events
+//! arrive. An explicit local file dialog uses bounded pause/return probes on
+//! this same owner, with all dialog input discarded locally.
 //! Physical Ctrl+Alt+Shift+Escape is always a local stop, including when remote
 //! keyboard input was not negotiated. Its entire native batch is withheld. The
 //! host agent still owns release of previously submitted remote modifiers.
 pub(crate) mod display_switch;
 mod escape;
+#[cfg(feature = "linux-viewer-window")]
+#[cfg_attr(not(feature = "linux-desktop"), allow(dead_code))]
+pub(crate) mod file_choice;
 mod file_keys;
 mod held;
 mod status;
@@ -85,7 +90,8 @@ unsafe extern "C" {
 
 /// Physical window size is fixed for this capture generation. Configure and
 /// confirm the renderer's Layout separately on the original `ControlledViewer`.
-/// A resize/focus loss requires a new explicit control acquisition, not resume.
+/// Outside an explicitly suspended local dialog, resize/focus loss requires a
+/// new explicit control acquisition. A dialog never replaces this window/layout.
 #[derive(Clone, Copy)]
 pub struct Window {
     pub id: u32,
@@ -158,6 +164,10 @@ struct Shared {
 }
 impl Shared {
     fn stop(&self, reason: StopReason) {
+        #[cfg(feature = "linux-viewer-window")]
+        if let Some(window) = self.display_switch.get() {
+            window.file_choice_gate().stop();
+        }
         #[cfg(feature = "linux-viewer-window")]
         if self.state.first_stop().is_none()
             && let Some(window) = self.display_switch.get()
@@ -609,6 +619,14 @@ trait Target {
     fn capabilities(&self) -> Capabilities;
     fn push(&mut self, event: Event, sampled: ClientInstant) -> Result<(), StopReason>;
     fn ready(&self);
+    #[cfg(feature = "linux-viewer-window")]
+    fn file_choice_gate(&self) -> Option<Arc<file_choice::Gate>> {
+        None
+    }
+    #[cfg(feature = "linux-viewer-window")]
+    fn input_idle(&self) -> bool {
+        false
+    }
     fn text_offer(&mut self, _held: bool) -> Result<text::Offer, StopReason> {
         Ok(text::Offer::default())
     }
@@ -645,6 +663,14 @@ struct NativeTarget {
     text: text::Context<TextContext>,
 }
 impl Target for NativeTarget {
+    #[cfg(feature = "linux-viewer-window")]
+    fn file_choice_gate(&self) -> Option<Arc<file_choice::Gate>> {
+        Some(self.shared.display_switch.get()?.file_choice_gate())
+    }
+    #[cfg(feature = "linux-viewer-window")]
+    fn input_idle(&self) -> bool {
+        self.source.queued() == Some(0)
+    }
     fn text_retire(&mut self, serial: u64) {
         let _ = self.text.take(serial);
     }
@@ -772,6 +798,10 @@ impl Target for NativeTarget {
     }
     fn ready(&self) {
         self.shared.state.ready();
+        #[cfg(feature = "linux-viewer-window")]
+        if let Some(gate) = self.file_choice_gate() {
+            gate.enable();
+        }
     }
 }
 fn run(
@@ -938,6 +968,31 @@ fn run_events(
         // no triggering batch, repeat or subsequent release is exported.
         if target.display_switch_pending().is_some() {
             thread::sleep(TURN);
+            continue;
+        }
+        #[cfg(feature = "linux-viewer-window")]
+        if let Some(gate) = target.file_choice_gate()
+            && let Some(serial) = file_choice::requested(&gate)?
+            && let Some((fresh_timeline, fresh_sampler)) = file_choice::run(
+                native,
+                target,
+                window,
+                layout,
+                names,
+                &mut decoder,
+                &mut shortcuts,
+                &mut display_switch,
+                &mut escape,
+                system_shortcuts,
+                &gate,
+                serial,
+                !events[..used]
+                    .iter()
+                    .any(|event| (1..=4).contains(&event.kind) || (13..=18).contains(&event.kind)),
+            )?
+        {
+            timeline = Some(fresh_timeline);
+            sampler = fresh_sampler;
             continue;
         }
         // Inspect the ENTIRE batch for lifecycle changes before admitting any
@@ -1220,6 +1275,12 @@ fn await_event(
             return Err(StopReason::NativeFailure);
         }
         if target.display_switch_pending().is_some() {
+            return Ok(None);
+        }
+        #[cfg(feature = "linux-viewer-window")]
+        if let Some(gate) = target.file_choice_gate()
+            && file_choice::requested(&gate)?.is_some()
+        {
             return Ok(None);
         }
         let mut event = Raw::default();

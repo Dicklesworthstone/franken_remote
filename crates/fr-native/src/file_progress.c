@@ -296,7 +296,8 @@ static int upload_box(struct fr_upload *p, int16_t x, int16_t y, uint16_t w, uin
 }
 int fr_upload_draw(struct fr_upload *p, const struct fr_upload_frame *f) {
     if (!p || !f || f->progress < -1 || f->progress > 1000 ||
-        (f->actions & ~(p->direction == 3 ? 64u : p->direction == 2 ? 56u : p->direction == 1 ? 4u : 7u))) return 0;
+        (f->actions & ~(p->direction == 3 ? 64u : p->direction == 2 ? 56u : p->direction == 1 ? 4u : (7u | 128u | 256u))) ||
+        ((f->actions & 128u) && !(f->actions & 256u))) return 0;
     size_t sizes[UP_ROWS];
     for (unsigned row = 0; row < UP_ROWS; ++row) {
         sizes[row] = 0;
@@ -329,6 +330,10 @@ int fr_upload_draw(struct fr_upload *p, const struct fr_upload_frame *f) {
         p->direction == 1 ? "Download progress - original destination only" :
         "Upload progress - original selection only";
     if (!upload_text(p, 16, 23, heading, strlen(heading))) return 0;
+    if (p->direction == 0 && (p->actions & 256u) &&
+        (!upload_box(p, 456, 8, 168, 32, 0) ||
+         !upload_text(p, 468, 29, "Choose files...", 15) ||
+         (!(p->actions & 128u) && !upload_text(p, 582, 29, "(off)", 5)))) return 0;
     for (unsigned row = 0; row < UP_ROWS; ++row) {
         if (!upload_text(p, 16, (int16_t)(46 + row * 20), (const char *)f->lines[row], sizes[row])) return 0;
     }
@@ -354,6 +359,8 @@ int fr_upload_draw(struct fr_upload *p, const struct fr_upload_frame *f) {
 static uint32_t upload_hit(const struct fr_upload *p, int16_t x, int16_t y) {
     if (p->direction == 3)
         return x >= 456 && x < 624 && y >= 8 && y < 40 ? 4u : 0u;
+    if (p->direction == 0 && (p->actions & 256u) &&
+        x >= 456 && x < 624 && y >= 8 && y < 40) return 128u;
     if (y < 234 || y >= 266) return 0;
     for (unsigned i = 0; i < 3; ++i) {
         int left = 16 + (int)i * 204;

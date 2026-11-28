@@ -123,6 +123,7 @@ impl Drop for Broker {
 struct Opening {
     sender: CString,
     path: CString,
+    parent: String,
     directory: bool,
     multiple: bool,
 }
@@ -285,7 +286,7 @@ fn boolean(message: &Message) -> bool {
 
 fn read_opening(message: &Message) -> Opening {
     message.signature(c"ssa{sv}").unwrap();
-    assert_eq!(message.read_text(b's', 256).unwrap(), "");
+    let parent = message.read_text(b's', 256).unwrap();
     let title = message.read_text(b's', 256).unwrap();
     message.require_container(b'a', c"{sv}").unwrap();
     let (mut token, mut directory, mut multiple) = (None, None, None);
@@ -350,6 +351,7 @@ fn read_opening(message: &Message) -> Opening {
     Opening {
         sender,
         path,
+        parent,
         directory,
         multiple,
     }
@@ -476,8 +478,12 @@ impl Service<'_> {
             &opening.path
         };
         object_path(&reply, path);
+        // The client may consume a sent reply immediately. Keep observation
+        // ordered with that successful send, so a post-cleanup state read
+        // cannot see the old counter after the actual original reply arrived.
+        let mut observed = self.observed.lock().unwrap();
         self.bus.send(&reply).unwrap();
-        self.observed.lock().unwrap().opening_replies += 1;
+        observed.opening_replies += 1;
         self.delayed_reply = None;
     }
 

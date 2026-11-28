@@ -122,7 +122,7 @@ fn waiting_for_a_first_drop_exposes_only_cancel_and_no_transfer_evidence() {
         } else {
             "Waiting for host file sharing"
         }));
-        assert!(text(&frame.lines[2]).contains("Only the items you drop will be sent"));
+        assert!(text(&frame.lines[2]).contains("Only your explicitly selected items will be sent"));
         assert!(
             frame
                 .lines
@@ -133,10 +133,46 @@ fn waiting_for_a_first_drop_exposes_only_cancel_and_no_transfer_evidence() {
     sample.cancel_requested = true;
     let frame = Frame::new(&sample);
     assert_eq!(frame.actions, 0);
-    assert!(text(&frame.lines[0]).starts_with("Stopping file drops"));
+    assert!(text(&frame.lines[0]).starts_with("Stopping file sharing"));
     sample.cancel_requested = false;
     sample.status.phase = SendPhase::SelectionAccepted;
     assert_eq!(Frame::new(&sample).actions, 0);
+}
+
+#[test]
+fn chooser_readiness_and_decline_are_independent_of_transfer_outcomes() {
+    use crate::file_drop::{ChoiceSnapshot, ChoiceStatus};
+    let mut sample = snapshot();
+    sample.status.phase = SendPhase::Finished;
+    for (status, text_fragment) in [
+        (ChoiceStatus::Idle, "Choose files"),
+        (ChoiceStatus::Choosing, "Choosing files locally"),
+        (ChoiceStatus::Returning, "Return to the remote desktop"),
+        (ChoiceStatus::Cancelled, "cancelled. No new files"),
+        (ChoiceStatus::Unavailable, "unavailable. No new files"),
+        (ChoiceStatus::CleanupIncomplete, "cleanup unconfirmed"),
+    ] {
+        let mut frame = Frame::new(&sample);
+        let original = frame.clone();
+        frame.choice(ChoiceSnapshot {
+            ready: false,
+            status,
+        });
+        assert_eq!(frame.progress, original.progress);
+        assert_eq!(frame.lines[..7], original.lines[..7]);
+        assert!(!frame.permits(Action::ChooseFiles));
+        assert_eq!(frame.actions, CHOICE_PRESENT);
+        assert!(text(&frame.lines[7]).contains(text_fragment));
+        assert!(!text(&frame.lines[7]).contains("Status exceeds"));
+    }
+    let mut frame = Frame::new(&sample);
+    frame.choice(ChoiceSnapshot {
+        ready: true,
+        status: ChoiceStatus::Idle,
+    });
+    assert!(frame.permits(Action::ChooseFiles));
+    assert!(!frame.permits(Action::Cancel));
+    assert_eq!(frame.progress, -1);
 }
 #[test]
 fn every_sender_stage_is_rendered_without_changing_authority() {

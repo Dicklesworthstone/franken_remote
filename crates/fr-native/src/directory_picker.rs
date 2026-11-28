@@ -102,6 +102,7 @@ pub struct DirectoryPicker {
     setup_until: u64,
     previous: u64,
     token: CString,
+    parent: CString,
     owner: Option<CString>,
     path: Option<CString>,
     activation_attempted: bool,
@@ -138,6 +139,7 @@ impl DirectoryPicker {
             setup_until: now.checked_add(SETUP_US).ok_or(Error::Clock)?,
             previous: now,
             token: bus::token()?,
+            parent: c"".to_owned(),
             owner: None,
             path: None,
             activation_attempted: false,
@@ -362,7 +364,7 @@ impl DirectoryPicker {
                     CHOOSER,
                     c"OpenFile",
                 )?;
-                query.text(c"")?;
+                query.text(&self.parent)?;
                 query.text(if self.mode == SelectionMode::Directory {
                     c"Choose a folder to receive files"
                 } else {
@@ -542,11 +544,38 @@ impl Drop for DirectoryPicker {
 /// protocol as receiving-folder selection. No file is opened by this picker.
 #[derive(Debug)]
 pub struct FilePicker(DirectoryPicker);
+/// Connected selection keeps the portal's ORIGINAL response clock through
+/// local path validation. Suspend, cleanup and a delayed owner cannot renew it.
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+pub(crate) struct FileChoice {
+    pub(crate) dropped: crate::file_drop::Dropped,
+    captured: u64,
+}
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+impl FileChoice {
+    pub(crate) fn fresh(&self) -> bool {
+        bus::now().is_ok_and(|now| {
+            now.checked_sub(self.captured)
+                .is_some_and(|age| Duration::from_micros(age) < MAX_AGE)
+        })
+    }
+}
 impl FilePicker {
     pub fn open() -> Result<Self, Error> {
         let now = bus::now()?;
         let address = session_address()?;
         DirectoryPicker::open_mode_at(&address, now, SelectionMode::Files).map(Self)
+    }
+
+    /// The caller supplies this application's original, live X11 viewer. The
+    /// parent relation helps the portal restore focus after its own dialog; it
+    /// does not replace the independent input suspension/resumption proof.
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    pub(crate) fn open_parented(parent: u32) -> Result<Self, Error> {
+        let parent = x11_parent(parent)?;
+        let mut picker = Self::open()?;
+        picker.0.parent = parent;
+        Ok(picker)
     }
 
     /// Return at most eight local paths once, after the native interaction ends.
@@ -558,9 +587,39 @@ impl FilePicker {
         }
     }
 
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    pub(crate) fn poll_choice(&mut self) -> Result<Option<FileChoice>, Error> {
+        let Some(paths) = self.poll()? else {
+            return Ok(None);
+        };
+        let captured = self.0.response_at.ok_or(Error::Clock)?;
+        // Sample Instant BEFORE CLOCK_BOOTTIME: this projection may shorten
+        // the portable drop deadline, but can never freshen the portal result.
+        let instant = std::time::Instant::now();
+        let age = bus::now()?.checked_sub(captured).ok_or(Error::Clock)?;
+        if Duration::from_micros(age) >= MAX_AGE {
+            return Err(Error::Expired);
+        }
+        let dropped = crate::file_drop::Dropped {
+            paths,
+            captured: instant
+                .checked_sub(Duration::from_micros(age))
+                .ok_or(Error::Clock)?,
+        };
+        Ok(Some(FileChoice { dropped, captured }))
+    }
+
     pub fn close(&mut self) -> Result<(), Error> {
         self.0.close()
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+fn x11_parent(parent: u32) -> Result<CString, Error> {
+    if parent == 0 {
+        return Err(Error::Unavailable);
+    }
+    CString::new(format!("x11:{parent:x}")).map_err(|_| Error::Unavailable)
 }
 
 fn unique_name(name: &str) -> bool {

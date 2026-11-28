@@ -1,6 +1,6 @@
 # Native file transfer progress and local controls
 
-An explicitly configured `fr connect --control --send PATH` or `--receive DIR`
+An explicitly configured `fr connect --control --send PATH`, `--file-drop` or `--receive DIR`
 opens an optional progress panel alongside its original Linux X11 viewer. The
 panel reads the original transfer owner's bounded status. Files and portable
 directory selections use the same panel; observation-only and unconfigured
@@ -13,17 +13,51 @@ Opening or hiding one panel never replaces the other direction's owner.
 
 | Direction | Progress bar | Local controls |
 | --- | --- | --- |
-| Upload: `--send PATH` | Current-object bytes queued into the file channel | Pause, Resume, Cancel upload |
+| Upload: `--send PATH` or `--file-drop` | Current-object bytes queued into the file channel; no percentage before selection | Pause, Resume, Cancel upload; Choose files when the original intake is ready |
 | Download: `--receive DIR` | Current-object bytes privately staged in the local destination | Cancel download |
 
 The panel sets its non-input window hint before mapping and never requests
-keyboard focus. Upload buttons issue the same local requests as the existing
+keyboard focus. Upload Pause, Resume and Cancel issue the same local requests as the existing
 [physical shortcuts](NATIVE_FILE_SHORTCUTS.md). Download cancellation uses the
 original receive handle; it cannot pause, resume or restart a transfer.
-Closing the panel only hides it: it does not cancel files, revoke control or close
-the desktop. There is no automatic reopen or replacement selection. Upload
+Closing the panel hides progress and disables new selections while an already
+accepted transfer keeps its own outcome. An open local chooser also has to close
+and finish its bounded input return, as described below. There is no automatic
+reopen or replacement selection. Upload
 shortcuts and terminal receipts remain available when the panel is hidden or
 unavailable.
+
+## Choosing more files on Linux
+
+An ordinary upload with the original session's `SendIntake` exposes **Choose
+files...** at the upper right. It becomes available after the host's attachment
+is ready and the preceding batch and source cleanup have finished. The same
+button can make the first selection for `--file-drop`. A standing folder-upload
+job owns its selected source and does not install this action.
+
+Release held keys/buttons and finish any local text composition before choosing.
+The original input producer must positively suspend before the desktop portal
+opens; it forwards no dialog gestures. After the portal closes, the same input
+owner must prove fresh focus, unchanged geometry and no held input before it
+returns. This keeps the original control grant. A cancelled chooser submits no
+files. If native closure or input return
+cannot be confirmed within its original bound, the owner fences the connection
+and retains the unfinished cleanup owner.
+
+The last row reports chooser state independently of transfer receipts:
+
+| Chooser message | Meaning |
+| --- | --- |
+| Choosing files locally | The original dialog owns the one selection slot; another click or drop is disabled. |
+| Return to the remote desktop | The dialog has closed; focus and held-input checks are still pending. |
+| File selection cancelled | No new batch was submitted; a later explicit selection can use the same live intake. |
+| File selection unavailable | The local choice or original admission checks refused; no new batch was submitted. |
+| File chooser cleanup unconfirmed | The original dialog could not prove closure; further native selections are disabled. |
+
+The response's two-second freshness limit includes focus restoration, descriptor
+selection and intake-lock waits. Expiry never renews a selection or replays it.
+See [the connected upload workflow](NATIVE_FILE_SEND.md#additional-selections-during-a-native-desktop-session)
+for portal requirements and the shared selection and byte bounds.
 
 ## Mac window controls
 
@@ -132,13 +166,13 @@ as completed native cleanup.
 ## Scope and validation
 
 An upload configured with the original session's `SendIntake` can display later
-explicit file drops after successful publication and source cleanup. Each batch
+explicit file choices or drops after successful publication and source cleanup. Each batch
 keeps a separate `SendControl`. The same panel thread destroys its old native
 window before opening a successor with that new immutable control, original
 placement and fresh mapping evidence. It drains lifecycle events first, so a
 queued close, unmap or parent loss suppresses replacement. Hidden or failed
 panels never reopen. Hiding progress after a selection was accepted leaves that
-transfer running and disables future drops. Earlier completion receipts remain
+transfer running and disables future native selections. Earlier completion receipts remain
 in the CLI's bounded content-free history. See
 [NATIVE_FILE_SEND.md](NATIVE_FILE_SEND.md#additional-selections-during-a-native-desktop-session).
 
@@ -155,6 +189,20 @@ include button requests without focus transfer, staged-byte pixel readback,
 publication and cleanup uncertainty, terminal races, stale clicks,
 synthetic/invalid gestures, event floods, parent loss and cleanup. Their session
 and transfer-result fixtures are explicit.
+The connected chooser change has the following executed evidence:
+
+| Check | Result and scope |
+| --- | --- |
+| Actual portal and shared selection-inbox Rust sources | 39 tests passed with the pinned compiler and strict Clippy; portal cases use a private D-Bus broker and an explicit fixture service. |
+| Original input-pause gate Rust source | 6 tests passed for original identity, refusal, deadlines, cancellation and positive return. |
+| Actual native input C sources on authenticated Xvfb | 39 cases passed: 11 chooser-interval cases, 7 keyboard-map cases and 21 existing text/input cases. C compilation used `-Wall -Wextra -Werror`. |
+| Actual progress-panel C ABI on authenticated Xvfb | One driver passed, checking visible chooser pixels, action 128, disabled/synthetic/unmatched gestures, stale press rejection and unchanged original focus. |
+
+These are separate source and native-boundary checks. The authored full Rust
+capture-loop/panel tests and authenticated ATP integration were not executed:
+the pinned Asupersync dependency build was killed before compilation reached
+these modules. A real desktop portal with a window manager, physical-user
+authenticity and live-tailnet file sending remain unqualified by this evidence.
 Concurrent-panel regressions exercise either file configuration order, distinct
 native button routing, preserved clipboard visibility and off control, hiding
 one direction while the other remains usable, and both native cleanup barriers.
@@ -169,4 +217,6 @@ authenticity, general window-manager compatibility or a live tailnet.
 
 Folder synchronization, cross-connection resumption, automatic file
 opening, Wayland/Windows UI and a general accessibility implementation are
-not added by this panel. Existing file and input authority checks are unchanged.
+not added by this panel. Original file grants, attachment identities and transfer
+deadlines remain unchanged; ordinary focus loss still fences input outside the
+explicitly suspended local chooser interval.

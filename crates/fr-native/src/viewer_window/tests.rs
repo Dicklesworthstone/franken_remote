@@ -348,6 +348,7 @@ fn original_window_control(session: StreamingViewerControl) -> WindowControl {
         focus_loss_recovery: focus_recovery::Gate::default(),
         automation_focus_stop: AtomicU8::new(0),
         file_drops: file_drop::Inbox::default(),
+        file_choice: Arc::default(),
         target: OnceLock::new(),
         width: 320,
         height: 240,

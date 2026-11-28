@@ -171,6 +171,7 @@ struct Shared {
     focus_loss_recovery: focus_recovery::Gate,
     automation_focus_stop: AtomicU8,
     file_drops: file_drop::Inbox,
+    file_choice: Arc<crate::viewer_input::file_choice::Gate>,
     target: OnceLock<X11Target>,
     width: u32,
     height: u32,
@@ -230,6 +231,7 @@ impl Shared {
         self.session.stop();
         self.automation_focus.stop();
         self.file_drops.close();
+        self.file_choice.stop();
         let _ = self
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
@@ -253,6 +255,19 @@ impl Shared {
 #[derive(Clone)]
 pub struct WindowControl(Arc<Shared>);
 impl WindowControl {
+    pub(crate) fn file_choice_gate(&self) -> Arc<crate::viewer_input::file_choice::Gate> {
+        Arc::clone(&self.0.file_choice)
+    }
+
+    /// One explicit local dialog on the original interactive input producer.
+    /// Automation's independent focus contract cannot be relaxed by this UI.
+    #[cfg(feature = "linux-desktop")]
+    pub(crate) fn pause_file_choice(&self) -> Result<crate::viewer_input::file_choice::Pause, ()> {
+        if self.status() != Status::Mapped || self.0.automation_focus.enabled() {
+            return Err(());
+        }
+        crate::viewer_input::file_choice::Pause::new(self.clone(), self.file_choice_gate())
+    }
     pub fn stop(&self) {
         self.0.focus_loss_recovery.cancel();
         self.0.resize.cancel();
@@ -549,6 +564,7 @@ impl ViewerWindow {
             focus_loss_recovery: focus_recovery::Gate::default(),
             automation_focus_stop: AtomicU8::new(0),
             file_drops: file_drop::Inbox::default(),
+            file_choice: Arc::default(),
             target: OnceLock::new(),
             width,
             height,

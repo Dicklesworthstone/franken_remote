@@ -83,17 +83,19 @@ impl Surface for Ingress {
         intake: &SendIntake,
         request: SendRequest,
         captured: Instant,
+        fresh: &dyn Fn() -> bool,
     ) -> Result<(SendControl, bool), &'static str> {
         let mut latest = self
             .0
             .latest
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if captured.elapsed() >= file_drop::MAX_AGE || !Surface::ready(self) {
+        let current = || captured.elapsed() < file_drop::MAX_AGE && Surface::ready(self) && fresh();
+        if !current() {
             return Err("file_selection_expired");
         }
         let source = intake
-            .submit(request)
+            .submit_if(request, current)
             .map_err(|_| "file_selection_unavailable")?;
         *latest = Some(source.clone());
         Ok((source, true))

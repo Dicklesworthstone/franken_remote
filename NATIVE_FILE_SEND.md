@@ -347,15 +347,42 @@ explicit direction. Neither selection is replayed after reconnect.
 Start the Linux X11 viewer with `--control --file-drop` and a host configured
 with `--input-agent PATH --files DIR` to choose files after connecting. The
 upload panel waits for the original control grant and the host's one-use file
-attachment before accepting a Copy drop. No source is selected, opened or read
-by this empty-source configuration; it sends no empty ATP batch. Copy local
+attachment before enabling **Choose files...** or accepting a Copy drop. No
+source is selected, opened or read by this empty-source configuration; it sends
+no empty ATP batch. Copy local
 files or directories from an X11 file manager onto the viewer window when the
-panel is ready. Alternatively, use `--control --send PATH...`; additional drops
+panel is ready, or use **Choose files...** to select files in the local desktop
+portal. Alternatively, use `--control --send PATH...`; additional selections
 become available after the initial batch publishes and source cleanup finishes.
 Keep the upload progress panel open and wait
-for each batch to finish before selecting another. Each drop accepts at most
-eight paths; the desktop retains at most eight dropped batches. The host's
+for each batch to finish before selecting another. Each selection accepts at most
+eight paths; the desktop retains at most eight later native batches. The host's
 original cumulative byte and transfer-attempt limits still apply.
+
+The connected file chooser shares the drop target's single pending slot and
+original selection worker. Another click or drop cannot replace an open dialog.
+Release held keys/buttons and finish local text composition first: the original
+producer refuses the chooser before opening when it cannot suspend cleanly,
+and continues to own those original input releases.
+The portal is parented to this viewer; input is suspended before it opens and
+can resume only after the original dialog has positively closed and the same
+viewer has fresh focus with no held input. Cancelling the chooser selects no
+files and leaves the otherwise live desktop connected. The panel reports the
+cancelled or unavailable choice separately from transfer receipts. A dialog
+whose cleanup cannot be confirmed disables further native selections for that
+connection and fences its unfinished input suspension; it does not authorize a
+successor dialog. Input return is also bounded, and ordinary focus loss remains
+terminal outside this explicit local interaction. No new control grant, source
+or file attachment is created for a successful return.
+
+The chooser has a bounded local interaction lifetime. After its original
+Response, the selected paths retain the same two-second age limit through
+focus restoration, descriptor selection and intake admission. Linux's
+suspend-aware clock prevents a sleeping or delayed owner from refreshing that
+selection. An expired choice is refused; no file is automatically replayed.
+The chooser requires the local FileChooser portal. It is unavailable for a
+standing folder-upload job, which owns its original source exclusively; use
+that job's selected folder or start an ordinary explicit upload connection.
 
 `NativeObserver::configure_file_send_with_intake` and
 `Desktop::configure_file_send_with_intake` retain a bounded `SendIntake` for the
@@ -383,7 +410,8 @@ starting a disk source or closing the desktop. An expired selection reports
 
 For `--file-drop` without an initial source, `NativeObserver::configure_file_drop`
 and `Desktop::configure_file_drop` use the same owner, attachment and fixed
-sender policy. The initial panel has only Cancel, with no transfer percentage
+sender policy. The initial panel has Cancel and, once the original lane is ready,
+Choose files, with no transfer percentage
 or fabricated publication. Its control handle becomes terminal when the first
 explicit selection takes ownership; it cannot pause, cancel or replay a later
 batch. Each accepted batch gets its own Pause / Resume / Cancel controls. The
@@ -409,7 +437,7 @@ Each subsequent upload gets a fresh native progress window on the original panel
 thread. The old window is destroyed before its immutable control is replaced;
 queued clicks and the original `--send` keyboard shortcuts cannot address the
 new selection. Use the new panel's Pause / Resume / Cancel buttons. Hiding or
-losing progress disables further drops while an already accepted transfer keeps
+losing progress disables further native selections while an already accepted transfer keeps
 its own outcome. Completion summaries retain all requested indexes, including
 accepted drops that expire or retire before preparation, without names or paths.
 
@@ -426,6 +454,16 @@ CLI and native panel checks cover explicit opt-in, read-only refusal, duplex
 offers and the initial panel's handoff without an invented completed batch.
 These are regression targets; live-tailnet and physical X11 drag-and-drop
 qualification remain separate evidence.
+
+Chooser regressions exercise the production portal framing against a private
+D-Bus broker, original parent and response age, decline without a fabricated
+batch, and shared drop/chooser admission. The native panel regression drives the
+actual C hit testing and Rust event loop. The executed checks are 39 portal/inbox
+Rust tests, 6 input-pause gate tests, 39 native C input cases and one native C
+panel ABI driver; see [their precise scope](NATIVE_FILE_PROGRESS.md#scope-and-validation).
+The full Rust event-loop and authenticated transfer integration tests were
+blocked by the pinned dependency build. A fixture portal is not evidence of a
+real desktop portal, window manager or authenticated end-to-end file transfer.
 
 The production URI/inbox module has passing pinned-compiler tests, and the
 production C bridge passes `-std=c11 -Wall -Wextra -Werror -fsyntax-only`.

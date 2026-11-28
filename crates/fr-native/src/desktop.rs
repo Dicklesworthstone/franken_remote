@@ -629,7 +629,9 @@ impl Desktop {
         self.file_progress = Some(panel);
         Ok((controls, intake))
     }
-    /// Enable copy-only local file drops on an explicitly configured upload.
+    /// Enable copy-only local file drops and the connected "Choose files"
+    /// action on an explicitly configured ordinary upload. A standing folder
+    /// upload owns its source exclusively and has no selection intake.
     /// The original intake and native window are taken from THIS Desktop; no
     /// caller can attach another desktop's file lane. Each later selection gets
     /// separate progress controls and remains subject to the original grant.
@@ -1067,7 +1069,8 @@ impl Desktop {
                                     capture_system_shortcuts,
                                     file_controls.as_ref(),
                                     (window.resize_enabled()
-                                        || window.focus_loss_recovery_enabled())
+                                        || window.focus_loss_recovery_enabled()
+                                        || file_controls.is_some())
                                     .then_some(&window),
                                 )?);
                                 Ok(())
@@ -1187,7 +1190,8 @@ impl Desktop {
                                     file_controls.as_ref(),
                                     (display_switching
                                         || window.resize_enabled()
-                                        || window.focus_loss_recovery_enabled())
+                                        || window.focus_loss_recovery_enabled()
+                                        || file_controls.is_some())
                                     .then_some(&window),
                                 )?);
                                 Ok(())

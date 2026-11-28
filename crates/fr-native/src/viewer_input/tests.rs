@@ -564,5 +564,9 @@ mod file_keys_tests;
 
 mod system_shortcuts;
 
+#[cfg(feature = "linux-viewer-window")]
+#[path = "tests/file_choice.rs"]
+mod file_choice_tests;
+
 #[path = "tests/text.rs"]
 mod text_tests;

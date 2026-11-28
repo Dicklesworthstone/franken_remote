@@ -126,6 +126,7 @@ enum Action {
     Louder = 16,
     Mute = 32,
     TurnOff = 64,
+    ChooseFiles = 128,
 }
 impl Action {
     fn from_raw(value: u32) -> Option<Self> {
@@ -137,6 +138,7 @@ impl Action {
             16 => Some(Self::Louder),
             32 => Some(Self::Mute),
             64 => Some(Self::TurnOff),
+            128 => Some(Self::ChooseFiles),
             _ => None,
         }
     }
@@ -146,7 +148,7 @@ impl Action {
             Self::Pause => source.pause(),
             Self::Resume => source.resume(),
             Self::Cancel => source.cancel(),
-            Self::Quieter | Self::Louder | Self::Mute | Self::TurnOff => return,
+            Self::Quieter | Self::Louder | Self::Mute | Self::TurnOff | Self::ChooseFiles => return,
         };
     }
 }
@@ -212,6 +214,7 @@ fn upload_replaceable(snapshot: &SendSnapshot) -> bool {
 struct UploadSwap<T = SendControl> {
     current: T,
     pending: Option<T>,
+    choice: Option<crate::file_drop::Inbox>,
 }
 impl<T: UploadStatus> UploadSwap<T> {
     fn queue(&mut self, state: &AtomicU8, next: T) -> bool {
@@ -260,6 +263,22 @@ impl Control {
     }
     pub fn hide(&self) {
         self.stop(StopReason::Hidden);
+    }
+    /// One original ordinary upload intake supplies both drop and chooser
+    /// admission. A panel alone cannot create that capability.
+    pub(crate) fn enable_choice(&self, inbox: crate::file_drop::Inbox) -> bool {
+        self.upload.as_ref().is_some_and(|upload| {
+            upload.lock().is_ok_and(|mut swap| {
+                if self.state.load(Ordering::Acquire) >= 2
+                    || swap.choice.is_some()
+                    || !inbox.enable_choice()
+                {
+                    return false;
+                }
+                swap.choice = Some(inbox);
+                true
+            })
+        })
     }
     /// The selection already belongs to the original `SendIntake`. This only
     /// replaces a completed upload or empty-source setup UI, without starting work or retargeting
@@ -423,6 +442,7 @@ impl Panel {
             Transfer::Upload(source) => Some(Arc::new(Mutex::new(UploadSwap {
                 current: source.clone(),
                 pending: None,
+                choice: None,
             }))),
             _ => None,
         };
@@ -551,6 +571,16 @@ trait Target {
     }
     fn snapshot(&self) -> Snapshot;
     fn action(&self, action: Action);
+    fn choice(&self) -> Option<crate::file_drop::ChoiceSnapshot> {
+        None
+    }
+    fn frame(&self) -> Frame {
+        let mut frame = Frame::snapshot(&self.snapshot());
+        if let Some(choice) = self.choice() {
+            frame.choice(choice);
+        }
+        frame
+    }
     fn panel_stopped(&self) {}
     fn progress(&self) {}
     fn replacement_pending(&self) -> Result<bool, StopReason> {
@@ -581,7 +611,20 @@ impl Target for NativeTarget {
         self.source.snapshot()
     }
     fn action(&self, action: Action) {
+        if action == Action::ChooseFiles {
+            if let Some(upload) = &self.upload
+                && let Ok(swap) = upload.lock()
+                && swap.pending.is_none()
+                && let Some(inbox) = &swap.choice
+            {
+                let _accepted = inbox.request_choice();
+            }
+            return;
+        }
         self.source.action(action);
+    }
+    fn choice(&self) -> Option<crate::file_drop::ChoiceSnapshot> {
+        self.upload.as_ref()?.lock().ok()?.choice.as_ref()?.choice()
     }
     fn panel_stopped(&self) {
         if let Some(privacy) = &self.privacy {
@@ -847,7 +890,7 @@ fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> RunEnd {
                 // Recheck both what was displayed and the original CURRENT
                 // snapshot: a shortcut or terminal receipt can race a click.
                 if previous.as_ref().is_some_and(|p| p.permits(action))
-                    && Frame::snapshot(&target.snapshot()).permits(action)
+                    && target.frame().permits(action)
                 {
                     target.action(action);
                     redraw = true;
@@ -864,7 +907,7 @@ fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> RunEnd {
             if target.stopped() {
                 return StopReason::SessionEnded.into();
             }
-            let frame = Frame::snapshot(&target.snapshot());
+            let frame = target.frame();
             if damage || previous.as_ref() != Some(&frame) {
                 // SAFETY: fixed C-compatible record, borrowed only for this call.
                 if unsafe { fr_upload_draw(native.0.as_ptr(), &raw const frame) } != 1 {

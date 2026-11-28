@@ -109,12 +109,34 @@ pub(crate) struct Retired {
 enum Slot {
     Pending(Dropped),
     Retired(Retired),
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    Choose(Instant),
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    Choosing,
+}
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChoiceStatus {
+    Idle,
+    Choosing,
+    Returning,
+    Cancelled,
+    Unavailable,
+    CleanupIncomplete,
+}
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChoiceSnapshot {
+    pub(crate) ready: bool,
+    pub(crate) status: ChoiceStatus,
 }
 #[derive(Default)]
 struct State {
     ready: bool,
     closed: bool,
     slot: Option<Slot>,
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    choice: Option<ChoiceStatus>,
 }
 impl State {
     fn retire(&mut self, reason: &'static str) {
@@ -123,6 +145,12 @@ impl State {
             // Replacing the slot immediately drops every path. A later close
             // must preserve the first recorded retirement reason.
             self.slot = Some(Slot::Retired(Retired { count, reason }));
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+        if matches!(self.slot, Some(Slot::Choose(_))) {
+            // A request to open a chooser has no selected objects to retire.
+            self.slot = None;
+            self.choice = Some(ChoiceStatus::Unavailable);
         }
     }
 }
@@ -214,7 +242,7 @@ impl Inbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.slot.take()? {
             Slot::Retired(retired) => Some(retired),
-            pending @ Slot::Pending(_) => {
+            pending => {
                 state.slot = Some(pending);
                 None
             }
@@ -222,9 +250,176 @@ impl Inbox {
     }
 }
 
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+impl Inbox {
+    /// Install only on the original ordinary upload owner. A standing folder
+    /// job has no such intake and never enables this action.
+    pub(crate) fn enable_choice(&self) -> bool {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed || state.choice.is_some() {
+            return false;
+        }
+        state.choice = Some(ChoiceStatus::Idle);
+        true
+    }
+    pub(crate) fn choice(&self) -> Option<ChoiceSnapshot> {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.choice.map(|status| ChoiceSnapshot {
+            ready: state.ready && !state.closed && state.slot.is_none(),
+            status,
+        })
+    }
+    /// Reserve the same one slot as Xdnd, before any native dialog opens. A
+    /// second click or drop cannot replace this original local interaction.
+    pub(crate) fn request_choice(&self) -> bool {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.ready || state.closed || state.slot.is_some() || state.choice.is_none() {
+            return false;
+        }
+        state.slot = Some(Slot::Choose(Instant::now()));
+        state.choice = Some(ChoiceStatus::Choosing);
+        true
+    }
+    pub(crate) fn take_choice(&self) -> bool {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(Slot::Choose(captured)) = state.slot else {
+            return false;
+        };
+        if !state.ready || state.closed || captured.elapsed() >= MAX_AGE {
+            state.retire("file_selection_expired");
+            return false;
+        }
+        state.ready = false;
+        state.slot = Some(Slot::Choosing);
+        true
+    }
+    pub(crate) fn returning_choice(&self) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(state.slot, Some(Slot::Choosing)) {
+            state.choice = Some(ChoiceStatus::Returning);
+        }
+    }
+    /// Called only after the original picker returned from close. Unconfirmed
+    /// native cleanup permanently fences this owner's chooser AND drop slot.
+    pub(crate) fn finish_choice(&self, outcome: ChoiceStatus) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(state.slot, Some(Slot::Choosing)) {
+            return;
+        }
+        state.choice = Some(outcome);
+        state.slot = None;
+        state.ready = false;
+        if outcome == ChoiceStatus::CleanupIncomplete {
+            state.closed = true;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    #[test]
+    fn chooser_and_drop_share_one_original_admission_slot() {
+        let inbox = Inbox::default();
+        let files = || vec![PathBuf::from("/tmp/explicit")];
+        inbox.set_ready(true);
+        assert!(!inbox.request_choice(), "a drop-only owner has no chooser");
+        assert!(inbox.enable_choice());
+        assert!(!inbox.enable_choice());
+        assert!(inbox.request_choice());
+        assert!(!inbox.ready());
+        assert!(!inbox.publish(files(), Instant::now()));
+        assert!(!inbox.request_choice());
+        assert!(inbox.take().is_none());
+        assert!(inbox.take_retired().is_none());
+        assert!(inbox.take_choice());
+        assert!(!inbox.take_choice());
+        // Readiness cannot release a live dialog's reservation.
+        inbox.set_ready(true);
+        assert!(!inbox.ready());
+        assert!(!inbox.request_choice());
+        assert!(!inbox.publish(files(), Instant::now()));
+        inbox.returning_choice();
+        assert_eq!(inbox.choice().unwrap().status, ChoiceStatus::Returning);
+        inbox.set_ready(true);
+        assert!(!inbox.ready(), "input resumption still owns the same slot");
+        inbox.finish_choice(ChoiceStatus::Cancelled);
+        assert!(inbox.take().is_none());
+        assert!(inbox.take_retired().is_none());
+        assert!(!inbox.is_closed(), "declining has no authority effect");
+        inbox.set_ready(true);
+        assert!(inbox.choice().unwrap().ready);
+        assert_eq!(inbox.choice().unwrap().status, ChoiceStatus::Cancelled);
+        assert!(inbox.publish(files(), Instant::now()));
+        assert!(!inbox.request_choice());
+        assert_eq!(inbox.take().unwrap().paths, files());
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    #[test]
+    fn chooser_cleanup_failure_cannot_be_rearmed_or_invent_a_batch() {
+        let inbox = Inbox::default();
+        assert!(inbox.enable_choice());
+        inbox.set_ready(true);
+        assert!(inbox.request_choice());
+        assert!(inbox.take_choice());
+        inbox.finish_choice(ChoiceStatus::CleanupIncomplete);
+        inbox.set_ready(true);
+        inbox.finish_choice(ChoiceStatus::Idle);
+        assert!(inbox.is_closed());
+        assert!(!inbox.ready());
+        assert!(!inbox.enable_choice());
+        assert!(!inbox.request_choice());
+        assert_eq!(
+            inbox.choice().unwrap().status,
+            ChoiceStatus::CleanupIncomplete
+        );
+        assert!(inbox.take().is_none());
+        assert!(inbox.take_retired().is_none());
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    #[test]
+    fn stale_or_closed_chooser_click_does_not_open_or_select_anything() {
+        for close in [false, true] {
+            let inbox = Inbox::default();
+            assert!(inbox.enable_choice());
+            inbox.set_ready(true);
+            assert!(inbox.request_choice());
+            if close {
+                inbox.close();
+            } else {
+                inbox.0.lock().unwrap().slot =
+                    Some(Slot::Choose(Instant::now().checked_sub(MAX_AGE).unwrap()));
+            }
+            assert!(!inbox.take_choice());
+            assert!(inbox.take().is_none());
+            assert!(inbox.take_retired().is_none());
+            assert_eq!(inbox.choice().unwrap().status, ChoiceStatus::Unavailable);
+            inbox.set_ready(true);
+            assert_eq!(inbox.request_choice(), !close);
+        }
+    }
 
     #[test]
     fn local_uri_list_preserves_explicit_names_and_order() {

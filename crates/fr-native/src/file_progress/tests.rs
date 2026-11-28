@@ -1,6 +1,7 @@
 //! Actual C drawing/events plus the production Rust loop. Session authority and
 //! file outcomes are explicit fixtures, not authenticated transfer qualification.
 mod audio;
+mod choice;
 mod clipboard;
 mod duplex;
 mod receive;
@@ -95,7 +96,11 @@ impl Target for Probe {
             Action::Pause => sample.pause_requested = true,
             Action::Resume => sample.pause_requested = false,
             Action::Cancel => sample.cancel_requested = true,
-            Action::Quieter | Action::Louder | Action::Mute | Action::TurnOff => {
+            Action::Quieter
+            | Action::Louder
+            | Action::Mute
+            | Action::TurnOff
+            | Action::ChooseFiles => {
                 panic!("unrelated action in file panel");
             }
         }
