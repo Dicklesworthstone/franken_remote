@@ -213,12 +213,15 @@ fn bootstrap_expiry_uses_request_start_and_the_deadline_is_exclusive() {
         .accept_bootstrap(attempt, &response.to_string(), 2_999_999)
         .unwrap();
     adapter.client_hello(attempt, 2_999_999).unwrap();
-    assert_eq!(adapter.tick(attempt, 3_000_000), Err(Error::Expired));
+    // The one-use hello consumed the original nonce while it was valid. The
+    // subsequent negotiation retains the original attempt's ten-second bound.
+    adapter.tick(attempt, 3_000_000).unwrap();
+    assert_eq!(adapter.tick(attempt, 11_000_000), Err(Error::Expired));
     assert_eq!(adapter.snapshot().attempt, None);
 
-    let attempt = adapter.begin("observer", 4_000_000).unwrap();
+    let attempt = adapter.begin("observer", 12_000_000).unwrap();
     assert_eq!(
-        adapter.accept_bootstrap(attempt, &response.to_string(), 6_000_000),
+        adapter.accept_bootstrap(attempt, &response.to_string(), 14_000_000),
         Err(Error::Expired)
     );
 }

@@ -9,6 +9,7 @@ use crate::{
         MediaSnapshot, OutputReceipt, PreparedChunk, PreparedConfiguration, ReleaseReceipt,
     },
 };
+use fr_client::startup::ApprovalNotice;
 use fr_core::limits::ProtocolLimits;
 use fr_media::delivery::{
     DecodedFrame, DecoderBinding, MediaBindings, MediaBudget, MediaEpoch, ReceiveConfig,
@@ -100,6 +101,8 @@ pub(crate) struct DesktopSession {
     offer: Offer,
     host: Option<Offer>,
     selected: Option<Selection>,
+    selected_queued: bool,
+    approval: Option<ApprovalNotice>,
     binding: Option<ControlBinding>,
     descriptor: Option<attachment::Descriptor>,
     grant: Option<attachment::Grant>,
@@ -130,6 +133,8 @@ impl DesktopSession {
             offer,
             host: None,
             selected: None,
+            selected_queued: false,
+            approval: None,
             binding: None,
             descriptor: None,
             grant: None,
@@ -162,6 +167,9 @@ impl DesktopSession {
     }
     pub fn opened(&self) -> bool {
         self.binding.is_some() && !self.closed
+    }
+    pub fn approval(&self) -> Option<ApprovalNotice> {
+        self.approval
     }
     fn live(&self) -> Result<(), Error> {
         if self.quarantined {
@@ -279,12 +287,37 @@ impl DesktopSession {
                 }
                 Message::ApprovalRequired {
                     request,
+                    deadline_us,
                     role: Role::Observe,
-                    ..
-                } if self.selected.is_some() && request.as_raw() != 0 => {}
+                } if self.approval.is_none()
+                    && self.selected_queued
+                    && self
+                        .selected
+                        .as_ref()
+                        .is_some_and(browser::local_approval_selected)
+                    && request.as_raw() != 0
+                    && deadline_us != 0 =>
+                {
+                    core.on_waiting_approval(request, deadline_us, now)
+                        .map_err(|_| Error::InvalidControl)?;
+                    self.approval = Some(ApprovalNotice {
+                        request,
+                        host_deadline_us: deadline_us,
+                    });
+                }
                 Message::SessionOpened {
-                    binding, selection, ..
-                } if self.selected.as_ref() == Some(&selection) => {
+                    binding,
+                    selection,
+                    observation_until_us,
+                } if self.selected.as_ref() == Some(&selection)
+                    && self.selected_queued
+                    && observation_until_us != 0
+                    && self
+                        .approval
+                        .is_none_or(|notice| notice.request == binding.remote_session)
+                    && (!browser::local_approval_required(&selection)
+                        || self.approval.is_some()) =>
+                {
                     core.on_admitted_session(binding, selection.limits, now)
                         .map_err(|_| Error::InvalidControl)?;
                     self.binding = Some(binding);
@@ -405,6 +438,10 @@ impl DesktopSession {
         if clock {
             core.clock_probe_queued(now)
                 .map_err(|_| Error::InvalidClock)?;
+        } else if self.binding.is_none() && self.selected.is_some() && !self.selected_queued {
+            // SelectedConfiguration is the sole outbound pre-binding record.
+            // Taking it is not evidence that its original bytes entered WSS.
+            self.selected_queued = true;
         }
         Ok(())
     }

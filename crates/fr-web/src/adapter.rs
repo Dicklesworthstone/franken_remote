@@ -46,6 +46,7 @@ pub enum BrowserAdapterError {
     DesktopUnavailable,
     InvalidState,
     Expired,
+    ApprovalExpired,
     InvalidClock,
     InvalidControl,
     UnsupportedControl,
@@ -68,6 +69,7 @@ impl BrowserAdapterError {
             Self::DesktopUnavailable => "browser_session_unavailable",
             Self::InvalidState => "browser_connection_state_invalid",
             Self::Expired => "browser_handshake_expired",
+            Self::ApprovalExpired => "browser_approval_expired",
             Self::InvalidClock => "browser_clock_invalid",
             Self::InvalidControl => "browser_control_record_invalid",
             Self::UnsupportedControl => "browser_control_record_unsupported",
@@ -96,6 +98,7 @@ enum Phase {
     Bootstrapping,
     AwaitingTransport,
     AwaitingHost,
+    AwaitingApproval,
     Viewing,
     Refused,
     Closed,
@@ -108,6 +111,7 @@ impl Phase {
             Self::Bootstrapping => "bootstrapping",
             Self::AwaitingTransport => "awaiting_transport",
             Self::AwaitingHost => "awaiting_host",
+            Self::AwaitingApproval => "awaiting_approval",
             Self::Viewing => "viewing",
             Self::Refused => "refused",
             Self::Closed => "closed",
@@ -334,6 +338,16 @@ impl BrowserConnectionAdapter {
         let Ok(length) = browser::encode_hello(&hello, MAX_CONTROL_RECORD_BYTES, &mut out) else {
             return self.fail(BrowserAdapterError::Encoding);
         };
+        // The one-use nonce has been consumed by this hello. The host still
+        // checks its own original nonce expiry when it receives these bytes.
+        // Negotiation retains the attempt's original ten-second ceiling.
+        let Some(until) = self
+            .started_us
+            .checked_add(u64::from(ProtocolLimits::ABSOLUTE.max_handshake_duration_ms()) * 1000)
+        else {
+            return self.fail(BrowserAdapterError::InvalidClock);
+        };
+        self.deadline_us = until;
         self.phase = Phase::AwaitingHost;
         Ok(out[..length].to_vec())
     }
@@ -347,7 +361,10 @@ impl BrowserConnectionAdapter {
         now_us: u64,
     ) -> Result<&'static str, BrowserAdapterError> {
         self.check_current(attempt, now_us)?;
-        if !matches!(self.phase, Phase::AwaitingHost | Phase::Viewing) {
+        if !matches!(
+            self.phase,
+            Phase::AwaitingHost | Phase::AwaitingApproval | Phase::Viewing
+        ) {
             return self.fail(BrowserAdapterError::InvalidState);
         }
         if bytes.len() > MAX_CONTROL_RECORD_BYTES {
@@ -386,7 +403,31 @@ impl BrowserConnectionAdapter {
             .ok_or(BrowserAdapterError::InvalidState)?
             .receive_control(&mut self.core, bytes, now_us);
         match result {
-            Ok(()) => Ok(""),
+            Ok(()) => {
+                if kind == Kind::ApprovalRequired {
+                    // check_current above enforced the original negotiation
+                    // deadline before this single positively negotiated notice.
+                    let Some(until) = self
+                        .started_us
+                        .checked_add(browser::APPROVAL_STARTUP_BUDGET_US)
+                    else {
+                        return self.fail(BrowserAdapterError::InvalidClock);
+                    };
+                    if self.phase != Phase::AwaitingHost
+                        || self
+                            .desktop
+                            .as_ref()
+                            .is_none_or(|desktop| desktop.approval().is_none())
+                    {
+                        return self.fail(BrowserAdapterError::InvalidControl);
+                    }
+                    self.deadline_us = until;
+                    self.phase = Phase::AwaitingApproval;
+                } else if kind == Kind::SessionOpened && self.phase == Phase::AwaitingApproval {
+                    self.phase = Phase::AwaitingHost;
+                }
+                Ok("")
+            }
             Err(error) => self.fail(error),
         }
     }
@@ -714,7 +755,11 @@ impl BrowserConnectionAdapter {
         }
         self.last_now_us = now_us;
         if self.phase != Phase::Viewing && now_us >= self.deadline_us {
-            return self.fail(BrowserAdapterError::Expired);
+            return self.fail(if self.phase == Phase::AwaitingApproval {
+                BrowserAdapterError::ApprovalExpired
+            } else {
+                BrowserAdapterError::Expired
+            });
         }
         if self.core.tick(now_us).is_err() {
             return self.fail(BrowserAdapterError::InvalidClock);

@@ -38,10 +38,11 @@ afterEach(() => {
 // byte at offset 33 is the only change for a controller request. No production
 // encoder or simulated protocol implementation constructs these expectations.
 const OBSERVER_HELLO = Buffer.from((`
-    46524430 0000 0001 00000000 0000009b 00000000 00000000
+    46524430 0000 0001 00000000 000000b8 00000000 00000000
     00000001 0000 03 0000 00
     00010000 00100000 000aa555 00002000 0000000001000000
-    04 0000000000200000 00000003
+    04 0000000000200000 00000004
+    00000016 62726f777365722d6c6f63616c2d617070726f76616c 0001 00
     00000011 62726f777365722d766964656f2d777373 0001 01
     00000011 636c6f636b2d636f7272656c6174696f6e 0001 01
     00000014 686576632d6465636f6465722d73746172747570 0001 01
@@ -49,6 +50,45 @@ const OBSERVER_HELLO = Buffer.from((`
 ` + "a5".repeat(32)).replace(/\s/g, ""), "hex");
 const REQUIRED_CAPABILITY = Buffer.from(
     "46524430000000040000000000000004000000000000000000040000", "hex");
+
+// Canonical consent records built independently of the production encoder.
+function scalar(value, size) {
+    const bytes = Buffer.alloc(size);
+    if (size === 16) bytes.writeBigUInt64BE(BigInt(value), 8);
+    else if (size === 8) bytes.writeBigUInt64BE(BigInt(value));
+    else bytes.writeUIntBE(value, 0, size);
+    return bytes;
+}
+function record(kind, payload) {
+    const header = Buffer.alloc(24);
+    header.write("FRD0");
+    header.writeUInt16BE(kind, 6);
+    header.writeUInt32BE(payload.length, 12);
+    return Buffer.concat([header, payload]);
+}
+function approvalCapabilities() {
+    const payload = Buffer.concat([OBSERVER_HELLO.subarray(24, -33), Buffer.from([0])]);
+    const name = Buffer.from("browser-local-approval");
+    const offset = payload.indexOf(name);
+    assert.equal(offset, 51);
+    payload[offset + name.length + 2] = 1;
+    return record(2, payload);
+}
+function approvalNotice(request = 13, deadline = 1) {
+    return record(0x10, Buffer.concat([scalar(request, 16), scalar(deadline, 8), Buffer.from([0])]));
+}
+function selectApproval(socket) {
+    socket.message(wireBuffer(approvalCapabilities()));
+    const selected = Buffer.from(socket.sent.at(-1));
+    assert.equal(selected.readUInt16BE(6), 3);
+    return selected;
+}
+function approvalOpened(selected, request = 13) {
+    return record(0x11, Buffer.concat([
+        scalar(11, 16), scalar(12, 16), scalar(request, 16), scalar(7, 4),
+        Buffer.from([0, 0, 0, 0, 0, 0, 1, 0]), selected.subarray(24), scalar(1, 8),
+    ]));
+}
 
 function noAuthority(snapshot) {
     assert.equal(snapshot.view_fresh, false);
@@ -145,7 +185,7 @@ test("production transport sends the actual Rust hello for both requested roles"
         const socket = await open(client, f, role);
         const expected = Buffer.from(OBSERVER_HELLO);
         if (role === "controller") expected[33] = 1;
-        assert.equal(expected.length, 179);
+        assert.equal(expected.length, 208);
         assert.equal(socket.sent.length, 1);
         assert.deepEqual(Buffer.from(socket.sent[0]), expected);
         assert.equal(f.requests[0].url, "/api/session/bootstrap");
@@ -470,4 +510,124 @@ test("production DOM stays view-only through actual Rust startup and typed host 
     assert.equal(f.element("btn-request-control").disabled, true);
     assert.equal(f.owners[0].final.refusal_code, "host_required_capability_missing");
     disposed(f);
+});
+
+test("production DOM projects actual Rust consent waiting before the exact original session opens", async () => {
+    const f = rustFixture(available(), {}, uiFixture);
+    const pending = f.click("btn-connect");
+    await nextTurn();
+    const socket = f.sockets[0];
+    socket.open();
+    await pending;
+    const selected = selectApproval(socket);
+    f.tick(10099);
+    socket.message(wireBuffer(approvalNotice()));
+    assert.equal(f.element("connection-state").textContent, "Waiting for approval on the host…");
+    assert.equal(f.element("freshness-badge").textContent, "View: Unverified");
+    assert.equal(f.element("authority-badge").textContent, "Role: View-Only");
+    for (const id of ["btn-request-control", "btn-release-control", "btn-fullscreen"]) {
+        assert.equal(f.element(id).disabled, true);
+    }
+    assert.equal(f.element("btn-disconnect").disabled, false);
+    assert.equal(socket.sent.length, 2, "waiting emits no admission, clock or media records");
+    assert.equal(f.sockets.length, 1, "waiting must not open a media socket");
+    assert.equal(callCount(f.owners[0], "controlQueued"), 1);
+    noAuthority(JSON.parse(f.owners[0].adapter.snapshot()));
+    assert.equal(JSON.parse(f.owners[0].adapter.desktopSnapshot()).retainedDecoders, 0);
+    f.tick(29000);
+    assert.equal(f.element("connection-state").textContent, "Waiting for approval on the host…");
+    socket.message(wireBuffer(approvalOpened(selected)));
+    assert.equal(f.element("connection-state").textContent, "Preparing desktop video...");
+    assert.equal(Buffer.from(socket.sent[2]).readUInt16BE(6), 0x1c);
+    assert.equal(f.sockets.length, 1, "only a subsequent original media grant may open video");
+    noAuthority(JSON.parse(f.owners[0].adapter.snapshot()));
+    f.tick(30100);
+    assert.equal(f.owners[0].final.refusal_code, "browser_handshake_expired");
+    assert.equal(f.element("connection-state").textContent, "Refused");
+    disposed(f);
+});
+
+test("production consent timeout includes package loading and closes the original owner at 30s", { timeout: 3000 }, async () => {
+    const loading = deferred();
+    const f = rustFixture(available(), { load: (create) => loading.promise.then(create) });
+    const refusals = [];
+    const client = f.makeClient({ onRefused: (error) => refusals.push(error) });
+    const pending = client.connect("observer");
+    await nextTurn();
+    f.tick(5000);
+    loading.resolve();
+    await nextTurn();
+    const socket = f.sockets[0];
+    socket.open();
+    await pending;
+    const selected = selectApproval(socket);
+    f.tick(10099);
+    socket.message(wireBuffer(approvalNotice(13, 18446744073709551615n)));
+    f.tick(30099);
+    assert.equal(client.closed, false);
+    assert.equal(JSON.parse(f.owners[0].adapter.snapshot()).state_label, "awaiting_approval");
+    f.tick(30100);
+    assert.equal(client.closed, true);
+    assert.equal(refusals.length, 1);
+    assert.equal(refusals[0].code, "browser_approval_expired");
+    assert.match(refusals[0].message, /original deadline/);
+    assert.equal(f.owners[0].final.refusal_code, "browser_approval_expired");
+    assert.equal(socket.closeCalls.length, 1);
+    disposed(f);
+    socket.message(wireBuffer(approvalOpened(selected)));
+    assert.equal(callCount(f.owners[0], "receiveControl"), 2);
+    assert.equal(refusals.length, 1);
+});
+
+test("production DOM shows typed host consent denial and expiry while releasing all startup resources", async () => {
+    for (const [reason, code, message] of [
+        [8, "host_local_approval_denied", "The host declined this viewing request."],
+        [9, "host_approval_expired", "The viewing request expired before local approval completed."],
+    ]) {
+        const f = rustFixture(available(), {}, uiFixture);
+        const pending = f.click("btn-connect");
+        await nextTurn();
+        const socket = f.sockets[0];
+        socket.open();
+        await pending;
+        selectApproval(socket);
+        socket.message(wireBuffer(approvalNotice()));
+        socket.message(wireBuffer(record(4, Buffer.concat([scalar(reason, 2), Buffer.from([0, 0])]))));
+        assert.equal(f.element("connection-state").textContent, "Refused");
+        assert.equal(f.element("refusal-detail").textContent, message);
+        assert.equal(f.element("refusal-overlay").classList.contains("hidden"), false);
+        assert.equal(f.element("btn-connect").disabled, false);
+        assert.equal(f.element("btn-request-control").disabled, true);
+        assert.equal(f.owners[0].final.refusal_code, code);
+        disposed(f);
+    }
+});
+
+test("production page lifecycle cancels waiting consent and fences late approval from a replacement", async () => {
+    for (const [event, data] of [["pagehide", {}], ["pageshow", { persisted: true }]]) {
+        const f = rustFixture(available(), {}, uiFixture);
+        const pending = f.click("btn-connect");
+        await nextTurn();
+        const old = f.sockets[0];
+        old.open();
+        await pending;
+        const selected = selectApproval(old);
+        old.message(wireBuffer(approvalNotice()));
+        f.event(event, data);
+        assert.equal(f.element("connection-state").textContent, "Disconnected");
+        assert.equal(old.closeCalls.length, 1);
+        assert.equal(f.owners[0].freed, 1);
+        const replacement = f.click("btn-connect");
+        await nextTurn();
+        f.sockets[1].open();
+        await replacement;
+        const before = f.owners[1].adapter.snapshot();
+        old.message(wireBuffer(approvalOpened(selected)));
+        old.peerClose();
+        assert.equal(f.owners[1].adapter.snapshot(), before);
+        assert.equal(callCount(f.owners[1], "receiveControl"), 0);
+        assert.equal(f.element("connection-state").textContent, "Awaiting session authorization");
+        f.click("btn-disconnect");
+        disposed(f);
+    }
 });

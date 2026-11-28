@@ -65,8 +65,18 @@ unbounded chain of retired connection attempts.
 
 Package loading has a separate 15-second I/O watchdog. The original connection
 start time is still passed to Rust, so loading and network progress cannot
-extend Rust's ten-second startup deadline or the bootstrap expiry bound. A
-silent response body or socket is retired when that deadline expires.
+restart Rust's ten-second negotiation deadline. Bootstrap expiry independently
+bounds the one-use ClientHello; it is never renewed. A silent body or socket
+is retired when its original phase deadline expires.
+
+If the selected host requires `browser-local-approval` v1, one canonical notice
+received before negotiation expires selects a thirty-second total startup
+ceiling anchored to the same original connection start. Rust retains its exact
+request and host deadline, projects `awaiting_approval`, and accepts only a
+matching SessionOpened. A second notice, an old callback, a changed request or
+a late answer cannot restart that budget or authorize a replacement. Waiting
+grants no media/input readiness. The host clock remains distinct from the
+client's own monotonic deadline.
 
 Bootstrap bodies and control records are bounded to 4 KiB before copying them
 into WASM. The reader enforces the cumulative body limit even without a

@@ -19,6 +19,32 @@ pub const PROFILE_VERSION: u16 = 0;
 pub const NONCE_BYTES: usize = 32;
 pub const MAX_RECORD: usize = super::MAX_RECORD;
 
+/// Optional support for one attributed host-local approval before observation.
+/// A host requiring consent marks this capability required in its offer.
+pub const APPROVAL_CAPABILITY: &str = "browser-local-approval";
+pub const APPROVAL_VERSION: u16 = 1;
+/// Total startup ceiling measured from the ORIGINAL attempt/control start.
+/// A valid approval notice selects this bound; receipt never restarts it.
+pub const APPROVAL_STARTUP_BUDGET_US: u64 = 30_000_000;
+
+pub fn local_approval_selected(selection: &Selection) -> bool {
+    selection.role == Role::Observe
+        && selection.validate_for(WSS_PROFILE).is_ok()
+        && selection.capabilities.iter().any(|capability| {
+            capability.name == APPROVAL_CAPABILITY && capability.version == APPROVAL_VERSION
+        })
+}
+
+/// The selected host policy requires an original approval notice before open.
+/// Merely supporting optional consent does not turn it on for another host.
+pub fn local_approval_required(selection: &Selection) -> bool {
+    local_approval_selected(selection)
+        && selection
+            .capabilities
+            .iter()
+            .any(|capability| capability.name == APPROVAL_CAPABILITY && capability.required)
+}
+
 /// A complete browser hello. Debug output deliberately omits the bearer nonce.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Hello {
@@ -132,6 +158,11 @@ pub fn offer(ceiling: ProtocolLimits) -> Offer {
         role: Role::Observe,
         limits: limits().negotiated(&ceiling),
         capabilities: vec![
+            Capability {
+                name: APPROVAL_CAPABILITY.to_owned(),
+                version: APPROVAL_VERSION,
+                required: false,
+            },
             Capability {
                 name: VIDEO_CAPABILITY.to_owned(),
                 version: VIDEO_VERSION,

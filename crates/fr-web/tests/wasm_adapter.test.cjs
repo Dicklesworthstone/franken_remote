@@ -69,10 +69,11 @@ function noAuthority(adapter) {
 // the fixed offer-role field at offset 33. These are test fixtures, not JS wire
 // implementation for the application.
 const OBSERVER_HELLO = Buffer.from((`
-    46524430 0000 0001 00000000 0000009b 00000000 00000000
+    46524430 0000 0001 00000000 000000b8 00000000 00000000
     00000001 0000 03 0000 00
     00010000 00100000 000aa555 00002000 0000000001000000
-    04 0000000000200000 00000003
+    04 0000000000200000 00000004
+    00000016 62726f777365722d6c6f63616c2d617070726f76616c 0001 00
     00000011 62726f777365722d766964656f2d777373 0001 01
     00000011 636c6f636b2d636f7272656c6174696f6e 0001 01
     00000014 686576632d6465636f6465722d73746172747570 0001 01
@@ -111,6 +112,31 @@ function record(kind, binding, payload) {
     return Buffer.concat([header, payload]);
 }
 function kind(bytes) { return Buffer.from(bytes).readUInt16BE(6); }
+function approvalCapabilities(required = true) {
+    const payload = Buffer.concat([OBSERVER_HELLO.subarray(24, -33), Buffer.from([0])]);
+    const name = Buffer.from("browser-local-approval");
+    const offset = payload.indexOf(name);
+    assert.equal(offset, 51, "the independent offer golden names the first capability");
+    payload[offset + name.length + 2] = required ? 1 : 0;
+    return record(2, 0, payload);
+}
+function approvalNotice(request = 13, deadline = 1, role = 0) {
+    return record(0x10, 0, Buffer.concat([scalar(request, 16), u64(deadline), Buffer.from([role])]));
+}
+function selectApproval(adapter, start = 100, required = true) {
+    const attempt = awaitingHost(adapter, start);
+    adapter.receiveControl(attempt, approvalCapabilities(required), start + 3);
+    const selected = Buffer.from(adapter.takeControl(attempt, start + 4));
+    assert.equal(kind(selected), 3);
+    adapter.controlQueued(attempt, start + 5);
+    return { attempt, selected };
+}
+function approvalOpened(selected, request = 13) {
+    return record(0x11, 0, Buffer.concat([
+        scalar(11, 16), scalar(12, 16), scalar(request, 16), u32(7),
+        Buffer.from([0, 0, 0, 0, 0, 0, 1, 0]), selected.subarray(24), u64(1),
+    ]));
+}
 function openedDesktop(adapter, synchronize = true) {
     const attempt = adapter.begin("observer", 1);
     adapter.acceptBootstrap(attempt, bootstrap(), 2);
@@ -308,7 +334,7 @@ test("real WASM emits exact canonical hello bytes for both requested roles", () 
             assert.ok(hello instanceof Uint8Array);
             const expected = Buffer.from(OBSERVER_HELLO);
             if (role === "controller") expected[33] = 1;
-            assert.equal(expected.length, 179);
+            assert.equal(expected.length, 208);
             assert.deepEqual(Buffer.from(hello), expected);
             assert.equal(noAuthority(adapter).state_label, "awaiting_host");
             fails("browser_connection_state_invalid", () => adapter.clientHello(attempt, 13));
@@ -344,6 +370,108 @@ test("real WASM decodes the canonical typed host refusal and closes its attempt"
         assert.equal(snapshot.refusal_code, "host_required_capability_missing");
         assert.equal(snapshot.attempt, null);
         fails("browser_connection_cancelled", () => adapter.receiveControl(attempt, REQUIRED_CAPABILITY, 14));
+    });
+});
+
+test("actual WASM retains one local-consent notice without observation or media resources", () => withAdapter((adapter) => {
+    const { attempt, selected } = selectApproval(adapter);
+    adapter.receiveControl(attempt, approvalNotice(), 10099);
+    assert.equal(noAuthority(adapter).state_label, "awaiting_approval");
+    assert.equal(adapter.needsVideo(), false);
+    adapter.tick(attempt, 29000);
+    assert.equal(noAuthority(adapter).state_label, "awaiting_approval");
+    assert.equal(JSON.parse(adapter.desktopSnapshot()).retainedDecoders, 0);
+    assert.equal(adapter.configurationReady(), false);
+    adapter.receiveControl(attempt, approvalOpened(selected), 29001);
+    assert.equal(noAuthority(adapter).state_label, "awaiting_media");
+    assert.equal(kind(adapter.takeControl(attempt, 29002)), 0x1c);
+    // Even successful local consent cannot restart media startup.
+    fails("browser_handshake_expired", () => adapter.tick(attempt, 30100));
+}));
+
+test("actual WASM approval timeout uses attempt start and ignores unrelated host clock magnitude", () => {
+    for (const hostDeadline of [1n, 18446744073709551615n]) withAdapter((adapter) => {
+        const { attempt } = selectApproval(adapter);
+        adapter.receiveControl(attempt, approvalNotice(13, hostDeadline), 10099);
+        adapter.tick(attempt, 30099.999);
+        fails("browser_approval_expired", () => adapter.tick(attempt, 30100));
+        const snapshot = noAuthority(adapter);
+        assert.equal(snapshot.attempt, null);
+        assert.equal(snapshot.refusal_code, "browser_approval_expired");
+    });
+});
+
+test("actual WASM refuses late consent, duplicate notices and wrong approved-session identity", () => {
+    withAdapter((adapter) => {
+        const { attempt } = selectApproval(adapter);
+        fails("browser_handshake_expired", () => adapter.receiveControl(attempt, approvalNotice(), 10100));
+    });
+    for (const repeated of [approvalNotice(), approvalNotice(14), approvalNotice(13, 2)]) withAdapter((adapter) => {
+        const { attempt } = selectApproval(adapter);
+        adapter.receiveControl(attempt, approvalNotice(), 106);
+        fails("browser_control_record_unsupported", () => adapter.receiveControl(attempt, repeated, 107));
+        noAuthority(adapter);
+    });
+    withAdapter((adapter) => {
+        const { attempt, selected } = selectApproval(adapter);
+        adapter.receiveControl(attempt, approvalNotice(), 106);
+        fails("browser_control_record_unsupported", () => adapter.receiveControl(attempt, approvalOpened(selected, 14), 107));
+        noAuthority(adapter);
+    });
+});
+
+test("actual WASM requires a selected consent capability and a queued selection before waiting", () => {
+    withAdapter((adapter) => {
+        const { attempt, selected } = selectApproval(adapter);
+        fails("browser_control_record_unsupported", () => adapter.receiveControl(attempt, approvalOpened(selected), 106));
+    });
+    withAdapter((adapter) => {
+        const attempt = awaitingHost(adapter, 100);
+        adapter.receiveControl(attempt, approvalCapabilities(), 103);
+        adapter.takeControl(attempt, 104);
+        fails("browser_control_record_unsupported", () => adapter.receiveControl(attempt, approvalNotice(), 105));
+    });
+    withAdapter((adapter) => {
+        const { attempt, selected } = selectApproval(adapter, 100, false);
+        adapter.receiveControl(attempt, approvalOpened(selected), 106);
+        assert.equal(noAuthority(adapter).state_label, "awaiting_media");
+        fails("browser_handshake_expired", () => adapter.tick(attempt, 10100));
+    });
+});
+
+test("actual WASM closes denied consent and fences late opens after lifecycle replacement", () => {
+    for (const [reason, code] of [[8, "host_local_approval_denied"], [9, "host_approval_expired"]]) withAdapter((adapter) => {
+        const { attempt } = selectApproval(adapter);
+        adapter.receiveControl(attempt, approvalNotice(), 106);
+        const refused = record(4, 0, Buffer.concat([scalar(reason, 2), Buffer.from([0, 0])]));
+        assert.equal(adapter.receiveControl(attempt, refused, 107), code);
+        assert.equal(noAuthority(adapter).attempt, null);
+    });
+    for (const event of ["pagehide", "bfcache_restore"]) withAdapter((adapter) => {
+        const { attempt, selected } = selectApproval(adapter);
+        adapter.receiveControl(attempt, approvalNotice(), 106);
+        adapter.lifecycle(attempt, event, 107);
+        const replacement = adapter.begin("observer", 108);
+        const before = adapter.snapshot();
+        fails("browser_connection_cancelled", () => adapter.receiveControl(attempt, approvalOpened(selected), 109));
+        assert.equal(adapter.snapshot(), before);
+        fails("browser_handshake_expired", () => adapter.tick(replacement, 10108));
+    });
+});
+
+test("actual WASM nonce expiry fences unsent hello without shortening an already-issued negotiation", () => {
+    withAdapter((adapter) => {
+        const attempt = adapter.begin("observer", 100);
+        adapter.acceptBootstrap(attempt, bootstrap("observer", { expires_in_ms: 1000 }), 101);
+        fails("browser_handshake_expired", () => adapter.clientHello(attempt, 1100));
+        fails("browser_connection_cancelled", () => adapter.receiveControl(attempt, approvalNotice(), 1101));
+    });
+    withAdapter((adapter) => {
+        const attempt = adapter.begin("observer", 100);
+        adapter.acceptBootstrap(attempt, bootstrap("observer", { expires_in_ms: 1000 }), 101);
+        adapter.clientHello(attempt, 1099);
+        adapter.tick(attempt, 1100);
+        fails("browser_handshake_expired", () => adapter.tick(attempt, 10100));
     });
 });
 

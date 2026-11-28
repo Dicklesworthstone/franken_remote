@@ -85,7 +85,8 @@ fn browser_negotiation_is_complete_without_relaxing_native_profile() {
 fn browser_selection_cannot_remove_required_media_or_change_role() {
     let client = browser::offer(ProtocolLimits::ABSOLUTE);
     let mut host = client.clone();
-    host.capabilities.remove(0);
+    host.capabilities
+        .retain(|capability| capability.name != browser::VIDEO_CAPABILITY);
     assert_eq!(
         browser::check_host(&client, &host),
         Err(negotiation::Error::RequiredCapability)

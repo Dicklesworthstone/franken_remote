@@ -19,7 +19,10 @@ use fr_client::{
     shortcut::{PlatformCapabilityRow, PlatformId},
 };
 use fr_core::{
-    ids::{DisplayGeometryGeneration, InputLeaseId, InputTicketId, ViewportMappingGeneration},
+    ids::{
+        DisplayGeometryGeneration, InputLeaseId, InputTicketId, RemoteSessionId,
+        ViewportMappingGeneration,
+    },
     limits::ProtocolLimits,
 };
 use fr_media::{
@@ -180,6 +183,24 @@ impl BrowserSessionCore {
         self.presentation_floor = None;
         self.presented_source_us = None;
         self.control_until_us = None;
+        self.last_now_us = now_us;
+        Ok(())
+    }
+
+    /// Retain the host's one original consent request without authorizing any
+    /// observation or constructing media owners. The host timestamp is display
+    /// metadata until clock correlation exists, never a client-clock timeout.
+    pub(crate) fn on_waiting_approval(
+        &mut self,
+        request: RemoteSessionId,
+        host_deadline_us: u64,
+        now_us: u64,
+    ) -> Result<(), SessionError> {
+        if request.as_raw() == 0 || host_deadline_us == 0 || now_us < self.last_now_us {
+            return Err(SessionError::InvalidState);
+        }
+        self.session
+            .on_waiting_approval(request, host_deadline_us)?;
         self.last_now_us = now_us;
         Ok(())
     }

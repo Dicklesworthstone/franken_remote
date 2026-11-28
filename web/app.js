@@ -135,6 +135,7 @@
             bootstrapping: "Connecting...",
             awaiting_transport: "Connecting secure transport...",
             awaiting_host: "Awaiting session authorization",
+            awaiting_approval: "Waiting for approval on the host…",
             awaiting_media: "Preparing desktop video...",
             viewing: "Viewing desktop",
             refused: "Refused",
