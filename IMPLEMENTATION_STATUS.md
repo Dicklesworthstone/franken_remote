@@ -1,5 +1,46 @@
 # Implementation status
 
+## Initial display choice in the browser client (2026-11-27)
+
+The Linux browser desktop now negotiates the existing `display-selection` v1
+extension. After any required local approval and acknowledged session opening,
+the host sends one bounded catalog from the original discovered capture worker.
+Rust/WASM automatically chooses a sole display or presents an explicit picker
+for multiple displays. The picker shows native pixel sizes and desktop positions;
+JavaScript supplies only a row index through an original-attempt callback.
+
+The canonical choice retains its original control binding, catalog revision,
+display alias and geometry. It must actually enter the control socket before
+the client accepts a matching video binding and visible picture size. The host
+consumes one exact full-display choice, keeps its local encoder settings, and
+checks the same native topology before configuration. Stale/foreign/cropped or
+duplicate choices and replacement catalogs are terminal. A host without the
+extension retains its existing local default-display path.
+
+Control renewal, clock exchange, local revocation and socket closure continue
+while the picker is open. The same original ten-second or local-consent
+thirty-second startup ceiling still applies. No timer, approval, worker or
+authority is replaced. Native topology checks do not capture pixels, and the
+original cleanup receipt survives cancellation of discovery or selection.
+The inner active-session guard also fences observation before parked discovery
+and partial transport futures are dropped. Mid-session switching remains out
+of scope; choosing another screen requires a new connection.
+
+The browser connection ABI is now 3; the loader rejects older packages before
+bootstrap. The host source and ownership paths have been independently reviewed.
+The final exact-toolchain release WASM package passed 140/140 tests, including
+nondefault display selection through real Rust HEVC admission and simulated
+native-resource disposal, consent ordering, malformed/replayed choices,
+original deadlines and obsolete picker callbacks. All 437 recorded source,
+test and build inputs stayed unchanged during qualification. Portable
+JavaScript passed 55/55; focused native wire tests passed 21/21; strict WASM
+Clippy passed for the library and both Rust adapter/approval test targets.
+Five new host state/configuration regressions are authored but unexecuted.
+Native host compilation remains blocked by the pinned Asupersync SIGKILL below;
+physical multi-display, UI, browser/GPU and live-tailnet qualification remain
+open. See [browser setup](docs/browser-desktop.md) and
+[the wire contract](PROTOCOL_BROWSER_WSS.md).
+
 ## Native-pixel Windows viewing and local pan (2026-11-27)
 
 Windows viewers can explicitly request the host's native display pixels with
@@ -98,7 +139,7 @@ See [local approval](docs/desktop-approval.md) and
 
 The opt-in Linux `frd run --browser-port` path now connects the actual protected
 HTTPS/WSS listener to installed-Tailscale admission, the existing supervised
-capture worker, and the Rust/WASM browser owner. It requires an embedded ABI-2
+capture worker, and the Rust/WASM browser owner. It requires an embedded ABI-3
 browser package, the selected logind session and the live Stop sharing indicator.
 Both unattended and local-consent policy modes are now available as described
 above. Native-only effects and unsupported host platforms

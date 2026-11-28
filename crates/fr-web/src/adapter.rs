@@ -7,6 +7,7 @@
 //! owners. Observation, actual decoder readiness and visible freshness remain
 //! distinct; this adapter exposes no remote input grant.
 
+pub use crate::desktop::{DisplayCatalogSnapshot, DisplayOptionSnapshot};
 use crate::{BrowserLifecycleEvent, BrowserSessionCore, BrowserTransportProfile};
 use core::fmt;
 use fr_core::limits::ProtocolLimits;
@@ -18,7 +19,7 @@ use fr_wire::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const BROWSER_ABI_VERSION: u32 = 2;
+pub const BROWSER_ABI_VERSION: u32 = 3;
 pub const MAX_BOOTSTRAP_BYTES: usize = 4096;
 pub const MAX_CONTROL_RECORD_BYTES: usize = browser::MAX_RECORD;
 const MAX_BOOTSTRAP_LIFETIME_MS: u32 = 15_000;
@@ -47,6 +48,9 @@ pub enum BrowserAdapterError {
     InvalidState,
     Expired,
     ApprovalExpired,
+    DisplayExpired,
+    InvalidDisplay,
+    NoDisplays,
     InvalidClock,
     InvalidControl,
     UnsupportedControl,
@@ -70,6 +74,9 @@ impl BrowserAdapterError {
             Self::InvalidState => "browser_connection_state_invalid",
             Self::Expired => "browser_handshake_expired",
             Self::ApprovalExpired => "browser_approval_expired",
+            Self::DisplayExpired => "browser_display_selection_expired",
+            Self::InvalidDisplay => "browser_display_selection_invalid",
+            Self::NoDisplays => "browser_no_displays",
             Self::InvalidClock => "browser_clock_invalid",
             Self::InvalidControl => "browser_control_record_invalid",
             Self::UnsupportedControl => "browser_control_record_unsupported",
@@ -164,7 +171,8 @@ struct BootstrapResponse<'a> {
     refusal_code: Option<&'a str>,
 }
 
-/// Content-free DOM projection, with authority facts derived from the core.
+/// Bounded DOM projection, with authority facts derived from the core and
+/// display metadata disclosed only by the approved original session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[allow(clippy::struct_excessive_bools)] // Independent UI facts, not authority inputs.
 pub struct BrowserAdapterSnapshot {
@@ -177,6 +185,7 @@ pub struct BrowserAdapterSnapshot {
     pub can_request_control: bool,
     pub is_controlling: bool,
     pub refusal_code: Option<&'static str>,
+    pub display_catalog: Option<DisplayCatalogSnapshot>,
 }
 
 /// Owns the connection's nonce, bounded handshake, and shared session core.
@@ -453,11 +462,34 @@ impl BrowserConnectionAdapter {
             return self.fail(BrowserAdapterError::InvalidClock);
         }
         self.last_now_us = now_us;
+        if self.phase != Phase::Viewing && now_us >= self.deadline_us {
+            return self.fail(self.startup_expired());
+        }
         let result = self
             .desktop
             .as_mut()
             .ok_or(BrowserAdapterError::InvalidState)?
             .control_queued(&mut self.core, now_us);
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error),
+        }
+    }
+    /// Choose a row in the one original Rust-owned catalog. JavaScript never
+    /// supplies a remote alias, revision, geometry generation or crop rectangle.
+    pub fn select_display(
+        &mut self,
+        attempt: BrowserAttempt,
+        index: u32,
+        now_us: u64,
+    ) -> Result<(), BrowserAdapterError> {
+        self.check_current(attempt, now_us)?;
+        let result = self
+            .desktop
+            .as_mut()
+            .map_or(Err(BrowserAdapterError::InvalidDisplay), |desktop| {
+                desktop.select_display(&mut self.core, index)
+            });
         match result {
             Ok(()) => Ok(()),
             Err(error) => self.fail(error),
@@ -700,6 +732,13 @@ impl BrowserConnectionAdapter {
                 && self
                     .desktop
                     .as_ref()
+                    .is_some_and(crate::desktop::DesktopSession::awaiting_display)
+            {
+                "awaiting_display"
+            } else if self.phase == Phase::AwaitingHost
+                && self
+                    .desktop
+                    .as_ref()
                     .is_some_and(crate::desktop::DesktopSession::opened)
             {
                 "awaiting_media"
@@ -713,6 +752,10 @@ impl BrowserConnectionAdapter {
             can_request_control: false,
             is_controlling: false,
             refusal_code: self.refusal_code,
+            display_catalog: self
+                .desktop
+                .as_ref()
+                .and_then(crate::desktop::DesktopSession::display_catalog),
         }
     }
 
@@ -739,6 +782,32 @@ impl BrowserConnectionAdapter {
         BrowserAdapterError::InvalidClock
     }
 
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub(crate) fn invalid_display(&mut self, attempt: BrowserAttempt) -> BrowserAdapterError {
+        if let Err(error) = self.require_attempt(attempt) {
+            return error;
+        }
+        self.retire(
+            Phase::Refused,
+            Some(BrowserAdapterError::InvalidDisplay.code()),
+        );
+        BrowserAdapterError::InvalidDisplay
+    }
+
+    fn startup_expired(&self) -> BrowserAdapterError {
+        if self.phase == Phase::AwaitingApproval {
+            BrowserAdapterError::ApprovalExpired
+        } else if self
+            .desktop
+            .as_ref()
+            .is_some_and(crate::desktop::DesktopSession::awaiting_display)
+        {
+            BrowserAdapterError::DisplayExpired
+        } else {
+            BrowserAdapterError::Expired
+        }
+    }
+
     fn check_current(
         &mut self,
         attempt: BrowserAttempt,
@@ -752,11 +821,7 @@ impl BrowserConnectionAdapter {
         }
         self.last_now_us = now_us;
         if self.phase != Phase::Viewing && now_us >= self.deadline_us {
-            return self.fail(if self.phase == Phase::AwaitingApproval {
-                BrowserAdapterError::ApprovalExpired
-            } else {
-                BrowserAdapterError::Expired
-            });
+            return self.fail(self.startup_expired());
         }
         if self.core.tick(now_us).is_err() {
             return self.fail(BrowserAdapterError::InvalidClock);

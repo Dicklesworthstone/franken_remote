@@ -36,6 +36,7 @@ function fixture(options = {}) {
                         adapters.push(this);
                     }
                     free() { this.freed += 1; assert.equal(this.freed, 1); }
+                    selectDisplay() {}
                 },
                 BrowserMediaAdapter: class {
                     constructor(frames, bytes) {
@@ -47,11 +48,12 @@ function fixture(options = {}) {
                     free() { this.freed++; assert.equal(this.freed, 1); }
                 },
                 browserMediaAbiVersion: () => options.mediaAbi === undefined ? 1 : options.mediaAbi,
-                browserAbiVersion: () => options.abi === undefined ? 2 : options.abi,
+                browserAbiVersion: () => options.abi === undefined ? 3 : options.abi,
                 maxBootstrapBytes: () => options.bootstrapLimit === undefined ? 4096 : options.bootstrapLimit,
                 maxControlRecordBytes: () => options.controlLimit === undefined ? 4096 : options.controlLimit,
                 maxVideoRecordBytes: () => options.videoLimit === undefined ? 65536 : options.videoLimit,
             };
+            if (options.missingDisplaySelection) delete exports.BrowserAdapter.prototype.selectDisplay;
             const module = new vm.SyntheticModule(Object.keys(exports), function () {
                 for (const [name, value] of Object.entries(exports)) this.setExport(name, value);
             }, { context });
@@ -193,6 +195,19 @@ test("ABI or byte-limit mismatches refuse without constructing adapters and allo
         assert.equal(f.adapters.length, 1);
         binding.core.free();
     }
+});
+
+test("cached ABI2 packages refuse before constructing a display-selection adapter", async () => {
+    const f = fixture({ abi: 2 });
+    await assert.rejects(f.api.createAdapter(), { code: "browser_client_version_mismatch" });
+    assert.equal(f.adapters.length, 0);
+    assert.equal(f.imports.length, 1);
+});
+
+test("an ABI3 package missing the required display-selection export refuses before adapter allocation", async () => {
+    const f = fixture({ missingDisplaySelection: true });
+    await assert.rejects(f.api.createAdapter(), { code: "browser_client_version_mismatch" });
+    assert.equal(f.adapters.length, 0);
 });
 
 test("an initialization failure after all subscribers cancel is consumed and permits retry", { timeout: 3000 }, async () => {

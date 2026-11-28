@@ -173,6 +173,34 @@ button:disabled {
     line-height: 1.45;
 }
 
+.display-picker {
+    padding: 12px;
+    border-bottom: 1px solid #303a4b;
+    max-height: 40vh;
+    overflow: auto;
+}
+
+.display-picker h2 {
+    margin: 0 0 6px;
+    font-size: 16px;
+}
+
+.display-picker p {
+    margin: 0 0 10px;
+    color: #b8c3d4;
+}
+
+#display-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+#display-options button {
+    padding: 10px 14px;
+    text-align: left;
+}
+
 .hidden {
     display: none;
 }

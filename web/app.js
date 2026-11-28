@@ -15,7 +15,10 @@
     const btnRelControl = element("btn-release-control");
     const btnFullscreen = element("btn-fullscreen");
     const btnDisconnect = element("btn-disconnect");
+    const elDisplayPicker = element("display-picker");
+    const elDisplayOptions = element("display-options");
     let connectionAttempt = null;
+    let displayProjection = null;
     let connecting = false;
     let viewing = false;
     const btnProbe = element("btn-probe");
@@ -129,13 +132,46 @@
         elOverlay.classList.remove("hidden");
     }
 
-    function project(snapshot) {
+    function clearDisplayPicker() {
+        displayProjection = null;
+        elDisplayOptions.replaceChildren();
+        elDisplayPicker.classList.add("hidden");
+    }
+
+    function projectDisplays(snapshot, actions) {
+        const catalog = snapshot.display_catalog;
+        if (snapshot.state_label !== "awaiting_display" || !catalog || !actions) {
+            if (displayProjection) clearDisplayPicker();
+            return;
+        }
+        if (displayProjection && displayProjection.attempt === connectionAttempt
+            && displayProjection.revision === catalog.revision) return;
+        const original = connectionAttempt;
+        const projection = { attempt: original, revision: catalog.revision };
+        displayProjection = projection;
+        elDisplayOptions.replaceChildren();
+        for (const display of catalog.displays) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = `View display ${display.index + 1} — ${display.width} × ${display.height} at (${display.x}, ${display.y})`;
+            button.addEventListener("click", () => {
+                if (connectionAttempt !== original || displayProjection !== projection) return;
+                button.disabled = true;
+                actions.selectDisplay(display.index);
+            });
+            elDisplayOptions.append(button);
+        }
+        elDisplayPicker.classList.remove("hidden");
+    }
+
+    function project(snapshot, actions) {
         if (!connectionAttempt) return;
         const labels = {
             bootstrapping: "Connecting...",
             awaiting_transport: "Connecting secure transport...",
             awaiting_host: "Awaiting session authorization",
             awaiting_approval: "Waiting for approval on the host…",
+            awaiting_display: "Choose a display to view",
             awaiting_media: "Preparing desktop video...",
             viewing: "Viewing desktop",
             refused: "Refused",
@@ -152,6 +188,7 @@
         elBanner.textContent =
             "View-only desktop over WSS. Video shares one TCP media connection; control and authorization use a separate connection.";
         elBanner.classList.remove("hidden");
+        projectDisplays(snapshot, actions);
         buttons();
     }
 
@@ -170,6 +207,7 @@
         viewing = false;
         client.disconnect(reason);
         clearRefusal();
+        clearDisplayPicker();
         badge(elConnection, label || "Disconnected", "badge-neutral");
         badge(elAuthority, "Role: View-Only", "badge-neutral");
         badge(elFreshness, "View: Unverified", "badge-neutral");
@@ -233,5 +271,6 @@
             client.lifecycle(document.hasFocus() ? "focus_gained" : "focus_lost");
         }
     });
+    clearDisplayPicker();
     buttons();
 })(window);

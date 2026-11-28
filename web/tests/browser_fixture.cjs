@@ -157,25 +157,31 @@ function ioFixture(response = available(), options = {}) {
 function uiFixture(response, options = {}) {
     const f = ioFixture(response, options);
     const elements = new Map(), events = new Map(), documentEvents = new Map();
+    function node() {
+        const classes = new Set();
+        return {
+            disabled: false, textContent: "", className: "", children: [],
+            listeners: new Map(),
+            classList: {
+                add: (name) => classes.add(name),
+                remove: (name) => classes.delete(name),
+                contains: (name) => classes.has(name),
+            },
+            addEventListener(name, callback) { this.listeners.set(name, callback); },
+            replaceChildren(...children) { this.children = children; },
+            append(...children) { this.children.push(...children); },
+        };
+    }
     const document = {
         hidden: false,
         hasFocus: () => true,
         getElementById(id) {
             if (!elements.has(id)) {
-                const classes = new Set();
-                elements.set(id, {
-                    disabled: false, textContent: "", className: "",
-                    listeners: new Map(),
-                    classList: {
-                        add: (name) => classes.add(name),
-                        remove: (name) => classes.delete(name),
-                        contains: (name) => classes.has(name),
-                    },
-                    addEventListener(name, callback) { this.listeners.set(name, callback); },
-                });
+                elements.set(id, node());
             }
             return elements.get(id);
         },
+        createElement: () => node(),
         addEventListener: (name, callback) => documentEvents.set(name, callback),
     };
     f.window.addEventListener = (name, callback) => events.set(name, callback);

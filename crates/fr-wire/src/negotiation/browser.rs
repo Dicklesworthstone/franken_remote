@@ -45,6 +45,16 @@ pub fn local_approval_required(selection: &Selection) -> bool {
             .any(|capability| capability.name == APPROVAL_CAPABILITY && capability.required)
 }
 
+/// One initial full-display choice on the approved browser control binding.
+pub fn display_selection_selected(selection: &Selection) -> bool {
+    selection.role == Role::Observe
+        && selection.validate_for(WSS_PROFILE).is_ok()
+        && selection.capabilities.iter().any(|capability| {
+            capability.name == crate::display::CAPABILITY
+                && capability.version == crate::display::VERSION
+        })
+}
+
 /// A complete browser hello. Debug output deliberately omits the bearer nonce.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Hello {
@@ -172,6 +182,11 @@ pub fn offer(ceiling: ProtocolLimits) -> Offer {
                 name: crate::clock::CAPABILITY.to_owned(),
                 version: crate::clock::VERSION,
                 required: true,
+            },
+            Capability {
+                name: crate::display::CAPABILITY.to_owned(),
+                version: crate::display::VERSION,
+                required: false,
             },
             Capability {
                 name: crate::decoder::CAPABILITY.to_owned(),

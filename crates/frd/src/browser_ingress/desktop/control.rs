@@ -2,7 +2,7 @@
 //! Source discovery progresses beside the retained reader and writer futures.
 use super::*;
 use asupersync::io::split_owned;
-use fr_wire::{authority, clock, receiver_pressure};
+use fr_wire::{authority, clock, display as display_wire, receiver_pressure};
 #[cfg(test)]
 mod tests;
 
@@ -201,6 +201,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     if now >= startup_until_us {
         return Err(expired());
     }
+    let display = display::Choice::new(browser::display_selection_selected(&selection));
     let session = Arc::new(Session {
         binding,
         selection,
@@ -212,6 +213,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         supervisor: Mutex::new(Some(supervise)),
         state: Mutex::new(State {
             accepted: false,
+            display,
             descriptor: None,
             grant: None,
             binding_accepted: false,
@@ -329,6 +331,10 @@ async fn active<S: AsyncRead + AsyncWrite + Unpin>(
     let mut reader = pin!(read_control(ingress, read, Arc::clone(&session)));
     let mut writer = pin!(write_control(write, Arc::clone(&session)));
     let mut prepare = pin!(prepare(&session, launch, select));
+    // Declared after the owned futures so cancellation and ordinary return
+    // fence observation BEFORE dropping their native discovery or partial I/O.
+    // The outer guard remains a backstop; independent Retirement owns reaping.
+    let _fence = SessionGuard(Arc::clone(&session));
     let mut prepared = false;
     poll_fn(|task| {
         if let Err(error) = session.poll_check(task, 0) {
@@ -362,11 +368,15 @@ async fn prepare(session: &Session, launch: Launch, choose: SelectSource) -> io:
         }
         session.pause(5_000).await?;
     }
-    let discovered = crate::media::discovery::DiscoveredSource::start(&session.control, launch)
+    let mut discovered = crate::media::discovery::DiscoveredSource::start(&session.control, launch)
         .await
         .map_err(|_| failed())?;
     let catalog = discovered.catalog().map_err(|_| failed())?;
-    let (choice, configuration) = choose(&catalog).map_err(|_| failed())?;
+    let requested = choose_display(session, &mut discovered, catalog).await?;
+    let (choice, configuration) = choose(&catalog, requested).map_err(|_| failed())?;
+    if requested.is_some_and(|requested| requested != choice) {
+        return Err(failed());
+    }
     let display = catalog.selected(choice).map_err(|_| failed())?;
     let limits = session.selection.limits;
     limits
@@ -374,6 +384,8 @@ async fn prepare(session: &Session, launch: Launch, choose: SelectSource) -> io:
         .map_err(|_| failed())?;
     if configuration.max_access_unit_bytes > limits.max_encoded_access_unit_bytes()
         || !display.is_picture(configuration.width, configuration.height)
+        || (requested.is_some()
+            && !display.accepts_picture(false, configuration.width, configuration.height))
         || configuration.fps == 0
     {
         return Err(failed());
@@ -412,6 +424,51 @@ async fn prepare(session: &Session, launch: Launch, choose: SelectSource) -> io:
         2,
         encode_attachment(browser::attachment::Message::Binding(descriptor), session)?,
     )
+}
+
+async fn choose_display(
+    session: &Session,
+    discovered: &mut crate::media::discovery::DiscoveredSource,
+    catalog: Catalog,
+) -> io::Result<Option<Select>> {
+    if !browser::display_selection_selected(&session.selection) {
+        return Ok(None);
+    }
+    session.check()?;
+    let mut bytes = vec![0; display_wire::MAX_CATALOG_BYTES];
+    let length = display_wire::encode(
+        &display_wire::Message::Catalog(catalog),
+        session.binding,
+        &session.selection.limits,
+        &mut bytes,
+        Direction::HostToViewer,
+        Delivery::Reliable,
+    )
+    .map_err(|_| failed())?;
+    bytes.truncate(length);
+    session.enqueue(2, bytes)?;
+    session
+        .state
+        .lock()
+        .map_err(|_| failed())?
+        .display
+        .offered(catalog)?;
+    let mut next_check = session.check()?.checked_add(250_000).ok_or_else(expired)?;
+    loop {
+        let now = session.check()?;
+        let selected = session.state.lock().map_err(|_| failed())?.display.take()?;
+        if let Some(selected) = selected {
+            return Ok(Some(selected));
+        }
+        if now >= next_check {
+            // The original unconfigured worker stays live while the user
+            // chooses. This checks topology without capturing a picture and
+            // never refreshes the session's original startup deadline.
+            discovered.check_display().await.map_err(|_| failed())?;
+            next_check = session.check()?.checked_add(250_000).ok_or_else(expired)?;
+        }
+        session.pause(5_000).await?;
+    }
 }
 
 async fn read_control<R: AsyncRead + Unpin>(
@@ -470,6 +527,14 @@ async fn read_control<R: AsyncRead + Unpin>(
             match browser::record_kind(&bytes, browser::MAX_RECORD, session.binding.id)
                 .map_err(|_| failed())?
             {
+                Kind::SelectDisplay => {
+                    session
+                        .state
+                        .lock()
+                        .map_err(|_| failed())?
+                        .display
+                        .receive(&bytes, session.binding, &session.selection.limits)?;
+                }
                 Kind::ChallengeResponse => {
                     let message = authority::decode(
                         &bytes,

@@ -24,6 +24,9 @@
             browser_approval_expired: "The host did not approve this connection before its original deadline. Connect again to make a new request.",
             host_local_approval_denied: "The host declined this viewing request.",
             host_approval_expired: "The viewing request expired before local approval completed.",
+            browser_display_selection_expired: "Display selection did not finish before the connection's original deadline. Connect again to choose a display.",
+            browser_display_selection_invalid: "The display selection no longer matches this session. Connect again to choose from a fresh display list.",
+            browser_no_displays: "The approved host session has no displays available to share.",
             browser_bootstrap_http_error: "The host refused browser session bootstrap.",
             browser_bootstrap_too_large: "The host bootstrap response exceeded the browser limit.",
             browser_bootstrap_unreadable: "The host bootstrap response could not be read.",
@@ -91,7 +94,26 @@
         _state(attempt) {
             if (!this._owns(attempt) || !attempt.binding) return;
             const snapshot = JSON.parse(attempt.binding.core.snapshot());
-            if (typeof this.callbacks.onState === "function") this.callbacks.onState(snapshot);
+            if (typeof this.callbacks.onState === "function") {
+                // Every action closes over this original transport owner. A
+                // detached old picker must never target a replacement adapter.
+                this.callbacks.onState(snapshot, {
+                    selectDisplay: (index) => this._selectDisplay(attempt, index),
+                });
+            }
+        }
+
+        _selectDisplay(attempt, index) {
+            if (!this._owns(attempt) || !attempt.binding) return false;
+            try {
+                attempt.binding.core.selectDisplay(attempt.token, index, this.nowMs());
+                this._pump(attempt);
+                this._state(attempt);
+                return this._owns(attempt);
+            } catch (error) {
+                this._end(attempt, failure(error, "browser_display_selection_invalid"), true);
+                return false;
+            }
         }
 
         async _bootstrapBody(response, attempt) {

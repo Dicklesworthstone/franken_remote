@@ -63,6 +63,38 @@ Stop, selected-session loss and policy change retire the pending capability;
 late native answers cannot authorize a replacement. The host retains native
 prompt cleanup independently of the cancelled socket.
 
+## Initial display selection
+
+The optional existing `display-selection` version **1** capability uses the
+canonical reliable control-channel DisplayCatalog and SelectDisplay records.
+After any required consent, SessionOpened and its queued BindingAccepted, the
+host discovers one catalog from the original capture worker and publishes at
+most eight displays. The catalog is bound to that control session and carries
+opaque aliases, its original revision and each display's geometry generation.
+
+The Rust client retains this one immutable catalog. A sole display is selected
+automatically; multiple displays require an explicit initial UI choice. The
+JavaScript API supplies only an index through an attempt-bound callback. Rust
+resolves that row and emits the exact full-display selection; JavaScript cannot
+construct a native display name, handle, revision, geometry or crop request.
+The choice must actually enter the control socket before a corresponding media
+binding is accepted. The binding and visible picture dimensions must match the
+chosen display.
+
+The host accepts exactly one selection from the original catalog and validates
+the complete choice again through the same discovered worker before encoder
+configuration. Renewal, clock, local revocation and socket closure continue
+while the picker is open; topology changes are checked without capturing pixels.
+The original startup ceiling still applies: ten seconds normally, or thirty
+seconds total when a timely local-consent notice selected that budget. Catalog
+arrival and user choice never start a new timer.
+
+Empty catalogs, stale or foreign choices, crops, duplicate/replacement catalogs,
+repeated selections and mismatched media bindings are terminal. The original
+worker's cleanup remains retained if the wait is cancelled. No mid-session
+switch or worker replacement is implied. Without the negotiated capability,
+the host retains its existing local origin/first-display selection.
+
 ## Video attachment
 
 After SessionOpened and its control BindingAccepted, the host sends a video

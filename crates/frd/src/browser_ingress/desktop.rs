@@ -48,6 +48,7 @@ use std::{
 };
 
 mod control;
+mod display;
 mod video;
 
 /// Called only after exact-origin, one-use nonce and canonical selection checks.
@@ -59,7 +60,10 @@ pub struct Request {
     pub selection: Selection,
     pub(crate) approval: Option<crate::session_startup::PendingApproval>,
 }
-pub type SelectSource = Box<dyn FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send>;
+/// Configure the original catalog choice. `Some` is an already checked peer
+/// choice and must be preserved exactly; `None` keeps the local legacy choice.
+pub type SelectSource =
+    Box<dyn FnOnce(&Catalog, Option<Select>) -> Result<(Select, Configuration), ()> + Send>;
 pub type Supervisor = Pin<Box<dyn Future<Output = Result<(), ()>> + Send>>;
 /// Local host ownership, not data manufactured by the browser ingress.
 pub struct Authorized {
@@ -318,6 +322,7 @@ struct Prepared {
 }
 struct State {
     accepted: bool,
+    display: display::Choice,
     descriptor: Option<browser::attachment::Descriptor>,
     grant: Option<browser::attachment::Grant>,
     binding_accepted: bool,

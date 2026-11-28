@@ -69,13 +69,14 @@ function noAuthority(adapter) {
 // the fixed offer-role field at offset 33. These are test fixtures, not JS wire
 // implementation for the application.
 const OBSERVER_HELLO = Buffer.from((`
-    46524430 0000 0001 00000000 000000b8 00000000 00000000
+    46524430 0000 0001 00000000 000000d0 00000000 00000000
     00000001 0000 03 0000 00
     00010000 00100000 000aa555 00002000 0000000001000000
-    04 0000000000200000 00000004
+    04 0000000000200000 00000005
     00000016 62726f777365722d6c6f63616c2d617070726f76616c 0001 00
     00000011 62726f777365722d766964656f2d777373 0001 01
     00000011 636c6f636b2d636f7272656c6174696f6e 0001 01
+    00000011 646973706c61792d73656c656374696f6e 0001 00
     00000014 686576632d6465636f6465722d73746172747570 0001 01
     01
 ` + "a5".repeat(32)).replace(/\s/g, ""), "hex");
@@ -88,6 +89,7 @@ const REQUIRED_CAPABILITY = Buffer.from(
 // receiver, HEVC guard, clock and native-custody owners; the explicit callbacks
 // below simulate native decoder/compositor completion, not browser support.
 const { HVCC, PICTURE } = require("../../../web/tests/media_fixture.cjs");
+const displayFixture = require("../../../web/tests/display_fixture.cjs");
 const scalar = (value, size) => {
     const bytes = Buffer.alloc(size);
     if (size === 16) bytes.writeBigUInt64BE(BigInt(value), 8);
@@ -137,11 +139,12 @@ function approvalOpened(selected, request = 13) {
         Buffer.from([0, 0, 0, 0, 0, 0, 1, 0]), selected.subarray(24), u64(1),
     ]));
 }
-function openedDesktop(adapter, synchronize = true) {
+function openedDesktop(adapter, synchronize = true, displayOptions = {}) {
+    const { legacy = false, displays = [displayFixture.FIRST], index = 0 } = displayOptions;
     const attempt = adapter.begin("observer", 1);
     adapter.acceptBootstrap(attempt, bootstrap(), 2);
     adapter.clientHello(attempt, 3);
-    adapter.receiveControl(attempt, record(2, 0, Buffer.concat([OBSERVER_HELLO.subarray(24, -33), Buffer.from([0])])), 4);
+    adapter.receiveControl(attempt, displayFixture.capabilities(OBSERVER_HELLO, { legacy }), 4);
     const selected = adapter.takeControl(attempt, 4.1);
     assert.equal(kind(selected), 3);
     adapter.controlQueued(attempt, 4.2);
@@ -156,6 +159,12 @@ function openedDesktop(adapter, synchronize = true) {
     adapter.controlQueued(attempt, 5.4);
     const clockReply = record(0x85, 7, Buffer.concat([probe.subarray(24), u64(5400)]));
     if (synchronize) adapter.receiveControl(attempt, clockReply, 5.5);
+    if (!legacy) {
+        adapter.receiveControl(attempt, displayFixture.catalog(displays), 5.6);
+        if (displays.length > 1) adapter.selectDisplay(attempt, index, 5.65);
+        assert.deepEqual(Buffer.from(adapter.takeControl(attempt, 5.7)), displayFixture.selection(displays[index]));
+        adapter.controlQueued(attempt, 5.8);
+    }
     adapter.receiveControl(attempt, record(0x1b, 7, mediaDescriptor), 6);
     assert.equal(kind(adapter.takeControl(attempt, 6.1)), 0x1c);
     adapter.controlQueued(attempt, 6.2);
@@ -170,8 +179,8 @@ function openedDesktop(adapter, synchronize = true) {
     ])), 10);
     return { attempt, clockReply };
 }
-function configuredDesktop(adapter) {
-    const { attempt } = openedDesktop(adapter);
+function configuredDesktop(adapter, displayOptions) {
+    const { attempt } = openedDesktop(adapter, true, displayOptions);
     assert.equal(adapter.configurationReady(), true);
     const prepared = JSON.parse(adapter.prepareDesktopConfiguration());
     assert.equal(prepared.codec, "hvc1.1.6.L60.90");
@@ -223,6 +232,178 @@ function pressure(adapter, attempt, now) {
     };
 }
 const FRAME_CHARGE = BigInt(3 * PICTURE.length + 4096);
+
+function openedForSelection(adapter, { start = 100, approval = false, legacy = false, queued = true } = {}) {
+    const attempt = awaitingHost(adapter, start);
+    adapter.receiveControl(attempt, displayFixture.capabilities(OBSERVER_HELLO, { approval, legacy }), start + 3);
+    const selected = Buffer.from(adapter.takeControl(attempt, start + 4));
+    adapter.controlQueued(attempt, start + 5);
+    if (approval) adapter.receiveControl(attempt, approvalNotice(), start + 6);
+    adapter.receiveControl(attempt, approvalOpened(selected), start + 7);
+    assert.equal(kind(adapter.takeControl(attempt, start + 8)), 0x1c);
+    if (queued) {
+        adapter.controlQueued(attempt, start + 9);
+        assert.equal(kind(adapter.takeControl(attempt, start + 10)), 0x84);
+        adapter.controlQueued(attempt, start + 11);
+    }
+    return attempt;
+}
+
+test("actual WASM selects a nondefault display and admits its real HEVC picture through native custody", () => withAdapter((adapter) => {
+    const { attempt, decoder } = configuredDesktop(adapter, {
+        displays: [displayFixture.SECOND, displayFixture.FIRST], index: 1,
+    });
+    receivePicture(adapter, attempt);
+    const callback = takePicture(adapter, attempt, 20.2);
+    const output = JSON.parse(adapter.desktopOutput(decoder, callback, 21));
+    assert.equal(output.canPresent, true);
+    assert.equal(output.firstDecoded, true);
+    adapter.desktopPresented(decoder, callback, 22, true);
+    assert.equal(JSON.parse(adapter.snapshot()).state_label, "viewing");
+    assert.equal(JSON.parse(adapter.snapshot()).can_request_control, false);
+    assert.equal(JSON.parse(adapter.snapshot()).display_catalog, null);
+    const released = JSON.parse(adapter.desktopFrameClosed(decoder, callback, 23));
+    assert.equal(BigInt(released.releasedBytes), FRAME_CHARGE);
+    assert.equal(pressure(adapter, attempt, 23).frames, 1n);
+    adapter.disconnect(attempt);
+    adapter.desktopDecoderClosed(decoder);
+    assert.equal(JSON.parse(adapter.desktopSnapshot()).retainedDecoders, 0);
+}));
+
+test("actual WASM projects bounded display rows and emits only the original full-display choice", () => withAdapter((adapter) => {
+    const attempt = openedForSelection(adapter);
+    adapter.receiveControl(attempt, displayFixture.catalog(), 112);
+    const snapshot = noAuthority(adapter);
+    assert.equal(snapshot.state_label, "awaiting_display");
+    assert.deepEqual(snapshot.display_catalog, { revision: "31", displays: [
+        { index: 0, width: 320, height: 240, x: 0, y: 0 },
+        { index: 1, width: 640, height: 480, x: -640, y: 0 },
+    ] });
+    assert.equal(adapter.needsVideo(), false);
+    assert.equal(adapter.takeControl(attempt, 113), undefined);
+    adapter.selectDisplay(attempt, 1, 114);
+    assert.deepEqual(Buffer.from(adapter.takeControl(attempt, 115)), displayFixture.selection(displayFixture.SECOND));
+    adapter.controlQueued(attempt, 116);
+    assert.equal(noAuthority(adapter).state_label, "awaiting_media");
+    assert.equal(JSON.parse(adapter.snapshot()).display_catalog, null);
+}));
+
+test("actual WASM auto-selects one display and refuses an empty approved catalog", () => {
+    withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter);
+        adapter.receiveControl(attempt, displayFixture.catalog([displayFixture.FIRST]), 112);
+        assert.equal(noAuthority(adapter).state_label, "awaiting_media");
+        assert.deepEqual(Buffer.from(adapter.takeControl(attempt, 113)), displayFixture.selection());
+        adapter.controlQueued(attempt, 114);
+    });
+    withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter);
+        fails("browser_no_displays", () => adapter.receiveControl(attempt, displayFixture.catalog([]), 112));
+        assert.equal(noAuthority(adapter).attempt, null);
+    });
+});
+
+test("actual WASM rejects premature, unnegotiated, foreign and replacement display catalogs", () => {
+    withAdapter((adapter) => {
+        const { attempt } = selectApproval(adapter);
+        adapter.receiveControl(attempt, approvalNotice(), 106);
+        fails("browser_control_record_invalid", () => adapter.receiveControl(attempt, displayFixture.catalog(), 107));
+        assert.equal(noAuthority(adapter).attempt, null);
+    });
+    for (const options of [{ queued: false }, { legacy: true }]) withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter, options);
+        fails("browser_display_selection_invalid", () => adapter.receiveControl(attempt, displayFixture.catalog(), 112));
+        noAuthority(adapter);
+    });
+    withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter);
+        fails("browser_display_selection_invalid", () => adapter.receiveControl(attempt,
+            displayFixture.catalog(undefined, { session: 14 }), 112));
+    });
+    for (const revision of [31, 32]) withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter);
+        adapter.receiveControl(attempt, displayFixture.catalog(), 112);
+        fails("browser_display_selection_invalid", () => adapter.receiveControl(attempt,
+            displayFixture.catalog(undefined, { revision }), 113));
+        assert.equal(noAuthority(adapter).display_catalog, null);
+    });
+});
+
+test("actual WASM rejects invalid or replayed row choices and fences stale callbacks", () => {
+    for (const index of [NaN, Infinity, -1, -0, 0.5, 2, 8, Number.MAX_VALUE]) withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter);
+        adapter.receiveControl(attempt, displayFixture.catalog(), 112);
+        fails("browser_display_selection_invalid", () => adapter.selectDisplay(attempt, index, 113));
+        assert.equal(noAuthority(adapter).attempt, null);
+    });
+    withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter);
+        adapter.receiveControl(attempt, displayFixture.catalog(), 112);
+        adapter.selectDisplay(attempt, 0, 113);
+        fails("browser_display_selection_invalid", () => adapter.selectDisplay(attempt, 1, 114));
+    });
+    withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter);
+        adapter.receiveControl(attempt, displayFixture.catalog(), 112);
+        adapter.lifecycle(attempt, "pagehide", 113);
+        const replacement = adapter.begin("observer", 114);
+        const before = adapter.snapshot();
+        fails("browser_connection_cancelled", () => adapter.selectDisplay(attempt, NaN, 115));
+        fails("browser_connection_cancelled", () => adapter.selectDisplay(attempt, 1, 115));
+        assert.equal(adapter.snapshot(), before);
+        assert.equal(JSON.parse(before).attempt, replacement);
+    });
+});
+
+test("actual WASM binds media to the queued chosen display and its native visible dimensions", () => {
+    for (const state of ["unchosen", "unsubmitted", "unqueued", "wrong_display", "wrong_geometry"]) withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter);
+        adapter.receiveControl(attempt, displayFixture.catalog(), 112);
+        if (state !== "unchosen") adapter.selectDisplay(attempt, 0, 113);
+        if (!["unchosen", "unsubmitted"].includes(state)) adapter.takeControl(attempt, 114);
+        if (["wrong_display", "wrong_geometry"].includes(state)) adapter.controlQueued(attempt, 115);
+        const descriptor = Buffer.from(mediaDescriptor);
+        if (state === "wrong_display") descriptor.writeBigUInt64BE(22n, 4 + 48 + 8);
+        if (state === "wrong_geometry") descriptor.writeBigUInt64BE(1n, 4 + 64);
+        fails("browser_display_selection_invalid", () => adapter.receiveControl(attempt, record(0x1b, 7, descriptor), 116));
+        assert.equal(adapter.needsVideo(), false);
+    });
+    withAdapter((adapter) => {
+        fails("browser_display_selection_invalid", () => openedDesktop(adapter, true, {
+            displays: [{ ...displayFixture.FIRST, width: 640 }],
+        }));
+        assert.equal(JSON.parse(adapter.desktopSnapshot()).retainedDecoders, 0);
+    });
+});
+
+test("actual WASM keeps display choice inside original ordinary and local-consent startup deadlines", () => {
+    for (const approval of [false, true]) withAdapter((adapter) => {
+        const attempt = openedForSelection(adapter, { approval });
+        adapter.receiveControl(attempt, displayFixture.catalog(), 112);
+        const until = approval ? 30100 : 10100;
+        // Selection does not suspend the independent clock-health contract.
+        // Drive canonical replies while the user considers this original list.
+        for (let now = 212; now < until - 1; now += 1000) {
+            adapter.tick(attempt, now);
+            const next = adapter.takeControl(attempt, now);
+            if (next) {
+                const probe = Buffer.from(next);
+                assert.equal(kind(probe), 0x84);
+                adapter.controlQueued(attempt, now);
+                adapter.receiveControl(attempt, displayFixture.clockReply(probe, now * 1000), now + 0.1);
+            }
+        }
+        adapter.tick(attempt, until - 1);
+        fails("browser_display_selection_expired", () => adapter.selectDisplay(attempt, 0, until));
+        assert.equal(noAuthority(adapter).display_catalog, null);
+    });
+    withAdapter((adapter) => {
+        const { attempt } = openedDesktop(adapter, true, { legacy: true });
+        assert.equal(adapter.configurationReady(), true, "an explicit legacy host retains its default-display path");
+        assert.equal(noAuthority(adapter).display_catalog, null);
+        adapter.disconnect(attempt);
+    });
+});
 
 test("the desktop waits for actual clock evidence before native configuration", () => withAdapter((adapter) => {
     const { attempt, clockReply } = openedDesktop(adapter, false);
@@ -313,7 +494,7 @@ test("superseded receive allocations release full credit without a decoder callb
 test("the actual module exposes versioned Rust bindings and linear memory", () => {
     assert.ok(rawExports.memory instanceof WebAssembly.Memory);
     assert.equal(typeof rawExports.browseradapter_new, "function");
-    assert.equal(bindings.browserAbiVersion(), 2);
+    assert.equal(bindings.browserAbiVersion(), 3);
     assert.equal(bindings.maxBootstrapBytes(), 4096);
     assert.equal(bindings.maxControlRecordBytes(), 4096);
     withAdapter((adapter) => {
@@ -334,7 +515,7 @@ test("real WASM emits exact canonical hello bytes for both requested roles", () 
             assert.ok(hello instanceof Uint8Array);
             const expected = Buffer.from(OBSERVER_HELLO);
             if (role === "controller") expected[33] = 1;
-            assert.equal(expected.length, 208);
+            assert.equal(expected.length, 232);
             assert.deepEqual(Buffer.from(hello), expected);
             assert.equal(noAuthority(adapter).state_label, "awaiting_host");
             fails("browser_connection_state_invalid", () => adapter.clientHello(attempt, 13));

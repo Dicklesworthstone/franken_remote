@@ -12,6 +12,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { before, afterEach, test } = require("node:test");
 const { available, deferred, nextTurn, ioFixture, uiFixture } = require("./browser_fixture.cjs");
+const displayFixture = require("./display_fixture.cjs");
 
 let bindings;
 const cleanups = [];
@@ -25,7 +26,7 @@ before(async () => {
     const exports = await bindings.default({ module_or_path: bytes });
     assert.ok(exports.memory instanceof WebAssembly.Memory);
     assert.equal(typeof exports.browseradapter_new, "function");
-    assert.equal(bindings.browserAbiVersion(), 2);
+    assert.equal(bindings.browserAbiVersion(), 3);
     assert.equal(bindings.maxBootstrapBytes(), 4096);
     assert.equal(bindings.maxControlRecordBytes(), 4096);
 });
@@ -38,13 +39,14 @@ afterEach(() => {
 // byte at offset 33 is the only change for a controller request. No production
 // encoder or simulated protocol implementation constructs these expectations.
 const OBSERVER_HELLO = Buffer.from((`
-    46524430 0000 0001 00000000 000000b8 00000000 00000000
+    46524430 0000 0001 00000000 000000d0 00000000 00000000
     00000001 0000 03 0000 00
     00010000 00100000 000aa555 00002000 0000000001000000
-    04 0000000000200000 00000004
+    04 0000000000200000 00000005
     00000016 62726f777365722d6c6f63616c2d617070726f76616c 0001 00
     00000011 62726f777365722d766964656f2d777373 0001 01
     00000011 636c6f636b2d636f7272656c6174696f6e 0001 01
+    00000011 646973706c61792d73656c656374696f6e 0001 00
     00000014 686576632d6465636f6465722d73746172747570 0001 01
     01
 ` + "a5".repeat(32)).replace(/\s/g, ""), "hex");
@@ -119,7 +121,7 @@ function rustFixture(response = available(), options = {}, fixture = ioFixture) 
         for (const name of [
             "begin", "bootstrapRequest", "acceptBootstrap", "clientHello",
             "receiveControl", "lifecycle", "tick", "disconnect", "snapshot",
-            "takeControl", "controlQueued", "needsVideo", "desktopSnapshot", "configurationReady",
+            "takeControl", "controlQueued", "selectDisplay", "needsVideo", "desktopSnapshot", "configurationReady",
         ]) {
             core[name] = (...args) => {
                 owner.calls.push({ name, args });
@@ -185,7 +187,7 @@ test("production transport sends the actual Rust hello for both requested roles"
         const socket = await open(client, f, role);
         const expected = Buffer.from(OBSERVER_HELLO);
         if (role === "controller") expected[33] = 1;
-        assert.equal(expected.length, 208);
+        assert.equal(expected.length, 232);
         assert.equal(socket.sent.length, 1);
         assert.deepEqual(Buffer.from(socket.sent[0]), expected);
         assert.equal(f.requests[0].url, "/api/session/bootstrap");
@@ -630,4 +632,144 @@ test("production page lifecycle cancels waiting consent and fences late approval
         f.click("btn-disconnect");
         disposed(f);
     }
+});
+
+function openDisplayCatalog(socket, { approval = false, legacy = false } = {}) {
+    socket.message(wireBuffer(displayFixture.capabilities(OBSERVER_HELLO, { approval, legacy })));
+    const selected = Buffer.from(socket.sent.at(-1));
+    assert.equal(selected.readUInt16BE(6), 3);
+    if (approval) socket.message(wireBuffer(approvalNotice()));
+    socket.message(wireBuffer(approvalOpened(selected)));
+    assert.ok(socket.sent.some((bytes) => Buffer.from(bytes).readUInt16BE(6) === 0x1c));
+}
+
+async function openDisplayUi(f, index = 0) {
+    const pending = f.click("btn-connect");
+    await nextTurn();
+    const socket = f.sockets[index];
+    socket.open();
+    await pending;
+    return socket;
+}
+
+test("production picker renders actual Rust approved displays and queues the chosen full display", async () => {
+    const f = rustFixture(available(), {}, uiFixture);
+    const socket = await openDisplayUi(f);
+    assert.equal(f.element("display-picker").classList.contains("hidden"), true);
+    openDisplayCatalog(socket, { approval: true });
+    assert.equal(f.element("display-picker").classList.contains("hidden"), true);
+    socket.message(wireBuffer(displayFixture.catalog()));
+    assert.equal(f.element("connection-state").textContent, "Choose a display to view");
+    assert.equal(f.element("display-picker").classList.contains("hidden"), false);
+    const buttons = f.element("display-options").children;
+    assert.equal(buttons.length, 2);
+    assert.match(buttons[0].textContent, /View display 1.*320 × 240.*\(0, 0\)/);
+    assert.match(buttons[1].textContent, /View display 2.*640 × 480.*\(-640, 0\)/);
+    assert.equal(f.element("btn-request-control").disabled, true);
+    assert.equal(f.element("btn-fullscreen").disabled, true);
+    assert.equal(f.sockets.length, 1);
+    noAuthority(JSON.parse(f.owners[0].adapter.snapshot()));
+    buttons[1].listeners.get("click")();
+    assert.deepEqual(Buffer.from(socket.sent.at(-1)), displayFixture.selection(displayFixture.SECOND));
+    assert.equal(callCount(f.owners[0], "selectDisplay"), 1);
+    assert.equal(f.element("connection-state").textContent, "Preparing desktop video...");
+    assert.equal(f.element("display-picker").classList.contains("hidden"), true);
+    assert.equal(f.element("display-options").children.length, 0);
+    assert.equal(f.sockets.length, 1);
+    const selected = f.owners[0].adapter.snapshot();
+    buttons[0].listeners.get("click")();
+    buttons[1].listeners.get("click")();
+    assert.equal(f.owners[0].adapter.snapshot(), selected, "detached choices cannot replay into the same live session");
+    assert.equal(callCount(f.owners[0], "selectDisplay"), 1);
+    assert.equal(f.owners[0].freed, 0);
+    f.click("btn-disconnect");
+    disposed(f);
+});
+
+test("production display UI auto-selects a sole display, preserves legacy hosts and reports an empty catalog", async () => {
+    for (const mode of ["one", "none", "legacy"]) {
+        const f = rustFixture(available(), {}, uiFixture);
+        const socket = await openDisplayUi(f);
+        openDisplayCatalog(socket, { legacy: mode === "legacy" });
+        if (mode !== "legacy") socket.message(wireBuffer(displayFixture.catalog(mode === "one" ? [displayFixture.FIRST] : [])));
+        assert.equal(f.element("display-picker").classList.contains("hidden"), true);
+        assert.equal(f.element("display-options").children.length, 0);
+        if (mode === "one") {
+            assert.deepEqual(Buffer.from(socket.sent.at(-1)), displayFixture.selection());
+            assert.equal(callCount(f.owners[0], "selectDisplay"), 0, "Rust, not DOM, chooses the only display");
+        }
+        if (mode === "none") {
+            assert.equal(f.element("connection-state").textContent, "Refused");
+            assert.equal(f.owners[0].final.refusal_code, "browser_no_displays");
+            assert.match(f.element("refusal-detail").textContent, /no displays available/);
+        } else {
+            assert.equal(f.element("connection-state").textContent, "Preparing desktop video...");
+            f.click("btn-disconnect");
+        }
+        assert.equal(f.sockets.length, 1);
+        disposed(f);
+    }
+});
+
+test("production picker obeys original normal and consent deadlines and never displays a preapproval catalog", async () => {
+    for (const approval of [false, true]) {
+        const f = rustFixture(available(), {}, uiFixture);
+        const socket = await openDisplayUi(f);
+        openDisplayCatalog(socket, { approval });
+        socket.message(wireBuffer(displayFixture.catalog()));
+        const until = approval ? 30100 : 10100;
+        let answered = 0;
+        for (let now = 100; now < until - 1; now += 500) {
+            f.tick(now);
+            for (const bytes of socket.sent.slice(answered)) {
+                const probe = Buffer.from(bytes);
+                if (probe.readUInt16BE(6) === 0x84) {
+                    socket.message(wireBuffer(displayFixture.clockReply(probe, now * 1000)));
+                }
+            }
+            answered = socket.sent.length;
+        }
+        f.tick(until - 1);
+        assert.equal(f.element("display-picker").classList.contains("hidden"), false);
+        f.tick(until);
+        assert.equal(f.owners[0].final.refusal_code, "browser_display_selection_expired");
+        assert.equal(f.element("display-picker").classList.contains("hidden"), true);
+        assert.match(f.element("refusal-detail").textContent, /original deadline/);
+        assert.equal(f.sockets.length, 1);
+        disposed(f);
+    }
+    const f = rustFixture(available(), {}, uiFixture);
+    const socket = await openDisplayUi(f);
+    selectApproval(socket);
+    socket.message(wireBuffer(approvalNotice()));
+    socket.message(wireBuffer(displayFixture.catalog()));
+    assert.equal(f.element("display-picker").classList.contains("hidden"), true);
+    assert.equal(f.element("display-options").children.length, 0);
+    assert.equal(f.element("connection-state").textContent, "Refused");
+    assert.equal(f.owners[0].final.refusal_code, "browser_control_record_invalid");
+    disposed(f);
+});
+
+test("detached picker buttons and late catalog callbacks cannot select a replacement Rust session", async () => {
+    const f = rustFixture(available(), {}, uiFixture);
+    const old = await openDisplayUi(f);
+    openDisplayCatalog(old);
+    old.message(wireBuffer(displayFixture.catalog()));
+    const oldClick = f.element("display-options").children[1].listeners.get("click");
+    f.event("pagehide");
+    assert.equal(f.owners[0].freed, 1);
+    const current = await openDisplayUi(f, 1);
+    openDisplayCatalog(current);
+    current.message(wireBuffer(displayFixture.catalog()));
+    const before = f.owners[1].adapter.snapshot();
+    assert.equal(JSON.parse(before).attempt, 1, "different Rust owners reuse local serials");
+    oldClick();
+    old.message(wireBuffer(displayFixture.catalog()));
+    assert.equal(f.owners[1].adapter.snapshot(), before);
+    assert.equal(callCount(f.owners[1], "selectDisplay"), 0);
+    assert.equal(f.element("display-picker").classList.contains("hidden"), false);
+    f.element("display-options").children[0].listeners.get("click")();
+    assert.deepEqual(Buffer.from(current.sent.at(-1)), displayFixture.selection());
+    f.click("btn-disconnect");
+    disposed(f);
 });

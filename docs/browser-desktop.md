@@ -6,7 +6,7 @@ This is the explicitly degraded WSS profile. Session control and video use separ
 
 ## Build and start
 
-Build the browser package with the repository's pinned nightly (`nightly-2026-08-31`) and the matching `wasm-bindgen` generator (`0.2.128`). The existing `scripts/build-web.cjs` recipe generates the self-hosted bundle. Its `fr_web.js` and `fr_web_bg.wasm` must come from the same build. The connection ABI is **2**; the local media-probe ABI remains **1**.
+Build the browser package with the repository's pinned nightly (`nightly-2026-08-31`) and the matching `wasm-bindgen` generator (`0.2.128`). The existing `scripts/build-web.cjs` recipe generates the self-hosted bundle. Its `fr_web.js` and `fr_web_bg.wasm` must come from the same build. The connection ABI is **3**; the local media-probe ABI remains **1**.
 
 Use a new output directory; the build recipe preserves existing bundles. It builds the actual WASM module and runs the generated-WASM integration suites:
 
@@ -15,7 +15,7 @@ node scripts/build-web.cjs /absolute/new/browser-bundle
 FR_WEB_ASSET_DIR=/absolute/new/browser-bundle cargo build --locked -p frd
 ```
 
-The second command embeds the generated pair. A build without the pair refuses `--browser-port` before listening or capturing. A previously generated connection-ABI-1 pair cannot run the new desktop.
+The second command embeds the generated pair. A build without the pair refuses `--browser-port` before listening or capturing. Older connection-ABI-1 or ABI-2 packages are refused by the browser loader before bootstrap; build a matching ABI-3 pair for this shell.
 
 Install the existing capture worker, logind monitor and observation indicator beside `frd`, or name their absolute paths. The Linux native build needs the existing `linux-displays`, `linux-session-monitor` and `linux-input` platform features. The installed Tailscale daemon must have HTTPS certificate issuance available, and the TCP port must be permitted by the configured ingress helper or protected directly with the required host capability.
 
@@ -62,6 +62,26 @@ It retains the original session and indicator choices and checks TCP port use.
 See [browser service installation](browser-service.md) for a complete preview
 command and startup prerequisites.
 
+## Choose the display to view
+
+After any required local consent, a host negotiating `display-selection` v1
+sends its approved display catalog. The browser selects a sole display
+automatically. With multiple displays, choose the button for the screen you
+want; the picker shows each screen's pixel dimensions and desktop position.
+Only the chosen full display is configured for video.
+
+The picker uses the original connection's startup time. It must complete within
+the ordinary ten-second startup ceiling, or the thirty-second total ceiling
+when local consent is required. A delayed choice does not prolong that time.
+If the attempt expires, reconnect to make a new choice and receive fresh consent
+when required. The client keeps servicing observation renewal while choosing.
+
+Display selection remains in Rust. Old picker callbacks cannot select a display
+on another attempt, and a changed display topology ends the original selection.
+To choose another screen after viewing starts, disconnect and reconnect. A host
+without the optional display-selection extension uses its existing default
+display behavior; it does not expose a picker.
+
 ## Authority and lifecycle
 
 Every actual TCP socket is checked against installed Tailscale membership using its real local and remote endpoints. It retains its original admission and refreshes before that proof expires. An expired or failed admission is terminal; the server cannot acquire a new proof to rescue the old desktop.
@@ -89,11 +109,15 @@ hosting, and HTTP/3 WebTransport are not provided by this profile. Requested
 incompatible host flags receive explicit refusals before startup. Other host
 operating systems are refused by the browser entry point.
 
-The exact pinned release WASM package and matching generated glue pass all 127
+The exact pinned release WASM package and matching generated glue pass all 140
 package tests, including desktop handshake, real HEVC admission, delayed
 decode/presentation, original resource credit and ten consent adapter/transport
-cases. Portable JavaScript tests pass 55 cases and focused native wire tests
-pass 19 cases. Native WebCodecs handles and browser I/O in those tests are
+cases. Display coverage includes a nondefault choice through matching video and
+resource disposal, sole/empty/legacy catalogs, exact selections and media
+dimensions, original deadlines and obsolete picker callbacks. Portable
+JavaScript tests pass 55 cases and focused native wire tests pass 21 cases.
+Strict WASM Clippy passes for the library and Rust browser/approval integration
+test targets. Native WebCodecs handles and browser I/O in those tests are
 explicitly simulated; these results do not establish real browser/OS/GPU,
 physical consent UI or live tailnet qualification.
 

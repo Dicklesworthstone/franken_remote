@@ -205,6 +205,24 @@ impl BrowserSessionCore {
         Ok(())
     }
 
+    /// Only an admitted browser session may disclose a display catalog.
+    pub(crate) fn on_display_catalog(
+        &mut self,
+        catalog: &fr_wire::display::Catalog,
+    ) -> Result<(), SessionError> {
+        if self.binding.is_none() {
+            return Err(SessionError::InvalidState);
+        }
+        self.session.on_catalog_received(*catalog)
+    }
+
+    pub(crate) fn select_display(&mut self, handle: u128) -> Result<(), SessionError> {
+        if self.binding.is_none() {
+            return Err(SessionError::InvalidState);
+        }
+        self.session.select_display(handle)
+    }
+
     /// Install credit and clock owners atomically with host `SessionOpened`.
     /// Bootstrap transport authentication alone must never call this method.
     pub fn on_session_opened(

@@ -30,6 +30,10 @@ use fr_wire::{
 use serde::Serialize;
 use std::collections::VecDeque;
 
+mod display_choice;
+use display_choice::DisplayChoice;
+pub use display_choice::{DisplayCatalogSnapshot, DisplayOptionSnapshot};
+
 const MAX_CONTROL_QUEUE: usize = 8;
 const MAX_VIDEO_FEEDBACK: usize = 2;
 const MAX_CALLBACK: u64 = 9_007_199_254_740_991;
@@ -63,8 +67,16 @@ impl From<crate::media_adapter::MediaAdapterError> for Error {
 
 struct QueuedControl {
     bytes: Vec<u8>,
-    clock: bool,
+    purpose: ControlPurpose,
     pressure: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControlPurpose {
+    Plain,
+    Clock,
+    Selection,
+    Admission,
+    Display,
 }
 struct Reservation {
     descriptor: FrameDescriptor,
@@ -107,6 +119,8 @@ pub(crate) struct DesktopSession {
     selected_queued: bool,
     approval: Option<ApprovalNotice>,
     binding: Option<ControlBinding>,
+    binding_queued: bool,
+    display_choice: DisplayChoice,
     descriptor: Option<attachment::Descriptor>,
     grant: Option<attachment::Grant>,
     attached: bool,
@@ -121,7 +135,7 @@ pub(crate) struct DesktopSession {
     last_announced: Option<FrameDescriptor>,
     next_callback: u64,
     control: VecDeque<QueuedControl>,
-    control_taken: Option<bool>,
+    control_taken: Option<ControlPurpose>,
     video_feedback: VecDeque<Vec<u8>>,
     next_clock_us: u64,
     first_decoded: bool,
@@ -139,6 +153,8 @@ impl DesktopSession {
             selected_queued: false,
             approval: None,
             binding: None,
+            binding_queued: false,
+            display_choice: DisplayChoice::default(),
             descriptor: None,
             grant: None,
             attached: false,
@@ -204,7 +220,12 @@ impl DesktopSession {
             fr_wire::MAX_REPAIR_RANGES,
         )?)
     }
-    fn queue_control(&mut self, bytes: Vec<u8>, clock: bool, pressure: bool) -> Result<(), Error> {
+    fn queue_control(
+        &mut self,
+        bytes: Vec<u8>,
+        purpose: ControlPurpose,
+        pressure: bool,
+    ) -> Result<(), Error> {
         if bytes.len() > crate::adapter::MAX_CONTROL_RECORD_BYTES {
             return Err(Error::MessageTooLarge);
         }
@@ -217,7 +238,7 @@ impl DesktopSession {
         }
         self.control.push_back(QueuedControl {
             bytes,
-            clock,
+            purpose,
             pressure,
         });
         Ok(())
@@ -225,7 +246,12 @@ impl DesktopSession {
     fn queue_negotiation(&mut self, message: &Message) -> Result<(), Error> {
         let mut bytes = [0; browser::MAX_RECORD];
         let n = browser::encode(message, bytes.len(), &mut bytes)?;
-        self.queue_control(bytes[..n].to_vec(), false, false)
+        let purpose = match message {
+            Message::SelectedConfiguration(_) => ControlPurpose::Selection,
+            Message::BindingAccepted { .. } => ControlPurpose::Admission,
+            _ => return Err(Error::InvalidState),
+        };
+        self.queue_control(bytes[..n].to_vec(), purpose, false)
     }
     fn queue_attachment(&mut self, message: attachment::Message) -> Result<(), Error> {
         let mut bytes = [0; attachment::GRANT_RECORD_BYTES];
@@ -237,7 +263,7 @@ impl DesktopSession {
             ViewerToHost,
             Reliable,
         )?;
-        self.queue_control(bytes[..n].to_vec(), false, false)
+        self.queue_control(bytes[..n].to_vec(), ControlPurpose::Plain, false)
     }
     fn queue_video(&mut self, message: decoder::Message<'_>) -> Result<(), Error> {
         if self.video_feedback.len() >= MAX_VIDEO_FEEDBACK {
@@ -335,6 +361,7 @@ impl DesktopSession {
         }
         let parent = self.parent()?;
         match kind {
+            Kind::DisplayCatalog => self.receive_catalog(core, bytes)?,
             Kind::Challenge => {
                 let binding = authority::Binding {
                     channel: parent.id,
@@ -360,7 +387,7 @@ impl DesktopSession {
                     ViewerToHost,
                     Reliable,
                 )?;
-                self.queue_control(out[..n].to_vec(), false, false)?;
+                self.queue_control(out[..n].to_vec(), ControlPurpose::Plain, false)?;
             }
             Kind::ClockReply => match core.on_clock_reply(bytes, now) {
                 Ok(()) | Err(fr_client::clock::Error::LateReply) => {
@@ -378,6 +405,11 @@ impl DesktopSession {
                     Reliable,
                 )? {
                     attachment::Message::Binding(descriptor) if self.descriptor.is_none() => {
+                        if self.display_selection_enabled()
+                            && !self.display_choice.accepts(descriptor.binding)
+                        {
+                            return Err(Error::InvalidDisplay);
+                        }
                         self.descriptor = Some(descriptor);
                         self.queue_attachment(attachment::Message::Accepted(
                             descriptor.binding.parent.id,
@@ -409,12 +441,15 @@ impl DesktopSession {
         self.sync_view(core, now)?;
         if self.binding.is_some()
             && now >= self.next_clock_us
-            && self.control_taken != Some(true)
-            && !self.control.iter().any(|queued| queued.clock)
+            && self.control_taken != Some(ControlPurpose::Clock)
+            && !self
+                .control
+                .iter()
+                .any(|queued| queued.purpose == ControlPurpose::Clock)
         {
             match core.begin_clock_probe(now) {
                 Ok(bytes) => {
-                    self.queue_control(bytes, true, false)?;
+                    self.queue_control(bytes, ControlPurpose::Clock, false)?;
                     self.next_clock_us = now
                         .checked_add(CLOCK_INTERVAL_US)
                         .ok_or(Error::InvalidClock)?;
@@ -431,20 +466,20 @@ impl DesktopSession {
             return Err(Error::InvalidState);
         }
         Ok(self.control.pop_front().map(|queued| {
-            self.control_taken = Some(queued.clock);
+            self.control_taken = Some(queued.purpose);
             queued.bytes
         }))
     }
     pub fn control_queued(&mut self, core: &mut BrowserSessionCore, now: u64) -> Result<(), Error> {
         self.live()?;
-        let clock = self.control_taken.take().ok_or(Error::InvalidState)?;
-        if clock {
-            core.clock_probe_queued(now)
-                .map_err(|_| Error::InvalidClock)?;
-        } else if self.binding.is_none() && self.selected.is_some() && !self.selected_queued {
-            // SelectedConfiguration is the sole outbound pre-binding record.
-            // Taking it is not evidence that its original bytes entered WSS.
-            self.selected_queued = true;
+        match self.control_taken.take().ok_or(Error::InvalidState)? {
+            ControlPurpose::Clock => core
+                .clock_probe_queued(now)
+                .map_err(|_| Error::InvalidClock)?,
+            ControlPurpose::Selection => self.selected_queued = true,
+            ControlPurpose::Admission => self.binding_queued = true,
+            ControlPurpose::Display => self.display_choice.queued()?,
+            ControlPurpose::Plain => {}
         }
         Ok(())
     }
@@ -519,6 +554,9 @@ impl DesktopSession {
                 binding.configuration.as_raw(),
                 self.limits(),
             )?;
+            if self.display_selection_enabled() && !self.display_choice.accepts_picture(config) {
+                return Err(Error::InvalidDisplay);
+            }
             let media_limits = self.media_limits()?;
             let mut receiver = ReceivePipeline::new(
                 ReceiveConfig {
@@ -630,7 +668,7 @@ impl DesktopSession {
         if !self.closed
             && let Some(bytes) = record
         {
-            self.queue_control(bytes.to_vec(), false, true)?;
+            self.queue_control(bytes.to_vec(), ControlPurpose::Plain, true)?;
         }
         Ok(())
     }

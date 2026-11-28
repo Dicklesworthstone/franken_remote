@@ -78,6 +78,23 @@ a late answer cannot restart that budget or authorize a replacement. Waiting
 grants no media/input readiness. The host clock remains distinct from the
 client's own monotonic deadline.
 
+Connection ABI 3 adds initial display selection. The optional negotiated
+`display-selection` v1 capability carries one canonical bounded catalog only
+after any required approval and the original session binding. Rust retains
+that catalog and accepts one row choice through an attempt-bound callback;
+JavaScript projects the dimensions/positions and performs I/O. A sole display
+is selected automatically, while multiple displays require a user choice.
+The outgoing full-display Select must actually be queued before a matching
+video binding is accepted. Foreign or stale aliases, replacement catalogs,
+duplicate selections and mismatched visible dimensions are refused.
+
+The picker shares the original ten-second startup ceiling or the already
+selected thirty-second local-consent ceiling. It creates no new timer or input
+authority. Renewal continues while choosing; hidden-page retirement and old
+DOM callbacks cannot carry a selection into a later attempt. Older connection
+ABI packages are refused before bootstrap, while hosts without the optional
+wire capability retain their existing default-display path.
+
 Bootstrap bodies and control records are bounded to 4 KiB before copying them
 into WASM. The reader enforces the cumulative body limit even without a
 Content-Length header. Malformed UTF-8, oversized records, wrong protocol

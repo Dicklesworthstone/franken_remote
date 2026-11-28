@@ -6,8 +6,14 @@ use crate::{
     media::{ObservationControl, host_now},
 };
 use asupersync::{runtime::RuntimeHandle, time::sleep};
-use fr_core::authority::{AuthorityPolicy, SessionAuthority};
+use fr_core::{
+    authority::{AuthorityPolicy, SessionAuthority},
+    ids::CodecConfigurationGeneration,
+    limits::ProtocolLimits,
+};
+use fr_media::worker::Configuration;
 use fr_wire::{
+    display::{Catalog, Select},
     negotiation::{Role, browser},
     refusal::Reason,
 };
@@ -58,8 +64,9 @@ pub(super) fn make(
                 control,
                 launch,
                 cleanup,
-                select: Box::new(move |catalog| {
-                    let (selected, mut codec) = choose(catalog, fps, bitrate, encoder)?;
+                select: Box::new(move |catalog, requested| {
+                    let (selected, mut codec) =
+                        choose_source(catalog, requested, fps, bitrate, encoder)?;
                     codec.max_access_unit_bytes = maximum;
                     Ok((selected, codec))
                 }),
@@ -70,6 +77,31 @@ pub(super) fn make(
             })
         })
     })
+}
+
+fn choose_source(
+    catalog: &Catalog,
+    requested: Option<Select>,
+    fps: u16,
+    bitrate: u32,
+    encoder: Encoder,
+) -> Result<(Select, Configuration), ()> {
+    let Some(requested) = requested else {
+        return choose(catalog, fps, bitrate, encoder);
+    };
+    let display = catalog.selected(requested).map_err(|_| ())?;
+    Ok((
+        requested,
+        Configuration {
+            width: display.pixel_width,
+            height: display.pixel_height,
+            fps,
+            backend: encoder.backend(),
+            bitrate,
+            max_access_unit_bytes: ProtocolLimits::ABSOLUTE.max_encoded_access_unit_bytes(),
+            generation: CodecConfigurationGeneration::INITIAL,
+        },
+    ))
 }
 
 async fn approved_authority(
@@ -148,6 +180,92 @@ impl Drop for StopAfterShare {
     fn drop(&mut self) {
         if self.once {
             self.stop.request();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fr_core::ids::DisplayGeometryGeneration;
+    use fr_wire::display::Display;
+
+    fn catalog() -> Catalog {
+        let origin = Display {
+            handle: 51,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            x: 0,
+            y: 0,
+            pixel_width: 1920,
+            pixel_height: 1080,
+            logical_width: 1920,
+            logical_height: 1080,
+            scale_numerator: 1,
+            scale_denominator: 1,
+            rotation: 0,
+        };
+        Catalog::new(
+            9,
+            &[
+                origin,
+                Display {
+                    handle: 52,
+                    x: -1280,
+                    pixel_width: 1280,
+                    pixel_height: 720,
+                    logical_width: 1280,
+                    logical_height: 720,
+                    ..origin
+                },
+            ],
+            &ProtocolLimits::ABSOLUTE,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn explicit_second_display_preserves_local_encoder_settings_and_its_native_size() {
+        let catalog = catalog();
+        let requested = catalog.selection(52).unwrap();
+        let (choice, config) =
+            choose_source(&catalog, Some(requested), 30, 8_000_000, Encoder::Vaapi).unwrap();
+        assert_eq!(choice, requested);
+        assert_eq!((config.width, config.height), (1280, 720));
+        assert_eq!(config.backend, Encoder::Vaapi.backend());
+        assert_eq!(config.fps, 30);
+        assert_eq!(config.bitrate, 8_000_000);
+        assert_eq!(config.generation, CodecConfigurationGeneration::INITIAL);
+
+        let (legacy, config) =
+            choose_source(&catalog, None, 30, 8_000_000, Encoder::Vaapi).unwrap();
+        assert_eq!(legacy, catalog.selection(51).unwrap());
+        assert_eq!((config.width, config.height), (1920, 1080));
+    }
+
+    #[test]
+    fn configuration_never_normalizes_a_stale_or_cropped_peer_choice() {
+        let catalog = catalog();
+        let selected = catalog.selection(52).unwrap();
+        for request in [
+            Select {
+                revision: 10,
+                ..selected
+            },
+            Select {
+                width: 640,
+                ..selected
+            },
+        ] {
+            assert!(
+                choose_source(
+                    &catalog,
+                    Some(request),
+                    30,
+                    8_000_000,
+                    Encoder::SoftwareExplicit,
+                )
+                .is_err()
+            );
         }
     }
 }

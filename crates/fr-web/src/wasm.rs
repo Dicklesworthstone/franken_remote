@@ -113,6 +113,21 @@ impl BrowserAdapter {
         let now = self.timestamp(attempt, now_ms)?;
         self.inner.control_queued(attempt, now).map_err(js_error)
     }
+    #[wasm_bindgen(js_name = selectDisplay)]
+    pub fn select_display(&mut self, attempt: u32, index: f64, now_ms: f64) -> Result<(), JsValue> {
+        let attempt = BrowserAttempt(attempt);
+        let now = self.timestamp(attempt, now_ms)?;
+        // A numeric ABI must not turn NaN/fractions/negative input into row zero.
+        let Some(index) = (0..fr_wire::display::MAX_DISPLAYS)
+            .filter_map(|index| u32::try_from(index).ok())
+            .find(|candidate| f64::from(*candidate).to_bits() == index.to_bits())
+        else {
+            return Err(js_error(self.inner.invalid_display(attempt)));
+        };
+        self.inner
+            .select_display(attempt, index, now)
+            .map_err(js_error)
+    }
     #[wasm_bindgen(js_name = needsVideo)]
     pub fn needs_video(&self) -> bool {
         self.inner.needs_video()

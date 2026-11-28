@@ -30,7 +30,7 @@ fn authorized(cx: &Cx) -> Authorized {
             1,
         )
         .unwrap(),
-        select: Box::new(|_| Err(())),
+        select: Box::new(|_, _| Err(())),
         cleanup: cx.clone(),
         supervise: Box::pin(std::future::pending()),
     }

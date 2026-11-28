@@ -2,7 +2,7 @@
 // Load the self-hosted Rust protocol owner. No protocol/session implementation
 // lives here: this boundary only initializes the matching generated WASM pair.
 (function (global) {
-    const ABI_VERSION = 2;
+    const ABI_VERSION = 3;
     const MAX_PENDING_ADAPTERS = 16;
     let readyModule = null;
     let pendingLoad = null;
@@ -34,6 +34,7 @@
         if (typeof module.browserAbiVersion !== "function"
             || module.browserAbiVersion() !== ABI_VERSION
             || typeof module.BrowserAdapter !== "function"
+            || typeof module.BrowserAdapter.prototype.selectDisplay !== "function"
             || typeof module.maxBootstrapBytes !== "function"
             || typeof module.maxControlRecordBytes !== "function"
             || typeof module.maxVideoRecordBytes !== "function") {

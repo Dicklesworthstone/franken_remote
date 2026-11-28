@@ -138,10 +138,13 @@ impl DiscoveredSource {
         }
         self.configure_choice(choice, configuration)
     }
-    /// Configure this original peer-bound browser source from a LOCAL catalog
-    /// choice. The WSS service has already negotiated Observe and owns the
-    /// exact admitted session; no network crop or native display name enters
-    /// this path. Independent shared sources still use configure_local.
+    /// Configure this original peer-bound browser source from its exact catalog
+    /// choice. The WSS service owns the admitted Observe session and validates
+    /// an optional `display-selection` request against its original bound
+    /// catalog before entering here. This owner checks the complete choice
+    /// again against the same discovered child's aliases; no network crop or
+    /// native display name enters this path. Legacy sessions use a local choice.
+    /// Independent shared sources still use configure_local.
     #[cfg(target_os = "linux")]
     pub(crate) fn configure_browser(
         self,
