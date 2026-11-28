@@ -56,6 +56,12 @@ capability receive an explicit capability refusal when consent is required.
 
 `--browser-port` selects a browser-only listener. Do not combine it with native `--port`. The existing native listener remains the default when the browser flag is absent. `--once` ends the run after its first accepted desktop, including failed desktop startup. Ordinary asset and bootstrap requests do not consume that desktop lifetime.
 
+For a managed graphical user service, use the installer's own
+`frd install --user --browser-port PORT` selection before the `--` separator.
+It retains the original session and indicator choices and checks TCP port use.
+See [browser service installation](browser-service.md) for a complete preview
+command and startup prerequisites.
+
 ## Authority and lifecycle
 
 Every actual TCP socket is checked against installed Tailscale membership using its real local and remote endpoints. It retains its original admission and refreshes before that proof expires. An expired or failed admission is terminal; the server cannot acquire a new proof to rescue the old desktop.

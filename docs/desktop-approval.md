@@ -73,6 +73,10 @@ cannot approve a later connection.
 
 ## Linux: install the monitored host as a user service
 
+For HTTPS/WSS hosting, use [browser service installation](browser-service.md),
+including the installer's explicit `--browser-port`. The native QUIC example
+below retains its packaged-UI requirements.
+
 The installer accepts the same explicit desktop selection for a systemd user
 service. For example, preview the service for your actual selected session:
 

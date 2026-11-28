@@ -33,7 +33,7 @@ USAGE:
     frd status [--json]
     frd approval [get | set local | set none]
     frd sharing [get | set own-user | set tailnet]
-    frd install [--user | --system] [--dry-run] [--port PORT] [-- FRD-RUN-OPTIONS]
+    frd install [--user | --system] [--dry-run] [--port PORT | --browser-port PORT] [-- FRD-RUN-OPTIONS]
     frd uninstall [--user | --system] [--dry-run]
     frd service-status [--user | --system] [--json]
     frd ingress-helper [--config PATH] [--json]
@@ -54,13 +54,13 @@ COMMANDS:
 
 OPTIONS:
     --port PORT     Ingress port for the native QUIC listener (default: 8443)
-    --browser-port PORT  Instead serve the view-only browser desktop over HTTPS/WSS
-                    on Linux. Requires --logind-session, --observation-indicator,
+    --browser-port PORT  Select HTTPS/WSS browser hosting for run or install
+                    (Linux user service). Requires --logind-session, --observation-indicator,
                     and a build containing the Rust/WASM browser bundle. Local
                     approval uses that same installed indicator before capture.
                     Control, audio and files are not enabled in this profile.
                     Uses separate control/video sockets; video has TCP head-of-line
-                    blocking. See docs/browser-desktop.md
+                    blocking. See docs/browser-desktop.md and docs/browser-service.md
     --socket PATH   Path to tailscaled.sock
     --approval MODE Process override: 'none' (unattended) or 'local' (one-use
                     device-attributed desktop consent before capture). Local

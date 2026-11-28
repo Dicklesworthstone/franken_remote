@@ -21,8 +21,24 @@ mod publication;
 mod quoting;
 #[cfg(unix)]
 use std::fs;
-use std::net::UdpSocket;
+use std::net::{TcpListener, UdpSocket};
 use std::path::PathBuf;
+
+/// The one installed listener; browser hosting remains an explicit selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServiceListener {
+    #[default]
+    Native,
+    Browser,
+}
+impl ServiceListener {
+    const fn port_flag(self) -> &'static str {
+        match self {
+            Self::Native => "--port",
+            Self::Browser => "--browser-port",
+        }
+    }
+}
 
 /// Target service manager variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +128,7 @@ impl fmt::Display for ServiceError {
             Self::PortConflict { port } => {
                 write!(
                     f,
-                    "service port {port} is already in use by another process; select a different port with --port"
+                    "service port {port} is already in use by another process; select a different listener port"
                 )
             }
             Self::ExecutableNotFound { path } => {
@@ -141,7 +157,9 @@ impl std::error::Error for ServiceError {}
 pub struct InstallOptions {
     /// Target service manager kind.
     pub kind: ServiceKind,
-    /// Ingress service port for QUIC and HTTPS (default 8443).
+    /// The native QUIC or browser HTTPS/WSS listener selected for this service.
+    pub listener: ServiceListener,
+    /// Port of the selected listener (default 8443).
     pub service_port: u16,
     /// Optional custom Tailscale daemon socket path.
     pub socket_path: Option<PathBuf>,
@@ -157,8 +175,8 @@ pub struct InstallOptions {
     pub dry_run: bool,
     /// Optional directory override (primarily for test isolation).
     pub custom_unit_dir: Option<PathBuf>,
-    /// Pass `--software-explicit` to `frd run` (the CPU HEVC developer profile;
-    /// `frd run` has no hardware encoder selection yet and refuses without it).
+    /// Pass `--software-explicit` to `frd run` (the CPU HEVC developer profile).
+    /// Hardware selection is carried separately through `-- --encoder ...`.
     pub software_explicit: bool,
     /// Further `frd run` flags (everything after `--`): control, clipboard,
     /// files, audio, display and session-lifetime options. Validated by
@@ -171,6 +189,7 @@ impl Default for InstallOptions {
         let exec_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("frd"));
         Self {
             kind: ServiceKind::default_for_platform(),
+            listener: ServiceListener::Native,
             service_port: 8443,
             socket_path: None,
             config_path: None,
@@ -384,7 +403,11 @@ pub struct UninstallReport {
 /// Render a systemd service unit file for `frd`.
 #[must_use]
 pub fn render_systemd_unit(options: &InstallOptions) -> String {
-    let mut args = format!("run --port {}", options.service_port);
+    let mut args = format!(
+        "run {} {}",
+        options.listener.port_flag(),
+        options.service_port
+    );
     if let Some(sock) = &options.socket_path {
         let _ = write!(
             args,
@@ -495,7 +518,7 @@ pub fn render_launchd_plist(options: &InstallOptions) -> String {
     let mut program_args = String::new();
     arg(&mut program_args, &options.exec_path.to_string_lossy());
     arg(&mut program_args, "run");
-    arg(&mut program_args, "--port");
+    arg(&mut program_args, options.listener.port_flag());
     arg(&mut program_args, &options.service_port.to_string());
     if let Some(sock) = &options.socket_path {
         arg(&mut program_args, "--socket");
@@ -611,14 +634,12 @@ pub fn preflight_check(options: &InstallOptions) -> Result<(), ServiceError> {
         });
     }
 
-    // 2. Check for a port collision on localhost. frd serves QUIC, so only
-    // a UDP holder conflicts; a TCP service on the same number does not.
+    // 2. Check the selected protocol. This is only a localhost preflight;
+    // the live listener still installs ingress rules and binds exact tailnet
+    // addresses under its original node identity.
     if !options.dry_run {
-        match UdpSocket::bind(("127.0.0.1", options.service_port)) {
-            Ok(socket) => {
-                // Port is free; close the probe immediately.
-                drop(socket);
-            }
+        match probe_port(options.listener, options.service_port) {
+            Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 return Err(ServiceError::PortConflict {
                     port: options.service_port,
@@ -631,6 +652,13 @@ pub fn preflight_check(options: &InstallOptions) -> Result<(), ServiceError> {
     }
 
     Ok(())
+}
+
+fn probe_port(listener: ServiceListener, port: u16) -> std::io::Result<()> {
+    match listener {
+        ServiceListener::Native => UdpSocket::bind(("127.0.0.1", port)).map(drop),
+        ServiceListener::Browser => TcpListener::bind(("127.0.0.1", port)).map(drop),
+    }
 }
 
 /// Idempotently install the `frd` service.
@@ -716,7 +744,17 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
 
     if options.kind == ServiceKind::SystemdUser && options.approval_mode == "local" {
         next_steps.push(
-            "Local approval uses the explicitly selected logind session on every start. Install the matching fr-observation-indicator beside frd and provide the selected session's X11 environment; missing session evidence or UI refuses hosting. After a new login changes the session ID, update the service selection explicitly."
+            if options.listener == ServiceListener::Browser {
+                "Local approval uses the explicitly selected logind session and configured observation-indicator image on every start. Provide that session's X11 environment; missing session evidence or UI refuses hosting. The one-use consent dialog is separate from the live Stop sharing window."
+            } else {
+                "Local approval uses the explicitly selected logind session on every start. Install the matching fr-observation-indicator beside frd and provide the selected session's X11 environment; missing session evidence or UI refuses hosting. After a new login changes the session ID, update the service selection explicitly."
+            }
+            .into(),
+        );
+    }
+    if options.listener == ServiceListener::Browser {
+        next_steps.push(
+            "The browser service requires its embedded Rust/WASM package, the explicitly selected active logind session and the configured Stop sharing indicator on every start. Its journal reports the certified HTTPS URL. After a new login changes the session ID, update the service selection explicitly."
                 .into(),
         );
     }
@@ -859,6 +897,7 @@ mod tests {
     fn render_systemd_user_unit_contains_expected_attributes() {
         let options = InstallOptions {
             kind: ServiceKind::SystemdUser,
+            listener: ServiceListener::Native,
             service_port: 8443,
             socket_path: Some(PathBuf::from("/var/run/tailscale/tailscaled.sock")),
             config_path: None,
@@ -883,6 +922,7 @@ mod tests {
     fn render_launchd_plist_contains_xml_elements() {
         let options = InstallOptions {
             kind: ServiceKind::LaunchdAgent,
+            listener: ServiceListener::Native,
             service_port: 9000,
             socket_path: None,
             config_path: None,
@@ -998,6 +1038,7 @@ mod tests {
 
         let options = InstallOptions {
             kind: ServiceKind::SystemdUser,
+            listener: ServiceListener::Native,
             service_port: 8443,
             socket_path: None,
             config_path: None,
@@ -1141,6 +1182,7 @@ mod tests {
     fn preflight_detects_missing_executable() {
         let options = InstallOptions {
             kind: ServiceKind::SystemdUser,
+            listener: ServiceListener::Native,
             service_port: 8443,
             socket_path: None,
             config_path: None,

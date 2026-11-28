@@ -1,6 +1,6 @@
 //! Strict installer parsing. Omitted authority flags inherit saved startup
 //! policy; explicit `none` and `own-user` MUST remain in the service definition.
-use super::{InstallOptions, ServiceError, ServiceKind};
+use super::{InstallOptions, ServiceError, ServiceKind, ServiceListener};
 use std::{
     collections::BTreeSet,
     path::{Component, Path, PathBuf},
@@ -20,6 +20,7 @@ impl InstallOptions {
             }
             let key = match flag.as_str() {
                 "--user" | "--system" => "service-kind",
+                "--port" | "--browser-port" => "listener-port",
                 other => other,
             };
             if !seen.insert(key) {
@@ -30,10 +31,15 @@ impl InstallOptions {
                 "--dry-run" => options.dry_run = true,
                 "--user" => options.kind = ServiceKind::default_for_platform(),
                 "--system" => options.kind = system_kind(),
-                "--port" => {
+                "--port" | "--browser-port" => {
                     options.service_port = value(&mut iter)?
                         .parse()
                         .map_err(|_| ServiceError::InvalidOptions)?;
+                    options.listener = if flag == "--browser-port" {
+                        ServiceListener::Browser
+                    } else {
+                        ServiceListener::Native
+                    };
                 }
                 "--socket" => options.socket_path = Some(PathBuf::from(value(&mut iter)?)),
                 "--config" => options.config_path = Some(PathBuf::from(value(&mut iter)?)),
@@ -88,6 +94,14 @@ impl InstallOptions {
                 detail: "a LaunchDaemon runs outside every login session, where macOS allows no screen capture or input; install the per-user LaunchAgent (frd install --user)".into(),
             });
         }
+        if self.listener == ServiceListener::Browser
+            && (!cfg!(target_os = "linux") || self.kind != ServiceKind::SystemdUser)
+        {
+            return Err(ServiceError::HostProfileUnavailable {
+                code: "browser_host_unsupported",
+                detail: "browser hosting requires a Linux user service in the explicitly selected graphical logind session",
+            });
+        }
         let encoder_selected = self.validate_run_args()?;
         if matches!(
             self.kind,
@@ -123,14 +137,17 @@ impl InstallOptions {
             detail: if self.kind == ServiceKind::LaunchdAgent {
                 "local approval needs a macOS host build and a per-user LaunchAgent in the selected console session; startup revalidates that session and the packaged approval UI"
             } else {
-                "local approval needs a user service with -- --logind-session ID for the shared graphical desktop, without --headless or --observation-indicator; startup revalidates that session and the packaged approval UI"
+                "local approval needs a user service with -- --logind-session ID for the shared graphical desktop, without --headless; only a browser service may select its approval/Stop sharing image with --observation-indicator; startup revalidates the session and UI"
             },
         };
         #[cfg(target_os = "linux")]
         if self.kind == ServiceKind::SystemdUser {
             let run = crate::host_policy::options::RunOptions::parse(&self.run_args)
                 .map_err(|_| ServiceError::InvalidOptions)?;
-            if run.logind_session.is_some() && !run.headless && run.observation_indicator.is_none()
+            if run.logind_session.is_some()
+                && !run.headless
+                && (run.observation_indicator.is_none()
+                    || self.listener == ServiceListener::Browser)
             {
                 return Ok(());
             }
@@ -151,7 +168,7 @@ impl InstallOptions {
     /// this never inserts a software flag, changes authority policy or probes GPU
     /// availability at installation time.
     fn validate_run_args(&self) -> Result<bool, ServiceError> {
-        if self.run_args.is_empty() {
+        if self.run_args.is_empty() && self.listener == ServiceListener::Native {
             return Ok(false);
         }
         #[cfg(not(host_stack))]
@@ -185,7 +202,8 @@ impl InstallOptions {
                         .into(),
             });
         }
-        let run = RunOptions::parse(&self.run_args).map_err(|_| ServiceError::InvalidOptions)?;
+        let mut run =
+            RunOptions::parse(&self.run_args).map_err(|_| ServiceError::InvalidOptions)?;
         let encoder_selected = run
             .selected_encoder()
             .map_err(|_| ServiceError::InvalidOptions)?
@@ -194,6 +212,7 @@ impl InstallOptions {
         // `--encoder` is the explicit host-side alternative to the legacy
         // installer software flag, never permission to emit both selectors.
         if run.port.is_some()
+            || run.browser_port.is_some()
             || run.socket.is_some()
             || run.config.is_some()
             || run.approval.is_some()
@@ -203,6 +222,13 @@ impl InstallOptions {
             || (self.software_explicit && encoder_selected)
         {
             return Err(ServiceError::InvalidOptions);
+        }
+        if self.listener == ServiceListener::Browser {
+            run.browser_port = Some(self.service_port);
+            self.validate_browser_run(
+                &run,
+                crate::broker::browser_assets::BrowserAssets::bundled(),
+            )?;
         }
         if run.clipboard && run.input_agent.is_none() {
             return Err(ServiceError::HostProfileUnavailable {
@@ -249,6 +275,25 @@ impl InstallOptions {
             validate_path(path)?;
         }
         Ok(encoder_selected)
+    }
+
+    #[cfg(host_stack)]
+    fn validate_browser_run(
+        &self,
+        run: &crate::host_policy::options::RunOptions,
+        bundled: bool,
+    ) -> Result<(), ServiceError> {
+        let approval = if self.approval_mode == "local" {
+            crate::host_policy::Approval::Local
+        } else {
+            // An omitted override remains omitted in the service. Startup
+            // resolves saved policy and rechecks the actual consent backend.
+            crate::host_policy::Approval::None
+        };
+        if let Some((code, detail)) = run.browser_refusal(approval, bundled) {
+            return Err(ServiceError::HostProfileUnavailable { code, detail });
+        }
+        Ok(())
     }
 }
 fn value<'a>(iter: &mut std::slice::Iter<'a, String>) -> Result<&'a str, ServiceError> {
@@ -297,6 +342,9 @@ mod file_conflict_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod local_approval_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod browser_tests;
 
 #[cfg(all(test, target_os = "macos", host_stack))]
 mod macos_approval_tests;

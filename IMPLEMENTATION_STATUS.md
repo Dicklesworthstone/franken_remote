@@ -1,5 +1,30 @@
 # Implementation status
 
+## Browser desktop as a managed user service (2026-11-27)
+
+`frd install --user --browser-port PORT` now renders the actual HTTPS/WSS
+listener without also inserting native `--port`. Previously, carrying browser
+arguments through the installer could produce a service that refused at every
+start because it selected both profiles. Listener choices are now exclusive,
+carried arguments cannot replace the installer's port/policy choices, and port
+preflight uses TCP for browser hosting and UDP for native QUIC.
+
+The browser service requires the real embedded WASM pair and the existing Linux
+graphical-user/session/indicator profile before writing a unit. It preserves
+saved-policy inheritance or explicit local/unattended approval, the selected
+encoder and desktop, and the browser's explicit consent/Stop Sharing image.
+Unsupported effects and system/headless/other-platform hosting remain refused.
+Live startup still obtains its own session, UI, tailnet, credential and ingress
+evidence. Installation grants no observation authority.
+
+Six new regressions exercise actual CLI parsing and service rendering, profile
+validation, exclusive listener selection, bundle availability, local-approval
+settings and TCP/UDP preflight. Source review and pinned formatting passed;
+native compilation and test execution remain blocked by the pinned Asupersync
+dependency's SIGKILL described below. No running systemd, physical desktop or
+live-tailnet qualification is claimed. See
+[browser service installation](docs/browser-service.md).
+
 ## Host-local consent for browser desktops (2026-11-27)
 
 The Linux browser host now honors effective `approval=local` through the existing
