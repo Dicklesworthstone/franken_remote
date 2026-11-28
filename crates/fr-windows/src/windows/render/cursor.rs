@@ -4,7 +4,7 @@
 //! released before return so resize and closure retain their original bounds.
 use crate::{
     cursor::{self, State},
-    geometry::Rect,
+    geometry::Presentation,
 };
 use windows::{
     Win32::{
@@ -113,23 +113,23 @@ impl Overlay {
             .ok_or_else(|| Error::from_hresult(E_INVALIDARG))
     }
 
-    pub(super) fn visible(&self, dest: Rect, attempt: u64, sequence: u64) -> bool {
+    pub(super) fn visible(&self, presentation: Presentation, attempt: u64, sequence: u64) -> bool {
         self.bitmap.is_some()
             && self.state.visible_on(attempt, sequence)
-            && cursor::placement(self.state, dest).is_some()
+            && cursor::placement_for(self.state, presentation).is_some()
     }
 
     pub(super) fn draw(
         &self,
         back_buffer: &ID3D11Texture2D,
-        dest: Rect,
+        presentation: Presentation,
         attempt: u64,
         sequence: u64,
     ) -> Result<()> {
         if !self.state.visible_on(attempt, sequence) {
             return Ok(());
         }
-        let Some(placement) = cursor::placement(self.state, dest) else {
+        let Some(placement) = cursor::placement_for(self.state, presentation) else {
             return Ok(());
         };
         let (Some(context), Some(bitmap)) = (&self.context, &self.bitmap) else {

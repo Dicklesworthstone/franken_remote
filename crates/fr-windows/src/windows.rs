@@ -138,6 +138,7 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     let view = viewer::View {
         fullscreen: options.fullscreen,
+        actual_pixels: options.actual_pixels,
         shortcuts: options.shortcuts,
         audio: options.audio,
     };

@@ -99,6 +99,7 @@ impl Settings {
         &self,
         stable_id: &str,
         port: NonZeroU16,
+        actual_pixels: bool,
         receive: Option<crate::receive_choice::Destination>,
     ) -> Vec<String> {
         // Always pass the original launch port, including the default. A child
@@ -109,6 +110,11 @@ impl Settings {
             "--port".to_owned(),
             port.to_string(),
         ];
+        // Native-pixel viewing belongs to this explicit app launch, not its
+        // remembered settings or a previous machine's window dimensions.
+        if actual_pixels {
+            args.push("--actual-pixels".to_owned());
+        }
         if self.control {
             args.push("--control".to_owned());
             if !self.clipboard {
@@ -168,7 +174,7 @@ mod tests {
     fn viewer_args_are_the_command_lines_own_options() {
         use crate::options::{ConnectionCommand, DisplayChoice};
         let parse = |settings: &Settings| {
-            let args = settings.viewer_args("nSTABLE1CNTRL", port(), None);
+            let args = settings.viewer_args("nSTABLE1CNTRL", port(), false, None);
             let command = ConnectionCommand::parse(&args, 8443).expect("viewer arguments parse");
             assert!(command.view);
             assert_eq!(command.selection, Some("nSTABLE1CNTRL"));
@@ -184,7 +190,7 @@ mod tests {
         // Clipboard sharing and shortcuts only exist with control, so a
         // view-only session carries neither flag.
         assert_eq!(
-            view_only.viewer_args("nSTABLE1CNTRL", port(), None),
+            view_only.viewer_args("nSTABLE1CNTRL", port(), false, None),
             ["view", "nSTABLE1CNTRL", "--port", "8443"]
         );
         let options = parse(&view_only);
@@ -237,7 +243,7 @@ mod tests {
         let request = choice.begin(10).unwrap();
         choice.finish(request, Some(&units), 20).unwrap();
         let settings = Settings::default();
-        let args = settings.viewer_args("nSTABLE1CNTRL", port(), choice.take(true));
+        let args = settings.viewer_args("nSTABLE1CNTRL", port(), false, choice.take(true));
         let parsed = ConnectionCommand::parse(&args, 8443).unwrap();
         let receive = parsed.options.receive.unwrap();
         assert_eq!(receive.directory, std::path::PathBuf::from(path));
@@ -250,7 +256,7 @@ mod tests {
         assert!(!saved.contains("receive"));
         assert!(!saved.contains("日本語"));
         let fresh_args =
-            Settings::from_json(saved.as_bytes()).viewer_args("nSTABLE1CNTRL", port(), None);
+            Settings::from_json(saved.as_bytes()).viewer_args("nSTABLE1CNTRL", port(), false, None);
         assert!(
             ConnectionCommand::parse(&fresh_args, 8443)
                 .unwrap()
@@ -265,7 +271,7 @@ mod tests {
             control: false,
             ..settings
         };
-        let args = view_only.viewer_args("nSTABLE1CNTRL", port(), choice.take(true));
+        let args = view_only.viewer_args("nSTABLE1CNTRL", port(), false, choice.take(true));
         assert!(
             ConnectionCommand::parse(&args, 8443)
                 .unwrap()
@@ -281,7 +287,11 @@ mod tests {
 
         for value in [1, 8443, 47819, 65535] {
             let invocation = ["--port".to_owned(), value.to_string()];
-            let AppCommand::Picker { port } = AppCommand::parse(&invocation, 8443).unwrap() else {
+            let AppCommand::Picker {
+                port,
+                actual_pixels,
+            } = AppCommand::parse(&invocation, 8443).unwrap()
+            else {
                 panic!("viewing invocation");
             };
             for control in [false, true] {
@@ -294,7 +304,7 @@ mod tests {
                     // Each return to the picker uses the original app port,
                     // even if the selected host or display preference changes.
                     for selected in ["nFIRST1", "nSECOND2"] {
-                        let arguments = settings.viewer_args(selected, port, None);
+                        let arguments = settings.viewer_args(selected, port, actual_pixels, None);
                         let command = ConnectionCommand::parse(&arguments, 443).unwrap();
                         assert_eq!(command.selection, Some(selected));
                         assert_eq!(command.options.port, value);
@@ -321,6 +331,7 @@ mod tests {
                         AppCommand::parse(&[], 8443),
                         Some(AppCommand::Picker {
                             port: NonZeroU16::new(8443).unwrap(),
+                            actual_pixels: false,
                         })
                     );
                 }
@@ -337,10 +348,52 @@ mod tests {
         let mut choice = Choice::default();
         let request = choice.begin(10).unwrap();
         choice.finish(request, None, 20).unwrap();
-        let arguments = Settings::default().viewer_args("nHOST1", port, choice.take(true));
+        let arguments = Settings::default().viewer_args("nHOST1", port, false, choice.take(true));
         let command = ConnectionCommand::parse(&arguments, 8443).unwrap();
         assert_eq!(command.options.port, 47819);
         assert!(command.options.receive.is_none());
+    }
+
+    #[test]
+    fn every_app_child_preserves_explicit_native_pixels_without_remembering_it() {
+        use crate::options::{AppCommand, ConnectionCommand};
+
+        let invocation = ["--actual-pixels", "--port", "47819"].map(str::to_owned);
+        let AppCommand::Picker {
+            port,
+            actual_pixels,
+        } = AppCommand::parse(&invocation, 8443).unwrap()
+        else {
+            panic!("viewing invocation");
+        };
+        for control in [false, true] {
+            let settings = Settings {
+                control,
+                ..Settings::default()
+            };
+            for selected in ["nFIRST1", "nSECOND2"] {
+                let args = settings.viewer_args(selected, port, actual_pixels, None);
+                let command = ConnectionCommand::parse(&args, 443).unwrap();
+                assert_eq!(command.selection, Some(selected));
+                assert_eq!(command.options.port, 47819);
+                assert_eq!(command.options.control, control);
+                assert!(command.options.actual_pixels);
+                assert_eq!(
+                    args.iter().filter(|arg| *arg == "--actual-pixels").count(),
+                    1
+                );
+            }
+            let saved = settings.to_json();
+            assert!(!saved.contains("actual_pixels"));
+            let restored = Settings::from_json(saved.as_bytes());
+            let default_launch = restored.viewer_args("nNEXT1", port, false, None);
+            assert!(
+                !ConnectionCommand::parse(&default_launch, 8443)
+                    .unwrap()
+                    .options
+                    .actual_pixels
+            );
+        }
     }
 }
 
@@ -358,7 +411,8 @@ mod playback_settings_tests {
         };
         let restored = Settings::from_json(settings.to_json().as_bytes());
         assert_eq!(restored, settings);
-        let args = restored.viewer_args("nSTABLE1CNTRL", NonZeroU16::new(8443).unwrap(), None);
+        let args =
+            restored.viewer_args("nSTABLE1CNTRL", NonZeroU16::new(8443).unwrap(), false, None);
         let parsed = crate::options::ConnectionCommand::parse(&args, 8443).unwrap();
         assert!(parsed.options.audio.is_some());
         assert!(!parsed.options.control);

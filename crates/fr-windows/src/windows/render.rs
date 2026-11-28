@@ -137,8 +137,8 @@ impl Renderer {
         self.cursor.clear();
     }
 
-    pub fn cursor_visible(&self, dest: Rect, attempt: u64, sequence: u64) -> bool {
-        self.cursor.visible(dest, attempt, sequence)
+    pub fn cursor_visible(&self, presentation: Presentation, attempt: u64, sequence: u64) -> bool {
+        self.cursor.visible(presentation, attempt, sequence)
     }
 
     /// Replace the retired session's visible image with black. Input is fenced
@@ -293,7 +293,8 @@ impl Renderer {
             );
             // No driver "enhancement": the host's pixels, converted only.
             context.VideoProcessorSetStreamAutoProcessingMode(processor, 0, false);
-            let source = rect(0, 0, to_i32(picture.0), to_i32(picture.1));
+            let crop = presentation.source();
+            let source = rect(crop.left, crop.top, crop.right, crop.bottom);
             context.VideoProcessorSetStreamSourceRect(processor, 0, true, Some(&raw const source));
             let target = rect(dest.left, dest.top, dest.right, dest.bottom);
             context.VideoProcessorSetStreamDestRect(processor, 0, true, Some(&raw const target));
@@ -321,7 +322,8 @@ impl Renderer {
             ManuallyDrop::drop(&mut entry.pInputSurface);
             blt?;
             drop(output);
-            self.cursor.draw(&back_buffer, dest, attempt, sequence)?;
+            self.cursor
+                .draw(&back_buffer, presentation, attempt, sequence)?;
             drop(back_buffer);
             let status = swap_chain.Present(1, DXGI_PRESENT(0));
             self.present_accepted = status == S_OK;

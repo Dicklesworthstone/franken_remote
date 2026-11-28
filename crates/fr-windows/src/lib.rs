@@ -12,7 +12,7 @@
 //! still decide whether a session may start.
 //!
 //! Commands:
-//!   fr-windows app [--port N]
+//!   fr-windows app [--port N] [--actual-pixels]
 //!       open the packaged desktop app's machine picker on this service port.
 //!   fr-windows
 //!       choose a machine from the installed Tailscale snapshot, then view it.
@@ -20,7 +20,7 @@
 //!       a local machine-choice snapshot (JSON), without remote probes.
 //!   fr-windows view [stable-id-or-name] [--port N] [--ipv4|--ipv6]
 //!       [--address IP]... [--control] [--no-clipboard] [--seconds N]
-//!       [--fullscreen] [--no-shortcuts]
+//!       [--fullscreen] [--actual-pixels] [--no-shortcuts]
 //!       [--audio] [--audio-volume 0..100] [--audio-muted]
 //!       [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software]
 //!       [--send FILE]... (requires --control; up to eight regular files, sent once)
@@ -30,6 +30,10 @@
 //!       GPU when available, otherwise the decoder's CPU path uploaded to the
 //!       GPU) and a D3D11 swap chain, 1:1 when the picture fits. Prints a JSON
 //!       completion document (counts and timings, no content) at the end.
+//!       --actual-pixels requests the full native image; its View menu fits
+//!       or pans that same retained texture without reconnecting on resize.
+//!       Full screen keeps this local menu visible. A shared host's smaller
+//!       picture remains fitted and cannot enable Actual pixels.
 //!   fr-windows directory <stable-id-or-name> [--port N] [--ipv4|--ipv6]
 //!       [--address IP]...
 //!       the host's tailnet directory (JSON).
@@ -121,9 +125,9 @@ mod upload_selection_budget;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: fr-windows\n       fr-windows app [--port N]\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
+const USAGE: &str = "usage: fr-windows\n       fr-windows app [--port N] [--actual-pixels]\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
      [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--no-clipboard] [--seconds N] \
-     [--fullscreen] [--no-shortcuts] [--audio] [--audio-volume 0..100] [--audio-muted] [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE]... [--receive DIR] \
+     [--fullscreen] [--actual-pixels] [--no-shortcuts] [--audio] [--audio-volume 0..100] [--audio-muted] [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE]... [--receive DIR] \
      [--receive-max-file-bytes N] [--receive-max-session-bytes N] \
      [--receive-conflict reject|keep-both]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \

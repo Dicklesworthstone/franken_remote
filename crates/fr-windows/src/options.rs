@@ -7,21 +7,33 @@ use std::{net::IpAddr, num::NonZeroU16, path::PathBuf};
 /// a remembered preference or authority to connect before a machine is chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppCommand {
-    Picker { port: NonZeroU16 },
-    Install { quiet: bool },
-    Uninstall { quiet: bool },
+    Picker {
+        port: NonZeroU16,
+        actual_pixels: bool,
+    },
+    Install {
+        quiet: bool,
+    },
+    Uninstall {
+        quiet: bool,
+    },
 }
 
 impl AppCommand {
     pub(crate) fn parse(mut args: &[String], default_port: u16) -> Option<Self> {
         let mut port = None;
         let mut quiet = false;
+        let mut actual_pixels = false;
         let mut installation = None;
         loop {
             match args {
                 [] => break,
                 [flag, tail @ ..] if flag == "--quiet" && !quiet => {
                     quiet = true;
+                    args = tail;
+                }
+                [flag, tail @ ..] if flag == "--actual-pixels" && !actual_pixels => {
+                    actual_pixels = true;
                     args = tail;
                 }
                 [flag, value, tail @ ..] if flag == "--port" && port.is_none() => {
@@ -38,19 +50,24 @@ impl AppCommand {
             }
         }
         match installation {
-            Some(_) if port.is_some() => None,
+            Some(_) if port.is_some() || actual_pixels => None,
             Some(true) => Some(Self::Install { quiet }),
             Some(false) => Some(Self::Uninstall { quiet }),
             None => Some(Self::Picker {
                 port: port.or_else(|| NonZeroU16::new(default_port))?,
+                actual_pixels,
             }),
         }
     }
 
     /// Relaunching the installed GUI preserves this invocation's endpoint;
     /// the Start menu shortcut and later launches retain their usual default.
-    pub(crate) fn picker_args(port: NonZeroU16) -> [String; 2] {
-        ["--port".to_owned(), port.to_string()]
+    pub(crate) fn picker_args(port: NonZeroU16, actual_pixels: bool) -> Vec<String> {
+        let mut args = vec!["--port".to_owned(), port.to_string()];
+        if actual_pixels {
+            args.push("--actual-pixels".to_owned());
+        }
+        args
     }
 }
 
@@ -182,6 +199,9 @@ pub(crate) struct Options {
     /// `--fullscreen`: a borderless window over the whole monitor, so the
     /// host is asked for exactly this screen's pixel size (no local scaling).
     pub fullscreen: bool,
+    /// Request native host pixels, with local Fit/Actual pixels and pan
+    /// controls. This launch choice is never inferred from a window resize.
+    pub actual_pixels: bool,
     /// While controlling, send Windows shortcuts (Win, Alt+Tab, Ctrl+Esc...)
     /// to the host. Defaults on; `--no-shortcuts` keeps them local.
     pub shortcuts: bool,
@@ -235,6 +255,7 @@ impl Options {
             receive: None,
             decoder: Decoder::Automatic,
             fullscreen: false,
+            actual_pixels: false,
             shortcuts: true,
         };
         let mut audio_volume = None;
@@ -296,6 +317,12 @@ impl Options {
                 }
                 [flag, tail @ ..] if view && flag == "--fullscreen" && !options.fullscreen => {
                     options.fullscreen = true;
+                    rest = tail;
+                }
+                [flag, tail @ ..]
+                    if view && flag == "--actual-pixels" && !options.actual_pixels =>
+                {
+                    options.actual_pixels = true;
                     rest = tail;
                 }
                 [flag, tail @ ..] if view && flag == "--no-shortcuts" && options.shortcuts => {
@@ -500,10 +527,29 @@ mod tests {
                 send: Vec::new(),
                 receive: None,
                 fullscreen: false,
+                actual_pixels: false,
                 shortcuts: true,
             })
         );
         assert_eq!(parse(&[], false), parse(&[], true));
+    }
+
+    #[test]
+    fn native_pixels_are_explicit_unique_and_survive_machine_selection() {
+        assert!(!parse(&[], true).unwrap().actual_pixels);
+        for selection in [None, Some("nHOST1")] {
+            let mut args = vec!["view".to_owned()];
+            args.extend(selection.map(str::to_owned));
+            args.extend(["--actual-pixels", "--fullscreen", "--control"].map(str::to_owned));
+            let parsed = ConnectionCommand::parse(&args, 8443).unwrap();
+            assert_eq!(parsed.selection, selection);
+            assert!(
+                parsed.options.actual_pixels && parsed.options.fullscreen && parsed.options.control
+            );
+        }
+        assert!(parse(&["--actual-pixels", "--actual-pixels"], true).is_none());
+        assert!(parse(&["--actual-pixels"], false).is_none());
+        assert!(parse(&["--actual-pixels=true"], true).is_none());
     }
 
     #[test]

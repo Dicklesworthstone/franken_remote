@@ -1,7 +1,7 @@
 //! Checked placement of the confirmed host cursor over the decoded picture.
 //! This is rendering state only: repainting it never acknowledges a new
 //! picture, renews input authority, or predicts a host pointer position.
-use crate::geometry::Rect;
+use crate::geometry::{Presentation, Rect};
 
 pub const MAX_DIMENSION: u16 = 256;
 
@@ -109,11 +109,33 @@ pub fn premultiplied(shape: Shape, rgba: &[u8]) -> Result<Vec<u8>, Error> {
 /// partly off-picture cursor is clipped at the picture, not the whole window.
 /// Extreme coordinates cannot overflow or allocate, and invisible quads are
 /// rejected before crossing into a native API.
+#[cfg(test)]
 #[allow(
     clippy::cast_possible_truncation,
     reason = "finite bounded drawing coordinates"
 )]
 pub fn placement(state: State, dest: Rect) -> Option<Placement> {
+    placement_clipped(state, dest, dest)
+}
+
+/// The same full-display projection and visible crop as the decoded image.
+/// Panning changes the offset/clip, never the cursor's native pixel scale.
+pub fn placement_for(state: State, presentation: Presentation) -> Option<Placement> {
+    if state.source != presentation.display() {
+        return None;
+    }
+    placement_clipped(
+        state,
+        presentation.display_projection(),
+        presentation.destination,
+    )
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "finite bounded drawing coordinates"
+)]
+fn placement_clipped(state: State, dest: Rect, visible: Rect) -> Option<Placement> {
     state.shape.bytes()?;
     let picture = state.source;
     if picture.0 == 0 || picture.1 == 0 || dest.left >= dest.right || dest.top >= dest.bottom {
@@ -145,15 +167,20 @@ pub fn placement(state: State, dest: Rect) -> Option<Placement> {
         reason = "window coordinates converted to native drawing units"
     )]
     let clip = [
-        dest.left as f32,
-        dest.top as f32,
-        dest.right as f32,
-        dest.bottom as f32,
+        visible.left as f32,
+        visible.top as f32,
+        visible.right as f32,
+        visible.bottom as f32,
     ];
-    Some(Placement {
-        destination: [x(left), y(top), x(right), y(bottom)],
-        clip,
-    })
+    let destination = [x(left), y(top), x(right), y(bottom)];
+    if destination[2] <= clip[0]
+        || destination[3] <= clip[1]
+        || destination[0] >= clip[2]
+        || destination[1] >= clip[3]
+    {
+        return None;
+    }
+    Some(Placement { destination, clip })
 }
 
 /// A native cursor is hidden only over this picture, and only while the

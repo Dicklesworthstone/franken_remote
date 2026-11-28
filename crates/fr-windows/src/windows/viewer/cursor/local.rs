@@ -1,7 +1,11 @@
 //! Apply frd's local cursor requests on the viewer's UI thread. The original
 //! owner and request stay together through native work and acknowledgement.
 use super::{super::control, native};
-use crate::{cursor::Shape, cursor_image, geometry::Rect};
+use crate::{
+    cursor::Shape,
+    cursor_image,
+    geometry::{Presentation, Rect},
+};
 use fr_mobile_ffi::{
     local_cursor::{Error, Hub, Image, Owner, Pointer, Request, Scope},
     session::Shared,
@@ -13,7 +17,7 @@ use windows::Win32::Foundation::HWND;
 #[derive(Clone, Copy)]
 pub(super) struct View {
     pub attempt: u64,
-    pub picture: Option<(u64, u64, Rect)>,
+    pub picture: Option<(u64, u64, Presentation)>,
     pub eligible: bool,
     pub overlay: bool,
     pub lifetime: u64,
@@ -23,7 +27,7 @@ impl View {
     fn rect(self) -> Option<Rect> {
         self.picture
             .filter(|(attempt, _, _)| *attempt == self.attempt)
-            .map(|(_, _, dest)| dest)
+            .map(|(_, _, presentation)| presentation.destination)
     }
 
     fn shape_rect(self, scope: Scope) -> Option<Rect> {
@@ -33,7 +37,7 @@ impl View {
                     && *attempt == scope.attempt
                     && *sequence > scope.frame_after
             })
-            .map(|(_, _, dest)| dest)
+            .map(|(_, _, presentation)| presentation.display_projection())
     }
 }
 

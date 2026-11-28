@@ -32,6 +32,11 @@
 //! it in order. After positive bounded cleanup the window can wait dormant for
 //! a new foreground event, then open fresh viewing without input or auxiliary
 //! authority. Hidden/failure reports remain distinct from cleanup proof.
+//!
+//! `--actual-pixels` requests the full native image for this window's lifetime.
+//! Its View menu fits or pans that retained image locally; resize does not
+//! reopen the session, and full screen keeps the menu accessible. Rendering,
+//! pointer mapping and both cursor paths use one checked source rectangle.
 mod audio;
 mod control;
 mod cursor;
@@ -42,12 +47,15 @@ mod file_memory;
 mod screen;
 mod text;
 mod upload;
+mod view;
 
 /// Window choices for one viewing command.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct View {
     /// Start full screen at the monitor's own pixel size.
     pub fullscreen: bool,
+    /// Keep the host's native pixels and expose local Fit/pan controls.
+    pub actual_pixels: bool,
     /// While controlling, send Windows shortcuts to the host.
     pub shortcuts: bool,
     /// Explicit host playback with local-only volume and mute.
@@ -57,7 +65,9 @@ pub struct View {
 use super::render::Renderer;
 use crate::{
     change_display::{self, Action, Activation, Cause, Refusal, Replacements},
-    geometry::{Mapping, Presentation, Rect as PictureRect, StaleMapping, host_scales, reopen_for},
+    geometry::{
+        Framing, Mapping, Presentation, Rect as PictureRect, StaleMapping, host_scales, reopen_for,
+    },
     keys,
 };
 use fr_client::clipboard::history::{
@@ -117,6 +127,9 @@ struct Viewer {
     /// The last drawn picture's size and place (input maps through these).
     picture: (u32, u32),
     mapping: Option<Mapping>,
+    framing: Framing,
+    /// Attempt whose original image owns the local pan offsets.
+    framing_attempt: u64,
     /// Held buttons (`session.button` indices) and the last pointer point.
     buttons: [bool; 5],
     last_point: (f64, f64),
@@ -146,6 +159,7 @@ struct Viewer {
     display_picker: Option<display::Picker>,
     /// Visible ownership state and an original one-use local menu choice.
     input_menu: control::Menu,
+    view_menu: Option<view::Menu>,
     /// Original selected file and its evidence survive every viewing replacement.
     upload_menu: Option<upload::Menu>,
     /// Original destination consent and publication receipts never follow a new session.
@@ -157,7 +171,7 @@ struct Viewer {
     /// the swap chain, scoped to their original connection.
     cursor_drawn: Option<(u64, PictureRect)>,
     /// Accepted picture geometry for the native cursor, never a pending frame.
-    picture_drawn: Option<(u64, u64, PictureRect)>,
+    picture_drawn: Option<(u64, u64, Presentation)>,
     /// A static picture must be retried after a skipped Present or foreground
     /// transition, retaining its original frame and color-range identity.
     repaint_pending: bool,
@@ -331,6 +345,18 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
         let _ = unsafe { DestroyWindow(hwnd) };
         return refuse("input_menu_unavailable");
     };
+    let view_menu = if view.actual_pixels {
+        match view::Menu::install(hwnd) {
+            Ok(menu) => Some(menu),
+            Err(_) => {
+                // SAFETY: our UI-thread window, before a session starts.
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return refuse("view_menu_unavailable");
+            }
+        }
+    } else {
+        None
+    };
     let upload_menu = if let Some(original) = &config.upload {
         if let Ok(menu) = upload::Menu::install(hwnd, Arc::clone(original)) {
             Some(menu)
@@ -365,6 +391,9 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
     } else {
         None
     };
+    // Native-pixel views need their local pan menu even in full screen.
+    // The default fitted viewer retains its existing borderless behavior.
+    screen::keep_menu(view.actual_pixels);
     // Full screen before the first picture size is stated, so the host is
     // asked for this monitor's own pixel size from the start (no reopen).
     if view.fullscreen {
@@ -372,7 +401,8 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
     }
     let shortcuts = view.shortcuts && config.control && screen::install(hwnd);
     let size = client_size(hwnd);
-    config.picture = Some(size);
+    let framing = Framing::new(view.actual_pixels);
+    config.picture = framing.picture_limit(size);
     let control = config.control;
     let Ok(session) = audio::start(config.clone(), audio.as_ref()) else {
         return refuse("session_thread_unavailable");
@@ -388,6 +418,8 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
             renderer,
             picture: (0, 0),
             mapping: None,
+            framing,
+            framing_attempt: 0,
             buttons: [false; 5],
             last_point: (0.0, 0.0),
             keys: keys::Deferred::default(),
@@ -402,6 +434,7 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
             text: None,
             display_picker: None,
             input_menu,
+            view_menu,
             upload_menu,
             download_menu,
             file_cleanup_started: None,
@@ -658,7 +691,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         v.reconnect("the window was hidden");
         return Reopen::Waiting;
     }
-    next.picture = Some(size);
+    next.picture = v.framing.picture_limit(size);
     // Native window queries and the original clipboard report can wait. The
     // ready opening carries the same absolute bound through both of them.
     if let Err(reason) = opening.check(input_ticks()) {
@@ -702,6 +735,8 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     // The reopen's own wait is not a frame interval.
     stats.last_draw = None;
     v.mapping = None;
+    v.framing.reset();
+    v.framing_attempt = 0;
     v.picture = (0, 0);
     v.picture_drawn = None;
     v.repaint_pending = false;
@@ -945,7 +980,11 @@ fn draw_latest(
         cursor::retire(v, hwnd);
         return (false, false);
     };
-    let Some(presentation) = Presentation::new(display, picture, v.renderer.size()) else {
+    if v.framing_attempt != attempt || v.display != display {
+        v.framing.reset();
+        v.framing_attempt = attempt;
+    }
+    let Some(presentation) = v.framing.presentation(display, picture, v.renderer.size()) else {
         stats.draw_failures += 1;
         v.session.shared().presentation_failed();
         v.reconnect("presentation failed");
@@ -954,7 +993,7 @@ fn draw_latest(
     };
     let overlay = v
         .renderer
-        .cursor_visible(presentation.destination, attempt, info.sequence)
+        .cursor_visible(presentation, attempt, info.sequence)
         .then_some((attempt, presentation.destination));
     if cursor::before_draw(v, hwnd, overlay).is_err() {
         stats.draw_failures += 1;
@@ -977,7 +1016,7 @@ fn draw_latest(
             .ok()
             .flatten()
     });
-    let Some(dest) = drawn else {
+    let Some(_dest) = drawn else {
         // A failed Present has an unknown display outcome. Preserve evidence
         // of either old or newly submitted cursor pixels until cleanup.
         v.cursor_drawn = overlay.or(v.cursor_drawn);
@@ -997,7 +1036,7 @@ fn draw_latest(
     // Record the just-submitted image BEFORE checking callbacks which could
     // have retired its owner during native work. Cleanup must erase it too.
     v.cursor_drawn = overlay;
-    v.picture_drawn = Some((attempt, info.sequence, dest));
+    v.picture_drawn = Some((attempt, info.sequence, presentation));
     let shared = v.session.shared();
     if v.closing
         || v.reopen.pending()
@@ -1713,6 +1752,58 @@ impl Viewer {
             .ok_or(StaleMapping)?
             .point(at, x, y, self.buttons.iter().any(|b| *b))
     }
+    /// Only this actually displayed attempt may supply a local menu action.
+    fn local_picture(&self) -> Option<(u64, u64, Presentation)> {
+        self.picture_drawn.filter(|(attempt, _, _)| {
+            !self.closing
+                && !self.reopen.pending()
+                && self.text.is_none()
+                && self.display_picker.is_none()
+                && !self.choosing_file()
+                && control::visible_now()
+                && self.session.shared().active()
+                && !self.session.shared().finished()
+                && self.session.shared().frames.app_id(0) == *attempt
+        })
+    }
+
+    fn change_local_view(&mut self, id: usize, message: u32) {
+        let current = self.local_picture();
+        let Some(action) = self
+            .view_menu
+            .as_mut()
+            .and_then(|menu| menu.take(id, current, control::lifetime(), message))
+        else {
+            return;
+        };
+        let Some((_, _, presentation)) = current else {
+            return;
+        };
+        let mut next = self.framing;
+        if !next.apply(action, presentation) {
+            // Even an already-fitted shared picture can change the user's
+            // future preference, without inventing a presentation now.
+            self.framing = next;
+            return;
+        }
+        // Fence local coordinates and queued/held input before any native
+        // operation. A repaint keeps the original frame id and source age;
+        // control and the full-display capture scope remain with their owner.
+        self.mapping = None;
+        self.picture_drawn = None;
+        self.repaint_pending = true;
+        self.framing = next;
+        control::invalidate_display();
+        self.session.shared().scroll_end();
+        if !self.release_everything() {
+            // A refused release is not evidence that the old held state
+            // ended. Fence this input owner before drawing the new mapping.
+            self.input_failed();
+            return;
+        }
+        // SAFETY: this UI thread no longer holds a remote mouse button.
+        let _ = unsafe { ReleaseCapture() };
+    }
     /// Capture the original grant before any native conversion or key drain.
     /// Replaceable old motion may be discarded; losing an ordered transition
     /// instead fences control and delegates held-state cleanup to its owner.
@@ -1826,6 +1917,15 @@ impl Viewer {
     /// an interrupted sample or a wait for the grant lock to the old event.
     fn key(&mut self, usage: u16, pressed: bool, native_at: u64) {
         if self.closing || self.reopen.pending() || self.choosing_file() {
+            return;
+        }
+        if self.framing.native_requested()
+            && self
+                .mapping
+                .as_ref()
+                .is_none_or(|mapping| !mapping.admits(native_at))
+        {
+            self.drop_input(!pressed);
             return;
         }
         let shared = self.session.shared();
@@ -2008,6 +2108,7 @@ impl Viewer {
     fn resized(&mut self, size: (u32, u32)) {
         self.text = None;
         if self.closing
+            || self.framing.native_requested()
             || self.choosing_file()
             || !self.reopen.available()
             || self.scales != Some(true)
@@ -2026,20 +2127,24 @@ impl Viewer {
         self.release_everything();
         self.session.shared().close();
     }
-    fn release_everything(&mut self) {
+    fn release_everything(&mut self) -> bool {
         // Unsent presses never go after focus loss; held keys are released.
         self.keys.clear();
         let shared = self.session.shared();
-        let _ = shared.release_all();
+        let accepted = |result| matches!(result, InputResult::Sent | InputResult::NotControlled);
+        let mut released = accepted(shared.release_all());
         let (px, py) = self.last_point;
         for (index, held) in self.buttons.iter_mut().enumerate() {
             if *held {
                 if let Ok(wire) = u32::try_from(index) {
-                    let _ = shared.button(wire, false, px, py);
+                    released &= accepted(shared.button(wire, false, px, py));
+                } else {
+                    released = false;
                 }
                 *held = false;
             }
         }
+        released
     }
 }
 
@@ -2081,6 +2186,12 @@ extern "system" fn window_proc(
         }
         WM_INITMENUPOPUP => {
             with_viewer(|v| {
+                let current = v.local_picture();
+                if let Some(menu) = &mut v.view_menu
+                    && menu.is_popup(wparam.0)
+                {
+                    menu.opened(current, v.framing, control::lifetime());
+                }
                 if let Some(audio) = &v.audio {
                     audio.refresh();
                 }
@@ -2108,6 +2219,11 @@ extern "system" fn window_proc(
                 }
             });
             false
+        }
+        WM_COMMAND if view::is_command(wparam.0 & 0xffff) => {
+            let message = current_message_time();
+            with_viewer(|v| v.change_local_view(wparam.0 & 0xffff, message));
+            true
         }
         WM_COMMAND if (0x46a0..=0x46a2).contains(&(wparam.0 & 0xffff)) => {
             with_viewer(|v| {

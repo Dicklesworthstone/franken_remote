@@ -35,7 +35,7 @@ use windows::{
 
 /// `ASFW_ANY`: let the next window to open take the foreground.
 const ASFW_ANY: u32 = u32::MAX;
-const USAGE: &str = "Usage: FrankenRemote [--port N] [--quiet]\n       FrankenRemote [--install | --uninstall] [--quiet]\n\nChoose a machine from your tailnet. The port must be 1-65535 and applies only to this app launch. The command-line viewer is fr-windows.exe.";
+const USAGE: &str = "Usage: FrankenRemote [--port N] [--actual-pixels] [--quiet]\n       FrankenRemote [--install | --uninstall] [--quiet]\n\nChoose a machine from your tailnet. The port must be 1-65535 and applies only to this app launch. --actual-pixels requests native host pixels and enables local Fit, Actual pixels and pan controls. The command-line viewer is fr-windows.exe.";
 
 /// Open the packaged GUI from `fr-windows app`. Launch the real windowed
 /// executable so its own viewer children and per-user installer keep their
@@ -78,7 +78,10 @@ pub fn run() -> ExitCode {
     }
     let quiet = args.iter().any(|arg| arg == "--quiet");
     match AppCommand::parse(&args, DEFAULT_SERVICE_PORT) {
-        Some(AppCommand::Picker { port }) => application(port),
+        Some(AppCommand::Picker {
+            port,
+            actual_pixels,
+        }) => application(port, actual_pixels),
         Some(AppCommand::Install { quiet }) => install_command(quiet),
         Some(AppCommand::Uninstall { quiet }) => uninstall_command(quiet),
         None => {
@@ -197,7 +200,7 @@ fn save_settings(path: Option<&Path>, settings: &Settings) {
     }
 }
 
-fn application(port: NonZeroU16) -> ExitCode {
+fn application(port: NonZeroU16, actual_pixels: bool) -> ExitCode {
     // SAFETY: process-wide setup before any window exists; a manifest that
     // already set the same awareness makes the call fail harmlessly.
     unsafe {
@@ -233,7 +236,7 @@ fn application(port: NonZeroU16) -> ExitCode {
                     installed = true;
                     // SAFETY: a scalar foreground-permission grant.
                     let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
-                    if install::launch(&app, port) {
+                    if install::launch(&app, port, actual_pixels) {
                         return ExitCode::SUCCESS;
                     }
                     notice = Some(Notice {
@@ -256,7 +259,7 @@ fn application(port: NonZeroU16) -> ExitCode {
             Ok(Picked::Machine(chosen)) => {
                 settings = chosen.settings.clone();
                 save_settings(settings_path.as_deref(), &settings);
-                match session(chosen, port) {
+                match session(chosen, port, actual_pixels) {
                     Ok(result) => notice = Some(result),
                     Err(reason) => {
                         message(
@@ -366,7 +369,7 @@ fn finish_session_log(output: &mut session_output::ChildOutput) -> bool {
     failed || write_failed
 }
 
-fn session(chosen: Chosen, port: NonZeroU16) -> Result<Notice, String> {
+fn session(chosen: Chosen, port: NonZeroU16, actual_pixels: bool) -> Result<Notice, String> {
     let name = machines::short_name(chosen.peer.certificate_name()).to_owned();
     let failed = |text: String| Notice {
         text,
@@ -380,9 +383,10 @@ fn session(chosen: Chosen, port: NonZeroU16) -> Result<Notice, String> {
     };
     // The locally selected receive path belongs only to this child. Keep it
     // out of the content-free session log and the remembered settings.
-    let args = chosen
-        .settings
-        .viewer_args(chosen.peer.stable_id(), port, chosen.receive);
+    let args =
+        chosen
+            .settings
+            .viewer_args(chosen.peer.stable_id(), port, actual_pixels, chosen.receive);
     let child = Command::new(exe)
         .arg("--session")
         .args(&args)

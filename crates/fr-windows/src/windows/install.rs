@@ -142,9 +142,9 @@ fn copy(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Start the installed copy (after installing from elsewhere).
-pub(super) fn launch(app: &Path, port: NonZeroU16) -> bool {
+pub(super) fn launch(app: &Path, port: NonZeroU16, actual_pixels: bool) -> bool {
     Command::new(app)
-        .args(crate::options::AppCommand::picker_args(port))
+        .args(crate::options::AppCommand::picker_args(port, actual_pixels))
         .spawn()
         .is_ok()
 }

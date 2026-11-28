@@ -132,6 +132,8 @@ fn set_style(hwnd: HWND, style: u32) {
 thread_local! {
     /// The UI thread's own full-screen state.
     static FULL: RefCell<Option<Saved>> = const { RefCell::new(None) };
+    /// Explicit native-pixel launches retain their local pan controls.
+    static KEEP_MENU: Cell<bool> = const { Cell::new(false) };
     // The rest belongs to the hook thread only (the hook runs there).
     /// Physical keys (scan code + 256 for extended) the hook took while down,
     /// so an auto-repeat is marked as one and its release also goes to us.
@@ -140,6 +142,10 @@ thread_local! {
     static MODIFIERS: Cell<u8> = const { Cell::new(0) };
     /// Enter was taken as the local full-screen shortcut; its release is too.
     static TOGGLE_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(super) fn keep_menu(keep: bool) {
+    KEEP_MENU.with(|value| value.set(keep));
 }
 
 /// The viewer window keys go to (its `HWND` value), 0 for none.
@@ -156,6 +162,7 @@ impl Drop for Guard {
     fn drop(&mut self) {
         uninstall();
         FULL.with(|full| *full.borrow_mut() = None);
+        keep_menu(false);
     }
 }
 
@@ -189,7 +196,9 @@ pub(super) fn enter(hwnd: HWND) -> bool {
         }
         let style = style_of(hwnd);
         let menu = GetMenu(hwnd);
-        let _ = SetMenu(hwnd, None);
+        if !KEEP_MENU.with(Cell::get) {
+            let _ = SetMenu(hwnd, None);
+        }
         let framed = WS_OVERLAPPEDWINDOW.0 | WS_MAXIMIZE.0;
         let frame = style & framed;
         set_style(hwnd, (style & !framed) | WS_POPUP.0);

@@ -325,6 +325,50 @@ after a positive number of seconds. Closing the window also closes the session.
 The viewer prints its existing JSON completion document with counts, timings
 and the typed ending.
 
+### View native pixels and pan a large desktop
+
+Start an explicit native-pixel view when the remote display is larger than
+your window and you want to inspect its text or other fine detail:
+
+```powershell
+fr-windows view remote.example.ts.net --actual-pixels
+fr-windows view --actual-pixels --control
+fr-windows app --actual-pixels
+.\FrankenRemote.exe --actual-pixels --port 47819
+```
+
+The second command opens the usual machine picker. In the desktop app, the
+choice applies to every machine selected during that launch and follows an
+installed-copy relaunch. It is not saved in settings or the Start menu shortcut.
+Control, clipboard, file and audio choices retain their existing requirements.
+
+**View → Actual pixels** shows one decoded pixel per physical window pixel,
+starting at the center of the native-sized image. **Pan left/right/up/down**
+moves by three quarters of the visible width or height and stops at the image
+edge. **Center image** returns to the middle. **Fit in window** shows the whole
+retained image; switching back to Actual pixels preserves the local pan position.
+Full screen keeps this menu visible for native-pixel launches.
+
+These controls use the existing decoded GPU texture. They do not choose a
+different host capture region, request another display, or grant control. A
+window resize redraws locally instead of reconnecting to request a smaller
+picture. Reconnects and display changes keep the native-pixel request and the
+chosen Fit/Actual mode, but center the new display. Old queued input cannot
+acquire the new local mapping, and held input is released when the view changes.
+Redrawing preserves the original frame identity and source age.
+
+A shared host publisher can supply an already-running smaller picture. In that
+case the View menu reports **native pixels unavailable**, keeps the picture
+fitted, and disables Actual pixels and panning. Local viewing cannot restore
+detail that was not encoded. Native-size requests also remain subject to the
+existing codec and protocol limits and can require more host, network and decoder
+work than the default window-sized stream.
+
+Without `--actual-pixels`, the current fitted-picture and resize behavior stays
+the same. Portable tests cover crop/input/cursor agreement, pan limits, original
+mapping lifetimes and launch propagation. Native Windows rendering and menu
+interaction require separate device qualification.
+
 ### Scaled pictures keep the original display coordinates
 
 A scaling-capable host can send a smaller HEVC picture for the viewer's physical

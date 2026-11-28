@@ -8,6 +8,7 @@ fn args(values: &[&str]) -> Vec<String> {
 fn picker(port: u16) -> AppCommand {
     AppCommand::Picker {
         port: NonZeroU16::new(port).unwrap(),
+        actual_pixels: false,
     }
 }
 
@@ -116,8 +117,37 @@ fn installation_and_quiet_behavior_remain_explicit() {
 fn installed_app_relaunch_keeps_the_original_port_without_an_install_action() {
     for value in [1, 8443, 47819, 65535] {
         let port = NonZeroU16::new(value).unwrap();
-        let relaunch = AppCommand::picker_args(port);
+        let relaunch = AppCommand::picker_args(port, false);
         assert_eq!(AppCommand::parse(&relaunch, 443), Some(picker(value)));
         assert_eq!(relaunch, ["--port".to_owned(), value.to_string()]);
+    }
+}
+
+#[test]
+fn native_pixels_follow_only_the_explicit_app_launch_and_installed_relaunch() {
+    let port = NonZeroU16::new(47819).unwrap();
+    let expected = AppCommand::Picker {
+        port,
+        actual_pixels: true,
+    };
+    let original = args(&["--actual-pixels", "--port", "47819"]);
+    assert_eq!(AppCommand::parse(&original, 8443), Some(expected));
+    let installed = AppCommand::picker_args(port, true);
+    assert_eq!(AppCommand::parse(&installed, 443), Some(expected));
+    assert_eq!(
+        installed
+            .iter()
+            .filter(|arg| *arg == "--actual-pixels")
+            .count(),
+        1
+    );
+    assert_eq!(AppCommand::parse(&[], 8443), Some(picker(8443)));
+    for arguments in [
+        vec!["--actual-pixels", "--actual-pixels"],
+        vec!["--install", "--actual-pixels"],
+        vec!["--actual-pixels", "--uninstall"],
+        vec!["--actual-pixels=false"],
+    ] {
+        assert_eq!(AppCommand::parse(&args(&arguments), 8443), None);
     }
 }

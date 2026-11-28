@@ -1,5 +1,37 @@
 # Implementation status
 
+## Native-pixel Windows viewing and local pan (2026-11-27)
+
+Windows viewers can explicitly request the host's native display pixels with
+`fr-windows view HOST --actual-pixels`, `fr-windows app --actual-pixels`, or
+`FrankenRemote.exe --actual-pixels`. The original launch choice survives machine
+selection, installed-app relaunch and orderly session replacements. It requests
+the full image through the existing picture negotiation; ordinary window-size
+requests remain the default. Native-pixel sessions do not reconnect just to
+resize the host's picture.
+
+The View menu switches the retained image between Fit in window and Actual
+pixels, pans in bounded steps and recenters. Full-screen native-pixel launches
+keep that menu accessible. One checked presentation carries the texture crop,
+visible rectangle and original-display projection into D3D11, pointer mapping,
+the remote cursor overlay and the local native cursor. Changing the view fences
+queued coordinates and keys, checks held-input release and redraws the same
+original frame without renewing its source age or creating another grant.
+An older menu choice cannot follow a different attempt, presentation or native
+window lifetime. A shared host may still supply a scaled picture; the menu names
+that condition and disables Actual pixels instead of claiming restored detail.
+
+Evidence: normal pinned `cargo test -p fr-windows --lib --locked --offline`
+passes all 288 tests, including 12 new view/launch regressions. Strict portable
+library/test Clippy with `-D warnings`, pinned formatting and whitespace checks
+pass. Independent geometry/input/cursor and installed Windows API source reviews
+completed. These are portable and source-review results: native Win32/D3D11
+compilation, physical presentation/panning and live controlled-host checks remain
+unqualified. The unchanged pinned Asupersync dependency was separately killed
+by SIGKILL before the native frd check reached application diagnostics.
+The broader desktop qualification bead remains open: `fr-p2-desktop-clients-qph`.
+See [Windows viewing controls](docs/windows-client.md).
+
 ## Browser desktop as a managed user service (2026-11-27)
 
 `frd install --user --browser-port PORT` now renders the actual HTTPS/WSS

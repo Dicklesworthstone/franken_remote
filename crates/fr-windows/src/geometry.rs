@@ -20,10 +20,18 @@ pub struct Rect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Presentation {
     pub destination: Rect,
+    /// Samples from the retained decoded texture. Local panning never asks
+    /// the host to capture a different region or changes the frame's age.
+    source: Rect,
     input: Rect,
+    /// The complete original display's projection, including pixels outside
+    /// the window. Both remote and native cursors use this scale; only the
+    /// destination rectangle is visible/hit-testable.
+    display_projection: Rect,
     display: (u32, u32),
     picture: (u32, u32),
     window: (u32, u32),
+    actual_pixels: bool,
 }
 
 impl Presentation {
@@ -53,19 +61,198 @@ impl Presentation {
         };
         Some(Self {
             destination,
+            source: Rect {
+                left: 0,
+                top: 0,
+                right: i32::try_from(picture.0).ok()?,
+                bottom: i32::try_from(picture.1).ok()?,
+            },
             input,
+            display_projection: destination,
             display,
             picture,
             window,
+            actual_pixels: false,
         })
+    }
+
+    /// One decoded pixel per physical client pixel. Only a native-sized
+    /// picture can establish this mode; a shared publisher's smaller picture
+    /// must remain explicitly fitted instead of implying restored detail.
+    fn native(display: (u32, u32), window: (u32, u32), origin: Option<(u32, u32)>) -> Option<Self> {
+        let mut result = Self::new(display, display, window)?;
+        let width = display.0.min(window.0);
+        let height = display.1.min(window.1);
+        let limit = (display.0 - width, display.1 - height);
+        let origin = origin.unwrap_or((limit.0 / 2, limit.1 / 2));
+        let (x, y) = (origin.0.min(limit.0), origin.1.min(limit.1));
+        let left = i32::try_from((window.0 - width) / 2).ok()?;
+        let top = i32::try_from((window.1 - height) / 2).ok()?;
+        let (x, y, width, height) = (
+            i32::try_from(x).ok()?,
+            i32::try_from(y).ok()?,
+            i32::try_from(width).ok()?,
+            i32::try_from(height).ok()?,
+        );
+        result.destination = Rect {
+            left,
+            top,
+            right: left.checked_add(width)?,
+            bottom: top.checked_add(height)?,
+        };
+        result.source = Rect {
+            left: x,
+            top: y,
+            right: x.checked_add(width)?,
+            bottom: y.checked_add(height)?,
+        };
+        // In a native-sized picture the shared input viewport is the whole
+        // display. A visible pixel therefore maps straight to its crop offset.
+        result.input = result.source;
+        result.display_projection = Rect {
+            left: left.checked_sub(x)?,
+            top: top.checked_sub(y)?,
+            right: left
+                .checked_sub(x)?
+                .checked_add(i32::try_from(display.0).ok()?)?,
+            bottom: top
+                .checked_sub(y)?
+                .checked_add(i32::try_from(display.1).ok()?)?,
+        };
+        result.actual_pixels = true;
+        Some(result)
+    }
+
+    pub const fn source(self) -> Rect {
+        self.source
+    }
+
+    pub const fn display_projection(self) -> Rect {
+        self.display_projection
+    }
+
+    pub const fn actual_pixels(self) -> bool {
+        self.actual_pixels
+    }
+
+    pub fn native_picture(self) -> bool {
+        self.display == self.picture
     }
 
     pub const fn picture(self) -> (u32, u32) {
         self.picture
     }
 
+    pub const fn display(self) -> (u32, u32) {
+        self.display
+    }
+
     pub const fn window(self) -> (u32, u32) {
         self.window
+    }
+}
+
+/// Explicit local commands. These never become remote input shortcuts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewAction {
+    Fit,
+    ActualPixels,
+    Left,
+    Right,
+    Up,
+    Down,
+    Center,
+}
+
+/// One window's local viewing preference. Requesting a native-sized picture
+/// is immutable for the launch; fitting that retained image later cannot
+/// shrink a host request or authorize a different capture scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Framing {
+    native_requested: bool,
+    actual_pixels: bool,
+    origin: Option<(u32, u32)>,
+}
+
+impl Framing {
+    pub const fn new(native_requested: bool) -> Self {
+        Self {
+            native_requested,
+            actual_pixels: native_requested,
+            origin: None,
+        }
+    }
+
+    pub const fn native_requested(self) -> bool {
+        self.native_requested
+    }
+
+    /// This exact policy is used for initial and replacement native sessions.
+    pub const fn picture_limit(self, window: (u32, u32)) -> Option<(u32, u32)> {
+        if self.native_requested {
+            None
+        } else {
+            Some(window)
+        }
+    }
+
+    /// A different display/attempt starts centered; local coordinates never
+    /// follow the old source. The user's Fit/Actual preference is retained.
+    pub fn reset(&mut self) {
+        self.origin = None;
+    }
+
+    pub fn presentation(
+        self,
+        display: (u32, u32),
+        picture: (u32, u32),
+        window: (u32, u32),
+    ) -> Option<Presentation> {
+        if self.native_requested && self.actual_pixels && picture == display {
+            Presentation::native(display, window, self.origin)
+        } else {
+            Presentation::new(display, picture, window)
+        }
+    }
+
+    /// Change only the checked, currently presented picture. Pan by three
+    /// quarters of the visible extent, clamping at the original image edge.
+    /// `false` means no visible change (or this launch/mode cannot pan).
+    pub fn apply(&mut self, action: ViewAction, current: Presentation) -> bool {
+        if !self.native_requested {
+            return false;
+        }
+        match action {
+            ViewAction::Fit => self.actual_pixels = false,
+            ViewAction::ActualPixels if current.native_picture() => self.actual_pixels = true,
+            ViewAction::ActualPixels => return false,
+            _ if !current.actual_pixels => return false,
+            ViewAction::Center => self.origin = None,
+            direction => {
+                let width = current.source.right.abs_diff(current.source.left);
+                let height = current.source.bottom.abs_diff(current.source.top);
+                let (Ok(mut x), Ok(mut y)) = (
+                    u32::try_from(current.source.left),
+                    u32::try_from(current.source.top),
+                ) else {
+                    return false;
+                };
+                let step = ((width * 3 / 4).max(1), (height * 3 / 4).max(1));
+                match direction {
+                    ViewAction::Left => x = x.saturating_sub(step.0),
+                    ViewAction::Right => {
+                        x = x.saturating_add(step.0).min(current.picture.0 - width);
+                    }
+                    ViewAction::Up => y = y.saturating_sub(step.1),
+                    ViewAction::Down => {
+                        y = y.saturating_add(step.1).min(current.picture.1 - height);
+                    }
+                    _ => unreachable!("non-pan commands handled above"),
+                }
+                self.origin = Some((x, y));
+            }
+        }
+        self.presentation(current.display, current.picture, current.window) != Some(current)
     }
 }
 
@@ -116,18 +303,26 @@ impl Mapping {
         Self::for_presentation(
             Presentation {
                 destination: dest,
+                source: Rect {
+                    left: 0,
+                    top: 0,
+                    right: i32::try_from(picture.0).expect("bounded test picture"),
+                    bottom: i32::try_from(picture.1).expect("bounded test picture"),
+                },
                 input: Rect {
                     left: 0,
                     top: 0,
                     right: i32::try_from(picture.0).expect("bounded test picture"),
                     bottom: i32::try_from(picture.1).expect("bounded test picture"),
                 },
+                display_projection: dest,
                 display: picture,
                 picture,
                 window: (
                     u32::try_from(dest.right).expect("bounded test window"),
                     u32::try_from(dest.bottom).expect("bounded test window"),
                 ),
+                actual_pixels: false,
             },
             1,
             presented_at,
@@ -156,6 +351,12 @@ impl Mapping {
         attempt != 0 && self.attempt == attempt && self.presentation == presentation
     }
 
+    /// Applies to queued keys too when an explicit local crop changes: the
+    /// key cannot outlive the local view in which Windows originally queued it.
+    pub fn admits(&self, message_at: u64) -> bool {
+        self.attempt != 0 && message_at > self.presented_at
+    }
+
     /// Ordinary pictures with the same placement do not restart input's local
     /// mapping lifetime. Returning to the same size after invalidation does.
     #[cfg(test)]
@@ -173,7 +374,7 @@ impl Mapping {
         y: i32,
         dragging: bool,
     ) -> Result<Option<(f64, f64)>, StaleMapping> {
-        if self.attempt == 0 || message_at <= self.presented_at {
+        if !self.admits(message_at) {
             return Err(StaleMapping);
         }
         let dest = self.presentation.destination;
@@ -428,3 +629,7 @@ mod tests {
 #[cfg(test)]
 #[path = "geometry/scaled_tests.rs"]
 mod scaled_tests;
+
+#[cfg(test)]
+#[path = "geometry/native_tests.rs"]
+mod native_tests;
